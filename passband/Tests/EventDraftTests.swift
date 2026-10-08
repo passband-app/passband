@@ -41,6 +41,10 @@ struct EventDraftTests {
         answersLandInTheFeed()
         refusalsAreFixedSentences()
         anUncertainWriteIsSettledByTheFeed()
+        aTimedOutWriteIsUncertainNotUnsaved()
+        anUncertainCreateIsFoundByItsId()
+        anUncertainEditLooksOnlyAtWhatItChanged()
+        aDeleteThatCanNoLongerTellIsRefused()
         anAnswerAfterTheGateClosedIsNobodys()
         aTypedPaneSurvivesAPageChange()
         theWave3WireDecodes()
@@ -510,18 +514,23 @@ struct EventDraftTests {
                "create: an event already there with the same title is not the one made")
         let made = event("new", start: "2026-10-08T19:45:00-07:00", end: "2026-10-08T21:00:00-07:00")
         expect(CalendarWrite.made(body, before: had, in: TimelineFeed(events: [a, made]))?.id == "new",
-               "create: a new event with that title on that calendar is")
+               "create, no id: a new event with that title at that start on that calendar is")
+        var later = made
+        later.start = "2026-10-08T20:45:00-07:00"
+        expect(CalendarWrite.made(body, before: had, in: TimelineFeed(events: [a, later])) == nil,
+               "create, no id: the same title at another time is not it")
         let elsewhere = event("new", start: "2026-10-08T19:45:00-07:00", end: nil, calendar: "work")
         expect(CalendarWrite.made(body, before: had, in: TimelineFeed(events: [a, elsewhere])) == nil,
                "create: not on another calendar")
         expect(CalendarWrite.made(body, before: had, in: nil) == nil, "create: no feed proves nothing")
 
-        expect(CalendarWrite.edited(a, in: before) == nil, "edit: unchanged is not yet saved")
+        let rename = EventPatch(title: "Renamed")
+        expect(CalendarWrite.edited(a, rename, in: before) == nil, "edit: unchanged is not yet saved")
         var renamed = a
         renamed.title = "Renamed"
-        expect(CalendarWrite.edited(a, in: TimelineFeed(events: [renamed]))?.title == "Renamed",
+        expect(CalendarWrite.edited(a, rename, in: TimelineFeed(events: [renamed]))?.title == "Renamed",
                "edit: the event as the page now has it")
-        expect(CalendarWrite.edited(a, in: TimelineFeed(events: [])) == nil, "edit: gone is not this edit")
+        expect(CalendarWrite.edited(a, rename, in: TimelineFeed(events: [])) == nil, "edit: gone is not this edit")
 
         expect(!CalendarWrite.gone(a, from: before), "delete: still there")
         expect(CalendarWrite.gone(a, from: TimelineFeed(events: [])), "delete: gone")
@@ -530,6 +539,135 @@ struct EventDraftTests {
                "delete: the same id on another calendar is another event")
         expect(!CalendarWrite.gone(a, from: nil) && !CalendarWrite.gone(a, from: TimelineFeed()),
                "delete: a feed that never loaded proves nothing")
+    }
+
+    /// verify2 V1: a calendar write the app gave up waiting on (or whose
+    /// connection dropped mid-request) may have reached the daemon, which
+    /// goes on without the app. It is the 504 "may have happened", settled
+    /// against the page, never "could not reach your server, so nothing was
+    /// saved". A request that never got there still is.
+    static func aTimedOutWriteIsUncertainNotUnsaved() {
+        for code in [URLError.Code.timedOut, .networkConnectionLost] {
+            let e = APIError.transport(URLError(code))
+            expect(e.kind == .network && e.mayHaveArrived, "\(code): may have arrived")
+            expect(CalendarWrite.status(of: e) == CalendarWrite.uncertainStatus, "\(code): settled as a 504")
+            expect(!CalendarWrite.failureText(status: CalendarWrite.status(of: e), .create).contains("nothing was saved"),
+                   "\(code): never 'nothing was saved'")
+        }
+        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .notConnectedToInternet] {
+            let e = APIError.transport(URLError(code))
+            expect(!e.mayHaveArrived && CalendarWrite.status(of: e) == 0, "\(code): never got there")
+        }
+        expect(CalendarWrite.status(of: APIError(.server, 502, "x")) == 502, "a status is itself")
+        expect(CalendarWrite.status(of: APIError(.network, 0, "client not configured")) == 0,
+               "a request never built is unsent")
+        expect(CalendarWrite.status(of: URLError(.badURL)) == -1, "not an APIError: not a status")
+    }
+
+    /// verify2 V2: the app names the new event's id, and an uncertain create
+    /// is found by that id whatever the title came back as (laundered,
+    /// collapsed, a URL cut down); a second press of the same pane sends the
+    /// same id.
+    static func anUncertainCreateIsFoundByItsId() {
+        let id = CalendarWrite.newEventId()
+        let base32hex = Set("0123456789abcdefghijklmnopqrstuv")
+        expect((5...1024).contains(id.count) && id.allSatisfy { base32hex.contains($0) },
+               "the id is one Google takes")
+        expect(CalendarWrite.newEventId() != id, "a new pane, a new id")
+        var body = EventWrite(
+            calendar_id: "primary", title: "Lunch  with\u{200B} Sam https://x.test/a?pwd=1",
+            start: "2026-10-08T12:00:00-07:00", end: "2026-10-08T13:00:00-07:00", all_day: false,
+            location: nil, description: nil)
+        body.id = id
+        let json = String(data: try! JSONEncoder().encode(body), encoding: .utf8)!
+        expect(json.contains("\"id\":\"\(id)\""), "the id is on the wire")
+        var stored = event(id, title: "Lunch with Sam x.test/a", start: body.start, end: body.end)
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [stored]))?.id == id,
+               "found by id though the title came back laundered")
+        stored.calendar_id = "work"
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [stored])) == nil,
+               "the id on another calendar is another event")
+        let lookalike = event("other", title: body.title, start: body.start, end: body.end)
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [lookalike])) == nil,
+               "with an id, a lookalike is not it")
+        var plain = body
+        plain.id = nil
+        let laundered = event("g1", title: "Lunch with Sam https://x.test/a?pwd=1", start: body.start, end: body.end)
+        expect(CalendarWrite.made(plain, before: [], in: TimelineFeed(events: [laundered]))?.id == "g1",
+               "no id: the title compares laundered")
+        expect(CalendarWrite.failureText(status: 409, .create).contains("already added"),
+               "a spent id says the event was made and deleted")
+    }
+
+    /// verify2 V3: an uncertain edit is found only when every field it
+    /// changed reads as typed. A guest answering, a colour changing, or any
+    /// field it did not touch is never taken for it.
+    static func anUncertainEditLooksOnlyAtWhatItChanged() {
+        let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00",
+                      location: "Kitchen", description: "Old")
+        // Somebody else's change landed; this edit did not.
+        var other = a
+        other.color = "#ff0000"
+        other.guests = [TimelineGuest(email: "sam@x.test", name: nil, response: .accepted, organizer: nil, isSelf: nil)]
+        let rename = EventPatch(title: "Lunch  with Sam")
+        expect(CalendarWrite.edited(a, rename, in: TimelineFeed(events: [other])) == nil,
+               "another change is not this edit")
+        var done = other
+        done.title = "Lunch with Sam"
+        expect(CalendarWrite.edited(a, rename, in: TimelineFeed(events: [done])) != nil,
+               "the title, laundered, is this edit")
+
+        let move = EventPatch(start: "2026-10-08T11:00:00-07:00", end: "2026-10-08T12:00:00-07:00", all_day: false)
+        var moved = a
+        moved.start = "2026-10-08T18:00:00Z"
+        moved.end = "2026-10-08T19:00:00Z"
+        expect(CalendarWrite.edited(a, move, in: TimelineFeed(events: [moved])) != nil,
+               "times compare as instants, not strings")
+        moved.end = "2026-10-08T19:30:00Z"
+        expect(CalendarWrite.edited(a, move, in: TimelineFeed(events: [moved])) == nil, "a different end is not it")
+
+        let place = EventPatch(location: .set("Zoom https://www.zoom.us/j/1?pwd=abc"), description: .clear)
+        var placed = a
+        placed.location = "Zoom zoom.us/j/1"
+        expect(CalendarWrite.edited(a, place, in: TimelineFeed(events: [placed])) == nil,
+               "a cleared note still there is not it")
+        placed.description = nil
+        expect(CalendarWrite.edited(a, place, in: TimelineFeed(events: [placed])) != nil,
+               "a link comes back cut to host and path")
+
+        let invite = EventPatch(guests: ["Sam@x.test"])
+        var invited = a
+        invited.guests = [
+            TimelineGuest(email: "me@x.test", name: nil, response: nil, organizer: true, isSelf: true),
+            TimelineGuest(email: "sam@x.test", name: nil, response: .pending, organizer: nil, isSelf: nil),
+        ]
+        expect(CalendarWrite.edited(a, invite, in: TimelineFeed(events: [invited])) != nil,
+               "guests compare as addresses, the user left out")
+        expect(CalendarWrite.edited(a, invite, in: TimelineFeed(events: [a])) == nil, "no guest yet is not it")
+
+        let oneDay = event("d", start: "2026-10-08", end: nil, allDay: true)
+        let toOneDay = EventPatch(start: "2026-10-09", end: "2026-10-09", all_day: true)
+        var shifted = oneDay
+        shifted.start = "2026-10-09"
+        expect(CalendarWrite.edited(oneDay, toOneDay, in: TimelineFeed(events: [shifted])) != nil,
+               "a one-day event is served with no end")
+    }
+
+    /// verify2 V5: "delete and tell guests" on a calendar that may no longer
+    /// tell them deletes nothing, as a save refuses; telling was never asked,
+    /// or there is nobody to tell, deletes silently.
+    static func aDeleteThatCanNoLongerTellIsRefused() {
+        expect(CalendarWrite.deleteNotify(tellGuests: true, hasGuests: true, mayTell: false) == nil,
+               "asked to tell, may not: refused")
+        expect(CalendarWrite.deleteNotify(tellGuests: true, hasGuests: true, mayTell: true) == true, "told")
+        expect(CalendarWrite.deleteNotify(tellGuests: false, hasGuests: true, mayTell: false) == false,
+               "never asked: silent")
+        expect(CalendarWrite.deleteNotify(tellGuests: true, hasGuests: false, mayTell: false) == false,
+               "nobody to tell: silent")
+        expect(!CalendarWrite.cannotTellText.contains("\u{2014}") && CalendarWrite.cannotTellText.contains("not deleted"),
+               "the refusal says nothing was deleted")
+        expect(CalendarWrite.failureText(status: 410, .delete).contains("nothing was deleted"),
+               "a lost calendar is not 'deleted'")
     }
 
     /// A write's answer is the session's that sent it (fix round 1, C4): the

@@ -70,6 +70,7 @@ run_suite month-grid \
 run_suite event-draft \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
   Sources/Passband/Lib/Agenda.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Lib/EventDraft.swift \
@@ -87,6 +88,7 @@ run_suite event-draft \
 run_suite event-guests \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
   Sources/Passband/Lib/Agenda.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Lib/EventDraft.swift \

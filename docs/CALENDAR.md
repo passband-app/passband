@@ -324,6 +324,10 @@ never rejected:
   (zero-width, word joiner, BOM, tag characters). A title with nothing else in
   it is empty, and its record is dropped. That rule fixes each record's
   stored position, so it must not change once ghosts exist in the field.
+  The shared filter (`order_link::plain`) is also the merchant name's, so
+  since this work a shipment, order or receipt merchant name loses
+  zero-width and tag characters too, for every tenant, flag or not (a ZWJ
+  emoji sequence in a merchant name comes apart).
 - A `basis` or `reason` that laundering blanks is served as null.
 
 **Identity.** Scope is `triage::ghost::sender_scope`, for authenticated mail
@@ -997,15 +1001,21 @@ promoting a ghost to a real event is later work.
 - **Routes** (human door, bearer authed, `no-store`, in
   `squelch-api/src/calendar_write.rs`):
   - `POST /client/calendar/events` with `{"calendar_id", "title", "start",
-    "end", "all_day", "location"?, "description"?}` answers 201 with the
-    event in the timeline's shape.
+    "end", "all_day", "location"?, "description"?, "id"?}` answers 201 with
+    the event in the timeline's shape. `id` is the new event's id, chosen by
+    the app (below, "A create sent twice").
   - `PATCH /client/calendar/events/{calendar_id}/{id}` with any subset of the
     same fields answers 200 with the event. An absent field is left alone;
     `location` and `description` take `null` to clear. A `calendar_id` in the
     body must be the event's own: moving an event is not offered.
   - `DELETE /client/calendar/events/{calendar_id}/{id}` answers 204. An event
-    Google says is already deleted (410) or does not know (404) is deleted
-    locally too.
+    Google says is already deleted (410) is deleted locally too, and so is
+    one it does not know (404) while the calendar is still the user's: the
+    primary calendar always is, any other is looked up on the user's
+    calendar list (`calendarList.get`), because Google answers 404 too for a
+    calendar the user has lost. A calendar no longer listed is a 410, "that
+    calendar is no longer available to you", the row is left for the sync
+    the write kicks, and the app says nothing was deleted.
 - **Times.** RFC3339 with an offset for a timed event, `YYYY-MM-DD` for an
   all-day one, both of one precision, the end after the start. An all-day
   `end` is the INCLUSIVE last day, as the timeline serves it (equal to the
@@ -1055,6 +1065,38 @@ promoting a ghost to a real event is later work.
   Google holds before anything is offered again (above all a second "tell
   guests"). A write is never retried. After every write the sync is kicked,
   so the next pass confirms it.
+- **One deadline per write.** Each Google call may take 30 seconds and a
+  write can make three (a token refresh, a guest edit's reread, the write),
+  more than the app's 45 second wait. So the whole write runs under one 35
+  second deadline (`calendar_write::WRITE_DEADLINE`); past it the answer is
+  the same 504 and the same sync kick. If the app's own wait runs out anyway,
+  or the connection drops mid-request, the app treats it as that 504 too and
+  settles against the reloaded page, never "nothing was saved". A request
+  that never reached the daemon still says nothing was saved.
+- **A create sent twice.** The app names each new event's `id` itself, one
+  per open pane, the same on every press of it: a UUID's 32 hex digits, which
+  Google takes ("characters allowed in the ID are those used in base32hex
+  encoding, i.e. lowercase letters a-v and digits 0-9", "between 5 and 1024
+  characters"). Google also says "we cannot guarantee that ID collisions will
+  be detected at event creation time", so the daemon does not rely on its
+  409: a create naming an id first reads it (`events.get`), and an event
+  already there is answered 200 as it stands, with no insert and so no second
+  invitation (audited `ok:existing ... notified=false`). An insert Google
+  answers 409 (`duplicate`, "The requested identifier already exists") is
+  answered the same way. An id already used by an event since deleted is a
+  409. Any other id shape is a 400 before Google hears anything.
+- **Settling an uncertain write (app).** After a 504 the app reloads the page
+  up to three times. A create is found by its id, whatever its title came
+  back as. An edit is found only when EVERY field it changed reads as typed
+  (laundered as the daemon launders: invisible characters out, whitespace
+  collapsed, a link cut to host and path; times compared as instants; guests
+  as addresses), so a guest's answer or a colour changed meanwhile is never
+  taken for it. A delete is found when the event is gone. Until then the pane
+  stays open and its save stays locked.
+- **"Delete and tell guests" that can no longer tell.** If the page reloaded
+  under the delete question and the calendar may no longer tell guests, the
+  delete is refused with a toast and the question stays up, as a save
+  refuses a control that is no longer on offer. It is never sent silently.
 - **A disconnect does not lose the write.** Each write's checks, Google call,
   local row and audit row run in a task of their own that the handler
   awaits. If the app goes away mid-request the request is dropped but the
@@ -1062,8 +1104,10 @@ promoting a ghost to a real event is later work.
 - **Errors.** 400 for a bad body (end before start, mixed precision, a title
   empty or over 200, a missing field, an unknown or read-only calendar, two
   `notify` keys), 403 when calendar is not granted or the event is not
-  editable, 404 for an unknown event, 502 when Google refuses, 504 when
-  Google's answer was lost (above). Error bodies are fixed strings and
+  editable, 404 for an unknown event, 409 for a create id already used by a
+  deleted event, 410 for a delete on a calendar no longer listed, 502 when
+  Google refuses, 504 when Google's answer was lost or the write ran past
+  its deadline (above). Error bodies are fixed strings and
   never echo the request.
 - **Audit.** One row per attempt in the audit log, in the mail actions' shape:
   action `calendar_event_create`, `calendar_event_edit` or
@@ -1071,7 +1115,9 @@ promoting a ghost to a real event is later work.
   `calendar:<calendar_id>/<event_id>`, detail `ok` or the reason
   (`rejected:body`, `rejected:calendar`, `rejected:read_only`,
   `rejected:not_granted`, `rejected:not_editable`, `failed:target`,
-  `failed:google`, `failed:uncertain`, `failed:answer`). Never a title,
+  `failed:google`, `failed:uncertain`, `failed:answer`,
+  `failed:calendar_gone`, `rejected:already_deleted`; a create answered
+  with an event an earlier send made is `ok:existing`). Never a title,
   place, description or guest's address. The target does carry the
   calendar id, which for a personal calendar someone shared with the user is
   its owner's address.

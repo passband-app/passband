@@ -150,6 +150,9 @@ pub enum CallError {
     Gone,
     /// 404: no such calendar (or no access to it any more).
     NotFound,
+    /// 409: an insert named an event id the calendar already holds (Google's
+    /// `duplicate`, "The requested identifier already exists").
+    Duplicate,
     /// The request went out and no usable answer came back: the connection
     /// was lost or timed out after sending, or a 2xx body could not be read.
     /// Google may have done what was asked. A write that ends here is NOT a
@@ -164,7 +167,9 @@ impl CallError {
     pub fn kind(self) -> CalendarErrorKind {
         match self {
             Self::Kind(kind) => kind,
-            Self::Gone | Self::NotFound | Self::Uncertain => CalendarErrorKind::Unavailable,
+            Self::Gone | Self::NotFound | Self::Duplicate | Self::Uncertain => {
+                CalendarErrorKind::Unavailable
+            }
         }
     }
 }
@@ -174,6 +179,7 @@ impl std::fmt::Display for CallError {
         match self {
             Self::Gone => f.write_str("gone"),
             Self::NotFound => f.write_str("not_found"),
+            Self::Duplicate => f.write_str("duplicate"),
             Self::Uncertain => f.write_str("uncertain"),
             Self::Kind(kind) => f.write_str(kind.as_str()),
         }
@@ -335,6 +341,37 @@ impl CalendarApi {
         Ok((attendees, omitted))
     }
 
+    /// `events.get` of one event, in the shape a write's answer has
+    /// ([`EVENT_FIELDS`], the same attendee bound): what a create that names
+    /// its own id reads first, so a create sent twice is answered with the
+    /// event the first one made instead of a second insert.
+    pub async fn get_event(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<Value, CallError> {
+        let mut url = self.url(&["calendars", calendar_id, "events", event_id])?;
+        url.query_pairs_mut()
+            .append_pair("maxAttendees", &MAX_ATTENDEES.to_string())
+            .append_pair("fields", EVENT_FIELDS);
+        self.get(url, token).await
+    }
+
+    /// `calendarList.get`: whether the calendar is still on the user's
+    /// calendar list (and not marked `deleted`). A 404 is NO: the user has
+    /// lost the calendar. Needs the list scope, which every calendar other
+    /// than the primary one is read with.
+    pub async fn calendar_listed(&self, token: &str, calendar_id: &str) -> Result<bool, CallError> {
+        let mut url = self.url(&["users", "me", "calendarList", calendar_id])?;
+        url.query_pairs_mut().append_pair("fields", "id,deleted");
+        match self.get(url, token).await {
+            Ok(entry) => Ok(entry.get("deleted").and_then(Value::as_bool) != Some(true)),
+            Err(CallError::NotFound | CallError::Gone) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// `events.insert`: create `event` (Google's event shape) on the calendar.
     /// Google's answer, the event as stored, carries its id, its link and the
     /// times as Google normalized them. With [`Notify::Guests`] Google mails
@@ -471,6 +508,7 @@ impl CalendarApi {
                 CallError::Kind(forbidden_kind(&body))
             }
             404 => CallError::NotFound,
+            409 => CallError::Duplicate,
             410 => CallError::Gone,
             429 => CallError::Kind(CalendarErrorKind::Quota),
             _ => unavailable,

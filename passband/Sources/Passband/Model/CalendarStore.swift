@@ -46,6 +46,10 @@ struct CalendarEditorRequest: Hashable, Identifiable {
     }
 
     let id = UUID()
+    /// The id a create's event is made under, the same on every press of
+    /// this pane (`EventWrite.id`): a second press after an answer that
+    /// never came can only find the first event, never make another.
+    let createId = CalendarWrite.newEventId()
     let mode: Mode
     /// What the pane opened with. An edit sends only what moved from this,
     /// and a draft that still equals it has not been touched.
@@ -539,7 +543,8 @@ extension AppStore {
         case .create:
             guard case .success(let made) = EventForm.wire(draft, today: now, calendar: cal, guests: terms)
             else { return false }
-            let body = made.stamped(notify: notify)
+            var body = made.stamped(notify: notify)
+            body.id = request.createId
             let invited = body.guests?.count ?? 0
             let before = CalendarWrite.keys(calendarFeed)
             calendarWriting = true
@@ -599,8 +604,10 @@ extension AppStore {
             } catch {
                 guard calendarLands(ticket) else { return false }
                 if writeStatus(error) == CalendarWrite.uncertainStatus {
-                    let found = await settleUncertain(ticket) { CalendarWrite.edited(original, in: $0) != nil }
-                    guard found, let event = CalendarWrite.edited(original, in: calendarFeed) else { return false }
+                    let found = await settleUncertain(ticket) { CalendarWrite.edited(original, patch, in: $0) != nil }
+                    guard found, let event = CalendarWrite.edited(original, patch, in: calendarFeed) else {
+                        return false
+                    }
                     landEvent(event, closing: request)
                     return true
                 }
@@ -677,12 +684,24 @@ extension AppStore {
     /// (`EventGuests.mayTell`): then Google emails them the cancellation.
     /// A 504 is settled as a save's is: gone from the reloaded page is
     /// deleted, still there keeps the question up.
+    ///
+    /// "Delete and tell guests" on a calendar that may no longer tell them
+    /// (the page reloaded under the question) deletes NOTHING and says so,
+    /// keeping the question up (`CalendarWrite.deleteNotify`): a silent
+    /// delete is not what the control said.
     @discardableResult
     func deleteEvent(_ event: TimelineEvent, tellGuests: Bool = false) async -> Bool {
         guard CalendarWrite.canEdit(event), !calendarWriting else { return false }
         let ticket = calendarTicket
         let hasGuests = EventGuests.count(event) > 0
-        let notify = tellGuests && hasGuests && EventGuests.mayTell(event, feed: calendarFeed)
+        guard
+            let notify = CalendarWrite.deleteNotify(
+                tellGuests: tellGuests, hasGuests: hasGuests,
+                mayTell: EventGuests.mayTell(event, feed: calendarFeed))
+        else {
+            pushToast(CalendarWrite.cannotTellText, .error)
+            return false
+        }
         calendarWriting = true
         do {
             try await APIClient.shared.deleteCalendarEvent(
@@ -719,14 +738,9 @@ extension AppStore {
         pushToast("Deleted from Google Calendar", .success)
     }
 
-    /// The status a refusal is worded by: 0 for a request that never reached
-    /// the daemon, -1 for anything else that is not a status at all (an
-    /// answer of the wrong shape).
-    private func writeStatus(_ error: Error) -> Int {
-        guard let api = error as? APIError else { return -1 }
-        if api.kind == .network { return 0 }
-        return api.status == 0 ? -1 : api.status
-    }
+    /// The status a refusal is worded by (`CalendarWrite.status`): a wait
+    /// that ran out is the 504 and is settled, never "nothing was saved".
+    private func writeStatus(_ error: Error) -> Int { CalendarWrite.status(of: error) }
 
     // MARK: - the connect card
 

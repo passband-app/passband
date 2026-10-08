@@ -4319,6 +4319,17 @@ mod tests {
             .unwrap();
         let g = listed(&store, 1).remove(0);
         assert_eq!((g.id, g.user_state), (id, Some(GhostUserState::Going)));
+
+        // A STORED DECISION THAT DOES NOT PARSE (verify2 V11) is not known to
+        // be harmless: its message feeds nothing until it is decided again.
+        set_flag(
+            &store,
+            "UPDATE agent_message_decisions SET decision_json='{not json' WHERE message_id=1",
+        );
+        assert!(listed(&store, 1).is_empty(), "unreadable serves nothing");
+        decide(&store, 1, 1, &Ev::default().decision());
+        let g = listed(&store, 1).remove(0);
+        assert_eq!((g.id, g.user_state), (id, Some(GhostUserState::Going)));
     }
 
     // ---- Round 3 ----

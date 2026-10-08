@@ -1007,8 +1007,20 @@ write that went out and got no usable answer (a timeout or a lost connection aft
 sending, a 2xx body that does not read: `CallError::Uncertain`) is a 504 saying
 Google may have made the change, kicks a sync and stores nothing, so the client
 refreshes before offering to send again (a "tell guests" is not repeated on a
-guess). A delete Google answers 404 or 410 found the event gone and removes the
-local row. Event and calendar ids of `.` or `..` (or empty) are refused at read
+guess). The whole write (token refresh, guest reread, write) runs under one 35
+second deadline, below the app's 45 second wait; past it the answer is the same
+504 and kick, and the app treats a wait of its own that runs out, or a
+connection lost mid-request, as that 504 too. A create may name its own event id
+(base32hex, 5 to 1024 characters, else a 400); the daemon reads that id before
+inserting and answers an event already there (or a 409 `duplicate` from Google)
+with that event and no insert, so a create sent twice never makes two events or
+mails a second invitation (audited `ok:existing ... notified=false`). A delete
+Google answers 410 found the event gone and removes the local row; a 404 does the
+same only on the primary calendar or on a calendar `calendarList.get` still
+lists, and is otherwise a 410 "that calendar is no longer available to you" that
+leaves the row for the kicked sync (Google answers 404 for a calendar the user
+lost, too). The app refuses a "delete and tell guests" whose calendar may no
+longer tell them rather than deleting silently. Event and calendar ids of `.` or `..` (or empty) are refused at read
 and again when the URL is built, because a URL path would read them as "here"
 and "up one". Error bodies are fixed strings that never
 echo the request; logs carry the action and an error kind, never an id. Every

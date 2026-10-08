@@ -468,9 +468,11 @@ impl SqliteStore {
         if cleared == 0 {
             return Ok(false);
         }
-        // The message may feed ghosts again: project its stored decision now
-        // (the queued re-triage below re-decides it later), so a ghost it
-        // alone supplied comes back with the user's state intact.
+        // The message may feed ghosts again: project its stored decision now,
+        // so the ghost rows and the user's marks on them are kept. A ghost it
+        // alone supplied stays HIDDEN until the re-triage queued below lands:
+        // leaving spam changes the access snapshot, so the stored decision's
+        // access reads `pending` and feeds nothing until it is re-decided.
         super::ghosts::refresh_message_guarded(&tx, account_id, message_id)?;
         tx.execute(
             "UPDATE triage

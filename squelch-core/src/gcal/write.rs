@@ -75,6 +75,8 @@ pub const BAD_GUEST: Invalid = Invalid("each guest must be one plain email addre
 pub const DUPLICATE_GUEST: Invalid = Invalid("a guest is listed twice");
 pub const GUEST_IS_OWNER: Invalid = Invalid("the calendar's owner cannot be its own guest");
 pub const BAD_NOTIFY: Invalid = Invalid("notify must be true or false");
+pub const BAD_EVENT_ID: Invalid =
+    Invalid("id must be 5 to 1024 characters, each a lowercase letter a to v or a digit");
 
 /// The most guests one request may name.
 pub const GUEST_CAP: usize = 50;
@@ -106,6 +108,11 @@ pub struct NewEvent {
     /// Checked addresses, as typed. Empty: no guests.
     pub guests: Vec<String>,
     pub notify: Notify,
+    /// The event id the client chose for it, or None to let Google choose.
+    /// THE CREATE'S IDEMPOTENCY KEY: the app picks one per pane and sends it
+    /// with every press, so a create sent again finds the event the first
+    /// one made ([`event_id`]).
+    pub id: Option<String>,
 }
 
 /// An edit, its fields checked one by one. The times are checked against the
@@ -361,9 +368,22 @@ pub fn calendar_id(value: &Value) -> Result<String, Invalid> {
         .ok_or(BAD_CALENDAR)
 }
 
+/// A client-chosen event id, as Google takes one: "characters allowed in
+/// the ID are those used in base32hex encoding, i.e. lowercase letters a-v
+/// and digits 0-9", and "the length of the ID must be between 5 and 1024
+/// characters". Anything else is refused here rather than by Google.
+pub fn event_id(value: &Value) -> Result<String, Invalid> {
+    let id = value.as_str().ok_or(BAD_EVENT_ID)?;
+    let ok = (5..=ID_CAP).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='v').contains(&c));
+    ok.then(|| id.to_string()).ok_or(BAD_EVENT_ID)
+}
+
 /// Read a create: `{"calendar_id", "title", "start", "end", "all_day",
-/// "location"?, "description"?, "guests"?, "notify"?}`. Unknown keys are
-/// ignored.
+/// "location"?, "description"?, "guests"?, "notify"?, "id"?}`. Unknown keys
+/// are ignored.
 pub fn parse_create(body: &Value) -> Result<NewEvent, Invalid> {
     let body = object(body)?;
     let need = |key| body.get(key).filter(|v| !v.is_null()).ok_or(MISSING);
@@ -386,6 +406,10 @@ pub fn parse_create(body: &Value) -> Result<NewEvent, Invalid> {
             Some(list) => guests(list)?,
         },
         notify: notify(body.get("notify"))?,
+        id: match body.get("id") {
+            None | Some(Value::Null) => None,
+            Some(id) => Some(event_id(id)?),
+        },
     })
 }
 
@@ -481,6 +505,9 @@ pub fn insert_body(event: &NewEvent) -> Result<Value, Invalid> {
     }
     if let Some(description) = &event.description {
         body["description"] = json!(description);
+    }
+    if let Some(id) = &event.id {
+        body["id"] = json!(id);
     }
     if !event.guests.is_empty() {
         let attendees: Vec<Value> = event

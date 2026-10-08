@@ -7,6 +7,13 @@
 # types: no app, no simulator, no key.
 #
 #   ./test.sh          build and run every suite
+#
+# The suites are independent, so they build and run N at a time (N = cores).
+# Each run_suite call below only QUEUES its suite; the xargs at the bottom of
+# the file is what runs the queue. A suite's output is held back and printed
+# as one block when it finishes, so two suites never interleave on the
+# terminal, and a failure in one does not stop the others: every red suite
+# is reported, and the script exits non-zero if any was.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -20,14 +27,36 @@ mkdir -p "$BUILD"
 echo "==> analytics-lint"
 python3 ./analytics-lint.py
 
+QUEUE=$(mktemp)
+trap 'rm -f "$QUEUE"' EXIT
+
 run_suite() {
+  printf '%s\n' "$*" >> "$QUEUE"
+}
+
+# One suite start to finish: compile, run, print. Runs under xargs below, in
+# its own bash, which is why it is exported along with BUILD.
+run_one() {
   local name="$1"
   shift
-  echo "==> $name"
-  xcrun swiftc -swift-version 6 -parse-as-library -Onone \
-    -o "$BUILD/$name" Sources/Passband/Lib/RehearsalMode.swift "$@"
-  "$BUILD/$name"
+  local log="$BUILD/$name.log"
+  local status=0
+  {
+    echo "==> $name"
+    xcrun swiftc -swift-version 6 -parse-as-library -Onone \
+      -o "$BUILD/$name" Sources/Passband/Lib/RehearsalMode.swift "$@" \
+      && "$BUILD/$name" \
+      && case "$name" in
+        # Full connection rehearsal must work even when normal onboarding was
+        # completed.
+        tour-controller) "$BUILD/$name" --onboarding-rehearsal --rehearse-connection ;;
+      esac
+  } > "$log" 2>&1 || status=$?
+  cat "$log"
+  return $status
 }
+export -f run_one
+export BUILD
 
 # The hero, peek and fire-and-forget preload must share one request.
 run_suite thread-prefetch \
@@ -622,8 +651,6 @@ run_suite tour-controller \
   Sources/Passband/Model/TourController.swift \
   Tests/TourControllerTests.swift
 
-# Full connection rehearsal must work even when normal onboarding was completed.
-"$BUILD/tour-controller" --onboarding-rehearsal --rehearse-connection
 # The ring behind the search panel's empty state: what a submitted query does to
 # the remembered ones. Pure Foundation, one file — the fold is kept out of the
 # store precisely so the order, the dedupe and the cap can be asserted with no
@@ -716,3 +743,7 @@ run_suite image-trim \
   Sources/Passband/Lib/ImageFill.swift \
   Sources/Passband/Lib/ImageTrim.swift \
   Tests/ImageTrimTests.swift
+
+# Run the queue. xargs keeps going past a failed suite and exits 123 if any
+# failed, which set -e turns into this script's exit status.
+xargs -P "$(sysctl -n hw.ncpu)" -L 1 bash -c 'run_one "$@"' _ < "$QUEUE"

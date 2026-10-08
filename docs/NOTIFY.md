@@ -824,8 +824,8 @@ label, one `AtomicU64` per combination, every series rendered even at zero,
   partial schema, `migrate` twice (idempotent), assert `PRAGMA table_info`,
   and for the table go through `SqliteStore::init`.
 - CI is exactly `cargo fmt --all --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo test --workspace`, on the pinned
-  1.94 toolchain. On this Mac prefix cargo with
+  --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast --
+  --test-threads=8`, on the pinned 1.94 toolchain. On this Mac prefix cargo with
   `DEVELOPER_DIR=/Library/Developer/CommandLineTools`.
 
 ### 11.11 Rollout, in order

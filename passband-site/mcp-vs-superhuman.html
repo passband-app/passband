@@ -4,11 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Passband MCP vs Superhuman MCP</title>
-    <meta name="description" content="Superhuman's MCP server lets your AI agent operate your mailbox: 28 tools, Business plan required. Passband's Agent MCP briefs your agent from its triage, and sign-in codes never reach it. A sourced comparison, checked October 2026." />
+    <meta name="description" content="Superhuman's MCP server lets your AI agent operate your mailbox: 28 tools, Business plan required. Passband's Agent MCP briefs your agent from its triage, writes mail only as far as you allow, and sign-in codes never reach it. A sourced comparison, checked October 2026." />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Passband" />
     <meta property="og:title" content="Passband MCP vs Superhuman MCP" />
-    <meta property="og:description" content="Superhuman's MCP server lets your AI agent operate your mailbox: 28 tools, Business plan required. Passband's Agent MCP briefs your agent from its triage, and sign-in codes never reach it. A sourced comparison, checked October 2026." />
+    <meta property="og:description" content="Superhuman's MCP server lets your AI agent operate your mailbox: 28 tools, Business plan required. Passband's Agent MCP briefs your agent from its triage, writes mail only as far as you allow, and sign-in codes never reach it. A sourced comparison, checked October 2026." />
     <meta property="og:url" content="https://passband.app/mcp-vs-superhuman" />
     <meta property="og:image" content="https://passband.app/og.png" />
     <meta property="og:image:width" content="1200" />
@@ -103,7 +103,8 @@
       }
 
       /* WHAT IT GETS: six briefs, the tool name in the corner for whoever
-         wants it. */
+         wants it. Then the owner's write setting, one card per level, the
+         default lit, on the same grid. */
       .brief { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.8rem; }
       @media (max-width: 900px) { .brief { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
       @media (max-width: 600px) { .brief { grid-template-columns: minmax(0, 1fr); } }
@@ -112,6 +113,14 @@
       .brief h3 { margin: 0.55rem 0 0.45rem; font-family: var(--serif); font-weight: 500; font-size: 1.35rem; line-height: 1.15; }
       .brief p { margin: 0; color: var(--dim); font-size: 0.92rem; line-height: 1.6; }
       .brief code { font: 500 10px/1 var(--mono); letter-spacing: 0.04em; color: var(--faintest); }
+      .write { margin-top: 2.75rem; max-width: 40rem; }
+      .write h3 { margin: 0 0 0.6rem; font-family: var(--serif); font-weight: 500; font-size: 1.6rem; line-height: 1.12; }
+      .write h3 em { font-style: normal; color: var(--accent-ink); }
+      .write p { margin: 0 0 1.25rem; color: var(--dim); font-size: 1rem; }
+      .levels > div.on { background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35); }
+      .levels h3 small { display: inline-block; margin-left: 0.5rem; vertical-align: middle; font: 600 10px/1.4 var(--mono);
+        letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-ink); }
 
       /* THE SEAL, drawn as the signal chain: mail in, triage, the door, the
          agent. What the triage holds back drops off the chain into Passband
@@ -226,15 +235,16 @@
           schedule across every inbox you link. Passband's Agent MCP hands
           your agent what Passband's triage already worked out: what needs you
           and why, what is due, what is on its way, and the instructions you
-          gave it for each sender. Sign-in codes and password reset links never
-          reach it.
+          gave it for each sender. It writes mail only as far as you allow:
+          out of the box a draft you send yourself, and sending only if you
+          turn it on. Sign-in codes and password reset links never reach it.
         </p>
         <dl class="vs">
           <div>
             <dt>Tools</dt>
             <dd>
               <p class="sh"><span>Superhuman</span><b>28</b></p>
-              <p class="pb"><span>Passband</span><b>7</b></p>
+              <p class="pb"><span>Passband</span><b>7 to 10</b></p>
             </dd>
           </div>
           <div>
@@ -248,7 +258,7 @@
             <dt>What an email that steers your agent can reach</dt>
             <dd>
               <p class="sh"><span>Superhuman</span><b>Send, trash, unsubscribe</b></p>
-              <p class="pb"><span>Passband</span><b>One sender rule, logged</b></p>
+              <p class="pb"><span>Passband</span><b>A rule or a draft, logged</b></p>
             </dd>
           </div>
           <div>
@@ -282,13 +292,13 @@
             <tr>
               <td>Tools</td>
               <td data-label="Superhuman">28 documented. By our reading of their descriptions, 14 read and 14 act</td>
-              <td data-label="Passband" class="pb">7. Six read; one sets a sender rule inside Passband</td>
+              <td data-label="Passband" class="pb">7 always: six read, one sets a sender rule inside Passband. Up to 3 more as you allow: leave a draft, open it on your Mac, send</td>
               <td class="verdict"><span class="win even">Different bets</span></td>
             </tr>
             <tr>
               <td>Actions in your mailbox</td>
               <td data-label="Superhuman">Draft, send, schedule, undo send, archive, label, trash, reminders, unsubscribe and block</td>
-              <td data-label="Passband" class="pb">Wrapped, not handed over. The agent works through Passband's triage and your sender rules rather than the raw mailbox, so a mistaken instruction changes what you see, not what you send</td>
+              <td data-label="Passband" class="pb">As far as you allow, per mailbox. Out of the box: a draft, marked as the agent's, that you read, edit and send yourself. Turn on sending and it sends from your address through Passband's own guarded, logged pipeline, told to show you each message first. Read only takes drafts away</td>
               <td class="verdict"><span class="win even">Different bets</span></td>
             </tr>
             <tr>
@@ -324,7 +334,7 @@
             <tr>
               <td>A record of what agents did</td>
               <td data-label="Superhuman"><q>No MCP-specific logging exists today</q></td>
-              <td data-label="Passband" class="pb">Every rule an agent writes is logged. If the log entry fails, the rule is not written</td>
+              <td data-label="Passband" class="pb">Every rule, draft and send by an agent is logged as the agent's. A rule or draft whose log entry fails is not written</td>
               <td class="verdict"><span class="win pb">Passband</span></td>
             </tr>
             <tr>
@@ -350,7 +360,8 @@
         <p class="intro">
           Passband reads every message as it arrives and decides what needs
           you. Agent MCP hands your agent that judgment, so it starts from an
-          answer instead of a pile of mail. Seven tools, in plain terms:
+          answer instead of a pile of mail. Seven tools, always there, in plain
+          terms:
         </p>
         <div class="brief">
           <div>
@@ -384,6 +395,40 @@
             <p>Write a rule for a sender in Passband, like &ldquo;only tell me when the amount changes,&rdquo; and your words travel with that sender's mail to your agent. Your agent can read your rules and set new ones, inside Passband.</p>
           </div>
         </div>
+
+        <div class="write">
+          <h3>What it may write is <em>your call.</em></h3>
+          <p>
+            Out of the box an agent can leave you a draft, and nothing more.
+            In Passband, under Settings, Agents, &ldquo;What your agent may
+            write&rdquo; moves that line per mailbox, and the door offers only
+            the tools your level allows.
+          </p>
+        </div>
+        <div class="brief levels">
+          <div>
+            <code>no extra tools</code>
+            <h3>Read only</h3>
+            <p>The seven tools above and nothing else. The agent cannot leave a draft or send a message.</p>
+          </div>
+          <div class="on">
+            <code>create_draft &middot; open_draft</code>
+            <h3>Drafts only <small>default</small></h3>
+            <p>The agent leaves a draft in Passband, marked from your agent, for you to read, edit and send, or discard. It can ask your Mac to bring the draft up in the composer, where only the send button sends it. Nothing leaves your mailbox.</p>
+          </div>
+          <div>
+            <code>send_email</code>
+            <h3>Send, with your approval</h3>
+            <p>The agent sends from your address through the same guarded, logged pipeline your own mail takes. It is told to show you each message and wait for your yes in its chat, which Passband cannot see: an instruction to the agent, not a lock. Drafts only is the hard stop.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          At every level an agent can reply only to mail it can read, writes
+          to the sender address it was shown and copies nobody it did not
+          name, attaches and forwards nothing, never touches a draft you are
+          writing, and never holds your Gmail credential. The full rules are in
+          the <a href="/security">threat model</a>.
+        </p>
       </section>
 
       <section class="section" id="sealed">
@@ -421,7 +466,7 @@
           <div class="node lit">
             <span class="tag">The door</span>
             <b>Agent MCP</b>
-            <p>Seven tools. Plain text only, never HTML.</p>
+            <p>Seven tools, plus the writes you allow. Plain text only, never HTML.</p>
           </div>
           <div class="link" aria-hidden="true"><span>briefing</span></div>
           <div class="node">
@@ -448,9 +493,10 @@
           </div>
           <div class="pb">
             <span class="tag">Passband Agent MCP</span>
-            <h3>Worst case today: one sender rule, logged.</h3>
-            <p>The one tool that writes changes a sender rule inside Passband, and it applies only to mail that arrives after it. None of the seven tools writes to Gmail.</p>
-            <p>Every rule an agent writes is recorded in the same step as the rule itself. If the record cannot be written, neither is the rule.</p>
+            <h3>Worst case out of the box: a rule, or a draft you have to send.</h3>
+            <p>A steered agent can change a sender rule inside Passband, which applies only to mail that arrives after it, or leave a draft, marked as the agent's, that goes nowhere until you press send. Nothing it can do out of the box sends mail.</p>
+            <p>Turn on &ldquo;Send, with your approval&rdquo; and the worst case grows to a message sent from your address. The agent is told to show you each one and wait for your yes, Passband's outbound guard reads all of it for anything that looks like a password or a key with no override, and every send is logged. But the yes happens in the agent's chat, where Passband cannot check it. Drafts only is the hard stop.</p>
+            <p>Every rule, draft and send by an agent is recorded as the agent's. A rule or draft whose record cannot be written is not written.</p>
           </div>
         </div>
         <p class="fine-print">
@@ -532,7 +578,9 @@
         <p class="aside-sub" style="margin-top:1.25rem; max-width:50rem">
           Tool counts are as Superhuman documents them; its help article
           introduces the list with &ldquo;tools such as.&rdquo; The read and
-          act split is our reading of each tool's description.
+          act split is our reading of each tool's description. Passband's
+          count is seven tools always, and up to ten by the mailbox owner's
+          setting.
         </p>
       </section>
     </main>

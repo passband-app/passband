@@ -2685,9 +2685,19 @@ struct ThreadViewer: View {
         // A fresh thread mounts fresh rows; where the LAST one's cards were
         // must not anchor this one, and its shape must not be what the minimap
         // draws for a thread this one knows nothing about yet.
-        map.forget()
-        newestHeight = 0
-        landed = false
+        //
+        // NOT A SEEDED READER'S, though. A reopen mounts this thread's rows in
+        // `init` (see AppStore.ReaderSeed), and a message whose height is on
+        // file reports its final frame before this task has run. Forgetting
+        // that here forgets the only report there will ever be: geometry
+        // speaks when it changes, the height never changes again, and the
+        // landing waits on a number that stays zero while the reader sits
+        // where the initial offset left it, at the END of the mail.
+        if thread?.thread_id != threadId {
+            map.forget()
+            newestHeight = 0
+            landed = false
+        }
         // Another thread's arrivals are not this one's, and a REOPEN of the
         // same thread re-fetches from the top — either way the pill is
         // pointing at nothing by the time this runs.

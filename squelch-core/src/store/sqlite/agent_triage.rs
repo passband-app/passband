@@ -1344,10 +1344,7 @@ impl AgentTriageStore for SqliteStore {
         })))?.collect::<std::result::Result<Vec<_>,_>>()?
         };
         let runs = {
-            let mut stmt = conn.prepare(
-                "SELECT id,job_id,outcome,completed_at,metadata_json FROM agent_triage_runs
-             WHERE account_id=?1 AND message_id=?2 ORDER BY id DESC LIMIT 25",
-            )?;
+            let mut stmt = conn.prepare(MESSAGE_RUNS_SQL)?;
             let rows = stmt
                 .query_map(params![account, message], |row| {
                     Ok((
@@ -2804,6 +2801,27 @@ fn list_items_with_query(
     Ok(items)
 }
 
+/// The fired reminders, newest first: what [`append_due_reminders`] adds to
+/// every FYE listing. A `const` so the plan test pins THIS statement to its
+/// index (`idx_triage_reminded_at`, created in `migrate.rs`): it runs on every
+/// Standing-band read, which is the client's 10 s poll, and without the index
+/// it walked every triage row in the account.
+pub(super) const DUE_REMINDERS_SQL: &str =
+    "SELECT m.id,m.thread_id,m.from_addr,m.subject,m.received_at,t.reminded_at,d.decision_json,
+            m.from_name
+     FROM messages m JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
+     LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
+     WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=0 AND t.status!='done'
+       AND t.reminded_at IS NOT NULL AND t.remind_at IS NULL
+     ORDER BY t.reminded_at DESC,m.id DESC";
+
+/// The newest runs for one message, for `agent_diagnostics`. A `const` so the
+/// plan test pins it to `idx_agent_triage_runs_message`: the table is never
+/// pruned, and without the index this was a scan of all of it.
+pub(super) const MESSAGE_RUNS_SQL: &str =
+    "SELECT id,job_id,outcome,completed_at,metadata_json FROM agent_triage_runs
+     WHERE account_id=?1 AND message_id=?2 ORDER BY id DESC LIMIT 25";
+
 /// A user's scheduled reminder is sufficient authority to surface mail even
 /// while model processing is unavailable. This is a view, never a stored verdict.
 fn append_due_reminders(
@@ -2811,15 +2829,7 @@ fn append_due_reminders(
     account: AccountId,
     items: &mut Vec<AgentListItem>,
 ) -> Result<()> {
-    let mut statement = conn.prepare(
-        "SELECT m.id,m.thread_id,m.from_addr,m.subject,m.received_at,t.reminded_at,d.decision_json,
-                m.from_name
-         FROM messages m JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
-         LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
-         WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=0 AND t.status!='done'
-           AND t.reminded_at IS NOT NULL AND t.remind_at IS NULL
-         ORDER BY t.reminded_at DESC,m.id DESC",
-    )?;
+    let mut statement = conn.prepare(DUE_REMINDERS_SQL)?;
     let rows = statement
         .query_map([account], |row| {
             Ok((

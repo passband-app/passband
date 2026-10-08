@@ -177,6 +177,18 @@ pub struct ApiState {
     /// API ([`squelch_core::gcal::client::API_BASE`]); a test's local fake
     /// otherwise. Never read from the environment or a config file.
     pub(crate) calendar_api_base: Option<Arc<str>>,
+    /// How long one calendar write may take in all, Google's token refresh,
+    /// the guest list's reread and the write itself together
+    /// ([`crate::calendar_write::WRITE_DEADLINE`]). Past it the write is
+    /// answered 504, "may have happened". Shorter only in tests.
+    pub(crate) calendar_write_deadline: std::time::Duration,
+    /// The creates naming their own event id that are in flight, as
+    /// (account, calendar, id), shared by every clone: a second create with
+    /// the same key while the first is still running is refused at once
+    /// rather than racing it to Google
+    /// ([`crate::calendar_write::InFlight`]).
+    pub(crate) calendar_creates_in_flight:
+        Arc<std::sync::Mutex<std::collections::HashSet<(AccountId, String, String)>>>,
     /// The one Google Calendar consent this daemon may have in flight for the
     /// app's Connect button (`POST /client/calendar/connect`, self-host only),
     /// and the loopback listener that waits for its redirect. Shared by every
@@ -539,6 +551,8 @@ impl ApiState {
             calendar: None,
             calendar_refresh: CalendarRefresh::default(),
             calendar_api_base: None,
+            calendar_write_deadline: crate::calendar_write::WRITE_DEADLINE,
+            calendar_creates_in_flight: Default::default(),
             calendar_consent: Default::default(),
             calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
             calendar_consent_endpoints: Default::default(),
@@ -787,6 +801,13 @@ impl ApiState {
     #[doc(hidden)]
     pub fn with_calendar_api_base(mut self, base: impl Into<Arc<str>>) -> Self {
         self.calendar_api_base = Some(base.into());
+        self
+    }
+
+    /// A shorter overall deadline on a calendar write. TESTS ONLY.
+    #[doc(hidden)]
+    pub fn with_calendar_write_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.calendar_write_deadline = deadline;
         self
     }
 

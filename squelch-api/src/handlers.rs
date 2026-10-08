@@ -4981,6 +4981,7 @@ pub(crate) async fn guard_verdict(
                  resend with \"override_guard\": true to send anyway",
                 matches.join(", ")
             ),
+            code: None,
         });
     }
     // Overridden: record that the guard was bypassed (kinds only).

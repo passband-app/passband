@@ -39,6 +39,13 @@
 // picks a highlighted place or contact, makes a typed address a guest, and is
 // a new line in the notes. With no field focused it is the month's. Esc
 // closes the place list, then the delete question, then the pane.
+//
+// FROZEN (Lib/CalendarWrite.swift, `EventPaneState`). A save whose answer
+// never came and that the reloaded page cannot confirm leaves the pane
+// read-only, the draft as sent still showing, with one line and three
+// controls in the footer: "check again" (⌘↵), "send again" (the same body),
+// "close" (Esc). Plain ↵ does nothing. There is no way back to editing: a
+// changed event is a new pane.
 
 #if os(macOS)
     import SwiftUI
@@ -68,6 +75,8 @@
         }
 
         private var draft: EventDraft { store.calendarDraft ?? request.initial }
+        /// Where this pane's write stands. Typing only while `.editing`.
+        private var state: EventPaneState { store.calendarPaneState }
         private var editing: TimelineEvent? { request.event }
 
         var body: some View {
@@ -79,6 +88,9 @@
             VStack(alignment: .leading, spacing: 0) {
                 header
                 card(plan: plan, problem: problem, now: now, cal: cal)
+                    // A write out, or one in doubt: the draft stays in view
+                    // as it was sent, and nothing in it takes typing.
+                    .disabled(!state.fieldsEditable)
                     .padding(.horizontal, Space.scaled(18))
                     .padding(.vertical, Space.s14)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -531,7 +543,9 @@
         @ViewBuilder
         private func footer(problem: EventDraftProblem?, plan: GuestPlan) -> some View {
             Group {
-                if confirmingDelete {
+                if state.frozen {
+                    frozenFooter
+                } else if confirmingDelete {
                     deleteQuestion
                 } else {
                     verbs(problem: problem, plan: plan)
@@ -612,6 +626,51 @@
             }
         }
 
+        /// THE FROZEN FOOTER: what is known, said once, and the three ways on.
+        /// The same verbs and keys as every other footer of the pane; no
+        /// colour but the main control's, since nothing here is an error.
+        private var frozenFooter: some View {
+            let live = Set(state.frozenControls)
+            let checking = state == .sending(again: true)
+            return VStack(alignment: .leading, spacing: Space.s10) {
+                Text(checking ? CalendarWrite.frozenCheckingText : CalendarWrite.frozenText)
+                    .font(Typo.ui(13))
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: Space.s8) {
+                        Spacer(minLength: 0)
+                        frozenControls(live)
+                    }
+                    VStack(alignment: .trailing, spacing: Space.s8) { frozenControls(live) }
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+        }
+
+        @ViewBuilder
+        private func frozenControls(_ live: Set<EventPaneState.Control>) -> some View {
+            Button { store.closeEventEditor() } label: { keyed(EventPaneState.closeLabel, "esc") }
+                .buttonStyle(.glass)
+                .disabled(!live.contains(.close))
+            if let sent = store.calendarPaneSent {
+                Button(EventPaneState.sendAgainLabel(sent)) {
+                    Task { await store.sendEventAgain(request) }
+                }
+                .buttonStyle(.glass)
+                .disabled(!live.contains(.sendAgain))
+            }
+            Button { checkAgain() } label: { keyed(EventPaneState.checkAgainLabel, "⌘↵") }
+                .buttonStyle(.glassProminent)
+                .tint(Palette.accent)
+                .disabled(!live.contains(.checkAgain))
+        }
+
+        private func checkAgain() {
+            guard state == .uncertain else { return }
+            Task { await store.checkEventAgain(request) }
+        }
+
         /// The delete question, in the pane's own footer: asked once, the
         /// fields still there above it, Escape back to them. An event with
         /// guests asks about telling them, and offers both answers by name:
@@ -678,13 +737,23 @@
             [
                 // The innermost thing open closes first: the place list, the
                 // delete question, then the pane.
-                KeyBinding("Escape", "close", allowInInput: true) { escape() },
+                KeyBinding("Escape", "close", allowInInput: true) {
+                    // Frozen, or a write out: Esc closes the pane itself.
+                    if state.fieldsEditable { escape() } else { store.closeEventEditor() }
+                },
                 // ⌘↵ FROM ANYWHERE, the notes included: the footer's main
                 // control, by name, exactly as a click on it. Declines under
                 // a modal raised over the pane (the ask bar, the shortcuts
                 // card), whose field the chord was typed into.
                 KeyBinding(declining: "Enter", "save", meta: true, allowInInput: true) {
                     guard !store.modalOverlayOpen else { return false }
+                    switch state.action(.commandEnter) {
+                    case .editingRules: break
+                    case .checkAgain:
+                        checkAgain()
+                        return true
+                    case .close, .nothing: return true
+                    }
                     if confirmingDelete {
                         deleteNow(tellGuests: deleteWording.tell != nil)
                     } else {
@@ -702,6 +771,8 @@
                 // a click on the control that says so does that.
                 KeyBinding(declining: "Enter", "save", allowInInput: true) {
                     guard !store.modalOverlayOpen else { return false }
+                    // FROZEN, or a write out: ↵ does nothing at all.
+                    guard state.action(.enter) == .editingRules else { return true }
                     if focus == .location, places?.pick() == true { return true }
                     if confirmingDelete {
                         if deleteWording.tell == nil { deleteNow(tellGuests: false) }
@@ -774,7 +845,7 @@
         /// Save, AS the control that asked: the store decides from the
         /// control itself whether the guests are told.
         private func save(_ control: SaveControl, problem: EventDraftProblem?) {
-            guard problem == nil, !store.calendarWriting else { return }
+            guard problem == nil, !store.calendarWriting, state.fieldsEditable else { return }
             let draft = draft
             Task { await store.saveEvent(draft, request, via: control) }
         }
@@ -802,7 +873,10 @@
         private func patch(_ mutate: (inout EventDraft) -> Void) {
             // Only while this pane's request is still the one open: a late
             // write (a place looked up after Esc) must not revive a draft.
-            guard store.calendarEditor?.id == request.id, var next = store.calendarDraft else { return }
+            // Nor touch a draft that is out, or frozen as it was sent.
+            guard store.calendarEditor?.id == request.id, store.calendarPaneState.fieldsEditable,
+                var next = store.calendarDraft
+            else { return }
             mutate(&next)
             if next != store.calendarDraft { store.calendarDraft = next }
         }

@@ -2336,6 +2336,37 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
         })
         .unwrap();
     assert_eq!(token.as_deref(), Some("fresh"));
+    // A store from AFTER guests but before the unreadable-organizer mark
+    // (verify2 V9): only that column is new, and it alone must make every
+    // calendar forget its token and last full read, so the next pass rereads
+    // in full and sets the mark.
+    reopened
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE calendar_events DROP COLUMN organizer_unreadable;
+             UPDATE calendar_calendars SET sync_token='minted-before-the-mark',
+                    full_synced_at='2026-10-02T00:00:00+00:00';",
+        )
+        .unwrap();
+    drop(reopened);
+    let reopened = SqliteStore::open(&path).unwrap();
+    {
+        let conn = reopened.lock().unwrap();
+        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        let sync: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT sync_token, full_synced_at FROM calendar_calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            sync,
+            (None, None),
+            "the organizer mark alone forgets the tokens"
+        );
+    }
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
 }

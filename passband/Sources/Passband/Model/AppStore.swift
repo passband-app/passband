@@ -727,6 +727,13 @@ final class AppStore {
     /// A write to Google is out: the card's buttons wait, so one Enter is
     /// one event.
     var calendarWriting = false
+    /// Where the event pane's write stands (`EventPaneState`): editable,
+    /// out, frozen after an answer that never came, or done. Reset with the
+    /// pane.
+    var calendarPaneState: EventPaneState = .editing
+    /// What the pane last sent, kept whole while it is frozen: "send again"
+    /// sends exactly this, "check again" looks for exactly this.
+    var calendarPaneSent: SentWrite?
     /// Bumped by every timeline request and every local write to the feed;
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.

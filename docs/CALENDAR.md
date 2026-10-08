@@ -324,6 +324,10 @@ never rejected:
   (zero-width, word joiner, BOM, tag characters). A title with nothing else in
   it is empty, and its record is dropped. That rule fixes each record's
   stored position, so it must not change once ghosts exist in the field.
+  The shared filter (`order_link::plain`) is also the merchant name's, so
+  since this work a shipment, order or receipt merchant name loses
+  zero-width and tag characters too, for every tenant, flag or not (a ZWJ
+  emoji sequence in a merchant name comes apart).
 - A `basis` or `reason` that laundering blanks is served as null.
 
 **Identity.** Scope is `triage::ghost::sender_scope`, for authenticated mail
@@ -574,13 +578,46 @@ Wave 4, from the founder using wave 3 on screen:
   back to the Calendar page restores it as it was. An untouched pane just
   closes. Only the calendar gate closing or an account switch discards a
   draft.
-- **When Google's answer is lost.** A save or delete answered 504 shows a
-  quiet toast ("Google may have made this change. Refreshing…"), keeps the
+- **Only a definite "nothing happened" gives the fields back.** Every answer
+  to a write is one of three kinds (`CalendarWrite.verdict` in
+  Lib/CalendarWrite.swift, keyed on the daemon's `code`, §8 "What a refusal
+  says"): done (a 2xx the app decodes); nothing happened (a request that
+  never left the app, or one of the daemon's refusal codes with its own
+  status), which leaves the pane editable with one toast per code; and
+  everything else, which MAY have happened and is settled as below: a 504,
+  any 500, a 502 without `google_refused` (a proxy's own page), no code or
+  an unknown one, a 2xx that would not decode, any transport failure not
+  provably before the send (only no host, no connection, no network and a
+  refused TLS handshake count as unsent), and `already_creating` (the same create still
+  out, which may yet make it: "This event is still being sent. Check again
+  in a moment."). When in doubt, the pane holds.
+- **When Google's answer is lost.** A save or delete that may have happened
+  shows a quiet toast ("Google may have made this change. Refreshing…"), keeps the
   control locked, and reloads the feed up to 3 times, 2 seconds apart. The
-  pane closes only once the change is visible in the feed; otherwise it stays
-  open with its contents. Calendar writes wait 45 seconds on the client, longer
-  than the daemon's 30 seconds on Google, so the daemon's answer (504
-  included) always arrives first.
+  pane closes as a success once the change is visible in the feed. A delete
+  not yet seen keeps its question up. A SAVE not yet seen FREEZES the pane
+  (`EventPaneState` in Lib/CalendarWrite.swift): the fields go read-only with
+  the draft as sent still showing, one line says "Google may have made this
+  change. Passband could not confirm it yet.", and the footer offers three
+  controls: "check again" (⌘↵: the daemon is asked to sync, the feed is
+  reloaded and looked at again; seen closes as a success, unseen stays
+  frozen), "send again" (exactly the body already sent, the same create id
+  with it; for an edit that tells guests it reads "send again, guests may be
+  told twice"; a create's id keeps Google from inviting twice, so it says
+  nothing more) and "close" (Esc: the event, if Google made it, arrives with
+  the next sync; no draft is kept). Plain ↵ does nothing. There is no way
+  from a frozen pane back to an editable one: changing the event after an
+  uncertain save means closing and starting a new event, under a new id. A
+  "send again" refused outright keeps the pane frozen, since the first send
+  may still have worked. A composer asked for over a pane that cannot be
+  saved (frozen, or sending) is refused with "Close the event first"; over
+  an editable one, "Save or close the event first". The store's decisions
+  about the pane (whether a save may run, what "send again" and "check
+  again" work from, whether a late answer moves this pane, the toast a
+  refusal gets) are pure functions in `EventPaneRules`, tested in
+  passband/Tests/EventDraftTests.swift. Calendar writes wait 45 seconds on the client,
+  longer than the daemon's 35 second deadline on a write, so the daemon's
+  answer (504 included) arrives first.
 - **Telling guests only where it is allowed.** On a calendar that may not
   invite (`can_invite` false: one the user only writes to), the pane and the
   delete question offer only the silent controls, with one line saying why;
@@ -997,15 +1034,25 @@ promoting a ghost to a real event is later work.
 - **Routes** (human door, bearer authed, `no-store`, in
   `squelch-api/src/calendar_write.rs`):
   - `POST /client/calendar/events` with `{"calendar_id", "title", "start",
-    "end", "all_day", "location"?, "description"?}` answers 201 with the
-    event in the timeline's shape.
+    "end", "all_day", "location"?, "description"?, "id"?}` answers 201 with
+    the event in the timeline's shape. `id` is the new event's id, chosen by
+    the app (below, "A create sent twice").
   - `PATCH /client/calendar/events/{calendar_id}/{id}` with any subset of the
     same fields answers 200 with the event. An absent field is left alone;
     `location` and `description` take `null` to clear. A `calendar_id` in the
     body must be the event's own: moving an event is not offered.
   - `DELETE /client/calendar/events/{calendar_id}/{id}` answers 204. An event
-    Google says is already deleted (410) or does not know (404) is deleted
-    locally too.
+    Google says is already deleted (410) is deleted locally too, and so is
+    one it does not know (404) while the calendar is still the user's: the
+    primary calendar always is, any other is looked up on the user's
+    calendar list (`calendarList.get`), because Google answers 404 too for a
+    calendar the user has lost, and for an event they can no longer see.
+    "Still the user's" means listed, not `deleted`, AND an `accessRole` of
+    `owner` or `writer`: a calendar still listed whose role dropped to a
+    reader's is not. Otherwise it is a 410, "that calendar is no longer
+    available to you", the row is left for the sync the write kicks, and the
+    app says nothing was deleted. A calendar list read that fails is a 502
+    and deletes nothing locally.
 - **Times.** RFC3339 with an offset for a timed event, `YYYY-MM-DD` for an
   all-day one, both of one precision, the end after the start. An all-day
   `end` is the INCLUSIVE last day, as the timeline serves it (equal to the
@@ -1045,16 +1092,89 @@ promoting a ghost to a real event is later work.
   every synced event (a link without its query, markup as text).
 - **Google first, then local.** Only Google's success changes a row, and what
   is stored is Google's answer (its id, link, organizer and normalized times),
-  not the request. A refusal Google answered (any HTTP error, or a failure to
-  connect at all) is a 502, "Google Calendar did not accept the change", and
-  leaves every row exactly as it was. A write that went out and got NO usable
-  answer (a timeout or a lost connection after sending, a 2xx whose body does
-  not read) is different: Google may have made the change. It is a 504,
-  "Google Calendar may have made this change; refresh before trying again",
-  stores nothing, and kicks a sync, so the client reloads and shows what
-  Google holds before anything is offered again (above all a second "tell
-  guests"). A write is never retried. After every write the sync is kicked,
+  not the request. A refusal Google answered (a 4xx, or a failure to
+  connect at all) is a 502, "Google Calendar did not accept the change",
+  code `google_refused`, and leaves every row exactly as it was. A write
+  that went out and got NO usable answer (a timeout or a lost connection
+  after sending, a 2xx whose body does not read, or Google's own 5xx, which
+  its error guide calls "an unexpected error occurred while processing the
+  request") is different: Google may have made the change. It is a 504, "Google Calendar may have made this
+  change; refresh before trying again", code `uncertain`, stores nothing,
+  and kicks a sync, so the client reloads and shows what Google holds before
+  anything is offered again (above all a second "tell guests"). So is a
+  write Google ACCEPTED whose answer the daemon could not read
+  (`failed:answer`) or could not store (`failed:store`): it happened, so it
+  is a 504 `uncertain` with its own message, never a refusal the app would
+  give the fields back on (verify4 X1). A write is never retried. After every write the sync is kicked,
   so the next pass confirms it.
+- **One deadline per write.** Each Google call may take 30 seconds and a
+  write can make three (a token refresh, a guest edit's reread, the write),
+  more than the app's 45 second wait. So the whole write runs under one 35
+  second deadline (`calendar_write::WRITE_DEADLINE`); past it the answer is
+  the same 504 and the same sync kick. If the app's own wait runs out anyway,
+  or the connection drops mid-request, the app treats it as that 504 too and
+  settles against the reloaded page, never "nothing was saved". A request
+  that never reached the daemon still says nothing was saved.
+- **A create sent twice.** The app names each new event's `id` itself, one
+  per open pane: a UUID's 32 hex digits, which Google takes ("characters
+  allowed in the ID are those used in base32hex encoding, i.e. lowercase
+  letters a-v and digits 0-9", "between 5 and 1024 characters"). Google also
+  says "we cannot guarantee that ID collisions will be detected at event
+  creation time", so the daemon does not rely on its 409: a create naming an
+  id first reads it (`events.get`). An event already there is the answer
+  ONLY when it is the event this create would make: the same calendar (the
+  read is on the calendar the create names), the same title, location and
+  notes (each read back through the daemon's own laundering), start, end,
+  all-day flag and guest set (case folded, the calendar's own entry and the
+  organizer's left out; a list Google cut short never matches). NOT
+  compared: `notify`, which Google's event does not record. That is safe
+  only because the app never changes it on a resend: a create is sent again
+  only from a frozen pane, and only as the exact body it first sent, so a
+  resend never changes `notify` (nor anything else). Then it is answered 200 as it
+  stands, with no insert and so no second invitation (audited `ok:existing
+  ... notified=false`). Anything else under that id is a 409, "that event id
+  is already used for a different event", with no write (audited
+  `rejected:id_in_use`). An insert Google answers 409 (`duplicate`, "The
+  requested identifier already exists") is read and judged the same way. An
+  id already used by an event since deleted is a 409. Any other id shape is
+  a 400 before Google hears anything.
+- **One create per id at a time.** The daemon holds an in-memory set of
+  (account, calendar, id) for the creates in flight. A second create with
+  the same key while the first is still running is a 409, "that event is
+  already being created", before Google hears anything (audited
+  `rejected:in_flight`). The key is let go however the first ends: an
+  answer, a refusal, the deadline, or a panic.
+- **What this does not close.** The id makes a duplicate unlikely, not
+  impossible. A read that lags a just-made insert, followed by an insert
+  Google fails to flag as a duplicate, can still make two events with one
+  id; and the read is per calendar, so the same id on another calendar is
+  not seen. The app's frozen pane (§5) is the other half: after an
+  uncertain create it only ever resends the same body to the same calendar.
+- **Settling an uncertain write (app).** After an answer that may have
+  happened the app reloads the page up to three times. A create is found by
+  its id ALONE, on the calendar it was sent to, whatever its title came back
+  as: a lookalike, even the user's own new event from another pane, is not
+  it (verify5 Y3), and a calendar daemon older than ids (which ignores the
+  id) leaves the pane frozen until it is closed by hand. Only a create body
+  without an id (none is sent today) falls back to an event that could be
+  nobody else's: on that calendar, not on the page before the send, the
+  user's own (`editable`, and no guest named as another organizer), with
+  the all-day flag, start AND end, and the title (laundered) that were sent.
+  Someone else's invitation with the same title at the same
+  time is not it (verify4 X3). An edit is confirmed only when EVERY field it
+  changed reads AS SENT: times, the all-day flag and the guests exactly, and
+  a title, place or notes equal to what was typed once whitespace is
+  collapsed and invisible characters dropped. A text field that moved to
+  something else (a co-editor's change, or the user's own earlier lost edit)
+  is unknown, not confirmed (verify4 X2), and so is text the daemon rewrites
+  in ways the app does not copy (a link cut down, markup out, the length
+  cap): the pane stays frozen and is closed by hand. A guest's answer or a
+  colour changed meanwhile is never looked at. A delete is found when the
+  event is gone. A save not found freezes the pane (§5).
+- **"Delete and tell guests" that can no longer tell.** If the page reloaded
+  under the delete question and the calendar may no longer tell guests, the
+  delete is refused with a toast and the question stays up, as a save
+  refuses a control that is no longer on offer. It is never sent silently.
 - **A disconnect does not lose the write.** Each write's checks, Google call,
   local row and audit row run in a task of their own that the handler
   awaits. If the app goes away mid-request the request is dropped but the
@@ -1062,16 +1182,51 @@ promoting a ghost to a real event is later work.
 - **Errors.** 400 for a bad body (end before start, mixed precision, a title
   empty or over 200, a missing field, an unknown or read-only calendar, two
   `notify` keys), 403 when calendar is not granted or the event is not
-  editable, 404 for an unknown event, 502 when Google refuses, 504 when
-  Google's answer was lost (above). Error bodies are fixed strings and
+  editable, 404 for an unknown event, 409 for a create id already used by a
+  deleted event or by a different event, or still being created, 410 for a
+  delete on a calendar no longer listed or no longer written to, 502 when
+  Google refuses, 504 when Google's answer was lost, the write ran past its
+  deadline, or Google accepted it and the answer could not be read or
+  stored (above), 500 for anything else. Error bodies are fixed strings and
   never echo the request.
+- **What a refusal says.** Every error body from the three write routes is
+  `{"error": <fixed sentence>, "code": <code>}`, the code from a CLOSED list
+  (`calendar_write::code`). The app keys on the code, and only with the
+  code's own status; a code it does not know, or none, is "may have
+  happened".
+
+  | code | status | kind |
+  |---|---|---|
+  | `invalid` | 400 | nothing happened: the body, a guest address, the delete's query |
+  | `unknown_calendar` | 400 | nothing happened |
+  | `read_only` | 400 | nothing happened |
+  | `cannot_invite` | 400 | nothing happened |
+  | `guests_read_only` | 400 | nothing happened |
+  | `cannot_notify` | 400 | nothing happened |
+  | `not_granted` | 403 | nothing happened |
+  | `not_editable` | 403 | nothing happened |
+  | `not_found` | 404 | nothing happened: no such stored event |
+  | `id_in_use` | 409 | nothing happened: the id names a different event |
+  | `already_deleted` | 409 | nothing happened: the id's event was deleted |
+  | `calendar_gone` | 410 | nothing happened: Google answered the delete 404 and the calendar is no longer the user's to write |
+  | `google_refused` | 502 | nothing happened: Google refused the write (or a read or token refresh before it) |
+  | `already_creating` | 409 | MAY HAVE: the same create is still out, and may make the event |
+  | `uncertain` | 504 | MAY HAVE: the answer was lost, the deadline passed, or Google accepted and the answer could not be read or stored |
+  | `internal` | 500 | MAY HAVE: anything else |
+
+  A new code is added to both sides at once, and is "may have happened" to
+  any app that predates it.
 - **Audit.** One row per attempt in the audit log, in the mail actions' shape:
   action `calendar_event_create`, `calendar_event_edit` or
   `calendar_event_delete`, actor `client-api`, target
   `calendar:<calendar_id>/<event_id>`, detail `ok` or the reason
   (`rejected:body`, `rejected:calendar`, `rejected:read_only`,
   `rejected:not_granted`, `rejected:not_editable`, `failed:target`,
-  `failed:google`, `failed:uncertain`, `failed:answer`). Never a title,
+  `failed:google`, `failed:token`, `failed:uncertain`, `failed:answer`,
+  `failed:store`,
+  `failed:calendar_gone`, `rejected:already_deleted`, `rejected:id_in_use`,
+  `rejected:in_flight`; a create answered
+  with an event an earlier send made is `ok:existing`). Never a title,
   place, description or guest's address. The target does carry the
   calendar id, which for a personal calendar someone shared with the user is
   its owner's address.

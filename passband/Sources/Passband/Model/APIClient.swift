@@ -170,20 +170,23 @@ actor APIClient {
             (data, response) = try await session.data(for: req)
         } catch {
             // Transport failure OR timeout — never echo the token/url detail.
-            throw APIError(.network, 0, "cannot reach squelch server")
+            throw APIError.transport(error)
         }
         guard let http = response as? HTTPURLResponse else {
-            throw APIError(.network, 0, "cannot reach squelch server")
+            // Something answered: the request got somewhere.
+            var out = APIError(.network, 0, "cannot reach squelch server")
+            out.mayHaveArrived = true
+            throw out
         }
         guard (200..<300).contains(http.statusCode) else {
             let kind = APIErrorKind.forStatus(http.statusCode)
             var message = "request failed (\(http.statusCode))"
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let err = obj["error"] as? String {
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            if let err = obj?["error"] as? String {
                 message = err
             }
             let guards = kind == .guardBlocked ? parseGuardKinds(message) : nil
-            throw APIError(kind, http.statusCode, message, guardKinds: guards)
+            throw APIError(kind, http.statusCode, message, guardKinds: guards, code: obj?["code"] as? String)
         }
         return (data, http)
     }
@@ -580,10 +583,12 @@ actor APIClient {
         try await post("/client/calendar/events", body: body, timeout: Self.calendarWriteTimeout)
     }
 
-    /// A calendar write waits past the daemon's own wait on Google (30
-    /// seconds): given up on sooner, a slow Google would read here as "could
-    /// not reach your server, nothing was saved" while the write may have
-    /// gone through, and the daemon's 504 saying exactly that never arrives.
+    /// A calendar write waits past the daemon's own deadline on the whole
+    /// write (35 seconds, its token refresh, guest reread and write
+    /// together), so the daemon's 504 "may have happened" arrives first. If
+    /// this wait runs out anyway, the write is still treated as uncertain
+    /// and settled against the page (`CalendarWrite.verdict`), never as
+    /// "nothing was saved".
     private static let calendarWriteTimeout: TimeInterval = 45
 
     /// `PATCH /client/calendar/events/{calendar_id}/{id}` with only the

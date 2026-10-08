@@ -1125,8 +1125,44 @@ write that went out and got no usable answer (a timeout or a lost connection aft
 sending, a 2xx body that does not read: `CallError::Uncertain`) is a 504 saying
 Google may have made the change, kicks a sync and stores nothing, so the client
 refreshes before offering to send again (a "tell guests" is not repeated on a
-guess). A delete Google answers 404 or 410 found the event gone and removes the
-local row. Event and calendar ids of `.` or `..` (or empty) are refused at read
+guess). A write Google accepted whose answer the daemon could not read or store
+is that same 504, never a refusal. Every error body names its kind in a `code`
+from a closed list (docs/CALENDAR.md section 8, "What a refusal says"), and the
+app gives a pane's fields back ONLY on a code that says nothing reached Google
+(or Google refused it), with that code's own status; anything else, including
+no code, an unknown code, any 500 and a bare 502, freezes the pane. The whole write (token refresh, guest reread, write) runs under one 35
+second deadline, below the app's 45 second wait; past it the answer is the same
+504 and kick, and the app treats a wait of its own that runs out, or a
+connection lost mid-request, as that 504 too. A create may name its own event id
+(base32hex, 5 to 1024 characters, else a 400); the daemon reads that id before
+inserting. An event already there (or found after a 409 `duplicate` from Google)
+is answered, with no insert and no second invitation (audited `ok:existing ...
+notified=false`), ONLY when it is the event the create would make: same
+calendar, laundered title, location and notes, start, end, all-day flag and
+guest set. Anything else under the id is a 409 with no write
+(`rejected:id_in_use`), so an id cannot be used to claim an event with another
+title, place, notes, time or guest list than the request described. What it does
+NOT compare is `notify`: Google's event does not say whether its guests were
+mailed, so a create asking for invitations could be answered by an event made
+without them. The app never sends that, because a create is resent only from a
+frozen pane and only as the exact body first sent, so a resend never changes
+`notify`; a different client could, and would be told 200 with nobody invited
+(the audit row says `notified=false`). A second
+create with an id whose first create is still in flight (an in-memory set of
+account, calendar and id, released however the first ends) is a 409 before
+Google hears it (`rejected:in_flight`). This makes a duplicate from a retried
+create unlikely, not impossible: Google does not guarantee to catch a taken id
+at insert time and a read may lag one just made, and the read is per calendar.
+The app closes the rest from its side: after an uncertain save it freezes the
+pane and can only send the same body again (docs/CALENDAR.md section 5). A delete
+Google answers 410 found the event gone and removes the local row; a 404 does the
+same only on the primary calendar or on a calendar `calendarList.get` still
+lists, not deleted, with an `accessRole` of `owner` or `writer`; otherwise it is
+a 410 "that calendar is no longer available to you" that leaves the row for the
+kicked sync (Google answers 404 for a calendar the user lost, and for an event
+they can no longer see). A calendar list read that fails is a 502 and deletes
+nothing. The app refuses a "delete and tell guests" whose calendar may no
+longer tell them rather than deleting silently. Event and calendar ids of `.` or `..` (or empty) are refused at read
 and again when the URL is built, because a URL path would read them as "here"
 and "up one". Error bodies are fixed strings that never
 echo the request; logs carry the action and an error kind, never an id. Every

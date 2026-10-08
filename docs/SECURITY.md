@@ -170,7 +170,8 @@ refuses it before the handler is reached).
   spell `passband-img:` itself in a kept `<style>` block, which `rewrite` neuters to
   `passband-img-blocked:` before minting anything.
 - `Model/ImageStore.swift` owns the fetch: ephemeral session, no cookies, empty
-  referrer, `image/*` only, redirects re-guarded per hop, files named `sha256(url)`
+  referrer, images only (an `image/*` header, or failing that a raster magic number
+  per `Lib/ImageSniff.swift`, never svg), redirects re-guarded per hop, files named `sha256(url)`
   and a manifest holding **no URLs** — a directory listing the reader's mail URLs
   would be a readable index of their correspondence.
 - **`cid:` references are the local mirror of all this.** `Lib/CidImages.swift`

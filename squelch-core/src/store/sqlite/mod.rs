@@ -947,6 +947,20 @@ impl Store for SqliteStore {
         self.inbox_unread(account_id)
     }
 
+    fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT created_at FROM accounts WHERE id = ?1",
+                params![account_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(stamp
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc)))
+    }
+
     fn set_inbox_unread(&self, account_id: AccountId, messages: i64, threads: i64) -> Result<()> {
         self.set_inbox_unread(account_id, messages, threads)
     }

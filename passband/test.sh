@@ -657,6 +657,13 @@ run_suite capability-probe \
   Sources/Passband/Model/APIError.swift \
   Tests/CapabilityProbeTests.swift
 
+# An agent's draft asked onto the screen: the passband://draft link (untrusted,
+# from whatever opened the URL) and the event-stream frame that carries
+# open_draft. Neither may read as the other, or as a pair link.
+run_suite agent-draft-link \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Tests/AgentDraftLinkTests.swift
+
 # Which hidden features this mailbox has been let into. Off for every doubt:
 # no stats, an old daemon, an empty list.
 run_suite hidden-features \

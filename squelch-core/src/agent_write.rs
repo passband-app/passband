@@ -122,6 +122,45 @@ pub struct AgentCompose {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentDraftCreated {
     pub draft_id: i64,
+    /// A `passband://` link that opens this draft in the Mac app; see
+    /// [`draft_link`]. Given with every draft, so the agent always has a way
+    /// to point its human at it.
+    pub link: String,
+}
+
+/// What asking the owner's Mac to show a draft came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDraftOpened {
+    /// A Passband Mac app was connected for this mailbox and was told to
+    /// bring the draft up. `false` means nothing was listening: the draft is
+    /// saved and the link below is the way in.
+    pub on_mac: bool,
+    /// A `passband://` link that opens the draft in the Mac app. Handed back
+    /// either way, so the agent can give its human a way to the draft.
+    pub link: String,
+}
+
+/// The `passband://` link that opens draft `draft_id` of `mailbox` in the Mac
+/// app. The mailbox rides along because a Mac may hold several accounts and a
+/// draft id is one daemon's row id, meaningless in another's.
+///
+/// `created` (the draft's creation time, Unix seconds) BINDS THE LINK TO THAT
+/// ONE DRAFT. Draft ids are SQLite row ids: small, sequential, and reused once
+/// a draft is sent or discarded. Without this, a link left in a chat transcript
+/// would open whichever agent draft held the number next, and any page could
+/// walk `draft/1..N`. The app opens a link only when the draft it finds was
+/// created at exactly this second.
+pub fn draft_link(mailbox: &str, draft_id: i64, created: i64) -> String {
+    let mut encoded = String::with_capacity(mailbox.len());
+    for b in mailbox.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(b as char)
+            }
+            _ => encoded.push_str(&format!("%{b:02X}")),
+        }
+    }
+    format!("passband://draft/{draft_id}?mailbox={encoded}&t={created}")
 }
 
 /// Mail the agent sent.
@@ -197,6 +236,16 @@ pub trait AgentMailer: Send + Sync {
         compose: AgentCompose,
     ) -> std::result::Result<AgentDraftCreated, AgentWriteError>;
 
+    /// Ask the owner's Mac to bring one of the agent's drafts up in the
+    /// composer. Needs [`AgentWriteAccess::Drafts`]. Only a draft an agent
+    /// wrote can be named; the owner's own drafts answer
+    /// [`AgentWriteError::NotFound`], as an unknown id does. Opens, never
+    /// sends.
+    async fn open_draft(
+        &self,
+        draft_id: i64,
+    ) -> std::result::Result<AgentDraftOpened, AgentWriteError>;
+
     /// Send mail now. Needs [`AgentWriteAccess::Send`].
     async fn send(&self, compose: AgentCompose) -> std::result::Result<AgentSent, AgentWriteError>;
 }
@@ -205,6 +254,14 @@ pub trait AgentMailer: Send + Sync {
 mod tests {
     use super::*;
     use crate::store::SqliteStore;
+
+    #[test]
+    fn a_draft_link_names_the_draft_and_its_mailbox() {
+        assert_eq!(
+            draft_link("me+work@example.com", 12, 1_790_000_000),
+            "passband://draft/12?mailbox=me%2Bwork%40example.com&t=1790000000"
+        );
+    }
 
     #[test]
     fn levels_are_ordered_and_round_trip() {

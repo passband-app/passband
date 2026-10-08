@@ -715,3 +715,25 @@ fn account_email_reads_the_row_and_404s_unknown() {
         CoreError::NotFound
     ));
 }
+
+/// The triage agent's onboarding window counts from this stamp, so it must
+/// round-trip the RFC 3339 `ensure_account` writes, and an unknown id or an
+/// unparseable stamp must read as `None` (steady-state effort), never an error.
+#[test]
+fn account_created_at_reads_the_stamp_and_none_for_unknown_or_garbled() {
+    let before = Utc::now();
+    let (store, acct) = store();
+    let created = store.account_created_at(acct).unwrap().unwrap();
+    assert!(created >= before - chrono::Duration::seconds(5) && created <= Utc::now());
+    assert_eq!(store.account_created_at(9999).unwrap(), None);
+
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE accounts SET created_at = 'x' WHERE id = ?1",
+            params![acct],
+        )
+        .unwrap();
+    assert_eq!(store.account_created_at(acct).unwrap(), None);
+}

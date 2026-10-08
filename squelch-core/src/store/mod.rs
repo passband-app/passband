@@ -2107,6 +2107,11 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// answer, "we do not know" is not.
     fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>>;
 
+    /// When this account was first created in the store, or `None` for an
+    /// unknown id or an unparseable stamp. The triage agent's onboarding
+    /// window counts from it.
+    fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
     /// Overwrite this account's Gmail INBOX unread counts, stamping `fetched_at`
     /// now. Only ever called with numbers that came back from Gmail, so a failed
     /// fetch leaves the previous row in place.

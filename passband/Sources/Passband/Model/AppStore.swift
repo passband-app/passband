@@ -4583,6 +4583,149 @@ final class AppStore {
         inlineReply = next
     }
 
+    // MARK: - an agent asks for its draft on screen
+
+    /// The agent door's `open_draft`, relayed over `accountId`'s event stream.
+    func openAgentDraft(_ signal: AgentOpenSignal, accountId: UUID) {
+        // A request that sat in a sleeping Mac's connection is not a request
+        // any more.
+        guard signal.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
+        Task { await showAgentDraft(signal.open_draft, accountId: accountId, link: nil) }
+    }
+
+    /// When a `passband://draft` link was last acted on. Links come from
+    /// whatever opened the URL, and each one costs a fetch and may take the
+    /// screen: the daemon spaces an agent's requests five seconds apart, and
+    /// a link gets the same spacing here, where the daemon cannot see it.
+    private var lastDraftLinkAt: Date?
+
+    /// A `passband://draft` link somebody clicked. Always about the mailbox on
+    /// screen: the link's `mailbox` is checked against it rather than used to
+    /// go looking through other accounts.
+    func openAgentDraft(_ link: AgentDraftLink) {
+        guard connStatus == .connected, let active = AccountManager.shared.activeId else { return }
+        if let last = lastDraftLinkAt, Date().timeIntervalSince(last) < 5 { return }
+        lastDraftLinkAt = Date()
+        Task { await showAgentDraft(link.draftId, accountId: active, link: link) }
+    }
+
+    /// ⌘Enter was pressed on a composer whose keyboard send is locked.
+    func noteKeyboardSendLocked() {
+        pushToast("Your agent opened this draft. Read it, then click send.")
+    }
+
+    /// Bring one of an agent's drafts up in the composer, and Passband to the
+    /// front with it.
+    ///
+    /// THE REQUEST IS NOT TRUSTED TO NAME ANYTHING BUT AN ID. What opens is the
+    /// draft the daemon holds under that id, and only when the daemon marks it
+    /// `from_agent`: neither a signal nor a link can open (or probe for) a
+    /// draft the owner wrote. A link must also carry that draft's creation
+    /// second, so an old link cannot open whatever draft got the id next.
+    ///
+    /// IT NEVER TAKES A COMPOSER SOMEBODY IS WRITING IN, AND THEN IT DOES NOT
+    /// COME FORWARD EITHER. Activating Passband under somebody typing in
+    /// another app delivers their next keystrokes here: with their own
+    /// half-written mail in the composer, a typed-ahead ⌘Enter would send it.
+    /// So when anything of theirs is being written, nothing moves; a toast
+    /// waits for them. The one composer that does not count as theirs is an
+    /// agent's draft still exactly as the agent left it, which the next
+    /// request may replace.
+    ///
+    /// WHAT IT OPENS CANNOT BE SENT FROM THE KEYBOARD, for the same reason:
+    /// see `ComposeState.keyboardSendLocked`. And the keyboard is taken off
+    /// the composer after it opens, so text typed ahead lands nowhere rather
+    /// than in the draft's fields.
+    ///
+    /// `link` is set for a link, which somebody clicked and so deserves an
+    /// answer when it leads nowhere; a relayed signal that leads nowhere says
+    /// nothing.
+    private func showAgentDraft(_ draftId: Int, accountId: UUID, link: AgentDraftLink?) async {
+        #if os(macOS)
+            guard !RehearsalMode.isEnabled, !accountActionsBlocked else { return }
+            let asked = link != nil
+            guard AccountManager.shared.activeId == accountId else {
+                pushToast("Your agent left a draft in another account. Switch to it to open the draft.")
+                return
+            }
+            if let mailbox = link?.mailbox {
+                // Checked against an address this app actually KNOWS. Right
+                // after launch or a switch it may not have one yet, so it is
+                // asked for; a link whose mailbox cannot be confirmed opens
+                // nothing, since draft ids repeat across mailboxes.
+                var own = stats?.account_email
+                if own == nil { own = (try? await APIClient.shared.getStats())?.account_email }
+                let known = own?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+                guard AccountManager.shared.activeId == accountId else { return }
+                guard known == mailbox else {
+                    pushToast(
+                        known.isEmpty
+                            ? "Could not check which account that draft belongs to. Try the link again."
+                            : "That draft belongs to another account. Switch to it and open the link again.")
+                    return
+                }
+            }
+            let e = epoch
+            let rows = await fetchDrafts()
+            // The account on screen must still be the one this was for: the
+            // drafts just listed are whichever daemon the client is pointed
+            // at NOW.
+            guard e == epoch, AccountManager.shared.activeId == accountId else { return }
+            guard let rows else {
+                if asked { pushToast("Could not reach the server to open that draft.", .error) }
+                return
+            }
+            guard let draft = rows.first(where: { $0.id == draftId }), draft.from_agent == true,
+                link?.names(draftCreatedAt: draft.created_at) ?? true,
+                !isDeleting(draft.id)
+            else {
+                if asked { pushToast("That draft is not here any more.") }
+                return
+            }
+            // Already the one on screen, or already on its way out.
+            guard !isInert(draft), !isHeld(draft) else { return }
+            let writing = [compose, inlineReply].compactMap { $0 }.contains { open in
+                // An agent's draft nobody has touched is not somebody writing.
+                if open.fromAgent, let id = open.draftId, let row = rows.first(where: { $0.id == id }),
+                    row.body == open.body, open.attachments.isEmpty
+                {
+                    return false
+                }
+                return DraftSaver.hasContent(open) || !open.attachments.isEmpty
+            }
+            guard !writing else {
+                pushToast("Your agent left a draft. It is in your drafts when you are done here.")
+                return
+            }
+            openDraft(draft)
+            // Marked on whichever slot the draft landed in. A reply restores
+            // into the inline composer a moment later, so the mark is set
+            // again once that fetch has had time to fill it.
+            lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+            // The window may be closed (the app keeps running so the feed
+            // stays up); activation alone does not bring a closed one back.
+            MainWindow.show()
+            NSApp.activate(ignoringOtherApps: true)
+            try? await Task.sleep(for: .milliseconds(700))
+            guard e == epoch else { return }
+            lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+            MainWindow.find()?.makeFirstResponder(nil)
+        #endif
+    }
+
+    /// Set `keyboardSendLocked` on the composer holding this draft: the pane,
+    /// for new mail, or the inline reply to its parent.
+    private func lockKeyboardSend(draftId: Int, replyTo parent: Int?) {
+        if var pane = compose, pane.draftId == draftId, !pane.keyboardSendLocked {
+            pane.keyboardSendLocked = true
+            compose = pane
+        }
+        if let parent, var reply = inlineReply, reply.replyToMessageId == parent, !reply.keyboardSendLocked {
+            reply.keyboardSendLocked = true
+            inlineReply = reply
+        }
+    }
+
     func closeInlineReply() {
         DraftSaver.shared.flush(.inlineReply, inlineReply)
         inlineReply = nil

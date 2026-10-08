@@ -1,0 +1,5 @@
+# `cargo run` on macOS goes through scripts/sign-run.sh, which signs squelchd
+# with the Developer ID so the keychain stops asking for the login password
+# after every rebuild. See the script for why.
+[target.'cfg(target_os = "macos")']
+runner = "scripts/sign-run.sh"

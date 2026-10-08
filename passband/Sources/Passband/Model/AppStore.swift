@@ -35,10 +35,12 @@ enum OpenSource: String, Sendable {
     case sitrep, sitrepCard = "sitrep_card", reading, emails, search, browse
     case assistant, deeperSearch = "deeper_search", groups, notification
     case reply, reader, tour
+    /// A ghost's "mail behind it" on the calendar page.
+    case calendar
 }
 
 enum MainView: String, Sendable, Hashable, CaseIterable {
-    case sitrep, emails, auth, rules, groups, usage, settings, process
+    case sitrep, calendar, emails, auth, rules, groups, usage, settings, process, discovery
 
     /// The TOP rail group — also the 1..N number-key mapping, taken from
     /// POSITION in this array. Usage/Settings are excluded so that adding one
@@ -53,11 +55,40 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// back the window it was spending (see Views/AuditView.swift).
     static let mainViews: [MainView] = [.sitrep, .emails, .auth, .rules, .groups]
     /// The BOTTOM rail group, pinned below a divider.
+    ///
+    /// `discovery` is in neither group: its one door is the ring, alone above
+    /// the divider, and it takes no number key because nobody should need to
+    /// reach a field guide faster than by looking at it.
     static let bottomViews: [MainView] = [.usage, .settings]
+
+    /// THE NUMBER KEYS AS THEY ARE RIGHT NOW: `mainViews`, with Calendar
+    /// second while it is offered (Sitrep 1, Calendar 2, Emails 3 and every
+    /// later page one higher), and exactly `mainViews` while it is not, so
+    /// the gate being closed renumbers nobody. The rule is
+    /// `CalendarGate.numbered`. ⇧C opens the calendar as well, as it did
+    /// before it had a digit.
+    ///
+    /// `calendar` is `AppStore.calendarPageAvailable`, passed in so the rail,
+    /// the menu and the keys ask the gate the same way and move together.
+    static func numberedViews(calendar: Bool) -> [MainView] {
+        CalendarGate.numbered(mainViews, calendar: .calendar, offered: calendar)
+    }
+
+    /// The most digits the keys ever bind: one per numbered page with the
+    /// calendar offered. The last one declines while it is not.
+    static var numberKeyCount: Int { mainViews.count + 1 }
+
+    /// THE TOP RAIL AS DRAWN, each page with the digit that opens it: the
+    /// hint the rail's tooltip prints, in the same order the keys are bound
+    /// in (RootView.globalBindings).
+    static func railViews(calendar: Bool) -> [(view: MainView, key: String)] {
+        numberedViews(calendar: calendar).enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
+    }
 
     var label: String {
         switch self {
         case .sitrep: "Sitrep"
+        case .calendar: "Calendar"
         case .emails: "Emails"
         case .auth: "Auth"
         case .rules: "Rules"
@@ -65,12 +96,14 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .usage: "Usage"
         case .settings: "Settings"
         case .process: "Process"
+        case .discovery: "Ways through your mail"
         }
     }
 
     var symbol: String {
         switch self {
         case .sitrep: "gauge.with.dots.needle.33percent"
+        case .calendar: "calendar"
         case .emails: "envelope"
         case .auth: "key"
         case .rules: "slider.horizontal.3"
@@ -78,6 +111,8 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .usage: "waveform.path.ecg"
         case .settings: "gearshape"
         case .process: "checkmark.seal"
+        // Never drawn: the rail draws the discovery ring in its place.
+        case .discovery: "circle.dashed"
         }
     }
 }
@@ -305,7 +340,7 @@ struct RefreshError: Equatable, Sendable {
 /// `AppStore.cancelScheduledRow`).
 enum UndoKind: Sendable {
     case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete, schedule,
-        scheduledCancel, skip
+        scheduledCancel, ghostDismiss, skip
 
     /// Whether firing this undo changes anything the sitrep shows, and so
     /// whether `fireUndo` un-hides a resolved id and pulls the poller. The two
@@ -315,7 +350,7 @@ enum UndoKind: Sendable {
     var touchesSitrep: Bool {
         switch self {
         case .archive, .done, .label, .ruleDelete, .groupDelete, .remind: true
-        case .send, .draftDelete, .schedule, .scheduledCancel, .skip: false
+        case .send, .draftDelete, .schedule, .scheduledCancel, .ghostDismiss, .skip: false
         }
     }
 }
@@ -517,8 +552,22 @@ final class AppStore {
     var connStatus: ConnStatus = .loading {
         didSet {
             if connStatus == .connected { Notifier.shared.connectionBecameReady() }
+            if connStatus != .loading { restoringSavedConnection = false }
+            if connStatus == .loading || connStatus == .connected { leftSavedConnectionWait = false }
         }
     }
+    /// The loading gate is up because a saved account's daemon is being
+    /// waited on (`recoverSavedConnection`), not because of a keychain read or
+    /// a practice swap. That wait has no end of its own, so this is what lets
+    /// the gate and the Accounts menu offer a way out of it.
+    private(set) var restoringSavedConnection = false
+    /// The Connect gate is up because the person walked away from that wait
+    /// to connect something else. It opens on its choices then, not on a form
+    /// filled in with the one server known not to be answering.
+    private(set) var leftSavedConnectionWait = false
+    /// Switching is offered from a working mailbox, and from the wait for one
+    /// that is not answering. Not from the Connect gate (see PassbandCommands).
+    var canSwitchAccounts: Bool { connStatus == .connected || restoringSavedConnection }
     var settings: ConnectionSettings? {
         didSet {
             capabilityRecoveryTask?.cancel()
@@ -585,7 +634,32 @@ final class AppStore {
     /// The daemon's stats, apart from the bands (see SitrepData): the sync
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
-    var stats: StoreStats?
+    var stats: StoreStats? {
+        didSet {
+            // The calendar gate, out of every poll: written only when it
+            // flips, so its readers (the rail, the Go menu) are not readers
+            // of the stats.
+            let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
+            if open != calendarPageAvailable { calendarPageAvailable = open }
+        }
+    }
+    /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
+    /// number keys, the shortcuts sheet, the assistant's guide and the route
+    /// all read this one property; the rule itself, the daemon's timeline AND
+    /// the `calendar` hidden feature, is `CalendarGate.pageAvailable`.
+    ///
+    /// STORED, and written by `stats`' didSet only when it changes (the
+    /// `statsEpoch` pattern): computed off `stats` it made the rail and the
+    /// Go menu re-evaluate on every poll that changed any count. Off the raw
+    /// `stats`, not `calendarAccess`: it says only whether a page exists,
+    /// never whose calendar is in it.
+    private(set) var calendarPageAvailable = false
+    /// The epoch of the poll that wrote `stats`. `stats` is not wiped on an
+    /// account switch, so until the new mailbox's first poll lands it still
+    /// describes the one just left; anything that must not mix two accounts
+    /// (the calendar grant and its consent link, `calendarAccess`) reads
+    /// `stats` only while this is the live epoch.
+    var statsEpoch: Int?
     var lastRefresh: Date?
     var refreshError: RefreshError?
 
@@ -605,6 +679,70 @@ final class AppStore {
 
     // MARK: sitrep zones — see SitrepZoneCache
     var zones = SitrepZoneCache()
+
+    // MARK: calendar page, see Model/CalendarStore.swift
+    /// The last timeline that landed, held here for the reason the zones are:
+    /// the page is unmounted every time you leave it, and coming back should
+    /// paint the agenda it had rather than a loading line. Replaced only by a
+    /// newer answer; a failed reload keeps it.
+    var calendarFeed: TimelineFeed?
+    /// A load has finished at least once (success or failure) for this
+    /// account, so an empty feed can be told from one still on its way.
+    var calendarLoaded = false
+    /// Agenda or month, and where the month is. Kept here, not in the page,
+    /// for the session: the page is unmounted every time you leave it, and
+    /// coming back should land where you were. `calendarPlace` nil is today.
+    /// The month first (`CalendarViewMode.initial`).
+    var calendarMode: CalendarViewMode = .initial
+    var calendarPlace: MonthPlace?
+    /// The month's levels, deepest last: the selected day's column opened in
+    /// place of the grid (narrow windows only), and the item whose detail is
+    /// showing. Escape closes them in that order (`calendarMonthBack`).
+    var calendarDayOpen = false
+    var calendarMonthItem: String?
+    /// The connect card, while it is up. Its own property, apart from the
+    /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
+    var calendarConnectAsk: CalendarConnectAsk?
+    /// Since Connect was last pressed, and for which account: the page says
+    /// it is waiting for Google until the grant shows up on the stats poll or
+    /// the consent session has certainly died (`CalendarGate.connectWaitWindow`).
+    var calendarConnectWait: CalendarConnectWait?
+    /// A self-host daemon has been asked for a consent link and has not
+    /// answered yet: Connect does nothing meanwhile, so one press is one tab.
+    var calendarConnectStarting = false
+    /// The event pane, while it is open (`CalendarEditorRequest`): which
+    /// event, and what its fields opened with. A PANE beside the page, like
+    /// the composer (Views/CalendarEventPane.swift), so it is NOT in
+    /// `modalOverlayOpen`: nothing blurs and the month beside it stays live.
+    /// Written only on open and close, so the shell may read it
+    /// (`eventPaneOpen`).
+    var calendarEditor: CalendarEditorRequest?
+    /// The pane's fields as they stand, rewritten on every keystroke. Apart
+    /// from the request for the reason `compose` is apart from `composeOpen`:
+    /// the shell must not re-evaluate while somebody types a title. Read by
+    /// the pane, and by the calendar page for the draft's chip on the grid.
+    var calendarDraft: EventDraft?
+    /// A sweep is live on the day column (drag to create): Escape cancels it
+    /// through this before it does anything else. Bookkeeping, never drawn.
+    @ObservationIgnored var calendarSweepCancel: (() -> Void)?
+    /// The one-question card before an event is deleted from Google, raised
+    /// from the detail pane (the editor asks in its own footer instead).
+    var calendarDeleteAsk: CalendarDeleteAsk?
+    /// A write to Google is out: the card's buttons wait, so one Enter is
+    /// one event.
+    var calendarWriting = false
+    /// Bumped by every timeline request and every local write to the feed;
+    /// an answer is applied only if nothing newer has started since it was
+    /// asked for. Not observed: it is bookkeeping, never drawn.
+    @ObservationIgnored var calendarLoadGeneration = 0
+    /// Bumped by `dropCalendarState` (an account switch, the gate closing):
+    /// a write still out when it was bumped answers into nothing
+    /// (`CalendarWriteTicket`). Bookkeeping, never drawn.
+    @ObservationIgnored var calendarSession = 0
+    /// The event pane was left with something typed in it: the request and
+    /// the draft are kept, the pane is not drawn, and coming back to the
+    /// Calendar page brings it back as it was (`parkEventEditor`).
+    var calendarEditorParked = false
     /// When the last full zone refresh COMPLETED. nil = never loaded. OUT of
     /// the observed struct: it is a TTL stamp, and stamping it invalidated
     /// every zone view once per pass whether or not a row had changed.
@@ -635,7 +773,18 @@ final class AppStore {
         var done = 0
         var skipped = 0
     }
-    var walk: Walk?
+    var walk: Walk? {
+        didSet {
+            // THREE EMAILS IN IS A WALK, not a stray Space. Noted here, on
+            // the crossing, so the three places that step the tally (done,
+            // remind, skip) stay one line each and cannot disagree about it.
+            let before = (oldValue?.done ?? 0) + (oldValue?.skipped ?? 0)
+            let now = (walk?.done ?? 0) + (walk?.skipped ?? 0)
+            if before < Self.walkDeepAt, now >= Self.walkDeepAt { Discovery.note(.walkDeep) }
+        }
+    }
+    /// How far into a walk counts as having found flow mode.
+    static let walkDeepAt = 3
     /// What a FINISHED walk came to, for the sitrep's moment. Cleared by the
     /// moment itself once it has played.
     struct WalkSummary: Equatable {
@@ -706,6 +855,7 @@ final class AppStore {
         let finished = walk
         closeThread()
         guard let finished, finished.done + finished.skipped > 0 else { return }
+        Discovery.note(.walkFinished)
         walkFinished = WalkSummary(
             done: finished.done, skipped: finished.skipped,
             duration: Date().timeIntervalSince(finished.startedAt))
@@ -835,6 +985,10 @@ final class AppStore {
     /// so a thread switch under a live token is a viewer that simply never
     /// hears about the bump it no longer cares about.
     var openThreadRefreshToken = 0
+    /// Bumped by the menu's Find in Email (⌘F with a thread open). The viewer
+    /// watches it and opens its find bar: the session is the reader's own
+    /// state, so the store only has to say that it was asked for.
+    var findInEmailTick = 0
     /// WHAT THE HUMAN HAS ALREADY BEEN TOLD about the thread they are reading.
     /// Private because `noteThreadArrival` is the only door: the refetch and
     /// the announcement have different rules, and ThreadArrivals is where the
@@ -988,6 +1142,10 @@ final class AppStore {
         }
     }
     private(set) var practiceTransitioning = false
+    /// The account a switch is asking after, until it lands or is refused.
+    private(set) var switchingTo: UUID?
+    /// Counts switch requests, so the newest one is the only one that lands.
+    @ObservationIgnored private var switchIntent = 0
 
     /// Also enforced by account mutation entry points, not only menu items.
     var accountActionsBlocked: Bool {
@@ -1328,6 +1486,7 @@ final class AppStore {
         capabilityRecoveryTask?.cancel()
         let recoveryEpoch = epoch
         connStatus = .loading
+        restoringSavedConnection = true
         capabilityRecoveryTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -1363,6 +1522,30 @@ final class AppStore {
                 }
             }
         }
+    }
+
+    /// Ask the saved daemon again now instead of sitting out the loop's sleep:
+    /// the person has just started it and should not wait half a minute to be
+    /// believed.
+    func retrySavedConnectionNow() {
+        guard restoringSavedConnection, !accountActionsBlocked, !switching,
+            let settings, let id = AccountManager.shared.activeId
+        else { return }
+        connError = nil
+        recoverSavedConnection(settings, accountId: id)
+    }
+
+    /// Stop waiting on the saved daemon and hand the window to the Connect
+    /// gate. Nothing is forgotten: the account stays in the index with its
+    /// credentials, and the gate's "Try saved connection again" comes straight
+    /// back here.
+    func stopWaitingForSavedConnection() {
+        guard restoringSavedConnection, !accountActionsBlocked, !switching else { return }
+        capabilityRecoveryTask?.cancel()
+        capabilityRecoveryTask = nil
+        connError = nil
+        leftSavedConnectionWait = true
+        connStatus = .disconnected
     }
 
     /// Verify candidate credentials and triage capabilities, then persist and connect.
@@ -1670,13 +1853,66 @@ final class AppStore {
     /// generation INSIDE APIClient that every request checks and every caller
     /// passes — identified, not built, because it touches all 25 call sites.
     func switchAccount(to record: AccountRecord) async {
-        // (1) Never two at once — the two awaits below are both windows a
-        //     second switch could start in.
-        guard !accountActionsBlocked, !switching else { return }
+        guard !accountActionsBlocked else { return }
+        // THE CHECK COMES BEFORE THE GATE, and outside it. It reads a keychain
+        // slot and asks the target daemon one question; nothing of the live
+        // world is touched. Held inside the gate (the old shape) a target that
+        // was not answering locked every other switch out for the length of
+        // its retries, in silence: one press on a dead account and the app
+        // would not move to a healthy one. So the newest pick wins instead,
+        // and an older one that comes back late is dropped unreported.
+        switchIntent &+= 1
+        let intent = switchIntent
+        switchingTo = record.id
+        defer { if switchIntent == intent { switchingTo = nil } }
+        // One attempt, no retries: somebody is watching this one, and "that
+        // server is not answering" now beats the same sentence in 15 seconds.
+        let checked = await switchPreflight(record, retrying: false)
+        guard switchIntent == intent else { return }
+        guard case .ready(let next) = checked else {
+            if case .refused(let why) = checked { reportSwitchFailure(why, for: record) }
+            return
+        }
+        // (1) Never two at once — the awaits below are windows a second
+        //     switch could start in. The world may also have moved while the
+        //     target was being asked.
+        guard !accountActionsBlocked, !switching, record.id != AccountManager.shared.activeId
+        else { return }
         switching = true
         // (10) Whichever path we leave by.
         defer { switching = false }
-        await performSwitch(to: record)
+        await performSwitch(to: record, preflight: next)
+    }
+
+    private enum SwitchPreflight {
+        case ready(ConnectionSettings)
+        case refused(String)
+    }
+
+    /// Step (2): the target's credentials, and proof its daemon will take
+    /// them, BEFORE anything is torn down — the steps that can fail. Failing
+    /// here, with the old world untouched, keeps the human on a working
+    /// mailbox; checking after the wipe (the old shape) turned a single denied
+    /// access panel into a logout, and the gate it landed on then endangered
+    /// the surviving accounts' credentials. A keychain read can raise the
+    /// access panel, but nothing has been suspended or wiped yet, so blocking
+    /// here is safe. The probe is built from the candidate credentials, so the
+    /// live client is not touched either.
+    private func switchPreflight(_ record: AccountRecord, retrying: Bool) async -> SwitchPreflight {
+        let loaded = await AccountManager.shared.credentialLoad(for: record.id)
+        guard case .ok(let next) = loaded else {
+            if case .unreadable = loaded {
+                return .refused("the keychain refused to unlock \(record.displayName)")
+            }
+            return .refused("no credentials for \(record.displayName) in the keychain")
+        }
+        do {
+            try await APIClient.shared.probe(
+                baseURL: next.serverURL, token: next.apiToken, retrying: retrying)
+        } catch {
+            return .refused(Self.connectErrorText(error))
+        }
+        return .ready(next)
     }
 
     /// Steps (2)–(9), gate already held. Split out so `removeAccount` — which
@@ -1687,55 +1923,34 @@ final class AppStore {
     /// drafts would go to is the one being forgotten. The settle still runs —
     /// a debounced save already in flight must finish before the client is
     /// reconfigured, whoever it was addressed to.
+    ///
+    /// `preflight` is step (2) already done by the caller (`switchAccount`,
+    /// which does it outside the gate).
     @discardableResult
     private func performSwitch(
-        to record: AccountRecord, flushDrafts: Bool = true, currentWorldGone: Bool = false
+        to record: AccountRecord, flushDrafts: Bool = true, currentWorldGone: Bool = false,
+        preflight: ConnectionSettings? = nil
     ) async -> Bool {
-        // (2) The target's credentials, BEFORE anything is torn down — the one
-        //     step that can fail. Failing here, with the old world untouched,
-        //     keeps the human on a working mailbox; checking after the wipe
-        //     (the old shape) turned a single denied access panel into a
-        //     logout, and the gate it landed on then endangered the surviving
-        //     accounts' credentials. A keychain read can raise the access
-        //     panel, but nothing has been suspended or wiped yet, so blocking
-        //     here is safe.
-        let loaded = await AccountManager.shared.credentialLoad(for: record.id)
-        guard case .ok(let next) = loaded else {
-            let why: String
-            if case .unreadable = loaded {
-                why = "the keychain refused to unlock \(record.displayName)"
-            } else {
-                why = "no credentials for \(record.displayName) in the keychain"
-            }
-            guard currentWorldGone else {
-                // A plain switch: the world on screen is intact and the
-                // credentials backing it were never touched. Stay — and say
-                // so. A toast, not `connError`: that field renders only on
-                // ConnectView, so writing it here would show nothing now and
-                // then greet the next Add Account sheet with a stale failure.
-                pushToast(why, .error)
+        let next: ConnectionSettings
+        if let preflight {
+            next = preflight
+        } else {
+            switch await switchPreflight(record, retrying: true) {
+            case .ready(let checked):
+                next = checked
+            case .refused(let why):
+                if currentWorldGone {
+                    // The removal path: the account on screen is already gone
+                    // from the index, so there is no working world to stay in
+                    // — the Connect gate is the honest answer.
+                    await tearDownToGate(error: why)
+                } else {
+                    // The world on screen is intact and the credentials
+                    // backing it were never touched. Stay — and say so.
+                    reportSwitchFailure(why, for: record)
+                }
                 return false
             }
-            // The removal path: the account on screen is already gone from the
-            // index, so there is no working world to stay in — the Connect
-            // gate is the honest answer.
-            await tearDownToGate(error: why)
-            return false
-        }
-
-        // Probe with the candidate credentials before changing the live client
-        // or any account state. Transient failures retry automatically; a
-        // failed switch leaves the working account and its drafts untouched.
-        do {
-            try await APIClient.shared.probe(baseURL: next.serverURL, token: next.apiToken)
-        } catch {
-            let why = Self.connectErrorText(error)
-            if currentWorldGone {
-                await tearDownToGate(error: why)
-            } else {
-                pushToast(why, .error)
-            }
-            return false
         }
 
         // (3) From here, every answer still in flight belongs to the old
@@ -1796,7 +2011,25 @@ final class AppStore {
         Task { await refreshMail(.inbox) }
         Task { await refreshTrackingConfig() }
         Notifier.shared.connectionBecameReady()
+        // A switch made from the wait for a daemon that is not answering: the
+        // shell was never mounted, so this is also what mounts it. The starts
+        // above repeat on that transition, and all of them are idempotent.
+        if connStatus != .connected { connStatus = .connected }
         return true
+    }
+
+    /// A refused switch leaves the world it started from, and says why where
+    /// that world can show it. Toasts are the shell's; from the wait for a
+    /// saved daemon there is no shell, and the loading gate reads `connError`.
+    /// A toast, not `connError`, from the shell: that field renders only on
+    /// the gates, so writing it there would show nothing now and then greet
+    /// the next Add Account sheet with a stale failure.
+    private func reportSwitchFailure(_ why: String, for record: AccountRecord) {
+        if connStatus == .connected {
+            pushToast("can’t switch to \(record.displayName): \(why)", .error)
+        } else {
+            connError = "\(record.displayName): \(why)"
+        }
     }
 
     /// Tear the world down to the Connect gate: the shared tail of "the
@@ -1832,6 +2065,8 @@ final class AppStore {
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.
         UnsubscribeJobs.shared.reset()
+        // And the ignored-unsubscribe notice, for the same reason.
+        UnsubscribeViolations.shared.reset()
         sitrep = SitrepData()
         // Its own line since the stats left SitrepData. The old daemon's
         // stats over the new mailbox's empty bands read as "all clear": the
@@ -1848,6 +2083,12 @@ final class AppStore {
         // never mounted.
         zonesLoadedAt = nil
         zoneRetryOwed = false
+        // The calendar page's state is the account's: the feed, the item
+        // open in the month, the connect card, the editor and the delete
+        // question were about the last mailbox's calendars, and a write still
+        // out answers into nothing. The mode and the month are the user's,
+        // and stay.
+        dropCalendarState()
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
         // silence of — a pass that has already been disowned.
@@ -1896,6 +2137,7 @@ final class AppStore {
         triageFix = nil
         remindTarget = nil
         schedulePicker = nil
+        discardAsk = nil
         ruleEditor = nil
         // A draft's pattern names the old account's senders and rule ids.
         ruleDrafts = [:]
@@ -1994,15 +2236,26 @@ final class AppStore {
     /// the previous one — assigning `activeView` directly would inherit whatever
     /// the last click set and slide the rail for a keyboard route.
     private func route(to view: MainView, viaPointer: Bool = false) {
+        // A route to a calendar page that is not offered (the gate, a history
+        // entry from before it closed) lands on the sitrep instead.
+        let view = view == .calendar && !calendarPageAvailable ? .sitrep : view
         // On change only: the repeat-press no-op in setView re-routes to the
         // same view, and that is not a navigation worth an event.
         if view != activeView { Analytics.screen(view.rawValue) }
         routeWasPointer = viaPointer
         activeView = view
+        routeAsks &+= 1
     }
+
+    /// Bumped by every route. The phone's shell answers a route with a tab and
+    /// has to hear the call itself: it keeps `activeView` true only for the
+    /// tabs that have one, so a route to the view already named changes
+    /// nothing else (the same reason `searchAsks` exists).
+    private(set) var routeAsks = 0
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
         guard !RehearsalMode.isEnabled || view == .sitrep else { return }
+        guard view != .calendar || calendarPageAvailable else { return }
         // Navigating ANYWHERE dismisses an open thread viewer: the rail is visible
         // beside it, so a click there means "leave this email", not "change the
         // page underneath the overlay". Through closeThread() so the reader's
@@ -2322,8 +2575,8 @@ final class AppStore {
     /// True while a modal owns the screen; the surfaces under it blur so the modal
     /// reads as focus rather than as a new page. Toasts are deliberately absent (a
     /// toast must never defocus the app), as are the side panels, the thread
-    /// viewer, and the compose pane — those are surfaces you work beside, not
-    /// overlays on one. The reader's `inlineReply` is absent for the same reason:
+    /// viewer, the compose pane and the calendar's event pane: those are
+    /// surfaces you work beside, not overlays on one. The reader's `inlineReply` is absent for the same reason:
     /// it is part of the viewer, and blurring the email you are answering would
     /// be absurd.
     /// The tour joins on `wantsBlur` alone: its three talking steps are modals
@@ -2335,7 +2588,8 @@ final class AppStore {
             || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
-            || reconnectAsk != nil
+            || reconnectAsk != nil || discardAsk != nil || calendarCardUp
+            || calendarDeleteAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 
@@ -2483,6 +2737,7 @@ final class AppStore {
             // knows nothing about it and must not be refreshed on its behalf.
             guard e == epoch else { return }
             Analytics.capture("shipment_cleared")
+            Discovery.note(.shipmentCleared)
             pushToast("cleared \(Self.shipmentLabel(row)) · it returns if there's news", .info)
             await refreshZones(force: true)
         } catch {
@@ -3197,9 +3452,15 @@ final class AppStore {
         sideView = .none
     }
 
+    /// Bumped by every `openSearch`. The Mac answers that call with
+    /// `sideView`; the phone's shell answers it with a tab, and needs to hear
+    /// the call itself, since a repeat of the same seed changes nothing else.
+    private(set) var searchAsks = 0
+
     /// Open search. By default it RESUMES the last one; `seed` forces a fresh
     /// term (`f` on a row or in the reader, seeding `from:<address>`).
     func openSearch(seed: String? = nil) {
+        searchAsks &+= 1
         // Give wide search the window; closing the reader saves its draft.
         if threadId != nil { closeThread() }
         // A seed matching what is ALREADY fetched keeps the session: the hits
@@ -3450,6 +3711,9 @@ final class AppStore {
     }
 
     func openCompose(_ state: ComposeState) {
+        // ONE PANE AT A TIME: the composer and the calendar's event pane
+        // claim the same half of the window (`yieldEventPaneToCompose`).
+        guard yieldEventPaneToCompose() else { return }
         var next = state
         // Seeded HERE rather than by the caller, so every way into a composer
         // starts at the account's default and none can forget to.
@@ -3516,6 +3780,9 @@ final class AppStore {
             }
             return
         }
+        // Asked here as well as in `openCompose`: a composer the event pane
+        // refused must not go looking for a draft to restore into nothing.
+        guard yieldEventPaneToCompose() else { return }
         let state = ComposeState()
         openCompose(state)
         let opened = state.page
@@ -3760,6 +4027,7 @@ final class AppStore {
         // The files the draft claimed, already staged — no upload to wait on.
         next.attachments = (draft.attachments ?? []).map(ComposeAttachment.init)
         next.draftId = draft.id
+        next.fromAgent = draft.from_agent == true
     }
 
     // MARK: - drafts list
@@ -4143,6 +4411,93 @@ final class AppStore {
         }
     }
 
+    // MARK: - discarding a composer
+
+    /// The trash can's question, on screen: the identity of the composer it
+    /// was asked about. A field here that `ActionLayer` draws, like every
+    /// other modal, because the pane is half a window wide and a scrim
+    /// mounted inside it would dim only the pane.
+    var discardAsk: UUID?
+
+    /// The composer's trash can. Esc keeps the mail (`closeCompose`); this is
+    /// the other door, the one that does not, so it asks first: there is no
+    /// undo behind it. A composer holding nothing has nothing to lose and
+    /// nothing to ask about, and simply closes.
+    func askDiscardCompose() {
+        guard let open = compose, !open.sending else { return }
+        guard DraftSaver.hasContent(open) || !open.attachments.isEmpty else {
+            discardCompose()
+            return
+        }
+        // The card has no field of its own, so the caret would stay in the
+        // mail under the scrim and every key the card does not bind (letters,
+        // Backspace, ⌘V) would edit it blind. The pane puts it back if the
+        // answer is no. Whichever window holds a text responder, not only
+        // the key one: the trash can is clickable in a window that is not.
+        #if os(macOS)
+            for window in NSApp.windows where window.firstResponder is NSText {
+                window.makeFirstResponder(nil)
+            }
+        #endif
+        discardAsk = open.id
+    }
+
+    func cancelDiscardAsk() {
+        discardAsk = nil
+    }
+
+    /// Confirmed. Only for the composer the question was about: one that
+    /// was replaced while the card was up never agreed to anything.
+    func confirmDiscard() {
+        guard let asked = discardAsk else { return }
+        discardAsk = nil
+        guard compose?.id == asked else { return }
+        discardCompose()
+    }
+
+    /// Close the pane and keep NOTHING: no close flush, and the row an
+    /// earlier autosave made goes too (`DraftSaver.discard`, which waits out
+    /// a save still on the wire so the row it mints is deleted, not missed).
+    /// `closeCompose` minus the save, plus the delete.
+    private func discardCompose() {
+        guard let closing = compose else { return }
+        let hadContent = DraftSaver.hasContent(closing) || !closing.attachments.isEmpty
+        DraftSaver.shared.discard(.compose, closing)
+        compose = nil
+        if schedulePicker == .compose { schedulePicker = nil }
+        // The mirror of "kept in drafts": the two doors out must not read
+        // alike. Silent for a blank composer, which deleted nothing.
+        if hadContent { pushToast("message deleted") }
+        // Settles first, so it lists what is left once the delete landed.
+        Task { await refreshDrafts() }
+    }
+
+    /// Delete the row a discarded composer had been autosaving into. Called
+    /// by `DraftSaver.discard`, on the slot's own save chain. Immediate, with
+    /// no undo window: the confirm card was the second thought. True once the
+    /// row is gone (a 404 counts: gone is what was asked for).
+    func deleteDiscardedDraft(_ id: Int) async -> Bool {
+        let e = epoch
+        draftsRows.removeAll { $0.id == id }
+        // Hidden from every fetch while on the wire, until it lands.
+        draftTombstones.leaving(id)
+        do {
+            try await APIClient.shared.deleteDraft(id)
+            if e == epoch { noteDraftGone(id) }
+            return true
+        } catch let error as APIError where error.kind == .notFound {
+            if e == epoch { noteDraftGone(id) }
+            return true
+        } catch {
+            guard e == epoch else { return false }
+            // Still on the daemon, so the next list shows it again rather
+            // than the pane having promised a delete that did not happen.
+            draftTombstones.revive(id)
+            pushToast(errText(error, "could not delete that draft"), .error)
+            return false
+        }
+    }
+
     /// Open the reader's inline reply on a specific message. Never resets a
     /// composer that is already open — a draft is not something a repeated `r`
     /// gets to throw away.
@@ -4205,9 +4560,163 @@ final class AppStore {
             next.to = draft.to.isEmpty ? next.to : draft.to
             next.recipientsStated = true
         }
+        // AN AGENT'S DRAFT STATES ITS AUDIENCE, always. The agent chose who
+        // this goes to, so the fields are laid open with exactly what it
+        // chose rather than left showing the reply's derived recipient over
+        // a `to` the owner never saw.
+        if draft.from_agent == true {
+            next.to = draft.to.isEmpty ? next.to : draft.to
+            next.cc = draft.cc ?? next.cc
+            next.bcc = draft.bcc ?? next.bcc
+            next.recipientsStated = true
+            next.fromAgent = true
+        }
         next.attachments = (draft.attachments ?? []).map(ComposeAttachment.init)
         next.draftId = draft.id
         inlineReply = next
+    }
+
+    // MARK: - an agent asks for its draft on screen
+
+    /// The agent door's `open_draft`, relayed over `accountId`'s event stream.
+    func openAgentDraft(_ signal: AgentOpenSignal, accountId: UUID) {
+        // A request that sat in a sleeping Mac's connection is not a request
+        // any more.
+        guard signal.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
+        Task { await showAgentDraft(signal.open_draft, accountId: accountId, link: nil) }
+    }
+
+    /// When a `passband://draft` link was last acted on. Links come from
+    /// whatever opened the URL, and each one costs a fetch and may take the
+    /// screen: the daemon spaces an agent's requests five seconds apart, and
+    /// a link gets the same spacing here, where the daemon cannot see it.
+    private var lastDraftLinkAt: Date?
+
+    /// A `passband://draft` link somebody clicked. Always about the mailbox on
+    /// screen: the link's `mailbox` is checked against it rather than used to
+    /// go looking through other accounts.
+    func openAgentDraft(_ link: AgentDraftLink) {
+        guard connStatus == .connected, let active = AccountManager.shared.activeId else { return }
+        if let last = lastDraftLinkAt, Date().timeIntervalSince(last) < 5 { return }
+        lastDraftLinkAt = Date()
+        Task { await showAgentDraft(link.draftId, accountId: active, link: link) }
+    }
+
+    /// ⌘Enter was pressed on a composer whose keyboard send is locked.
+    func noteKeyboardSendLocked() {
+        pushToast("Your agent opened this draft. Read it, then click send.")
+    }
+
+    /// Bring one of an agent's drafts up in the composer, and Passband to the
+    /// front with it.
+    ///
+    /// THE REQUEST IS NOT TRUSTED TO NAME ANYTHING BUT AN ID. What opens is the
+    /// draft the daemon holds under that id, and only when the daemon marks it
+    /// `from_agent`: neither a signal nor a link can open (or probe for) a
+    /// draft the owner wrote. A link must also carry that draft's creation
+    /// second, so an old link cannot open whatever draft got the id next.
+    ///
+    /// IT NEVER TAKES A COMPOSER SOMEBODY IS WRITING IN, AND THEN IT DOES NOT
+    /// COME FORWARD EITHER. Activating Passband under somebody typing in
+    /// another app delivers their next keystrokes here: with their own
+    /// half-written mail in the composer, a typed-ahead ⌘Enter would send it.
+    /// So when anything of theirs is being written, nothing moves; a toast
+    /// waits for them. The one composer that does not count as theirs is an
+    /// agent's draft still exactly as the agent left it, which the next
+    /// request may replace.
+    ///
+    /// WHAT IT OPENS CANNOT BE SENT FROM THE KEYBOARD, for the same reason:
+    /// see `ComposeState.keyboardSendLocked`. And the keyboard is taken off
+    /// the composer after it opens, so text typed ahead lands nowhere rather
+    /// than in the draft's fields.
+    ///
+    /// `link` is set for a link, which somebody clicked and so deserves an
+    /// answer when it leads nowhere; a relayed signal that leads nowhere says
+    /// nothing.
+    private func showAgentDraft(_ draftId: Int, accountId: UUID, link: AgentDraftLink?) async {
+        #if os(macOS)
+            guard !RehearsalMode.isEnabled, !accountActionsBlocked else { return }
+            let asked = link != nil
+            guard AccountManager.shared.activeId == accountId else {
+                pushToast("Your agent left a draft in another account. Switch to it to open the draft.")
+                return
+            }
+            if let mailbox = link?.mailbox {
+                // Checked against an address this app actually KNOWS. Right
+                // after launch or a switch it may not have one yet, so it is
+                // asked for; a link whose mailbox cannot be confirmed opens
+                // nothing, since draft ids repeat across mailboxes.
+                var own = stats?.account_email
+                if own == nil { own = (try? await APIClient.shared.getStats())?.account_email }
+                let known = own?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+                guard AccountManager.shared.activeId == accountId else { return }
+                guard known == mailbox else {
+                    pushToast(
+                        known.isEmpty
+                            ? "Could not check which account that draft belongs to. Try the link again."
+                            : "That draft belongs to another account. Switch to it and open the link again.")
+                    return
+                }
+            }
+            let e = epoch
+            let rows = await fetchDrafts()
+            // The account on screen must still be the one this was for: the
+            // drafts just listed are whichever daemon the client is pointed
+            // at NOW.
+            guard e == epoch, AccountManager.shared.activeId == accountId else { return }
+            guard let rows else {
+                if asked { pushToast("Could not reach the server to open that draft.", .error) }
+                return
+            }
+            guard let draft = rows.first(where: { $0.id == draftId }), draft.from_agent == true,
+                link?.names(draftCreatedAt: draft.created_at) ?? true,
+                !isDeleting(draft.id)
+            else {
+                if asked { pushToast("That draft is not here any more.") }
+                return
+            }
+            // Already the one on screen, or already on its way out.
+            guard !isInert(draft), !isHeld(draft) else { return }
+            let writing = [compose, inlineReply].compactMap { $0 }.contains { open in
+                // An agent's draft nobody has touched is not somebody writing.
+                if open.fromAgent, let id = open.draftId, let row = rows.first(where: { $0.id == id }),
+                    row.body == open.body, open.attachments.isEmpty
+                {
+                    return false
+                }
+                return DraftSaver.hasContent(open) || !open.attachments.isEmpty
+            }
+            guard !writing else {
+                pushToast("Your agent left a draft. It is in your drafts when you are done here.")
+                return
+            }
+            openDraft(draft)
+            // Marked on whichever slot the draft landed in. A reply restores
+            // into the inline composer a moment later, so the mark is set
+            // again once that fetch has had time to fill it.
+            lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+            // The window may be closed (the app keeps running so the feed
+            // stays up); activation alone does not bring a closed one back.
+            MainWindow.show()
+            NSApp.activate(ignoringOtherApps: true)
+            try? await Task.sleep(for: .milliseconds(700))
+            guard e == epoch else { return }
+            lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+            MainWindow.find()?.makeFirstResponder(nil)
+        #endif
+    }
+
+    /// Set `keyboardSendLocked` on the composer holding this draft: the pane,
+    /// for new mail, or the inline reply to its parent.
+    private func lockKeyboardSend(draftId: Int, replyTo parent: Int?) {
+        if var pane = compose, pane.draftId == draftId, !pane.keyboardSendLocked {
+            pane.keyboardSendLocked = true
+            compose = pane
+        }
+        if let parent, var reply = inlineReply, reply.replyToMessageId == parent, !reply.keyboardSendLocked {
+            reply.keyboardSendLocked = true
+            inlineReply = reply
+        }
     }
 
     func closeInlineReply() {
@@ -5518,6 +6027,15 @@ final class AppStore {
     /// false means the button is never offered and the two-week nudge never
     /// fires.
     var shareAvailable: Bool { stats?.invite_sharing == true }
+
+    /// The hidden features that are on for this mailbox. Read off the same
+    /// stats as the capability flags above, and for a different reason than
+    /// they are: those say what the DAEMON can do, this says what an operator
+    /// has let this PERSON see. See `HiddenFeatures`.
+    var hiddenFeatures: HiddenFeatures { HiddenFeatures(daemon: stats?.features) }
+
+    /// Whether to show `feature` here. False until the daemon says otherwise.
+    func hasFeature(_ feature: HiddenFeature) -> Bool { hiddenFeatures.has(feature) }
 
     /// The daemon's answer to "has an iPhone app ever talked to this mailbox",
     /// or nil when it has not given one yet (or is too old to). Drives the

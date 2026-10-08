@@ -34,26 +34,46 @@ const GOOGLE_HOST: &str = "accounts.google.com";
 /// The only path.
 const GOOGLE_AUTH_PATH: &str = "/o/oauth2/v2/auth";
 
-/// The scopes `squelchd` requests: `squelchd auth` asks for the first,
-/// `squelchd auth --write` for the other two, and nothing asks for anything
-/// else.
+/// The scopes `squelchd` requests: `squelchd auth` asks for the first (and,
+/// alongside it, the optional [`GOOGLE_PROFILE_SCOPE`]), `squelchd auth
+/// --write` for the next two, `squelchd auth --calendar` for the two calendar
+/// scopes, and nothing asks for anything else.
 ///
-/// SOURCE OF TRUTH is squelch-core (`GMAIL_READONLY_SCOPE` and `WRITE_SCOPES`
-/// in `squelch-core/src/config.rs`); they are restated here rather than
-/// imported because the broker ships as its own image and must not pull the
-/// daemon's crate (rusqlite, keyring, fastembed, an embedding model) in to
-/// learn three strings. Self-hosters build their consent URL from those same
-/// constants, so an allowlist costs no legitimate client anything.
+/// SOURCE OF TRUTH is squelch-core (`GMAIL_READONLY_SCOPE`, `WRITE_SCOPES`,
+/// `CALENDAR_SCOPES` and `GOOGLE_PROFILE_SCOPE` in
+/// `squelch-core/src/config.rs`); they are restated here rather than imported
+/// because the broker ships as its own image and must not pull the daemon's
+/// crate (rusqlite, keyring, fastembed, an embedding model) in to learn six
+/// strings. Self-hosters build their consent URL from those same constants, so
+/// an allowlist costs no legitimate client anything.
 pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 pub const GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
+pub const CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
+pub const CALENDAR_LIST_SCOPE: &str =
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+/// The account's name and photo. Only this spelling: it is the one the daemon
+/// sends, and the short `profile` alias staying refused keeps the allowlist a
+/// list of exact strings rather than of meanings.
+pub const GOOGLE_PROFILE_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.profile";
 
 /// Every scope a registration may ask for. A consent URL requesting anything
 /// outside this set is refused: the broker renders the request as a link on its
 /// own domain, so without this a stranger can register
 /// `https://mail.google.com/` (full mailbox control, deletion included) and we
 /// will serve the page that asks a human to grant it.
-pub const ALLOWED_SCOPES: &[&str] = &[GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE, GMAIL_SEND_SCOPE];
+///
+/// The calendar pair is here because `squelchd auth --calendar` runs through
+/// the broker like every other consent. Nothing broader is: not `calendar`
+/// (every calendar, settings and sharing included), not `calendar.readonly`.
+pub const ALLOWED_SCOPES: &[&str] = &[
+    GMAIL_READONLY_SCOPE,
+    GMAIL_MODIFY_SCOPE,
+    GMAIL_SEND_SCOPE,
+    CALENDAR_EVENTS_SCOPE,
+    CALENDAR_LIST_SCOPE,
+    GOOGLE_PROFILE_SCOPE,
+];
 
 /// Why a consent URL was refused. Each message is safe to hand back to the
 /// caller: it names the constraint, never the value.
@@ -92,7 +112,7 @@ pub enum AuthUrlError {
     #[error("auth_url is missing a `scope`")]
     Scope,
     #[error(
-        "auth_url `scope` must be a subset of the scopes squelchd requests (gmail.readonly, gmail.modify, gmail.send)"
+        "auth_url `scope` must be a subset of the scopes squelchd requests (gmail.readonly, gmail.modify, gmail.send, calendar.events, calendar.calendarlist.readonly, userinfo.profile)"
     )]
     ScopeNotAllowed,
 }
@@ -521,11 +541,20 @@ mod tests {
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/cloud-platform",
             "https://www.googleapis.com/auth/gmail.settings.basic",
+            // Calendar scopes broader than the two squelchd asks for.
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events.owned",
+            "https://www.googleapis.com/auth/calendar.calendarlist",
+            "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar",
             // A prefix of an allowed scope is not an allowed scope.
             "https://www.googleapis.com/auth/gmail",
             "https://www.googleapis.com/auth/gmail.readonly.evil",
             // Nor is one that merely contains it.
             "openid",
+            // Identity beyond name and photo, and the alias of the one we allow.
+            "profile",
+            "https://www.googleapis.com/auth/userinfo.email",
             // One good scope does not carry a bad one in with it.
             "https://www.googleapis.com/auth/gmail.readonly https://mail.google.com/",
         ] {
@@ -549,9 +578,14 @@ mod tests {
             GMAIL_READONLY_SCOPE,
             GMAIL_MODIFY_SCOPE,
             GMAIL_SEND_SCOPE,
+            // `squelchd auth`: the mailbox, and the optional name and photo.
+            "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.profile",
             "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send",
             // A `+`-encoded separator decodes to the same set.
             "https://www.googleapis.com/auth/gmail.send  https://www.googleapis.com/auth/gmail.modify",
+            // `squelchd auth --calendar`.
+            CALENDAR_EVENTS_SCOPE,
+            "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly",
         ] {
             assert_eq!(check(&replacing("scope", good)), Ok(()), "{good:?}");
         }

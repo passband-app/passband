@@ -4,13 +4,13 @@
 //! will ever see, and one that guesses its base domain hands out tenant URLs
 //! that resolve to somebody else.
 //!
-//! SEVEN FIELDS HERE ARE SECRETS: the OAuth client secret, the cookie key, the
+//! EIGHT FIELDS HERE ARE SECRETS: the OAuth client secret, the cookie key, the
 //! warden bearer, the Bifrost admin token, the admin-page token, the Resend
-//! API key, and the database URL (which embeds the database password). So
-//! [`Config`] (and [`BifrostConfig`] and [`WaitlistConfig`] inside it) has a
-//! HAND-WRITTEN `Debug` that redacts them. A derived one would put all seven in
-//! any `tracing::debug!` that ever formats the config, and that is exactly the
-//! line nobody notices adding.
+//! API key, the WorkOS API key, and the database URL (which embeds the database
+//! password). So [`Config`] (and [`BifrostConfig`], [`WaitlistConfig`] and
+//! [`WorkosConfig`] inside it) has a HAND-WRITTEN `Debug` that redacts them. A
+//! derived one would put all eight in any `tracing::debug!` that ever formats
+//! the config, and that is exactly the line nobody notices adding.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -183,6 +183,21 @@ pub const DEFAULT_WAITLIST_ORIGIN: &str = "https://passband.app";
 /// Ceiling on the Resend API key. Real ones are ~35 characters.
 const MAX_RESEND_API_KEY_LEN: usize = 256;
 
+/// WorkOS's API origin. Pinned as a constant and deliberately NOT readable from
+/// the environment, for the reason Google's token endpoint and Resend's origin
+/// are: the completion call carries the WorkOS API key, which can act on the
+/// whole WorkOS environment, so "which host do we send the key to" must not be
+/// a deploy-time typo or an injected variable. WorkOS serves every environment
+/// (staging and production alike) from this one host and tells them apart by
+/// the key, so there is no deployment that needs a different value. Tests point
+/// [`WorkosConfig::api_url`] at a stub by constructing the struct directly.
+pub const WORKOS_API_URL: &str = "https://api.workos.com";
+
+/// Ceiling on the WorkOS API key. Real ones (`sk_live_...`, `sk_test_...`) are
+/// well under 100 characters; this is slack, and a bound on what a paste
+/// accident can put into an Authorization header.
+const MAX_WORKOS_API_KEY_LEN: usize = 256;
+
 /// Ceiling on the `From:` the invite is sent as. RFC 5321's address limit, with
 /// the display name riding in front of it.
 const MAX_INVITE_FROM_LEN: usize = 320;
@@ -254,6 +269,34 @@ pub struct Config {
     /// how 2026-09-28 went unnoticed until the person signing up said so. A
     /// SECRET: the URL is the whole credential, so `Debug` redacts it.
     pub alert_webhook_url: Option<String>,
+    /// WorkOS AuthKit, when this deployment lets agents connect to a tenant's
+    /// `/mcp` through it. `None` means the feature is OFF and `GET /agent/auth`
+    /// is NOT MOUNTED (a 404): a deployment that cannot complete an AuthKit
+    /// login must not open Google consents on AuthKit's behalf.
+    pub workos: Option<WorkosConfig>,
+}
+
+/// The WorkOS AuthKit "Standalone Connect" settings: the key the completion
+/// call is made with, and the origin it is made to. `api_key` is a secret; the
+/// hand-written `Debug` redacts it.
+#[derive(Clone)]
+pub struct WorkosConfig {
+    /// The WorkOS API key, presented as `Authorization: Bearer` on the one call
+    /// this feature makes. Redacted from `Debug`.
+    pub api_key: String,
+    /// WorkOS's API origin. A field rather than a constant use-site so the
+    /// completion can be tested against a stub; `from_env` always pins
+    /// [`WORKOS_API_URL`].
+    pub api_url: String,
+}
+
+impl std::fmt::Debug for WorkosConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkosConfig")
+            .field("api_key", &"<redacted>")
+            .field("api_url", &self.api_url)
+            .finish()
+    }
 }
 
 /// The Bifrost governance settings: where the gateway is, the admin
@@ -378,6 +421,8 @@ impl std::fmt::Debug for Config {
                 "alert_webhook_url",
                 &self.alert_webhook_url.as_ref().map(|_| "<redacted>"),
             )
+            // WorkosConfig's own Debug redacts the API key.
+            .field("workos", &self.workos)
             .finish()
     }
 }
@@ -517,6 +562,7 @@ impl Config {
             bifrost,
             waitlist,
             alert_webhook_url: alert_webhook_from(var("SQUELCH_CONTROL_ALERT_WEBHOOK_URL"))?,
+            workos: workos_from(var("SQUELCH_CONTROL_WORKOS_API_KEY"))?,
         })
     }
 
@@ -733,6 +779,32 @@ fn waitlist_from(
         invite_from,
         allowed_origin,
         resend_url: RESEND_URL.to_string(),
+    }))
+}
+
+/// Validate the WorkOS settings: unset is off, and a set key must be one.
+///
+/// ONE VARIABLE, so there is no half-configured state to refuse: the origin is
+/// pinned (see [`WORKOS_API_URL`]) and the key is the whole switch. What IS
+/// refused is a key that could not be an Authorization header, so a paste with
+/// a stray newline or a space in it fails at boot rather than as an unsendable
+/// request on the first agent that tries to connect. The error never echoes the
+/// value.
+fn workos_from(api_key: Option<String>) -> Result<Option<WorkosConfig>, ConfigError> {
+    let Some(api_key) = api_key else {
+        return Ok(None);
+    };
+    if !(1..=MAX_WORKOS_API_KEY_LEN).contains(&api_key.len())
+        || !api_key.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(ConfigError::invalid(
+            "invalid SQUELCH_CONTROL_WORKOS_API_KEY: expected a WorkOS API key (printable ASCII, \
+             no spaces), e.g. sk_live_...",
+        ));
+    }
+    Ok(Some(WorkosConfig {
+        api_key,
+        api_url: WORKOS_API_URL.to_string(),
     }))
 }
 
@@ -978,6 +1050,35 @@ mod tests {
                 resend_url: RESEND_URL.into(),
             }),
             alert_webhook_url: Some("https://hooks.slack.com/services/T0/B0/WEBHOOK-SECRET".into()),
+            workos: Some(WorkosConfig {
+                api_key: "WORKOS-API-KEY-VALUE".into(),
+                api_url: WORKOS_API_URL.into(),
+            }),
+        }
+    }
+
+    /// One variable is the whole switch: unset is off, a key is on with the
+    /// origin PINNED, and a key that could not be a header refuses to boot
+    /// without repeating itself in the error.
+    #[test]
+    fn the_workos_key_is_the_whole_switch() {
+        assert!(workos_from(None).unwrap().is_none(), "off");
+
+        let on = workos_from(Some("sk_test_abc123".into()))
+            .unwrap()
+            .expect("a key switches the feature on");
+        assert_eq!(on.api_key, "sk_test_abc123");
+        // Pinned, never read from the environment.
+        assert_eq!(on.api_url, WORKOS_API_URL);
+        assert_eq!(WORKOS_API_URL, "https://api.workos.com");
+
+        for bad in [
+            "sk_test_SECRET with space".to_string(),
+            "sk_test_SECRET\nX-Evil: 1".to_string(),
+            format!("sk_test_SECRET{}", "k".repeat(MAX_WORKOS_API_KEY_LEN)),
+        ] {
+            let e = workos_from(Some(bad.clone())).unwrap_err().to_string();
+            assert!(!e.contains("SECRET"), "{bad:?}: {e}");
         }
     }
 
@@ -1101,6 +1202,7 @@ mod tests {
         assert!(!rendered.contains("ADMIN-PAGE-TOKEN-VALUE"), "{rendered}");
         assert!(!rendered.contains("RESEND-API-KEY-VALUE"), "{rendered}");
         assert!(!rendered.contains("WEBHOOK-SECRET"), "{rendered}");
+        assert!(!rendered.contains("WORKOS-API-KEY-VALUE"), "{rendered}");
         // The database URL is redacted WHOLE, not partly: it carries the
         // password, and there is no half of a connection string worth printing
         // badly enough to risk spelling the other half.

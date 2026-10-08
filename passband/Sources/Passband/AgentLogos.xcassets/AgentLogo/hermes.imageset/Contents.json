@@ -1,0 +1,25 @@
+{
+  "images": [
+    {
+      "filename": "hermes-icon-master.svg",
+      "idiom": "universal"
+    },
+    {
+      "filename": "hermes-icon-master-dark.svg",
+      "idiom": "universal",
+      "appearances": [
+        {
+          "appearance": "luminosity",
+          "value": "dark"
+        }
+      ]
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  },
+  "properties": {
+    "preserves-vector-representation": true
+  }
+}

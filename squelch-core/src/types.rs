@@ -624,6 +624,160 @@ pub struct ShipmentLeg {
     pub delivered_at: Option<DateTime<Utc>>,
 }
 
+/// What the user said about a ghost. User-owned: the projection never writes
+/// it. Stored as its snake_case name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhostUserState {
+    Dismissed,
+    Going,
+}
+impl GhostUserState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dismissed => "dismissed",
+            Self::Going => "going",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "dismissed" => Some(Self::Dismissed),
+            "going" => Some(Self::Going),
+            _ => None,
+        }
+    }
+}
+
+/// What the mail says about a ghost: `cancelled` iff its newest proposal was a
+/// cancellation. Projection-owned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhostMailState {
+    Live,
+    Cancelled,
+}
+
+/// The one state a ghost is served in, strongest first: the user's word, then
+/// the mail's, then the clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhostState {
+    Dismissed,
+    Going,
+    Cancelled,
+    Expired,
+    Ghost,
+}
+
+/// One message that fed a ghost, and what it did to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhostSource {
+    pub message_id: i64,
+    pub thread_id: String,
+    pub role: crate::triage::decision::EventChange,
+}
+
+/// A listed ghost: the stored columns, parsed, plus the duration prior for its
+/// venue and kind. HUMAN-DOOR ONLY. Listed ghosts always have a start (a ghost
+/// without one is never listed).
+///
+/// AN ESTIMATE IS NEVER A FACT: `stated_end` is the end the mail stated,
+/// `estimate` the model's guess and `history_minutes` the user's past
+/// correction, each in its own field. [`GhostEvent::effective_end`] resolves
+/// them and says which tier it used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GhostEvent {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub kind: crate::triage::decision::EventRecordKind,
+    pub title: String,
+    pub start: crate::triage::ghost::EventTime,
+    pub start_timezone: Option<String>,
+    /// STATED end only.
+    pub stated_end: Option<crate::triage::ghost::EventTime>,
+    /// The MODEL's estimate only.
+    pub estimate: Option<crate::triage::ghost::GhostEstimate>,
+    pub location: Option<String>,
+    pub commitment: crate::triage::decision::EventCommitment,
+    pub mail_state: GhostMailState,
+    pub likelihood: Option<crate::triage::decision::EventLikelihood>,
+    pub user_state: Option<GhostUserState>,
+    pub user_state_at: Option<DateTime<Utc>>,
+    /// The user's correction of the end: a fact. Stored as a span from the
+    /// start and resolved against the CURRENT start when listed, so mail that
+    /// moves the start moves this end with it; None when the span was stored
+    /// at the other precision (timed versus all-day).
+    pub user_end: Option<crate::triage::ghost::EventTime>,
+    /// Minutes from `event_duration_priors` for this ghost's venue and kind.
+    pub history_minutes: Option<u32>,
+    /// The message whose record supplied the served facts. A listed ghost
+    /// always has one, and it is eligible (not sent, spam or restricted).
+    pub supplier_message_id: Option<i64>,
+    /// The message of the newest eligible assigned record.
+    pub last_message_id: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// The sender scope the ghost belongs to (`triage::ghost::sender_scope`),
+    /// set when it was created; it changes only when the one message that
+    /// alone feeds the ghost is re-decided under another scope. None for a
+    /// ghost made from mail that did not pass authentication.
+    pub owner_scope: Option<String>,
+    /// Oldest first.
+    pub sources: Vec<GhostSource>,
+}
+impl GhostEvent {
+    pub fn all_day(&self) -> bool {
+        !self.start.has_clock()
+    }
+    /// Whether the mail behind this ghost passed authentication for its
+    /// sender, so a client can mark one that did not.
+    pub fn verified(&self) -> bool {
+        self.owner_scope.is_some()
+    }
+    pub fn effective_end(&self) -> Option<crate::triage::ghost::EffectiveEnd> {
+        crate::triage::ghost::effective_end(
+            &self.start,
+            self.kind,
+            self.stated_end.as_ref(),
+            self.user_end.as_ref(),
+            self.history_minutes,
+            self.estimate.as_ref(),
+        )
+    }
+    /// The served state at `now`. Expired when the effective end (or, with
+    /// none, the start) has passed. A date-only time passes at the end of that
+    /// day in `now`'s zone, the only zone there is to judge it in.
+    pub fn state(&self, now: DateTime<chrono::FixedOffset>) -> GhostState {
+        use crate::triage::ghost::EventTime;
+        match self.user_state {
+            Some(GhostUserState::Dismissed) => return GhostState::Dismissed,
+            Some(GhostUserState::Going) => return GhostState::Going,
+            None => {}
+        }
+        if self.mail_state == GhostMailState::Cancelled {
+            return GhostState::Cancelled;
+        }
+        let over = self.effective_end().map(|e| e.end).unwrap_or(self.start);
+        let passed = match over {
+            EventTime::At(at) => at <= now,
+            // A date-only END is inclusive ("Oct 3 to Oct 5" runs through the
+            // 5th), and so is a date-only start with no end.
+            EventTime::Date(day) => day < now.date_naive(),
+        };
+        if passed {
+            GhostState::Expired
+        } else {
+            GhostState::Ghost
+        }
+    }
+    /// The likelihood to serve: none for a committed ghost, which is certain.
+    pub fn served_likelihood(&self) -> Option<&crate::triage::decision::EventLikelihood> {
+        (self.commitment != crate::triage::decision::EventCommitment::Committed)
+            .then_some(self.likelihood.as_ref())
+            .flatten()
+    }
+}
+
 /// A record of money ALREADY PAID, extracted from NON-SEALED past-transaction
 /// mail into the `receipts` table (keyed by message). HUMAN-DOOR ONLY
 /// (`GET /client/receipts`). `amount`/`currency` are best-effort — a receipt
@@ -929,8 +1083,8 @@ pub struct AttachmentInfo {
 ///
 /// WIRE CONTRACT: `{ sender, requested_at, method, violation_count,
 /// last_violation_at, resolution }`, newest `requested_at` first. `method` is
-/// "one_click" | "mailto" | "browser"; `resolution` is "blocked" | "dismissed"
-/// | null.
+/// "one_click" | "mailto" | "browser"; `resolution` is "blocked" | "filtered" |
+/// "dismissed" | null.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnsubscribeRecord {
     /// Lowercased sender address the unsubscribe was requested against.
@@ -942,7 +1096,8 @@ pub struct UnsubscribeRecord {
     pub violation_count: i64,
     /// Timestamp of the most recent counted violation, or `None`.
     pub last_violation_at: Option<DateTime<Utc>>,
-    /// User's resolution of a repeat offender: "blocked" | "dismissed", or
+    /// User's resolution of a repeat offender: "blocked" | "filtered" (a smart
+    /// block: a filtered rule in place of a mute) | "dismissed", or
     /// `None` while the request is still outstanding.
     pub resolution: Option<String>,
     /// Where an AUTOMATIC unsubscribe stands: running | done | needs_you |
@@ -957,6 +1112,15 @@ pub struct UnsubscribeRecord {
     pub status_reason: Option<String>,
     /// When `status` last changed.
     pub status_at: Option<DateTime<Utc>>,
+    /// The smart block proposed for this sender: a filtered rule that keeps
+    /// their consequential mail and drops the promotion. `None` when nothing
+    /// was proposed, which `smart_block_asked` tells apart from never asked.
+    #[serde(default)]
+    pub smart_block: Option<crate::triage::rule_suggest::SmartBlock>,
+    /// The question has been answered for this sender, whichever way, so a
+    /// client has no reason to ask `GET /client/unsubscribes/smart_block`.
+    #[serde(default)]
+    pub smart_block_asked: bool,
 }
 
 str_enum! {

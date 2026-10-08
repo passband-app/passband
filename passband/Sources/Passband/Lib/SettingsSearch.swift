@@ -176,6 +176,24 @@ enum SettingsSearch {
             ]),
         SettingsEntry(
             card: .notifications,
+            title: "Float login codes",
+            blurb: "Shows an arriving login code over whatever app you are in, with a Copy button.",
+            keywords: [
+                "login code", "login codes", "code", "otp", "2fa", "two factor", "verification",
+                "verification code", "pin", "passcode", "float", "floating", "popup", "pop up",
+                "panel", "copy code", "on top", "front",
+            ]),
+        SettingsEntry(
+            card: .notifications,
+            title: "Respect Do Not Disturb",
+            blurb: "Keeps login codes from floating over your screen while a Focus is on.",
+            keywords: [
+                "do not disturb", "dnd", "focus", "focus mode", "quiet", "screen share",
+                "screen sharing", "presenting", "login code", "login codes", "code", "otp",
+                "float", "panel", "popup",
+            ]),
+        SettingsEntry(
+            card: .notifications,
             title: "Test banner",
             blurb: "Posts a notification right now to prove banners reach you.",
             keywords: [
@@ -305,8 +323,9 @@ enum SettingsSearch {
             blurb: "Lets an AI agent you already run read your triaged inbox over MCP.",
             keywords: [
                 "agent", "agents", "mcp", "model context protocol", "openclaw", "claude code",
-                "codex", "cursor", "claude desktop", "connect an agent", "integration",
-                "integrations", "ai agent", "tools", "mcp server", "agent door",
+                "codex", "cursor", "claude desktop", "claude", "chatgpt", "hermes", "hermes agent", "muse",
+                "vs code", "vscode", "connect an agent", "integration",
+                "integrations", "ai agent", "tools", "mcp server", "agent mcp",
             ]),
         SettingsEntry(
             card: .agents,
@@ -315,6 +334,15 @@ enum SettingsSearch {
             keywords: [
                 "mcp url", "agent url", "streamable http", "allowed hosts",
                 "squelch_mcp_allowed_hosts", "403", "tailscale", "tailnet", "remote agent",
+            ]),
+        SettingsEntry(
+            card: .agents,
+            title: "What your agent may write",
+            blurb: "Read only, drafts only, or sending with your approval.",
+            keywords: [
+                "agent send", "agent drafts", "send email", "let agent send", "agent write",
+                "read only", "drafts only", "approval", "agent permissions", "write access",
+                "can my agent send", "agent reply",
             ]),
     ]
 

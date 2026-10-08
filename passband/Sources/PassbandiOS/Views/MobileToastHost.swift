@@ -29,12 +29,38 @@ struct MobileToastHost: View {
             stack.fixedSize()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .allowsHitTesting(!store.toasts.isEmpty || !store.undos.isEmpty)
+        .allowsHitTesting(
+            !store.toasts.isEmpty || !store.undos.isEmpty || violation != nil || showsTray)
+        // The ledger scan behind the ignored-unsubscribe notice, once a minute.
+        .background { ViolationScanKeeper() }
+    }
+
+    /// A sender who kept writing after being asked to stop.
+    private var violation: UnsubscribeRecord? { UnsubscribeViolations.shared.prompt }
+
+    /// Automatic unsubscribes in flight. Not over the reader or the composer:
+    /// unsubscribing leaves the reader on purpose, and whatever list the thumb
+    /// lands back on is where the job reports.
+    private var showsTray: Bool {
+        store.threadId == nil && store.compose == nil && !UnsubscribeJobs.shared.items.isEmpty
     }
 
     private var stack: some View {
         GlassEffectContainer(spacing: 10) {
             VStack(spacing: 8) {
+                // THE TWO CARDS ARE GIVEN THE SCREEN'S WIDTH OUTRIGHT. The stack
+                // is `fixedSize`, which measures a sentence as one line however
+                // long it is, and a card that wide runs off both edges.
+                if showsTray {
+                    UnsubscribeTray()
+                        .containerRelativeFrame(.horizontal) { width, _ in width - 32 }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                if let violation {
+                    UnsubscribeViolationNotice(record: violation)
+                        .containerRelativeFrame(.horizontal) { width, _ in width - 32 }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 // Sender strings reach these labels from mail headers: rendered
                 // as Text only, never as markup.
                 ForEach(store.toasts) { toast in
@@ -60,6 +86,8 @@ struct MobileToastHost: View {
         }
         .animation(Motion.toast, value: store.toasts.count)
         .animation(Motion.toast, value: store.undos.count)
+        .animation(Motion.toast, value: violation)
+        .animation(Motion.toast, value: showsTray)
     }
 
     /// The undo chip. Two targets in one pill: the label states what happened,

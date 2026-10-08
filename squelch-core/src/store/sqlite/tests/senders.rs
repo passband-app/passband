@@ -231,3 +231,102 @@ fn the_limit_is_honoured() {
     assert_eq!(store.search_senders(acct, "sender", 5).unwrap().len(), 5);
     assert_eq!(store.search_senders(acct, "sender", 50).unwrap().len(), 12);
 }
+
+#[test]
+fn domains_roll_the_directory_up_by_host() {
+    let (store, acct) = store();
+    for (gmail, from, day) in [
+        ("g1", "receipts@stripe.com", 1),
+        ("g2", "receipts@stripe.com", 2),
+        ("g3", "support@stripe.com", 7),
+        ("g4", "news@e.stripe.com", 3),
+        ("g5", "team@mainstripe.org", 4),
+        ("g6", "dan@example.com", 5),
+    ] {
+        triaged(acct, gmail, gmail)
+            .from(from)
+            .received_at(at(day))
+            .upsert(&store);
+    }
+    // stripe.com starts with the fragment; the other two only contain it, and
+    // tie on volume, so the later one leads. A subdomain is its own host: the
+    // rule that covers it is a different rule.
+    let hits = store.search_sender_domains(acct, "stripe", 8).unwrap();
+    assert_eq!(
+        hits.iter().map(|h| h.domain.as_str()).collect::<Vec<_>>(),
+        vec!["stripe.com", "mainstripe.org", "e.stripe.com"]
+    );
+    assert_eq!(hits[0].sender_count, 2);
+    assert_eq!(hits[0].msg_count, 3);
+    assert_eq!(hits[0].last_received_at, at(7));
+
+    // No fragment lists the busiest hosts; the limit is honoured.
+    let hits = store.search_sender_domains(acct, "  ", 2).unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].domain, "stripe.com");
+
+    // The fragment is a piece of a HOST: a mailbox name is not one.
+    assert!(
+        store
+            .search_sender_domains(acct, "receipts", 8)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .search_sender_domains(acct, "%", 8)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .search_sender_domains(acct, "str_pe", 8)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_domain_with_only_sealed_mail_is_not_offered() {
+    let (store, acct) = store();
+    triaged(acct, "g-otp", "t1")
+        .from("no-reply@accounts.example")
+        .subject("Your code")
+        .body("123456")
+        .sealed(SealedKind::Otp)
+        .seed(&store);
+    assert!(
+        store
+            .search_sender_domains(acct, "accounts", 8)
+            .unwrap()
+            .is_empty()
+    );
+    // One ordinary message from ANYONE at the host unlocks it.
+    triaged(acct, "g-plain", "t2")
+        .from("billing@accounts.example")
+        .subject("Your monthly summary")
+        .seed(&store);
+    let hits = store.search_sender_domains(acct, "accounts", 8).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].domain, "accounts.example");
+    assert_eq!(hits[0].sender_count, 2);
+}
+
+#[test]
+fn domains_are_scoped_to_the_account_and_exclude_spam_and_sent() {
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    triaged(other, "g1", "t")
+        .from("dan@theirs.example")
+        .upsert(&store);
+    triaged(acct, "g2", "t")
+        .from("winner@lottery.example")
+        .is_spam(true)
+        .upsert(&store);
+    triaged(acct, "g3", "t")
+        .from("me@mine.example")
+        .is_sent(true)
+        .upsert(&store);
+    assert!(store.search_sender_domains(acct, "", 8).unwrap().is_empty());
+    assert_eq!(store.search_sender_domains(other, "", 8).unwrap().len(), 1);
+}

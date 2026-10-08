@@ -26,6 +26,9 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
     let bubble: Bool
     /// Message id, or nil for a body that must never be pooled.
     let poolKey: String?
+    /// The reader's find term for this body, or nil when there is none.
+    let find: FindRequest?
+    let onFind: (FindRequest, FindResult) -> Void
     let onHeight: (FrameMeasurement) -> Void
     let onLoaded: () -> Void
     let onQuotedFound: (Bool) -> Void
@@ -105,12 +108,14 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
         context.coordinator.onLoaded = onLoaded
         context.coordinator.onQuotedFound = onQuotedFound
         context.coordinator.onLink = onLink
+        context.coordinator.onFind = onFind
         // A content/policy change is a genuine reload; a quote toggle is not
         // (reloading for it would flash an empty frame).
         context.coordinator.load(
             webView, html: html, source: source, allowRemote: allowRemote, bubble: bubble,
             poolKey: poolKey)
         context.coordinator.setQuotesCollapsed(webView, collapsed: collapseQuotes)
+        context.coordinator.setFind(webView, find)
     }
 
     /// Return the frame to the pool rather than dropping it — that is what makes

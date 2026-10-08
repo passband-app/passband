@@ -67,6 +67,9 @@ enum ShortcutCatalog {
                 // changes hands. The reader has no search-this-sender key of
                 // its own: `/` then `from:` is the spelled-out way.
                 Item(["f"], "forward this message"),
+                // ⌘F is search everywhere else (the menu); with an email
+                // open it finds inside it, the way it does on a web page.
+                Item(["⌘F"], "find in this email"),
                 Item(["Esc"], "back"),
             ]),
         Group(
@@ -92,4 +95,49 @@ enum ShortcutCatalog {
                 Item(["Esc"], "close panel / overlay"),
             ]),
     ]
+
+    // MARK: - the calendar, while it is offered
+
+    /// The Calendar page's own keys. Listed only while the page is offered
+    /// (`AppStore.calendarPageAvailable`), so nothing is advertised where it
+    /// does nothing.
+    static let calendarGroup = Group(
+        title: "Calendar",
+        items: [
+            Item(["m", "a"], "month / agenda"),
+            Item(["j", "k"], "move selection"),
+            Item(["Enter"], "open the mail behind it"),
+            Item(["y"], "going (again: not going)"),
+            Item(["x"], "dismiss"),
+            Item(["n"], "new event"),
+            Item(["e"], "edit event"),
+            Item(["⌘↵"], "save the event"),
+            Item(["⌫"], "delete event"),
+            Item(["←", "→", "↑", "↓"], "month: move the day"),
+            Item(["[", "]"], "month: previous / next"),
+            Item(["t"], "month: today"),
+            Item(["Enter"], "month: open the day"),
+        ])
+
+    /// The Navigate digits while the calendar is offered: Calendar is 2 and
+    /// every later page one higher (`CalendarGate.numbered`).
+    static let calendarDigits = Item(
+        ["1", "2", "3", "4", "5", "6"], "sitrep · calendar · emails · auth · rules · groups")
+
+    /// The table as the `?` overlay draws it for one account: exactly
+    /// `groups` while the calendar is not offered, and with the calendar in
+    /// the digits (and ⇧C) under Navigate plus the page's own group while it
+    /// is.
+    static func groups(calendar: Bool) -> [Group] {
+        guard calendar else { return groups }
+        var out = groups.map { group in
+            guard group.title == "Navigate" else { return group }
+            var g = group
+            g.items[0] = calendarDigits
+            g.items.insert(Item(["⇧C"], "calendar"), at: 1)
+            return g
+        }
+        out.insert(calendarGroup, at: min(2, out.count))
+        return out
+    }
 }

@@ -67,8 +67,18 @@ const RELAY_KEYS: &[&str] = &[
     "mailchimp",
 ];
 
-/// Strip control and bidi characters and collapse whitespace.
-fn plain(raw: &str) -> String {
+/// Strip control, bidi and invisible format characters and collapse
+/// whitespace.
+pub(crate) fn plain(raw: &str) -> String {
+    plain_with(raw, true)
+}
+
+/// [`plain`], with `invisible` false keeping the zero-width and tag
+/// characters. Only a ghost's TITLE uses that: whether a title is empty
+/// decides whether its record is kept, and a record's position among the kept
+/// ones is stored identity (`triage::ghost::launder_events`), so the title
+/// test must not change under stored rows.
+pub(crate) fn plain_with(raw: &str, invisible: bool) -> String {
     raw.chars()
         .filter(|c| !c.is_control() || c.is_whitespace())
         .filter(|c| {
@@ -76,6 +86,20 @@ fn plain(raw: &str) -> String {
                 c,
                 '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
             )
+        })
+        // Arabic letter mark, zero-width space and joiners, word joiner, BOM,
+        // and the tag block: invisible on screen, so they let two strings
+        // that look the same differ, and tags can smuggle text past a reader.
+        .filter(|c| {
+            !invisible
+                || !matches!(
+                    c,
+                    '\u{061C}'
+                        | '\u{200B}'..='\u{200D}'
+                        | '\u{2060}'
+                        | '\u{FEFF}'
+                        | '\u{E0000}'..='\u{E007F}'
+                )
         })
         .collect::<String>()
         .split_whitespace()
@@ -478,6 +502,33 @@ mod tests {
             Some("Bill's Exhausts")
         );
         assert_eq!(sanitize_merchant(Some("Amazon")).as_deref(), Some("Amazon"));
+    }
+
+    #[test]
+    fn plain_strips_every_invisible_class() {
+        for (class, c) in [
+            ("arabic letter mark", '\u{061C}'),
+            ("zero-width space", '\u{200B}'),
+            ("zero-width non-joiner", '\u{200C}'),
+            ("zero-width joiner", '\u{200D}'),
+            ("word joiner", '\u{2060}'),
+            ("byte order mark", '\u{FEFF}'),
+            ("tag block start", '\u{E0000}'),
+            ("tag letter", '\u{E0041}'),
+            ("tag block end", '\u{E007F}'),
+        ] {
+            assert_eq!(plain(&format!("Am{c}azon")), "Amazon", "{class}");
+            assert_eq!(
+                plain_with(&format!("Am{c}azon"), false).chars().count(),
+                7,
+                "{class}: kept when asked"
+            );
+        }
+        // The shipments side sees the same: one store, not two.
+        assert_eq!(
+            sanitize_merchant(Some("Ama\u{200B}zon\u{FEFF}")).as_deref(),
+            Some("Amazon")
+        );
     }
 
     #[test]

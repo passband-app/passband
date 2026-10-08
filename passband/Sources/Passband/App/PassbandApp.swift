@@ -43,7 +43,15 @@ struct PassbandApp: App {
                 // passband://pair links. Parked on the store rather than acted
                 // on here: only the Connect gate can pair, and an install that
                 // already has an identity must not re-pair over it.
-                .onOpenURL { store.receivePairLink($0) }
+                .onOpenURL { url in
+                    // passband://draft/<id>: a link an agent gave for a draft
+                    // it left. Anything else is a pair link or nothing.
+                    if let link = AgentDraftLink(url) {
+                        store.openAgentDraft(link)
+                    } else {
+                        store.receivePairLink(url)
+                    }
+                }
         }
         .defaultSize(width: 1320, height: 880)
         .windowStyle(.hiddenTitleBar)
@@ -67,6 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.
         Notifier.shared.install()
+        // Look at the floating code panel without waiting for a login code:
+        // same posture as PASSBAND_FORCE_TOUR, a launch environment only.
+        if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {
+            LoginCodePanel.shared.show(
+                .init(service: "GitHub", code: code), sender: "GitHub <noreply@github.com>",
+                account: nil, onMissed: {})
+        }
         // Attachment bytes staged for Quick Look are torn down when the panel
         // closes; this is the sweep for the ones a crash or a hard quit stranded.
         StagedAttachment.purgeRoot()
@@ -229,8 +244,10 @@ struct PassbandCommands: Commands {
             // RootView.globalBindings do the routing — which they always did,
             // behind the dispatcher's input guard, so nothing was lost but the
             // menu's ability to advertise them.
-            ForEach(Array(MainView.mainViews.enumerated()), id: \.element) { _, view in
-                Button(view.label) { store.setView(view) }
+            // Calendar rides second when it is offered, and takes the 2:
+            // same list as the rail, from the same gate.
+            ForEach(MainView.railViews(calendar: store.calendarPageAvailable), id: \.view) { row in
+                Button(row.view.label) { store.setView(row.view) }
                     .disabled(blocked)
             }
             Divider()
@@ -272,7 +289,10 @@ struct PassbandCommands: Commands {
                 // is counting the mailbox it started on — the run's own epoch
                 // fence catches the switch, but the switch should not be
                 // offered in the first place.
-                .disabled(blocked || store.connStatus != .connected)
+                // The wait for a saved daemon that is not answering is the
+                // exception to the first: the account being left is exactly
+                // the one that cannot put anything on screen.
+                .disabled(blocked || !store.canSwitchAccounts)
             }
             Divider()
             // DELIBERATELY CHORDLESS. ⌘` is the system's window cycler, and
@@ -280,8 +300,7 @@ struct PassbandCommands: Commands {
             // own — this is the tenth-account escape hatch and a place for the
             // menu to say the list wraps, not a primary way to move.
             Button("Next Account") { Task { await accounts.switchToNext() } }
-                .disabled(
-                    blocked || store.connStatus != .connected || accounts.accounts.count < 2)
+                .disabled(blocked || !store.canSwitchAccounts || accounts.accounts.count < 2)
             Divider()
             Button("Add Account…") { store.addAccountSheetOpen = true }
                 // The gate is already a connect form. Offering a second one on
@@ -296,9 +315,20 @@ struct PassbandCommands: Commands {
             Button("New Ask Chat") { store.newAskChat() }
             .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(blocked)
-            Button("Search…") { store.openSearch() }
-                .keyboardShortcut("f", modifiers: [.command])
-                .disabled(blocked)
+            // ⌘F FINDS IN WHAT IS OPEN. With an email on screen that is the
+            // email, the way it is a page in a browser; with none it is the
+            // mailbox. The reader also binds the chord in its own keymap,
+            // which is what answers the key; this is the pointer's route, and
+            // what keeps the menu from naming a verb the key will not do.
+            Button(store.threadId != nil ? "Find in Email…" : "Search…") {
+                if store.threadId != nil {
+                    store.findInEmailTick += 1
+                } else {
+                    store.openSearch()
+                }
+            }
+            .keyboardShortcut("f", modifiers: [.command])
+            .disabled(blocked)
             Divider()
             Button("Check for New Mail") {
                 Task { await SitrepPoller.shared.triggerMailRefresh() }

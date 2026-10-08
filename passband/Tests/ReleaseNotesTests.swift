@@ -22,6 +22,8 @@ struct ReleaseNotesTests {
         stamping()
         theTable()
         digest()
+        thePhonesTable()
+        thePhonesArrival()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -267,6 +269,217 @@ struct ReleaseNotesTests {
             version: "9.9.8", date: "2026-01-01", headline: "test",
             items: [ReleaseItem(.app, "One thing")])
         expect(plain.digest.headliners.isEmpty, "a release with no symbols has no tiles")
+
+        skippedReleases()
+    }
+
+    // MARK: - several releases as one card
+
+    static func skippedReleases() {
+        let newer = ReleaseNote(
+            version: "9.9.9", date: "2026-01-02", headline: "newer",
+            items: [
+                ReleaseItem(.app, "Flow mode", symbol: "wind"),
+                ReleaseItem(.ios, "Attach files to emails", symbol: "paperclip"),
+                ReleaseItem(.app, "Name an account"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ])
+        let older = ReleaseNote(
+            version: "9.9.8", date: "2026-01-01", headline: "older",
+            items: [
+                ReleaseItem(.app, "Attach files to emails", symbol: "paperclip"),
+                ReleaseItem(.app, "Schedule an email for later", symbol: "clock"),
+                ReleaseItem(.app, "Wide emails fit the window"),
+                ReleaseItem(.app, "Name an account."),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Triage is faster"),
+            ])
+        let d = ReleaseDigest([newer, older])
+
+        expect(
+            d.headliners.map(\.text) == ["Flow mode", "Attach files to emails", "Schedule an email for later"],
+            "every skipped release's headliners are walked, newest release first")
+        expect(
+            d.headliners.map(\.version) == ["9.9.9", "9.9.9", "9.9.8"],
+            "a page knows its release, the newest when two releases said it")
+        expect(
+            d.headliners[1].surfaces == [.app, .ios],
+            "one feature across two releases is one page naming both surfaces")
+        expect(d.sections.map(\.surface) == [.app, .daemon], "one section per surface, not per release")
+        expect(
+            d.sections.first?.items == ["Name an account", "Wide emails fit the window"],
+            "the bullets are one list, newest first, the same words said once")
+        expect(d.sections.first?.extras == ["Bug fixes"], "three releases of bug fixes are one footnote")
+        expect(d.sections.last?.items == ["Triage is faster"], "an older release's surface still lists")
+
+        // Whatever is skipped, nothing the table says goes missing.
+        let all = ReleaseDigest(table)
+        let said = Set((all.headliners.map(\.text) + all.sections.flatMap { $0.items + $0.extras }).map(ReleaseDigest.key))
+        expect(
+            table.flatMap(\.items).allSatisfy { said.contains(ReleaseDigest.key($0.text)) },
+            "the whole table merged still says every line")
+
+        // The greeting is for a jump of more than one release, and names both ends.
+        let two = ReleaseNotes.unseen(lastSeen: "0.0.2", running: "0.0.4")
+        let greeting = ReleaseNotes.catchUp(lastSeen: "0.0.2", running: "0.0.4", shown: two)
+        expect(greeting == ReleaseCatchUp(from: "0.0.2", to: "0.0.4"), "two releases at once are greeted")
+        expect(greeting?.title == "Thank you for updating to 0.0.4!", "the greeting names the new version")
+        expect(greeting?.line.hasSuffix("since you were on 0.0.2.") == true, "and the one they came from")
+        expect(greeting?.line.contains("\u{2014}") == false, "the greeting avoids em dashes")
+        let one = ReleaseNotes.unseen(lastSeen: "0.0.3", running: "0.0.4")
+        expect(
+            ReleaseNotes.catchUp(lastSeen: "0.0.3", running: "0.0.4", shown: one) == nil,
+            "the ordinary update is not greeted")
+        expect(
+            ReleaseNotes.catchUp(lastSeen: nil, running: "0.0.4", shown: two) == nil,
+            "no stamp, no version to say they came from")
+    }
+
+    // MARK: - the iPhone's own table
+
+    static let phone: [PhoneReleaseNote] = PhoneReleaseNotes.all
+
+    static func thePhonesTable() {
+        expect(!phone.isEmpty, "the phone has release notes")
+
+        var seen = Set<String>()
+        var previous: ReleaseVersion?
+        for note in phone {
+            guard let version = ReleaseVersion(note.version) else {
+                fail("phone version \(note.version) does not parse")
+                continue
+            }
+            expect(seen.insert(note.version).inserted, "phone \(note.version) appears once")
+            if let previous {
+                expect(version < previous, "phone \(note.version) is older than the note above it")
+            }
+            previous = version
+
+            expect(!note.headline.isEmpty, "phone \(note.version) has a headline")
+            expect(
+                note.date.count == 10 && note.date.filter { $0 == "-" }.count == 2,
+                "phone \(note.version) carries an ISO date")
+            // A walk: fewer than three pages is not one, and more than five is
+            // the list again with pictures.
+            expect(
+                (3...5).contains(note.features.count),
+                "phone \(note.version) walks three to five features")
+            expect(
+                Set(note.features.map(\.title)).count == note.features.count,
+                "phone \(note.version) names each feature once")
+
+            for feature in note.features {
+                let what = "phone \(note.version) \(feature.title.prefix(30))"
+                expect(!feature.title.isEmpty && !feature.detail.isEmpty, "\(what): a page has a title and a line")
+                expect(!feature.symbol.isEmpty, "\(what): a page has a symbol to fall back on")
+                // A title is a phrase set in the serif; the line under it is a
+                // sentence.
+                expect(!feature.title.hasSuffix("."), "\(what): the title is not a sentence")
+                expect(feature.detail.hasSuffix("."), "\(what): the line is one")
+                // HOUSE RULES. No em dashes, and no keys: a backtick is how
+                // the Mac's table sets a key, and a phone has none to press.
+                for text in [feature.title, feature.detail] {
+                    expect(!text.contains("\u{2014}"), "\(what): no em dashes")
+                    expect(!text.contains("`"), "\(what): no keys on a phone")
+                }
+            }
+            for aside in note.also {
+                expect(!aside.text.isEmpty, "phone \(note.version) has no empty lines")
+                expect(!aside.text.contains("\u{2014}"), "phone \(note.version) line avoids em dashes: \(aside.text.prefix(30))")
+                expect(!aside.text.contains("`"), "phone \(note.version) line names no key: \(aside.text.prefix(30))")
+            }
+            // Everything the table says, the closing page says: in its list or
+            // in its footnote. Folding must never drop a line.
+            let folded = note.also.count - note.asides.count
+            expect(
+                (folded == 0) == (note.footnote == nil),
+                "phone \(note.version) says its catch-alls in the footnote, and only those")
+        }
+
+        let folding = PhoneReleaseNote(
+            version: "9.9.9", date: "2026-01-01", headline: "test", features: [],
+            also: [PhoneAside("Rules have a page", symbol: "list.bullet"), PhoneAside("Bug fixes"), PhoneAside("UI improvements")])
+        expect(folding.asides.map(\.text) == ["Rules have a page"], "catch-alls leave the phone's list")
+        expect(folding.footnote == "Plus bug fixes and UI improvements.", "and are said once, after it")
+    }
+
+    // MARK: - what the phone is owed
+
+    /// The versions an arrival would show, or a word for what it did instead.
+    static func shown(_ arrival: PhoneReleaseNotes.Arrival) -> [String] {
+        switch arrival {
+        case .show(let notes): notes.map(\.version)
+        case .stamp(let version): ["stamp " + version]
+        case .nothing: []
+        }
+    }
+
+    static func thePhonesArrival() {
+        guard let first = phone.last?.version, let newest = phone.first?.version else { return }
+        let arrival = PhoneReleaseNotes.arrival
+
+        // THE UPDATE THIS FEATURE SHIPS IN. An install that already had a
+        // mailbox and has no stamp predates the walk: it is owed the release
+        // it just took.
+        expect(
+            shown(arrival(nil, first, false)) == [first],
+            "an established phone with no stamp is shown the release it took")
+
+        // A NEWCOMER IS SHOWN NOTHING and is stamped with the build they
+        // installed, so that release is never announced to them.
+        expect(
+            shown(arrival(nil, newest, true)) == ["stamp " + newest],
+            "a newcomer is stamped current and shown nothing")
+        expect(
+            shown(arrival(newest, newest, false)).isEmpty,
+            "and once stamped, their first sync shows nothing")
+        // Stamped with the RUNNING build even when no note was written for it.
+        expect(
+            shown(arrival(nil, "999.0.0", true)) == ["stamp 999.0.0"],
+            "a newcomer on a build past the table is stamped with that build")
+        expect(
+            PhoneReleaseNotes.unseen(lastSeen: "999.0.0", running: "999.0.1").isEmpty,
+            "so nothing older is ever announced to them")
+        // A build older than the first phone note, as a newcomer and not.
+        expect(shown(arrival(nil, "0.0.0", true)) == ["stamp 0.0.0"], "a newcomer below the table is still stamped")
+        expect(shown(arrival(nil, "0.0.0", false)).isEmpty, "a phone below the whole table is shown nothing")
+        expect(
+            shown(arrival("0.0.0", first, false)) == [first],
+            "and that newcomer is shown the first note when they update to it")
+
+        // Somebody at the gate who HAS a stamp has been here before (signed
+        // out and back in): the stamp stands and nothing is rewritten.
+        expect(shown(arrival(newest, newest, true)).isEmpty, "a stamped phone at the gate is left alone")
+        // Garbage in the stamp is no stamp.
+        expect(
+            shown(arrival("not-a-version", newest, true)) == ["stamp " + newest],
+            "an unparseable stamp on a newcomer is replaced")
+
+        // The same bounds as the Mac's table, asked of the phone's.
+        expect(
+            PhoneReleaseNotes.unseen(lastSeen: "9.9.9", running: newest).isEmpty,
+            "a phone stamp ahead of the build shows nothing")
+        expect(shown(arrival(nil, "", false)).isEmpty, "a phone build with no version shows nothing")
+        expect(shown(arrival(nil, "", true)).isEmpty, "and stamps nothing")
+        expect(
+            PhoneReleaseNotes.newest(atOrBelow: "0.0.0") == nil,
+            "Settings has nothing to show a phone build below the table")
+        expect(
+            PhoneReleaseNotes.newest(atOrBelow: "99.0.0")?.version == newest,
+            "and the newest note for one past it")
+        expect(
+            PhoneReleaseNotes.newestShown(PhoneReleaseNotes.unseen(lastSeen: nil, running: newest)) == newest,
+            "closing the walk stamps the newest note shown")
+
+        // THE TWO TABLES ARE TWO VERSION LINES. The phone's first note shares
+        // a number with a Mac release from weeks earlier; nothing here may
+        // read one for the other.
+        if let twin = ReleaseNotes.all.first(where: { $0.version == first }) {
+            expect(
+                twin.headline != phone.last?.headline,
+                "the phone's \(first) is its own release, not the Mac's of the same number")
+        }
     }
 
     // MARK: - harness

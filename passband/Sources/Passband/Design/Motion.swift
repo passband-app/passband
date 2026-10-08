@@ -39,4 +39,9 @@ enum Motion {
     /// switch is navigation and not an event: long enough to say which direction
     /// you moved, short enough that nobody waits through it to start reading.
     static let tabSlide: Animation = .snappy(duration: 0.2)
+
+    /// A pane arriving from an edge of the phone (the account drawer and the
+    /// Account page), and going back to it. Sprung, because it is something
+    /// the thumb pulled, and damped enough that it does not wobble on landing.
+    static let pane: Animation = .spring(response: 0.36, dampingFraction: 0.88)
 }

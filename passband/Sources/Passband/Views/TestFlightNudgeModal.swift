@@ -6,7 +6,9 @@
 // brand's own light) runs behind an iPhone rising out of the card's lower
 // edge. On its screen is a tiny sitrep, and every few seconds a push lands on
 // it: the one thing the phone app does that the Mac cannot. Reduce Motion
-// holds the notification on screen and lets the phosphor settle.
+// holds the notification on screen and lets the phosphor settle. The card,
+// the hero, the pill and the ✕ are the ad family's shared materials
+// (AdCard.swift), which the agent-door ad wears too.
 //
 // A QR CODE, NOT JUST A LINK. The link is for a phone, and opening it on the
 // Mac lands on a page that says to open it on a phone. Pointing the camera at
@@ -49,83 +51,30 @@ private struct TestFlightAdCard: View {
     @State private var leaving = false
     @State private var copied = false
 
-    private static let width: CGFloat = 340
-    private static let heroHeight: CGFloat = 196
-
     var body: some View {
         VStack(spacing: 0) {
             hero
             words
         }
-        .frame(width: Self.width)
-        .passbandGlass(.pane, cornerRadius: 20, tint: Palette.glassTintStrong)
-        .shadow(color: .black.opacity(0.35), radius: 28, y: 14)
-        .offset(x: arrived && !leaving ? 0 : 40, y: arrived && !leaving ? 0 : 24)
-        .opacity(arrived && !leaving ? 1 : 0)
-        .scaleEffect(arrived && !leaving ? 1 : 0.96, anchor: .bottomTrailing)
+        .adCardChrome(arrived: arrived, leaving: leaving, label: "Get Passband for iPhone")
         .onAppear {
             withAnimation(reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.55, dampingFraction: 0.82).delay(0.35)) {
                 arrived = true
             }
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Get Passband for iPhone")
     }
 
     // MARK: - the hero
 
+    /// The shared hero (`AdHero`), with the phone rising out of it.
     private var hero: some View {
-        ZStack(alignment: .bottom) {
-            PhosphorBackdrop(paused: activeState != .key, scene: .card)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-
-            // The phosphor's floor bleeds into the card rather than ending at
-            // a seam: the hero fades into the glass under it.
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.35)],
-                startPoint: .center, endPoint: .bottom
-            )
-            .allowsHitTesting(false)
-
+        AdHero(live: activeState == .key, pill: "NEW  ·  IPHONE ALPHA", close: dismiss) {
             PhoneMock(reduceMotion: reduceMotion, live: activeState == .key)
                 .offset(y: arrived ? 66 : 220)
                 .animation(
                     reduceMotion ? nil : .spring(response: 0.75, dampingFraction: 0.78).delay(0.6),
                     value: arrived)
         }
-        .frame(height: Self.heroHeight)
-        .clipShape(UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
-        .overlay(alignment: .topTrailing) { closeButton }
-        .overlay(alignment: .topLeading) { betaPill }
-    }
-
-    private var closeButton: some View {
-        Button(action: dismiss) {
-            Image(systemName: "xmark")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white.opacity(0.9))
-                .frame(width: 24, height: 24)
-                .background(.black.opacity(0.35), in: Circle())
-                .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .padding(10)
-        .help("Close")
-        .accessibilityLabel("Close")
-    }
-
-    private var betaPill: some View {
-        Text("NEW  ·  IPHONE ALPHA")
-            .font(.system(size: 9, weight: .bold).width(.expanded))
-            .tracking(0.6)
-            .foregroundStyle(.white.opacity(0.92))
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(.black.opacity(0.32), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color(hex: 0x82BAF5).opacity(0.45), lineWidth: 0.5))
-            .padding(12)
     }
 
     // MARK: - the words

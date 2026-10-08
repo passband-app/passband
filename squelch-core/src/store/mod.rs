@@ -19,6 +19,7 @@ use crate::error::Result;
 // the type comments in `metrics.rs` and docs/NOTIFY.md §11.4.
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::triage::extract::shipments::ShipmentsApplied;
+use crate::triage::rule_suggest::SmartBlock;
 use crate::triage::{CalendarInfo, CarrierTrack, DeadlineHit, ReceiptInfo, ShipmentInfo};
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, Banking,
@@ -137,6 +138,29 @@ pub struct InboxUnread {
     pub fetched_at: DateTime<Utc>,
 }
 
+/// Who the mailbox belongs to, as Google's People API last described them: the
+/// part of [`account_profile`](Store::account_identity) small enough to ride on
+/// every stats answer. The photo's bytes are fetched separately, by tag.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AccountIdentity {
+    /// The full display name ("Ada Lovelace").
+    pub name: Option<String>,
+    /// The given name alone, which is what a greeting wants.
+    pub given_name: Option<String>,
+    /// Present exactly when a photo is stored. A short hash of its bytes, so it
+    /// changes when the picture does and not otherwise.
+    pub photo_tag: Option<String>,
+}
+
+/// The account's profile photo, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountPhoto {
+    pub bytes: Vec<u8>,
+    /// Sniffed from the bytes at fetch time, never taken from a header.
+    pub mime: String,
+    pub tag: String,
+}
+
 /// One Sent-derived contact, as both the autocomplete hit shape and the
 /// Sent-history harvest's merge input (same fields either way).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +182,22 @@ pub struct SenderEntry {
     /// Inbound, non-spam messages from this address. Sealed ones are counted
     /// (sealing is decided after the count is taken); a sender with ONLY sealed
     /// mail is never returned at all.
+    pub msg_count: i64,
+    pub last_received_at: DateTime<Utc>,
+}
+
+/// The sender directory rolled up by host (`/client/sender-domains`): everyone
+/// at one domain who has written to the account, as the rule editor's `*@`
+/// suggestion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderDomainEntry {
+    /// The host exactly as the addresses carry it (`e.stripe.com` is not
+    /// `stripe.com`), because a rule's glob matches the whole address and
+    /// `*@stripe.com` would not cover the subdomain.
+    pub domain: String,
+    /// Directory rows at this host.
+    pub sender_count: i64,
+    /// The sum of those rows' `msg_count`, with the same sealed caveat.
     pub msg_count: i64,
     pub last_received_at: DateTime<Utc>,
 }
@@ -240,6 +280,14 @@ pub struct TriagedMessage {
     /// re-scan structurally unable to storm: a row it re-ingests already exists
     /// and keeps whatever it was stamped with, NULL included.
     pub notify_eligible_at: Option<DateTime<Utc>>,
+    /// The `Date` header's UTC offset in minutes, east positive, written to
+    /// `messages.date_offset_minutes`. `None` when no Date header parsed.
+    /// Header metadata, not content, so it is captured for every message;
+    /// what counts as an observation is the timezone inference's call.
+    pub date_offset_minutes: Option<i32>,
+    /// The first calendar invitation in the message that named a real zone,
+    /// credited to its ORGANIZER (not the From). See [`crate::timezone`].
+    pub invite_zone: Option<crate::timezone::InviteZone>,
 }
 
 /// The full body of one sealed message. HUMAN-DOOR-ONLY: returned solely by
@@ -679,6 +727,23 @@ pub struct Draft {
     pub parent_subject: Option<String>,
     pub parent_from_addr: Option<String>,
     pub parent_from_name: Option<String>,
+    /// An agent on the agent door wrote this draft (issue #394). Set at insert
+    /// by [`SqliteStore::create_agent_draft`](sqlite::SqliteStore::create_agent_draft)
+    /// and kept through every later edit.
+    pub from_agent: bool,
+}
+
+/// What [`SqliteStore::create_agent_draft`](sqlite::SqliteStore::create_agent_draft)
+/// did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentDraftOutcome {
+    /// Inserted, with its audit row, under this draft id.
+    Created(i64),
+    /// The message being replied to already has a draft. Nothing written.
+    ReplyDraftExists,
+    /// The account already holds the most unsent agent drafts it may.
+    /// Nothing written.
+    TooMany,
 }
 
 /// Which draft row a save addresses. Taken by
@@ -966,6 +1031,25 @@ pub struct SenderDigestRow {
     pub status: String,
     /// The owner opened it in Passband.
     pub opened: bool,
+    /// What triage called it (`marketing`, `bill`, ...), when it said.
+    pub category: Option<String>,
+}
+
+/// Whether a smart block has been worked out for a sender, and what it was.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SmartBlockMemo {
+    NotAsked,
+    /// Asked and answered; `None` is "this sender has no line to draw".
+    Asked(Option<SmartBlock>),
+}
+
+impl SmartBlockMemo {
+    /// Read the `unsubscribes.smart_block` column: NULL is never asked, JSON
+    /// `null` is an answered no. Anything unreadable is asked again.
+    pub(crate) fn from_column(raw: Option<String>) -> Self {
+        raw.and_then(|raw| serde_json::from_str::<Option<SmartBlock>>(&raw).ok())
+            .map_or(Self::NotAsked, Self::Asked)
+    }
 }
 
 /// One other message in the escalated row's thread. Verdict and envelope only,
@@ -1545,6 +1629,43 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         policy: crate::config::ShipmentListPolicy,
     ) -> Result<bool>;
 
+    /// CALENDAR GHOSTS whose start falls in `[from, to)`, ordered by start,
+    /// HUMAN-DOOR ONLY, at most 2000. A timed start compares as an instant; a
+    /// date-only one is listed when its date is on or after `from`'s date in
+    /// `from`'s offset and before `to`'s date in `to`'s own offset, and sorts
+    /// at midnight in `from`'s offset. Each carries its eligible sources and
+    /// the duration prior for its venue and kind. A ghost with no start, or
+    /// whose facts came from a message that is not eligible right now (sent,
+    /// spam or restricted), is never listed: that test is in the SQL, so it
+    /// holds even when no rebuild has run since the message's status changed.
+    fn list_ghost_events(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>>;
+
+    /// The user's PATCH of a ghost, applied in ONE transaction. Each field is
+    /// `None` to leave it alone, `Some(None)` to clear it (a cleared state
+    /// clears its stamp), `Some(Some(_))` to set it. Returns `false` for an
+    /// unknown id or another account's, and
+    /// [`CoreError::InvalidInput`](crate::error::CoreError::InvalidInput) for
+    /// an end that is not after the start at the same precision, or a ghost
+    /// with no start; either way NOTHING is written, the state included. The
+    /// end is stored as a span from the current start, so mail that later
+    /// moves the start moves it too. A timed end on a timed ghost with a venue
+    /// also records the duration as the prior for that venue and kind;
+    /// clearing the end keeps what was learned. The projection never
+    /// overwrites either field.
+    fn patch_ghost_user(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        end: Option<Option<crate::triage::ghost::EventTime>>,
+        state: Option<Option<crate::types::GhostUserState>>,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
+
     /// ONE-SHOT REPAIR: re-run shipment detection over every shipment row's
     /// feeder message and delete the rows the current detector no longer yields
     /// that number from, returning how many were deleted.
@@ -1936,6 +2057,17 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         limit: u32,
     ) -> Result<Vec<SenderEntry>>;
 
+    /// HUMAN-DOOR ONLY (`/client/sender-domains`): the sender directory rolled
+    /// up by host and ranked for a typed fragment of one, for the rule
+    /// editor's `*@` suggestions. MUST NOT be reachable from MCP, like
+    /// `search_senders`.
+    fn search_sender_domains(
+        &self,
+        account_id: AccountId,
+        q: &str,
+        limit: u32,
+    ) -> Result<Vec<SenderDomainEntry>>;
+
     /// Read the sync cursor for a mailbox key, if one has been persisted.
     fn sync_state(&self, account_id: AccountId, mailbox: &str) -> Result<Option<SyncState>>;
 
@@ -1949,10 +2081,35 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// answer, "we do not know" is not.
     fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>>;
 
+    /// When this account was first created in the store, or `None` for an
+    /// unknown id or an unparseable stamp. The triage agent's onboarding
+    /// window counts from it.
+    fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
     /// Overwrite this account's Gmail INBOX unread counts, stamping `fetched_at`
     /// now. Only ever called with numbers that came back from Gmail, so a failed
     /// fetch leaves the previous row in place.
     fn set_inbox_unread(&self, account_id: AccountId, messages: i64, threads: i64) -> Result<()>;
+
+    /// The account's Google name and photo tag, or `None` when the profile was
+    /// never fetched. `None` is "we do not know", not "this person has no
+    /// name": clients fall back to what they showed before.
+    fn account_identity(&self, account_id: AccountId) -> Result<Option<AccountIdentity>>;
+
+    /// The stored profile photo, or `None` when there is none to serve.
+    fn account_photo(&self, account_id: AccountId) -> Result<Option<AccountPhoto>>;
+
+    /// Overwrite the account's profile whole. Only ever called with an answer
+    /// that came back from Google, so a failed fetch leaves the previous row
+    /// standing; a `None` photo CLEARS the stored one, which is how a removed
+    /// picture stops being served.
+    fn set_account_profile(
+        &self,
+        account_id: AccountId,
+        name: Option<&str>,
+        given_name: Option<&str>,
+        photo: Option<&AccountPhoto>,
+    ) -> Result<()>;
 
     /// LOCAL-ONLY (TUI): list sealed messages. This is the ONLY method that
     /// exposes sealed content and must never be reachable from MCP.
@@ -2441,6 +2598,29 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         account_id: AccountId,
         sender: &str,
         resolution: &str,
+    ) -> Result<bool>;
+
+    /// What is remembered about a smart block for this sender's ignored
+    /// unsubscribe, so the question is put to a model once. `None` when the
+    /// sender has no unsubscribe row at all.
+    fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<SmartBlockMemo>>;
+
+    /// Remember the answer on the sender's unsubscribe row: a proposal, or
+    /// `None` for "nothing worth keeping apart". `false` when there is no row.
+    /// A proposal is model text about sender-written subjects: it is stored to
+    /// be SHOWN again and becomes a rule only through the owner's click. It
+    /// outlives a resolution and a fresh request, being a reading of the
+    /// sender; a remembered `None` is dropped by a fresh request, so asking
+    /// again gets a second look at a sender whose mail may have changed.
+    fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: Option<&SmartBlock>,
     ) -> Result<bool>;
 
     /// Upsert one extracted promotion + stamp `triage.extractor_model_used`.

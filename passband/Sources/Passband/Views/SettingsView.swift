@@ -910,6 +910,10 @@ struct DeveloperSection: View {
                     .toggleStyle(.switch)
                     .labelsHidden()
                     .tint(Palette.accent)
+                    // A note for Braelyn from Ellie, left at Ellie's asking:
+                    // hover the switch while dev mode is on. An empty string
+                    // shows no tooltip, so nobody else ever sees it.
+                    .help(prefs.developerMode ? "ilysm cutie <3 - ellie" : "")
             }
         }
     }

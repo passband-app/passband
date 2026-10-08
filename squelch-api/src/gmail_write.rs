@@ -849,21 +849,30 @@ pub struct GmailWriteClient {
 }
 
 impl GmailWriteClient {
-    pub fn new(creds: std::sync::Arc<dyn CredentialStore>, account_id: AccountId) -> Self {
-        Self::with_base(creds, account_id, GMAIL_API_BASE.to_string())
-    }
-
-    /// Construct with an explicit API base (tests). Production uses [`Self::new`].
+    /// Construct with an explicit API base over a client of its own: the
+    /// shape the tests use. Production goes through [`Self::with_http`] with
+    /// the door's shared client (`ApiState::write_http`) and the real base.
     pub fn with_base(
         creds: std::sync::Arc<dyn CredentialStore>,
         account_id: AccountId,
         base: String,
     ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("reqwest client build");
+        Self::with_http(creds, account_id, base, Self::build_http())
+    }
+
+    /// Construct over an HTTP client the caller owns. The door builds ONE
+    /// (`ApiState::write_http`) and hands it to every action, because a
+    /// `reqwest::Client` is a rustls config and a connection pool, and
+    /// building one per action meant every send, archive and label paid a
+    /// fresh TCP + TLS handshake to Gmail and threw the warm connection of the
+    /// action before it away. The client is an `Arc` underneath, so cloning
+    /// it here is the cheap part.
+    pub fn with_http(
+        creds: std::sync::Arc<dyn CredentialStore>,
+        account_id: AccountId,
+        base: String,
+        http: reqwest::Client,
+    ) -> Self {
         Self {
             creds,
             account_id,
@@ -871,6 +880,31 @@ impl GmailWriteClient {
             base,
             budget: None,
         }
+    }
+
+    /// The HTTP client a write client wants, now that one lives for the
+    /// daemon's lifetime instead of one request:
+    ///
+    /// - a 60 s request ceiling and a 15 s connect ceiling, as before;
+    /// - redirects REFUSED, as the sync engine's Gmail client refuses them
+    ///   (`squelch_core::sync`): every request here carries the write bearer,
+    ///   and Gmail never redirects, so a redirect is only ever somewhere the
+    ///   token must not go;
+    /// - a 30 s idle timeout on pooled connections and TCP keepalive at the
+    ///   same interval. A per-action client dialled fresh every time; a shared
+    ///   one would otherwise hand a user's one-shot send the connection a
+    ///   laptop's sleep left half-open an hour ago. Idle connections are now
+    ///   dropped before a NAT forgets them, and a peer that died is noticed by
+    ///   the keepalive rather than by the user's 60 s wait.
+    pub(crate) fn build_http() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .build()
+            .expect("reqwest client build")
     }
 
     /// Book every request against the mailbox's shared Gmail budget, the one

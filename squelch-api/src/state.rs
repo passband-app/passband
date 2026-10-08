@@ -55,6 +55,15 @@ pub struct ApiState {
     /// Gmail API base override for the write client. Tests only; production
     /// leaves it `None` so live traffic always hits the real API.
     pub(crate) write_api_base: Option<String>,
+    /// The ONE HTTP client every Gmail write goes through, handed to each
+    /// `GmailWriteClient` the action handlers make. Built per action instead,
+    /// as it was, each send or archive paid a fresh rustls config and a fresh
+    /// TCP + TLS handshake to Gmail and discarded the warm connection of the
+    /// action before it. Built LAZILY, on the first write: a daemon with no
+    /// write credential never pays for the rustls config, and `new` stays
+    /// infallible. Behind an `Arc` because axum clones this state per request
+    /// and every clone must share the one pool, not initialise its own.
+    pub(crate) write_http: Arc<std::sync::OnceLock<reqwest::Client>>,
     /// Per-MTok input price (USD) behind `est_cost_usd_today` in
     /// `/client/stats`. Wire the operator's value in with
     /// [`ApiState::with_stage2_prices`].
@@ -507,6 +516,7 @@ impl ApiState {
                 .map(Arc::from),
             write_creds: None,
             write_api_base: None,
+            write_http: Arc::new(std::sync::OnceLock::new()),
             stage2_price_in_per_mtok: s2.price_in_per_mtok,
             stage2_price_out_per_mtok: s2.price_out_per_mtok,
             stage2_model: Arc::from(s2.model.as_str()),
@@ -1104,6 +1114,14 @@ impl ApiState {
     /// The Gmail API base override (tests only); `None` in production.
     pub(crate) fn write_api_base(&self) -> Option<&str> {
         self.write_api_base.as_deref()
+    }
+
+    /// The shared Gmail write client, built on first use and the same one
+    /// for every clone of this state. See the field.
+    pub(crate) fn write_http(&self) -> reqwest::Client {
+        self.write_http
+            .get_or_init(crate::gmail_write::GmailWriteClient::build_http)
+            .clone()
     }
 
     /// Build state, resolving the account email to an id and reading the master

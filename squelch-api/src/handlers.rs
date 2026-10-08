@@ -4441,12 +4441,17 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
 /// Resolve the WRITE-bound gmail client, or 403 with a hint if none configured.
 pub(crate) fn write_client(state: &ApiState) -> Result<GmailWriteClient, ApiError> {
     match state.write_creds() {
-        Some(creds) => Ok(match state.write_api_base() {
-            Some(base) => {
-                GmailWriteClient::with_base(creds.clone(), state.account_id, base.to_string())
-            }
-            None => GmailWriteClient::new(creds.clone(), state.account_id),
-        }
+        // Over the state's one shared HTTP client (see `ApiState::write_http`);
+        // what is built per action is two `Arc` clones and a base URL.
+        Some(creds) => Ok(GmailWriteClient::with_http(
+            creds.clone(),
+            state.account_id,
+            state
+                .write_api_base()
+                .map(str::to_string)
+                .unwrap_or_else(|| squelch_core::sync::GMAIL_API_BASE.to_string()),
+            state.write_http(),
+        )
         .with_budget(state.gmail_budget().cloned())),
         None => Err(ApiError::new(
             StatusCode::FORBIDDEN,

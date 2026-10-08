@@ -53,6 +53,23 @@ macro_rules! own_mail_sql {
 const OWN_MAIL: &str = own_mail_sql!();
 
 pub(crate) mod agent_budget;
+/// An archive row nobody has assessed, over aliases `m` (messages) and `a`
+/// (its `agent_message_state`, LEFT JOINed): stored to be found, never
+/// checked. To an external reader such a row DOES NOT EXIST YET. It is left
+/// out of every thread read, subject and count, and it does not close its
+/// thread, because closing on it would shut every live conversation with a
+/// year-old ancestor until somebody paid for a model call per ancestor.
+///
+/// Exactly this and nothing wider: a restricted archive row, a row the owner
+/// sealed by hand, and any NON-archive pending row all still close the thread.
+macro_rules! archive_unassessed_sql {
+    () => {
+        "(m.is_archive=1 AND (a.access IS NULL OR a.access='pending')
+           AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections c
+               WHERE c.account_id=m.account_id AND c.message_id=m.id
+                 AND c.field='external_access' AND c.value_json='true'))"
+    };
+}
 mod agent_deliveries;
 mod agent_triage;
 mod attention;
@@ -81,7 +98,9 @@ mod tracking;
 mod triage_stages;
 mod zones;
 
+pub use self::agent_triage::ARCHIVE_SURFACE_CAP;
 use self::migrate::migrate;
+pub use self::search::ExternalSearch;
 
 use std::path::Path;
 use std::sync::{Mutex, Once, RwLock};

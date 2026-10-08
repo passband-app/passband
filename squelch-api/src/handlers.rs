@@ -621,7 +621,7 @@ pub async fn get_thread(
             });
         }
         Ok(ThreadResponse {
-            cache_allowed: store.external_thread_allowed(account_id, &thread_id)?,
+            cache_allowed: store.human_cache_allowed(account_id, &thread_id)?,
             thread_id: view.thread_id,
             subject: view.subject,
             messages,

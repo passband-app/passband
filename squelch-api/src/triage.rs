@@ -251,7 +251,7 @@ pub async fn message(
             serde_json::to_value(store.thread_view_with_html(account, &message.thread_id)?)
                 .map_err(|error| squelch_core::CoreError::Other(error.into()))?;
         thread["cache_allowed"] = store
-            .external_thread_allowed(account, &message.thread_id)?
+            .human_cache_allowed(account, &message.thread_id)?
             .into();
         Ok(json!({"message_id": message_id, "thread": thread}))
     })

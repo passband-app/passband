@@ -36,13 +36,25 @@ fn shipment_policy() -> squelch_core::config::ShipmentListPolicy {
     squelch_core::config::Config::load().carriers.list_policy()
 }
 
+/// The archive depth from the daemon's own config, so `search_mail` reports
+/// the same horizon here as under `squelchd serve`. No poke: this binary runs
+/// no sync engine, so a matched archive row is queued for the daemon's worker
+/// and reported as pending rather than waited on.
+fn archive_surfacing() -> squelch_core::store::archive_surface::ArchiveSurfacing {
+    squelch_core::store::archive_surface::ArchiveSurfacing {
+        archive_days: squelch_core::config::Config::load().sync.archive_days,
+        ..Default::default()
+    }
+}
+
 /// Build the server object, so tests can construct it without binding a transport.
 fn build_server() -> anyhow::Result<SquelchServer> {
     let store = Arc::new(SqliteStore::open(squelch_core::config::resolve_db_path())?);
     Ok(
         SquelchServer::new(store, &squelch_core::config::account_email())?
             .with_shipment_policy(shipment_policy())
-            .with_ranking_config(squelch_core::config::Config::load().triage.ranking),
+            .with_ranking_config(squelch_core::config::Config::load().triage.ranking)
+            .with_archive_surfacing(archive_surfacing()),
     )
 }
 
@@ -124,6 +136,7 @@ async fn serve_http(addr: SocketAddr) -> anyhow::Result<()> {
         // No send pipeline in this binary: it serves the read tools only.
         // Drafts and sending are offered by `squelchd serve`.
         None,
+        archive_surfacing(),
     )?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr().unwrap_or(addr);

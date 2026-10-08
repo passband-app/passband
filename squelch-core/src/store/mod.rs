@@ -5,6 +5,7 @@
 //! `tokio::task::spawn_blocking`.
 
 pub mod agent_triage;
+pub mod archive_surface;
 pub mod recency;
 pub mod search_query;
 pub mod sqlite;
@@ -12,7 +13,7 @@ pub mod sqlite;
 pub use search_query::{
     FtsQuery, SearchDiagnostics, SearchFilter, SearchSort, TermDf, parse_search_query,
 };
-pub use sqlite::SqliteStore;
+pub use sqlite::{ARCHIVE_SURFACE_CAP, ExternalSearch, SqliteStore};
 
 use crate::error::Result;
 // ONE closed vocabulary for the metric label and the stored ledger string; see

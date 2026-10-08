@@ -270,14 +270,35 @@ pub(super) fn external_message_allowed_conn(
     )?)
 }
 
-/// External full-thread reads require every sibling to be allowed. The human
-/// reader bypasses this guard and may open pending or restricted mail.
+/// The thread's messages as an external reader may count them: everything but
+/// unassessed archive rows. `?1` account, `?2` thread.
+const EXTERNAL_THREAD_IDS_SQL: &str = concat!(
+    "SELECT m.id FROM messages m
+     LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+     WHERE m.account_id=?1 AND m.thread_id=?2 AND NOT ",
+    archive_unassessed_sql!()
+);
+
+/// [`THREAD_SUBJECT_SQL`] for an external reader: the oldest message that
+/// reader can see titles the thread, never an unassessed archive ancestor.
+const EXTERNAL_THREAD_SUBJECT_SQL: &str = concat!(
+    "SELECT m.subject FROM messages m
+     LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+     WHERE m.account_id=?1 AND m.thread_id=?2 AND NOT ",
+    archive_unassessed_sql!(),
+    " ORDER BY m.received_at ASC LIMIT 1"
+);
+
+/// External full-thread reads require every sibling to be allowed, except an
+/// unassessed archive sibling, which is omitted instead (see
+/// `archive_unassessed_sql!`). A thread of nothing but those is not found.
+/// The human reader bypasses this guard and may open pending or restricted mail.
 pub(super) fn thread_guard_and_subject(
     conn: &Connection,
     account_id: AccountId,
     thread_id: &str,
 ) -> Result<String> {
-    let mut stmt = conn.prepare("SELECT id FROM messages WHERE account_id=?1 AND thread_id=?2")?;
+    let mut stmt = conn.prepare(EXTERNAL_THREAD_IDS_SQL)?;
     let ids = stmt
         .query_map(params![account_id, thread_id], |row| row.get::<_, i64>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -289,9 +310,11 @@ pub(super) fn thread_guard_and_subject(
             return Err(CoreError::NotFound);
         }
     }
-    conn.query_row(THREAD_SUBJECT_SQL, params![account_id, thread_id], |row| {
-        row.get(0)
-    })
+    conn.query_row(
+        EXTERNAL_THREAD_SUBJECT_SQL,
+        params![account_id, thread_id],
+        |row| row.get(0),
+    )
     .optional()?
     .ok_or(CoreError::NotFound)
 }
@@ -515,6 +538,35 @@ impl SqliteStore {
         }
     }
 
+    /// May a human client keep this thread in its on-disk cache? Stricter than
+    /// [`Self::external_thread_allowed`] on purpose: the human reader is served
+    /// EVERY message, unassessed archive rows included, so a thread carrying
+    /// one is not cacheable until that row has been checked. Pure, like the
+    /// probe above.
+    pub fn human_cache_allowed(&self, account_id: AccountId, thread_id: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        let unassessed: bool = conn.query_row(
+            concat!(
+                "SELECT EXISTS(SELECT 1 FROM messages m
+                 LEFT JOIN agent_message_state a
+                   ON a.account_id=m.account_id AND a.message_id=m.id
+                 WHERE m.account_id=?1 AND m.thread_id=?2 AND ",
+                archive_unassessed_sql!(),
+                ")"
+            ),
+            params![account_id, thread_id],
+            |row| row.get(0),
+        )?;
+        if unassessed {
+            return Ok(false);
+        }
+        match thread_guard_and_subject(&conn, account_id, thread_id) {
+            Ok(_) => Ok(true),
+            Err(CoreError::NotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// A shipment combines tracking, status, and name fields from different
     /// messages. Every recorded contributor must have a current allowed decision.
     /// Legacy records without provenance remain available only to the human.
@@ -538,12 +590,19 @@ impl SqliteStore {
         // it because a human is looking at a page that says who filed it. A
         // thread of nothing but spam therefore comes back empty here and 404s
         // below, which is the same shape sealed mail gets.
-        let mut stmt = conn.prepare(
-            "SELECT id, from_addr, from_name, received_at, body
-             FROM messages
-             WHERE account_id=?1 AND thread_id=?2 AND is_spam = 0
-             ORDER BY received_at ASC",
-        )?;
+        //
+        // AND NO UNASSESSED ARCHIVE ROW, for the reason on
+        // `archive_unassessed_sql`: the guard above let the thread through
+        // without looking at those rows, so this select is what keeps them in.
+        let mut stmt = conn.prepare(concat!(
+            "SELECT m.id, m.from_addr, m.from_name, m.received_at, m.body
+             FROM messages m
+             LEFT JOIN agent_message_state a
+               ON a.account_id=m.account_id AND a.message_id=m.id
+             WHERE m.account_id=?1 AND m.thread_id=?2 AND m.is_spam = 0 AND NOT ",
+            archive_unassessed_sql!(),
+            " ORDER BY m.received_at ASC"
+        ))?;
         let messages = stmt
             .query_map(params![account_id, thread_id], |r| {
                 Ok(SanitizedMessage {

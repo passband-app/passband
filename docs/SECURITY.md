@@ -233,6 +233,36 @@ reads require the thread's sources to be allowed. MCP and dedicated
 rehydrates results under the same guard instead of releasing stale cached snippets.
 Account ownership is checked independently of access assessment.
 
+**Archive mail (issue #422).** Mail older than the backfill window is stored
+with `messages.is_archive = 1` and an `agent_message_state` row left at
+`pending`: no model call is spent on it at ingest. To an external reader such a
+row does not exist yet, which is a different thing from "pending" on live mail:
+
+- The thread guard (`thread_guard_and_subject`) OMITS an archive sibling whose
+  access is NULL or `pending` instead of closing the thread on it. The row is
+  left out of the messages, the count and the subject (the thread is titled by
+  the oldest message the reader may see). A thread of nothing but such rows is
+  not found. A `restricted` sibling, archive or not, an archive row the owner
+  sealed by hand, and any NON-archive pending sibling close the thread as before.
+- The check is bought when an external caller surfaces the row: an agent search
+  that matches it (`search_mail`, `GET /client/agent/search`) queues one
+  `access` job with trigger `archive_access` for at most ten matches per call,
+  best-ranked first, and opening its thread queues `source_access` for it as for
+  any legacy source. A row that already has a job at its revision (finished,
+  failed, or parked on the daily budget) is never queued again. The search
+  wakes the refine lane, waits up to about twelve seconds, and runs again.
+- Until the row is `allowed` the caller learns ONE thing about it: the count
+  `pending_older_matches`. Never an id, subject, sender or snippet.
+- `cache_allowed` on the human routes is stricter than the agent guard
+  (`human_cache_allowed`): the human reader is served the archive sibling, so a
+  thread carrying an unassessed one is not cacheable.
+- A reminder the owner sets on an archive message lists it at the human door
+  like any reminded row. It does not surface at the agent door until the row
+  is `allowed`.
+
+Do not widen the omission: it is exactly `is_archive = 1` AND access NULL or
+`pending` AND no owner seal (`archive_unassessed_sql!` in `store/sqlite/mod.rs`).
+
 The human `/client/v2/messages/{id}` endpoint can open the exact message immediately.
 It returns `Cache-Control: no-store`; `cache_allowed` controls client prefetch
 eligibility. Human read, attachment, draft, and reply paths do not treat a legacy

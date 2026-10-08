@@ -713,6 +713,12 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// collapsing them would put the spam fetch back on every manual refresh,
     /// which is most of what this change removed.
     spam_refresh: Arc<tokio::sync::Notify>,
+    /// THE AGENT DOOR'S POKE at the refine lane: an agent search just queued
+    /// access checks for archive rows and is waiting on them (see
+    /// `store::archive_surface`). Its own handle rather than a second use of
+    /// `refine_wake`, which stays private to this engine's own ingest; the two
+    /// wake the same lane.
+    refine_poke: Arc<tokio::sync::Notify>,
     /// Per-cap-kind last-warned UTC day. In-memory only; a restart re-arms them,
     /// and one fresh notice on restart is acceptable.
     ///
@@ -871,6 +877,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             refresh: Arc::new(tokio::sync::Notify::new()),
             refine_wake: tokio::sync::Notify::new(),
             spam_refresh: Arc::new(tokio::sync::Notify::new()),
+            refine_poke: Arc::new(tokio::sync::Notify::new()),
             warn_days: Arc::new(std::sync::Mutex::new(WarnDays::default())),
             notify_lane: std::sync::OnceLock::new(),
             unread_warned: AtomicBool::new(false),
@@ -937,6 +944,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// no-op and the page stays on whatever was last fetched.
     pub fn with_spam_refresh(mut self, spam_refresh: Arc<tokio::sync::Notify>) -> Self {
         self.spam_refresh = spam_refresh;
+        self
+    }
+
+    /// Share the REFINE POKE, so a door that just queued work somebody is
+    /// waiting on (an agent search surfacing archive mail) starts the refine
+    /// lane now instead of at its next interval. Wire the same handle into
+    /// `ApiState::with_refine_poke` and the agent door; without it that work
+    /// still runs, on the lane's own clock.
+    pub fn with_refine_poke(mut self, refine_poke: Arc<tokio::sync::Notify>) -> Self {
+        self.refine_poke = refine_poke;
         self
     }
 
@@ -1056,7 +1073,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     ) -> Result<T> {
         let mut backoff = self.gmail_quota_backoff;
         for attempt in 0..=GMAIL_QUOTA_RETRIES {
-            let resp = self.send_get(url).await?;
+            let quiet = retry == GmailRetry::Archive;
+            let resp = self.send_get(url, quiet).await?;
             let status = resp.status();
             if status.is_success() {
                 self.gmail_budget.note_success();
@@ -1108,8 +1126,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 backoff = (backoff * 2).min(self.gmail_quota_retry_cap);
                 continue;
             }
-            self.metrics
-                .record_gmail_error_reason(kind, gmail_error_reason(&body));
+            // The archive walk's refusals are counted and nothing more: its
+            // lane waits and retries by itself, and "sync is failing" in front
+            // of a current inbox would be a lie. A credential failure is the
+            // mailbox's, whoever hit it first.
+            if quiet && kind != GmailErrorKind::Auth {
+                self.metrics.count_gmail_error(kind);
+            } else {
+                self.metrics
+                    .record_gmail_error_reason(kind, gmail_error_reason(&body));
+            }
             return Err(CoreError::Other(anyhow::anyhow!(
                 "gmail api status {} (reason: {}{})",
                 status.as_u16(),
@@ -1121,14 +1147,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// Send a GET with a Bearer token, retrying once on 401 with a fresh token.
-    async fn send_get(&self, url: &str) -> Result<reqwest::Response> {
+    async fn send_get(&self, url: &str, quiet: bool) -> Result<reqwest::Response> {
         let token = self.token_for_request().await?;
-        let resp = self.bearer_get(url, &token.access_token).await?;
+        let resp = self.bearer_get(url, &token.access_token, quiet).await?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             // Redacted: the fact of a retry, never token/header content.
             eprintln!("squelch: gmail 401; refreshing token and retrying once");
             let token = self.token_for_request().await?;
-            return self.bearer_get(url, &token.access_token).await;
+            return self.bearer_get(url, &token.access_token, quiet).await;
         }
         Ok(resp)
     }
@@ -1154,7 +1180,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             })
     }
 
-    async fn bearer_get(&self, url: &str, access_token: &str) -> Result<reqwest::Response> {
+    async fn bearer_get(
+        &self,
+        url: &str,
+        access_token: &str,
+        quiet: bool,
+    ) -> Result<reqwest::Response> {
         // Admission is the mailbox's, not this engine's: every caller for the
         // account books against the same budget, 401 retries included.
         self.gmail_budget
@@ -1168,7 +1199,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             .map_err(|e| {
                 // No status ever arrived: DNS, TLS, connect or the client's own
                 // timeout. Distinct from `http` because the fix is different.
-                self.metrics.record_gmail_error(GmailErrorKind::Network);
+                if quiet {
+                    self.metrics.count_gmail_error(GmailErrorKind::Network);
+                } else {
+                    self.metrics.record_gmail_error(GmailErrorKind::Network);
+                }
                 CoreError::Other(anyhow::anyhow!("gmail request: {e}"))
             })
     }
@@ -1511,7 +1546,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         );
         let mut burst = tokio::time::Instant::now();
         let listed = self
-            .list_message_ids_in(None, Some(&q), None, GmailRetry::None)
+            .list_message_ids_in(None, Some(&q), None, GmailRetry::Archive)
             .await?;
         let stored = self.store.stored_gmail_msg_ids(self.account_id, &listed)?;
         let ids: Vec<String> = listed
@@ -1532,7 +1567,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 batch,
                 Mailbox::Inbox,
                 IngestOrigin::Archive,
-                GmailRetry::None,
+                GmailRetry::Archive,
             )
             .await?;
             // The last batch's rest comes after the cursor is safe, below.
@@ -1706,6 +1741,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // during one long round are one extra round, not twenty.
             tokio::select! {
                 _ = self.refine_wake.notified() => { idle_rounds = 0; }
+                _ = self.refine_poke.notified() => { idle_rounds = 0; }
                 _ = tokio::time::sleep(interval.saturating_mul(1 << idle_rounds).min(Duration::from_secs(30))) => {}
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return; }
@@ -3190,10 +3226,15 @@ enum ArchiveStep {
 /// Only backfills/catch-up retain a request across quota pauses. Poll helpers,
 /// spam browsing, metadata sweeps and the archive walk leave retry scheduling
 /// to their caller.
+///
+/// `Archive` schedules like `None` and differs in one thing: its errors are
+/// counted but never set the client-visible last sync error (see
+/// `SyncMetrics::count_gmail_error`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GmailRetry {
     None,
     CatchUp,
+    Archive,
 }
 
 const GMAIL_QUOTA_RETRIES: usize = 2;
@@ -7232,6 +7273,135 @@ mod tests {
             "ingested before the error, not re-fetched"
         );
         assert_eq!(g.calls("get:g-bad"), 2);
+    }
+
+    /// A REFUSAL INSIDE THE WALK IS NOT A SYNC OUTAGE. It is counted, and the
+    /// client-visible last error stays clear: the inbox is current, and a 500
+    /// on a year-old week is the walk's to retry.
+    #[tokio::test]
+    async fn a_gmail_error_in_the_archive_walk_is_counted_but_not_shown_as_a_sync_error() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-bad".to_string(),
+            std::collections::VecDeque::from([(500, "backendError".to_string())]),
+        );
+        g.0.lock().unwrap().all_mail_failures = 1;
+        let base = serve_mock(g.clone()).await;
+        let metrics = SyncMetrics::new();
+        let eng = archive_engine(store.clone(), acct, &base, 365).with_metrics(metrics.clone());
+        let (_tx, mut rx) = never_shutdown();
+        let http_errors = |n: u32| format!("squelchd_gmail_api_errors_total{{kind=\"http\"}} {n}");
+
+        // The listing is refused, then the fetch is.
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(metrics.sync_last_error(), None);
+        assert_eq!(metrics.sync_consecutive_failures(), 0);
+        let rendered = crate::metrics::render(&metrics, None);
+        assert!(rendered.contains(&http_errors(2)), "{rendered}");
+
+        // The same refusal on a live path is one, so the difference is the walk.
+        g.0.lock().unwrap().errors.insert(
+            "g-live".to_string(),
+            std::collections::VecDeque::from([(500, "backendError".to_string())]),
+        );
+        assert!(
+            eng.fetch_raw_and_ingest(
+                &["g-live".to_string()],
+                Mailbox::Inbox,
+                IngestOrigin::Incremental,
+                GmailRetry::None
+            )
+            .await
+            .is_err()
+        );
+        assert!(metrics.sync_last_error().is_some());
+    }
+
+    /// THE AGENT DOOR'S POKE, through the real refine lane and the real access
+    /// job: a search that surfaced an archive row wakes the lane, the lane
+    /// spends ONE small model call on it, and the search's wait returns with
+    /// the row readable. The lane's own clock here is 30 seconds, so only the
+    /// poke can explain the answer arriving inside the wait.
+    #[tokio::test]
+    async fn the_agent_doors_poke_wakes_the_refine_lane_to_run_the_archive_access_check() {
+        use crate::store::agent_triage::AgentTriageStore;
+        use crate::store::archive_surface::{SurfaceWait, surface_archive_matches};
+        let (store, account) = store_at_cursor(Some(100));
+        let at = days_ago(200);
+        let mut fetched = fixture(account, "g-old", &alert_eml(at), false);
+        fetched.internal_date = Some(at);
+        let parsed = ingest_with_rules(&fetched, &Stage1Config::default(), at, &[], |_| false);
+        let id = store.ingest_archive_message(&parsed).unwrap().unwrap();
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move |Json(_): Json<serde_json::Value>| {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    let verdict = json!({"restricted":false,"reason":"An ordinary alert"});
+                    Json(json!({"choices":[{"message":{"content":verdict.to_string()},"finish_reason":"stop"}],
+                        "usage":{"prompt_tokens":20,"completion_tokens":10}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut config = Config::default();
+        config.triage.agent.worker_poll_secs = 3600;
+        let poke = Arc::new(tokio::sync::Notify::new());
+        let mut eng = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config)
+            .with_refine_poke(poke.clone());
+        eng.stage2_llm = Some(llm);
+        eng.poll_healthy.store(true, Ordering::Relaxed);
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+
+        let ((), surfaced) = tokio::join!(eng.refine_lane(&mut rx), async {
+            // Let the lane finish its first, empty round and park.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let wait = SurfaceWait {
+                deadline: Duration::from_secs(10),
+                interval: Duration::from_millis(20),
+            };
+            let started = std::time::Instant::now();
+            let rerun = surface_archive_matches(&store, account, &[id], Some(&poke), wait)
+                .await
+                .unwrap();
+            let waited = started.elapsed();
+            tx.send(true).unwrap();
+            (rerun, waited)
+        });
+        let (rerun, waited) = surfaced;
+        assert!(rerun);
+        assert!(
+            waited < Duration::from_secs(8),
+            "the check finished inside the wait: {waited:?}"
+        );
+        assert!(store.agent_access_allowed(account, id).unwrap());
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "one small model call");
+        assert_eq!(
+            store.agent_diagnostics(account, id).unwrap()["jobs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "and one job"
+        );
+        server.abort();
     }
 
     /// THE LANE, inside the real `select!`: a Gmail error in the walk is waited

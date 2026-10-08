@@ -625,6 +625,16 @@ impl SyncMetrics {
                 at: Utc::now().timestamp(),
             });
         }
+        self.count_gmail_error(kind);
+    }
+
+    /// COUNT a Gmail error WITHOUT showing it to anyone: the per-kind counter
+    /// moves, the client-visible last error does not. For background work
+    /// whose refusals are not the mailbox being out of sync (the archive
+    /// walk): a 429 on a year-old week must not put a sync warning in front of
+    /// somebody whose inbox is current. A credential failure is never quiet;
+    /// callers send `Auth` through [`Self::record_gmail_error_reason`].
+    pub fn count_gmail_error(&self, kind: GmailErrorKind) {
         let slot = match kind {
             GmailErrorKind::Auth => &self.gmail_auth,
             GmailErrorKind::Quota => &self.gmail_quota,

@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 
 // New arrivals retain first priority. Explicit manual work comes before old
 // import/migration work, without changing which budget pays for each job.
+// `archive_access` shares that tier and nothing else of `manual:`: an agent
+// is waiting on the answer, so it must not queue behind a cutover.
 const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arrival_eligible,j.kind,COALESCE(lane.foreground,0)
              FROM agent_triage_jobs j INDEXED BY idx_agent_jobs_pending_claim JOIN messages candidate ON candidate.account_id=j.account_id AND candidate.id=j.message_id
              LEFT JOIN agent_job_lanes lane ON lane.job_id=j.id
@@ -24,7 +26,7 @@ const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arr
                      AND other.thread_id=candidate.thread_id))
              ORDER BY CASE
                  WHEN COALESCE(lane.foreground,0)=1 AND j.arrival_eligible=1 THEN 0
-                 WHEN j.trigger LIKE 'manual:%' THEN 1
+                 WHEN j.trigger LIKE 'manual:%' OR j.trigger='archive_access' THEN 1
                  ELSE 2 END,
                  COALESCE(lane.foreground,0) DESC,j.available_at,j.id LIMIT 1";
 
@@ -520,7 +522,7 @@ fn queue_investigation(
             || (state == "failed" && trigger.starts_with("manual:") && existing_trigger != trigger))
             && !matches!(
                 trigger,
-                "ingest" | "arrival" | "backfill" | "heal" | "source_access"
+                "ingest" | "arrival" | "backfill" | "heal" | "source_access" | "archive_access"
             )
         {
             conn.execute("UPDATE agent_triage_jobs SET state='queued',kind=?2,trigger=?3,attempts=0,available_at=?4,last_error=NULL WHERE id=?1",
@@ -744,7 +746,10 @@ pub(crate) fn enqueue_agent_triage_lane(
         params![account,message,revision])?;
         conn.execute("DELETE FROM agent_triage_followups WHERE job_id IN (SELECT id FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2 AND input_revision!=?3)",params![account,message,revision])?;
     }
-    let kind = if m.is_sent || m.is_spam || trigger == "source_access" {
+    // Both access triggers are a yes/no on one row somebody asked to read,
+    // never a placement: an archive row gets no FYE verdict and no push.
+    let access_only = matches!(trigger, "source_access" | "archive_access");
+    let kind = if m.is_sent || m.is_spam || access_only {
         "access"
     } else {
         "triage"
@@ -782,7 +787,7 @@ pub(crate) fn enqueue_agent_triage_lane(
     }
     // A sent reply is evidence that can resolve an existing obligation. It gets
     // no placement or arrival push of its own; re-evaluate the inbound target.
-    if changed && m.is_sent && !m.is_spam && trigger != "source_access" && !m.thread_id.is_empty() {
+    if changed && m.is_sent && !m.is_spam && !access_only && !m.thread_id.is_empty() {
         let target: Option<i64> = conn
             .query_row(
                 concat!(
@@ -1292,19 +1297,13 @@ impl AgentTriageStore for SqliteStore {
     fn external_agent_decision(&self, account: AccountId, message: i64) -> Result<MessageDecision> {
         let conn = self.lock()?;
         let source = read_message(&conn, account, message)?;
-        let siblings = {
-            let mut stmt =
-                conn.prepare("SELECT id FROM messages WHERE account_id=?1 AND thread_id=?2")?;
-            stmt.query_map(params![account, source.thread_id], |row| {
-                row.get::<_, i64>(0)
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        for sibling in siblings {
-            if !super::messages::external_message_allowed_conn(&conn, account, sibling)? {
-                return Err(CoreError::NotFound);
-            }
+        // The message itself by name: the thread guard omits an unassessed
+        // archive row instead of failing on it, which is right for a sibling
+        // and would be a leak for the row being asked about.
+        if !super::messages::external_message_allowed_conn(&conn, account, message)? {
+            return Err(CoreError::NotFound);
         }
+        super::messages::thread_guard_and_subject(&conn, account, &source.thread_id)?;
         let encoded:Option<String>=conn.query_row("SELECT decision_json FROM agent_message_decisions WHERE account_id=?1 AND message_id=?2",params![account,message],|row|row.get(0)).optional()?;
         decode(&encoded.ok_or(CoreError::NotFound)?)
     }
@@ -2066,6 +2065,77 @@ impl AgentTriageStore for SqliteStore {
 /// A blank display name is no display name.
 fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|name| !name.trim().is_empty())
+}
+
+/// How many archive rows one agent search may send for an access check.
+pub const ARCHIVE_SURFACE_CAP: usize = 10;
+
+impl SqliteStore {
+    /// ASSESS ON SURFACING: queue one `access` job (trigger `archive_access`,
+    /// background budget) for each of `ids` that is an unassessed archive row
+    /// of this account with NO job at its current revision, in any state. A
+    /// row whose check already ran, failed, or is parked on the daily budget
+    /// is left exactly as it is, so repeating a search never buys a second
+    /// model call. At most [`ARCHIVE_SURFACE_CAP`] are taken, in the order
+    /// given (the caller passes best-ranked first). Returns the ids queued.
+    pub fn request_archive_access(&self, account: AccountId, ids: &[i64]) -> Result<Vec<i64>> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let mut queued = Vec::new();
+        for id in ids {
+            if queued.len() >= ARCHIVE_SURFACE_CAP {
+                break;
+            }
+            let wanted: bool = tx.query_row(
+                concat!(
+                    "SELECT EXISTS(SELECT 1 FROM messages m
+                     LEFT JOIN agent_message_state a
+                       ON a.account_id=m.account_id AND a.message_id=m.id
+                     WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0 AND ",
+                    archive_unassessed_sql!(),
+                    " AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs j
+                         WHERE j.account_id=m.account_id AND j.message_id=m.id
+                           AND j.kind IN ('triage','access')
+                           AND j.input_revision=COALESCE(a.revision,1)))"
+                ),
+                params![account, id],
+                |row| row.get(0),
+            )?;
+            if wanted {
+                enqueue_agent_triage_conn(&tx, account, *id, "archive_access", false)?;
+                queued.push(*id);
+            }
+        }
+        tx.commit()?;
+        Ok(queued)
+    }
+
+    /// How many of `ids` still have an access check that could finish soon: a
+    /// job leased, or queued and due. A job parked for later (daily budget,
+    /// provider backoff) is not counted, so a caller polling this stops
+    /// waiting for work that will not run today.
+    pub fn archive_access_waiting(
+        &self,
+        account: AccountId,
+        ids: &[i64],
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs j
+             WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access')
+               AND (j.state='leased' OR (j.state='queued' AND j.available_at<=?3)))",
+        )?;
+        let mut waiting = 0;
+        for id in ids {
+            if stmt.query_row(params![account, id, now.to_rfc3339()], |row| {
+                row.get::<_, bool>(0)
+            })? {
+                waiting += 1;
+            }
+        }
+        Ok(waiting)
+    }
 }
 
 fn restrict_external_items(
@@ -5060,7 +5130,8 @@ fn human_inventory(
          LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
          LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
-         WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2 AND m.is_archive=0
+         WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
+           AND (m.is_archive=0 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
            AND (?4 IS NULL OR m.received_at<?4 OR (m.received_at=?4 AND m.id<?5))
          ORDER BY m.received_at DESC,m.id DESC"

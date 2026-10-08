@@ -280,6 +280,16 @@ fn fuse_ranked(lists: &[&[Candidate]], sort: SearchSort, now: DateTime<Utc>) -> 
     ranked.into_iter().map(|(c, _)| c).collect()
 }
 
+/// What an external search may return, and what it may only count.
+#[derive(Debug, Default)]
+pub struct ExternalSearch {
+    /// Readable results, in rank order.
+    pub hits: Vec<SearchHit>,
+    /// Ids of matching archive rows awaiting an access check, in rank order.
+    /// INTERNAL: an id here is a row the caller has not been allowed to see.
+    pub pending_archive: Vec<i64>,
+}
+
 impl SqliteStore {
     /// Rehydrate externally returned hits under the same lock as current access
     /// validation. Search indexes may contain old/restricted content; their
@@ -290,10 +300,39 @@ impl SqliteStore {
         account_id: AccountId,
         hits: &[SearchHit],
     ) -> Result<Vec<SearchHit>> {
+        Ok(self.external_search_partition(account_id, hits)?.hits)
+    }
+
+    /// [`Self::external_search_hits`], plus the ids of the candidates that
+    /// were dropped ONLY because they are archive rows nobody has assessed
+    /// yet, in retrieval order. Those ids are for the caller to queue an
+    /// access check with ([`Self::request_archive_access`]) and to count;
+    /// nothing else about such a row may leave the process.
+    pub fn external_search_partition(
+        &self,
+        account_id: AccountId,
+        hits: &[SearchHit],
+    ) -> Result<ExternalSearch> {
         let conn = self.lock()?;
         let mut allowed = Vec::new();
+        let mut pending_archive = Vec::new();
         for candidate in hits {
             if !super::messages::external_message_allowed_conn(&conn, account_id, candidate.id)? {
+                let unassessed: bool = conn.query_row(
+                    concat!(
+                        "SELECT EXISTS(SELECT 1 FROM messages m
+                         LEFT JOIN agent_message_state a
+                           ON a.account_id=m.account_id AND a.message_id=m.id
+                         WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0 AND ",
+                        archive_unassessed_sql!(),
+                        ")"
+                    ),
+                    params![account_id, candidate.id],
+                    |row| row.get(0),
+                )?;
+                if unassessed {
+                    pending_archive.push(candidate.id);
+                }
                 continue;
             }
             let hit = conn
@@ -315,7 +354,10 @@ impl SqliteStore {
                 Err(error) => return Err(error),
             }
         }
-        Ok(allowed)
+        Ok(ExternalSearch {
+            hits: allowed,
+            pending_archive,
+        })
     }
 
     /// Apply external access before the public result limit. Hidden leading hits
@@ -328,8 +370,22 @@ impl SqliteStore {
         sort: SearchSort,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        Ok(self
+            .external_search_surfacing(account_id, query, sort, limit)?
+            .hits)
+    }
+
+    /// [`Self::external_search`], also reporting the unassessed archive rows
+    /// that matched inside the recall window it ended on.
+    pub fn external_search_surfacing(
+        &self,
+        account_id: AccountId,
+        query: &str,
+        sort: SearchSort,
+        limit: usize,
+    ) -> Result<ExternalSearch> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok(ExternalSearch::default());
         }
         let mut window = limit;
         loop {
@@ -343,13 +399,29 @@ impl SqliteStore {
                 window,
             )?;
             let candidates: Vec<_> = hits.into_iter().map(|hit| hit.hit).collect();
-            let mut allowed = self.external_search_hits(account_id, &candidates)?;
-            if allowed.len() >= limit || !full {
-                allowed.truncate(limit);
-                return Ok(allowed);
+            let mut found = self.external_search_partition(account_id, &candidates)?;
+            if found.hits.len() >= limit || !full {
+                found.hits.truncate(limit);
+                return Ok(found);
             }
             window = window.saturating_mul(2);
         }
+    }
+
+    /// The oldest instant search can reach for this account: the earliest
+    /// non-spam `received_at`. Dates before 1990 are a broken `Date` header,
+    /// not old mail, and would make the horizon a lie.
+    pub fn indexed_since(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        let oldest: Option<String> = conn.query_row(
+            "SELECT MIN(received_at) FROM messages
+             WHERE account_id=?1 AND is_spam=0 AND received_at>='1990-01-01'",
+            params![account_id],
+            |row| row.get(0),
+        )?;
+        Ok(oldest
+            .and_then(|at| DateTime::parse_from_rfc3339(&at).ok())
+            .map(|at| at.with_timezone(&Utc)))
     }
 
     // ON-BOX SEMANTIC RECALL. Inherent methods rather than `Store` ones because

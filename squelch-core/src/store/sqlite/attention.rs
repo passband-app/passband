@@ -89,6 +89,14 @@ const WITHIN_WINDOW: &str = "(m.received_at >= ?2
             OR t.remind_at IS NOT NULL
             OR t.reminded_at IS NOT NULL)";
 
+/// The archive tier's exclusion from the human inventory, with the same
+/// exemption [`WITHIN_WINDOW`] gives: a reminder the user set on an archive
+/// message they found by search is their own instruction to see it again, so
+/// that row lists (and counts) exactly as a live row with a reminder does.
+pub(super) const LIVE_OR_REMINDER: &str = "(m.is_archive = 0
+            OR t.remind_at IS NOT NULL
+            OR t.reminded_at IS NOT NULL)";
+
 /// Membership test for the `standing` band, written against the `triage t` /
 /// `messages m` join that both band sites share. It lives in ONE place because
 /// the list query and the header's count must agree row for row, or the sitrep
@@ -247,7 +255,7 @@ impl SqliteStore {
 
                AND m.is_sent = 0
                AND {spam_sql}
-               AND m.is_archive = 0
+               AND {LIVE_OR_REMINDER}
                AND {WITHIN_WINDOW}
                AND t.importance >= ?3"
         );
@@ -853,7 +861,7 @@ impl SqliteStore {
                        WHERE t.account_id = ?1
                          AND m.is_sent = 0
                          AND m.is_spam = 0
-                         AND m.is_archive = 0
+                         AND {LIVE_OR_REMINDER}
                          AND {WITHIN_WINDOW}) t"
             ),
             params![account_id, bands_since.to_rfc3339()],

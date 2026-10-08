@@ -101,6 +101,11 @@ pub struct ApiState {
     /// `POST /client/spam/refresh`. `None` when no sync loop is wired in, which
     /// the endpoint reports as `triggered: false` rather than pretending.
     pub(crate) spam_refresh: Option<Arc<tokio::sync::Notify>>,
+    /// How the agent search surfaces archive mail: the configured
+    /// `sync.archive_days` and, once [`Self::with_refine_poke`] is called, the
+    /// refine lane's poke. The agent door is handed the SAME value
+    /// ([`Self::archive_surfacing`]) so the two cannot disagree.
+    pub(crate) archive_surfacing: squelch_core::store::archive_surface::ArchiveSurfacing,
     /// Wake channel for `GET /client/events`, the SAME sender attached to the
     /// store. THE PAYLOAD IS ONLY A HINT — the `events` table is the truth and
     /// every connection re-reads past its own cursor — so a missed or lagged
@@ -522,6 +527,7 @@ impl ApiState {
                 .price_out_per_mtok,
             refresh: None,
             spam_refresh: None,
+            archive_surfacing: Default::default(),
             event_notifier: None,
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
@@ -595,6 +601,36 @@ impl ApiState {
     pub fn with_spam_refresh(mut self, spam_refresh: Arc<tokio::sync::Notify>) -> Self {
         self.spam_refresh = Some(spam_refresh);
         self
+    }
+
+    /// Share the sync loop's REFINE POKE. Wire the SAME handle you pass to
+    /// `SyncEngine::with_refine_poke`; without it an agent search still queues
+    /// access checks for the archive mail it matched but does not wait for
+    /// them, and reports those matches as pending.
+    pub fn with_refine_poke(mut self, poke: Arc<tokio::sync::Notify>) -> Self {
+        self.archive_surfacing.poke = Some(poke);
+        self
+    }
+
+    /// `sync.archive_days`, so the agent search can say how far back the
+    /// index is meant to reach. 0 (the default here) reports no archive.
+    pub fn with_archive_days(mut self, archive_days: u32) -> Self {
+        self.archive_surfacing.archive_days = archive_days;
+        self
+    }
+
+    /// How long an agent search waits on the checks it queued. Tests shorten it.
+    pub fn with_surface_wait(
+        mut self,
+        wait: squelch_core::store::archive_surface::SurfaceWait,
+    ) -> Self {
+        self.archive_surfacing.wait = wait;
+        self
+    }
+
+    /// The archive-surfacing settings, for the agent door to be built with.
+    pub fn archive_surfacing(&self) -> squelch_core::store::archive_surface::ArchiveSurfacing {
+        self.archive_surfacing.clone()
     }
 
     /// Share the carrier poller's kick [`Notify`](tokio::sync::Notify) and the
@@ -1134,6 +1170,7 @@ impl ApiState {
         let state = Self::from_env(store, account_email)?
             .with_stage2_prices(cfg.stage2.price_in_per_mtok, cfg.stage2.price_out_per_mtok)
             .with_agent_triage(cfg.triage.clone())
+            .with_archive_days(cfg.sync.archive_days)
             .with_stage2_model(
                 cfg.stage2.model.clone(),
                 cfg.stage2.stage2_provider.map(|p| p.as_str().to_string()),

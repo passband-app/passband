@@ -36,6 +36,11 @@ revisions. User done/snooze/corrections and completed actions remain authoritati
 Corrections survive content revision changes; thread-level FYE choices apply to
 every sibling. External read guards independently honor human restrictions even
 if an older assessment was incorrectly marked allowed.
+Archive rows (`is_archive = 1`) get no job at ingest. Their access check is queued
+only when an external caller surfaces them: trigger `archive_access` from an agent
+search (kind `access`, background budget, claimed in the `manual:` tier, at most ten
+per search), or `source_access` from an explicit thread open. Until then external
+thread reads omit them rather than close the thread; see SECURITY.md section 4.
 Only matching sender rules are supplied as preferences and may be overridden with an evidenced
 exception. Memory has a read-only context interface; no memory editor ships.
 

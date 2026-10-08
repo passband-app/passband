@@ -158,4 +158,4 @@ jobs:
         if: always()
         run: |
           df -h / | tail -1
-          du -sh target
+          du -sh target 2>/dev/null || true

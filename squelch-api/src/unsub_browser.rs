@@ -47,6 +47,9 @@ const DEFAULT_API_BASE: &str = "https://api.browserbase.com";
 
 /// The key. Its presence is what makes the rung possible on this daemon.
 pub(crate) const API_KEY_VAR: &str = "SQUELCH_BROWSERBASE_API_KEY";
+/// Browserbase's own name for the same key, read when ours is unset: it is
+/// what their dashboard tells people to export, so it is what a `.env` holds.
+pub(crate) const API_KEY_FALLBACK_VAR: &str = "BROWSERBASE_API_KEY";
 /// Optional: which project sessions are created in. Unset, Browserbase uses
 /// the key's own.
 pub(crate) const PROJECT_VAR: &str = "SQUELCH_BROWSERBASE_PROJECT_ID";
@@ -110,7 +113,8 @@ impl Browserbase {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        Self::new(var(API_KEY_VAR)?, var(PROJECT_VAR), var(REGION_VAR))
+        let key = var(API_KEY_VAR).or_else(|| var(API_KEY_FALLBACK_VAR))?;
+        Self::new(key, var(PROJECT_VAR), var(REGION_VAR))
     }
 
     /// TEST HOOK: point the client at a stand-in API.
@@ -830,5 +834,33 @@ mod tests {
             !format!("{bb:?}").contains("bb_key"),
             "the key stays out of Debug"
         );
+    }
+
+    /// THE REAL BROWSERBASE: rent a browser, attach, read a page, give it
+    /// back. Spends a browser-minute on the account, so it runs only by hand:
+    /// `BROWSERBASE_API_KEY=... cargo test -p squelch-api live_browserbase -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs a Browserbase key; rents a real browser"]
+    async fn live_browserbase_rents_a_browser_we_can_read_a_page_in() {
+        use crate::unsub_cdp::{Cdp, CdpPage};
+        let bb = Browserbase::from_env().expect("a Browserbase key in the environment");
+        let session = bb.open().await.expect("a session was rented");
+        let read = async {
+            let cdp = Cdp::connect(&session.connect_url).await?;
+            let mut page = CdpPage::attach(cdp).await?;
+            page.open("https://example.com/").await?;
+            page.snapshot().await
+        }
+        .await;
+        bb.release(&session).await;
+        let snap = read.expect("the page was read");
+        eprintln!("--- {} ---\n{}\n---", snap.url, snap.text);
+        assert!(snap.url.starts_with("https://example.com"), "{}", snap.url);
+        assert!(
+            snap.text.contains("documentation examples"),
+            "{}",
+            snap.text
+        );
+        assert!(snap.controls.iter().any(|c| c.kind == Kind::Link));
     }
 }

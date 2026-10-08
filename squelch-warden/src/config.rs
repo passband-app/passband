@@ -416,8 +416,8 @@ pub struct Config {
     ///
     /// ONE KEY, EVERY TENANT, the same custody as the OAuth client: a tenant
     /// cannot read its own pod's environment, and the key rents browsers and
-    /// nothing else. Having it is necessary and not sufficient; a tenant also
-    /// needs the hidden feature `unsub_browser`.
+    /// nothing else. The key is the whole switch: a daemon that has it uses
+    /// the rung, for every mailbox.
     pub browserbase_secret_name: Option<String>,
     /// The APNs topic tenant daemons push under, handed on as
     /// `SQUELCH_RELAY_TOPIC`. Refused at boot without [`Config::relay_url`].

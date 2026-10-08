@@ -3,9 +3,8 @@
 //!
 //! `crate::unsub_job` gets here only after its plain reader gave up on a page
 //! (a preference center, a page that is empty until its script runs, a form
-//! that wants the address typed), and only for a mailbox that has the hidden
-//! feature and a daemon that has a Browserbase key. Everything about WHEN lives
-//! there. This module is HOW:
+//! that wants the address typed), and only on a daemon that has a Browserbase
+//! key. Everything about WHEN lives there. This module is HOW:
 //!
 //!   - [`Browserbase`] rents one browser per job and gives it back. The browser
 //!     runs on their network, not ours, so a stranger's page and its scripts

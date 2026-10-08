@@ -20,8 +20,8 @@
 //!        - it is a preference center, an app shell, a bot wall, an error, or
 //!          anything we cannot read with confidence: hand the ORIGINAL link to
 //!          the user (`needs_you`).
-//!   3. The browser, for a mailbox that has the hidden feature and a daemon
-//!      that has a Browserbase key ([`crate::unsub_browser`]). A page the
+//!   3. The browser, on a daemon that has a Browserbase key
+//!      ([`crate::unsub_browser`]). A page the
 //!      reader gave up on for a reason a real browser could fix (it wants a
 //!      choice made, a script run, the address typed) is opened in a rented
 //!      remote browser that a small model steers, a few actions at most. It
@@ -46,7 +46,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
-use squelch_core::features;
 use squelch_core::store::Store;
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::unsub_agent::{self, Observation, Raise, Step};
@@ -199,7 +198,7 @@ pub(crate) struct UnsubJobs {
     pub(crate) allow_local: bool,
     pub(crate) page_reader: Option<Arc<UnsubPageClient>>,
     /// Where the browser rung rents its browser. `None` (no key) and the rung
-    /// does not exist on this daemon, whatever the feature flag says.
+    /// does not exist on this daemon.
     pub(crate) browser: Option<Arc<Browserbase>>,
 }
 
@@ -371,7 +370,7 @@ async fn escalate(state: &ApiState, errand: &Errand<'_>, plain: Outcome) -> Outc
     let Outcome::NeedsYou(why) = plain else {
         return plain;
     };
-    if !worth_a_browser(why) || !state.features().enabled(features::UNSUB_BROWSER) {
+    if !worth_a_browser(why) {
         return plain;
     }
     let (Some(browser), Some(model)) =
@@ -819,7 +818,6 @@ mod tests {
 
     use axum::extract::State;
     use squelch_core::config::Stage2Provider;
-    use squelch_core::features::Features;
 
     /// A stand-in for Browserbase's API. `connect` is what a rented session's
     /// `connectUrl` will be; `None` answers 429, an account out of browsers.
@@ -981,7 +979,6 @@ document.getElementById('save').addEventListener('click', async () => {
     }
 
     fn rung_state(
-        features: Features,
         bb: Option<Browserbase>,
         model: Option<String>,
     ) -> (ApiState, Arc<SqliteStore>, i64) {
@@ -989,7 +986,6 @@ document.getElementById('save').addEventListener('click', async () => {
         let acct = store.ensure_account("me@example.com").unwrap();
         let mut state = ApiState::new(store.clone(), acct, "t")
             .with_unsub_fetch_allow_local(true)
-            .with_features(features)
             .with_unsub_browser(bb);
         if let Some(url) = model {
             state = state.with_unsub_page_reader(Some(UnsubPageClient::new(
@@ -1012,32 +1008,24 @@ document.getElementById('save').addEventListener('click', async () => {
         }
     }
 
-    const ON: [&str; 1] = [features::UNSUB_BROWSER];
-
     #[tokio::test]
-    async fn no_browser_is_rented_without_the_feature_the_key_and_a_reason_to() {
+    async fn no_browser_is_rented_without_the_key_a_model_and_a_reason_to() {
         let stuck = Outcome::NeedsYou(NeedsYou::ChooseTopics);
         let url = "http://127.0.0.1:9/prefs";
 
-        // The key and a model, but the mailbox has not been let in.
-        let (bb, hits) = browserbase(None).await;
-        let (state, ..) = rung_state(Features::none(), Some(bb), Some(model().await));
-        assert_eq!(escalate(&state, &errand(url), stuck).await, stuck);
-        assert!(hits.lock().unwrap().is_empty(), "feature off");
-
-        // Let in, but this daemon has no key.
-        let (state, ..) = rung_state(Features::pinned(ON), None, Some(model().await));
+        // A model, but this daemon has no key.
+        let (state, ..) = rung_state(None, Some(model().await));
         assert_eq!(escalate(&state, &errand(url), stuck).await, stuck);
 
-        // Let in, with a key, but no model to steer with.
+        // A key, but no model to steer with.
         let (bb, hits) = browserbase(None).await;
-        let (state, ..) = rung_state(Features::pinned(ON), Some(bb), None);
+        let (state, ..) = rung_state(Some(bb), None);
         assert_eq!(escalate(&state, &errand(url), stuck).await, stuck);
         assert!(hits.lock().unwrap().is_empty(), "no model");
 
         // Everything in place, and outcomes a browser cannot improve on.
         let (bb, hits) = browserbase(None).await;
-        let (state, ..) = rung_state(Features::pinned(ON), Some(bb), Some(model().await));
+        let (state, ..) = rung_state(Some(bb), Some(model().await));
         for settled in [
             Outcome::Done("one_click"),
             Outcome::Done("page"),
@@ -1051,7 +1039,7 @@ document.getElementById('save').addEventListener('click', async () => {
     #[tokio::test]
     async fn a_link_the_fetcher_would_refuse_is_not_handed_to_a_browser_either() {
         let (bb, hits) = browserbase(None).await;
-        let (state, ..) = rung_state(Features::pinned(ON), Some(bb), Some(model().await));
+        let (state, ..) = rung_state(Some(bb), Some(model().await));
         // Production: no test hook, so loopback is refused.
         let state = state.with_unsub_fetch_allow_local(false);
         let stuck = Outcome::NeedsYou(NeedsYou::NeedsBrowser);
@@ -1069,7 +1057,7 @@ document.getElementById('save').addEventListener('click', async () => {
     #[tokio::test]
     async fn a_browser_that_cannot_be_rented_leaves_the_readers_reason_standing() {
         let (bb, hits) = browserbase(None).await;
-        let (state, ..) = rung_state(Features::pinned(ON), Some(bb), Some(model().await));
+        let (state, ..) = rung_state(Some(bb), Some(model().await));
         let stuck = Outcome::NeedsYou(NeedsYou::ChooseTopics);
         assert_eq!(
             escalate(&state, &errand("http://127.0.0.1:9/prefs"), stuck).await,
@@ -1086,7 +1074,7 @@ document.getElementById('save').addEventListener('click', async () => {
     async fn a_rented_browser_that_never_answers_is_given_back_and_the_reason_stands() {
         // A session whose connect URL goes nowhere.
         let (bb, hits) = browserbase(Some("ws://127.0.0.1:9/devtools/browser/x".into())).await;
-        let (state, ..) = rung_state(Features::pinned(ON), Some(bb), Some(model().await));
+        let (state, ..) = rung_state(Some(bb), Some(model().await));
         let stuck = Outcome::NeedsYou(NeedsYou::NeedsBrowser);
         assert_eq!(
             escalate(&state, &errand("http://127.0.0.1:9/prefs"), stuck).await,
@@ -1107,7 +1095,7 @@ document.getElementById('save').addEventListener('click', async () => {
         let chrome = crate::unsub_cdp::tests::chrome().await;
         let (url, saves) = prefs_site().await;
         let (bb, rented) = browserbase(Some(chrome.ws.clone())).await;
-        let (state, store, acct) = rung_state(Features::pinned(ON), Some(bb), Some(model().await));
+        let (state, store, acct) = rung_state(Some(bb), Some(model().await));
 
         let plain = run(&state, &Plan::Page(url.clone())).await;
         assert!(

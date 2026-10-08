@@ -49,25 +49,11 @@ pub struct Feature {
 /// `features.enabled(features::THE_KEY)` wherever the daemon gates on it. The
 /// clients gate on the same key string; a flag only a client reads still gets
 /// an entry here, because this list is the only thing the admin page offers.
-pub const KNOWN: &[Feature] = &[
-    Feature {
-        key: CALENDAR,
-        summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
+pub const KNOWN: &[Feature] = &[Feature {
+    key: CALENDAR,
+    summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
               and editing events.",
-    },
-    Feature {
-        key: UNSUB_BROWSER,
-        summary: "Automatic unsubscribe drives a hosted browser through pages the plain reader gives \
-              up on: preference centers, script-only pages, forms that want the address typed.",
-    },
-];
-
-/// The browser rung of the automatic unsubscribe (`squelch_api::unsub_job`,
-/// docs/SECURITY.md section 7). OFF IS THE LADDER AS IT WAS: a page the plain
-/// reader cannot finish goes to the user. On, and only when the daemon also has
-/// a Browserbase key and a model, such a page is handed to a remote browser
-/// that a small model steers. Daemon-only: no client reads this key.
-pub const UNSUB_BROWSER: &str = "unsub_browser";
+}];
 
 /// The Calendar page and everything behind it on the human door: the
 /// timeline, the user's word on a ghost, the Google Calendar connection and

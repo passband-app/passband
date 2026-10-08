@@ -801,8 +801,8 @@ it. That move is what the guard below exists for.
 
 **The browser rung** (`squelch-api/src/unsub_browser.rs`, `unsub_cdp.rs`,
 `squelch-core/src/triage/unsub_agent.rs`). Everything above describes the plain
-reader, which holds for every mailbox. A mailbox with the hidden feature
-`unsub_browser`, on a daemon that was given a Browserbase key, has one more
+reader, which holds on every daemon. A daemon that was given a Browserbase key
+(every hosted tenant; a self-host only if it brings its own) has one more
 rung: a page the reader gave up on for a reason a real browser could fix
 (`choose_topics`, `needs_browser`, `unclear`; never a dead link) is opened in a
 rented remote browser that the notify model steers. On that rung the "one
@@ -847,8 +847,8 @@ action, nothing typed" rule above is deliberately replaced by this one:
   recipient to the sender), the page it leads to, and the address if a form asks
   for it. Sessions are created with recording and logging off. No mail, no
   credentials and no other mailbox data are reachable from the rung; it has no
-  route to the store at all. Browserbase is a subprocessor for mailboxes with
-  the feature on.
+  route to the store at all. Browserbase is a subprocessor for every hosted
+  mailbox.
 
 **What a maintainer must not break.**
 - Do not build a second outbound client for sender-chosen URLs, or call

@@ -207,8 +207,8 @@ data:
   # OPTIONAL. The automatic unsubscribe's browser rung: the Secret (key
   # `api-key`) holding the fleet's Browserbase API key, handed to every tenant
   # daemon as an optional SQUELCH_BROWSERBASE_API_KEY reference. Leave it out
-  # and no tenant has the rung. With it, a tenant still needs the hidden
-  # feature `unsub_browser` ticked on /admin/features. Create the Secret first:
+  # and no tenant has the rung. Set it and EVERY tenant has it as the roller
+  # restarts its pod; there is no per-tenant switch. Create the Secret first:
   #   kubectl -n <tenants namespace> create secret generic browserbase \
   #     --from-literal=api-key=bb_live_...
   # SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME: "browserbase"

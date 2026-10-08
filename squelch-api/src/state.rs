@@ -1187,8 +1187,7 @@ impl ApiState {
             // model, billed under its own ledger category.
             .with_unsub_page_reader(UnsubPageClient::from_config(cfg))
             // The browser rung, for a daemon that was given a Browserbase key.
-            // Having one is necessary and not sufficient: the mailbox also needs
-            // the hidden feature (`features::UNSUB_BROWSER`).
+            // The key is the whole switch: no key, no rung.
             .with_unsub_browser(crate::unsub_browser::Browserbase::from_env())
             // The assistant relay resolves only when BOTH the gateway base URL
             // and the assistant key are present; anything less is `None` and

@@ -198,10 +198,45 @@ fn seed_contacts_conn(
     Ok(())
 }
 
+/// `statvfs(2)` on `path`: the blocks an unprivileged writer may still take,
+/// in bytes. The one platform call behind the archive walk's disk floor.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+fn free_bytes_at(path: &std::path::Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| CoreError::InvalidInput("database path holds a NUL byte".to_string()))?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `c_path` is a NUL-terminated string that outlives the call, and
+    // `stat` is writable storage of exactly the type the call fills in.
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(CoreError::Other(anyhow::anyhow!(
+            "statvfs: {}",
+            std::io::Error::last_os_error().kind()
+        )));
+    }
+    // SAFETY: a zero return means the call initialised the struct.
+    let stat = unsafe { stat.assume_init() };
+    // Widths differ by platform (32-bit block counts on macOS), hence the
+    // casts and the allow above.
+    Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+
+/// Nowhere else is there a `statvfs`, so nowhere else is the number known.
+#[cfg(not(unix))]
+fn free_bytes_at(_path: &std::path::Path) -> Result<u64> {
+    Err(CoreError::Other(anyhow::anyhow!(
+        "free disk space is not readable on this platform"
+    )))
+}
+
 /// Replace this message's attachment rows, in the caller's transaction.
 /// DELETE-then-INSERT keeps re-ingest idempotent; `data == None` writes a NULL
 /// blob (over-cap, metadata only) while `size_bytes` stays the real decoded size.
 /// Written for sealed mail too — the byte-serving path guards sealed parents.
+/// `keep_bytes == false` writes every blob NULL, whatever the part's size: the
+/// archive tier keeps a year of attachments as names and sizes only.
 ///
 /// INSERT OR IGNORE, not plain INSERT: a sender can attach the same file twice,
 /// and a UNIQUE(account,message,filename,size) violation would roll back the
@@ -212,6 +247,7 @@ fn insert_attachments_conn(
     account_id: AccountId,
     message_id: i64,
     attachments: &[AttachmentInfo],
+    keep_bytes: bool,
 ) -> Result<()> {
     conn.execute(
         "DELETE FROM attachments WHERE account_id=?1 AND message_id=?2",
@@ -227,7 +263,7 @@ fn insert_attachments_conn(
                 a.filename,
                 a.mime,
                 a.size_bytes,
-                a.data.as_deref(),
+                a.data.as_deref().filter(|_| keep_bytes),
                 a.content_id,
             ],
         )?;
@@ -1261,7 +1297,18 @@ impl SqliteStore {
         // 7. Attachments: written for sealed mail too — the byte-serving endpoint
         //    guards sealed parents. Replaces prior rows so re-ingest is
         //    idempotent; over-cap parts store a NULL blob.
-        insert_attachments_conn(&tx, triaged.message.account_id, id, &triaged.attachments)?;
+        //
+        //    AN ARCHIVE ROW KEEPS METADATA ONLY, every part stored the way an
+        //    over-cap one is: the reader lists the file as not downloadable and
+        //    the byte endpoint answers 410. A year of blobs is what fills a
+        //    tenant's volume, and a full volume fails the LIVE ingest.
+        insert_attachments_conn(
+            &tx,
+            triaged.message.account_id,
+            id,
+            &triaged.attachments,
+            !archive,
+        )?;
         // 8. THE AGENT'S BOOKKEEPING, last, over the row as it now stands: it
         //    re-reads the message, and a changed content snapshot is what
         //    advances the revision and queues the work. The trigger names the
@@ -1360,12 +1407,64 @@ impl SqliteStore {
         walked_to: DateTime<Utc>,
     ) -> Result<()> {
         let conn = self.lock()?;
+        // `covered_to` is written by the INSERT alone: the row is created at
+        // the walk's start, which is where forward coverage starts too, and
+        // every later call here moves the backward edge and nothing else.
         conn.execute(
-            "INSERT INTO archive_walk(account_id, walked_to, updated_at)
-             VALUES(?1,?2,?3)
+            "INSERT INTO archive_walk(account_id, walked_to, covered_to, updated_at)
+             VALUES(?1,?2,?2,?3)
              ON CONFLICT(account_id) DO UPDATE SET
                  walked_to=excluded.walked_to, updated_at=excluded.updated_at",
             params![account_id, walked_to.to_rfc3339(), Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// See [`crate::store::Store::free_disk_bytes`].
+    pub(super) fn free_disk_bytes(&self) -> Result<u64> {
+        let file: String = {
+            let conn = self.lock()?;
+            conn.query_row(
+                "SELECT file FROM pragma_database_list WHERE name='main'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )?
+            .unwrap_or_default()
+        };
+        if file.is_empty() {
+            return Ok(u64::MAX);
+        }
+        free_bytes_at(std::path::Path::new(&file))
+    }
+
+    /// See [`crate::store::Store::archive_covered_to`]. A row from before the
+    /// column existed reads NULL and answers its `walked_to`: everything
+    /// between the two was stored by the backward walk, so starting there
+    /// re-lists ids the store already holds and fetches nothing twice.
+    pub(super) fn archive_covered_to(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT COALESCE(covered_to, walked_to) FROM archive_walk WHERE account_id=?1",
+            params![account_id],
+            |r| dt(r, 0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// See [`crate::store::Store::set_archive_covered_to`].
+    pub(super) fn set_archive_covered_to(
+        &self,
+        account_id: AccountId,
+        covered_to: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE archive_walk SET covered_to=?2, updated_at=?3 WHERE account_id=?1",
+            params![account_id, covered_to.to_rfc3339(), Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }

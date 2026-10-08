@@ -2024,8 +2024,15 @@ WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.account_id=agent_thread_atten
 -- window is stored. Created at `now - backfill_days` on first use and only ever
 -- moved backwards, a chunk at a time; the walk is complete once it reaches
 -- `now - archive_days`, and raising that setting resumes it from here.
+--
+-- `covered_to` is the FORWARD edge: the newest instant up to which mail that
+-- never carried INBOX or SENT (filed by a filter, archived before a sync) has
+-- been stored. It starts where `walked_to` started and only ever moves
+-- forwards, staying a day behind the clock. NULL on a row written before the
+-- column existed, which reads as `walked_to`.
 CREATE TABLE IF NOT EXISTS archive_walk (
     account_id INTEGER PRIMARY KEY,
     walked_to  TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    covered_to TEXT
 );

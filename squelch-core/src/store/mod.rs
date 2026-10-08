@@ -2048,8 +2048,30 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// covered, or `None` before its first chunk.
     fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
 
-    /// Persist the archive walk's cursor after a fully ingested chunk.
+    /// Persist the archive walk's cursor after a fully ingested chunk. The
+    /// call that creates the row also sets the forward edge to the same
+    /// instant; no later call moves it.
     fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()>;
+
+    /// The archive walk's FORWARD edge: the newest instant up to which mail
+    /// carrying neither INBOX nor SENT has been stored, or `None` before the
+    /// walk's first use.
+    fn archive_covered_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
+    /// Move the forward edge after a fully ingested forward chunk. Writes
+    /// nothing when the walk has no cursor row yet.
+    fn set_archive_covered_to(
+        &self,
+        account_id: AccountId,
+        covered_to: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Bytes free to an unprivileged writer on the filesystem holding the
+    /// database, for the archive walk's disk floor. `u64::MAX` for a database
+    /// that is not a file (in memory): there is no disk for it to fill. An
+    /// `Err` means the number could not be read, which the walk treats as "do
+    /// not write".
+    fn free_disk_bytes(&self) -> Result<u64>;
 
     /// Whether the stored row `message_id` is an archive row. What a live
     /// ingest asks after [`Store::ingest_message`] hands back an id, to tell a

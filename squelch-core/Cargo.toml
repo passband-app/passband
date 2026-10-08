@@ -58,11 +58,13 @@ hf-hub = { version = "0.5", default-features = false }
 sqlite-vec = { workspace = true }
 zerocopy = { workspace = true }
 
-# One use: `malloc_trim` behind `mem::trim`, which is how a dropped embedding
-# session's heap actually leaves the process (see `mem.rs` for the measurements).
-# The call is a glibc entry point and exists nowhere else, so the dependency is
-# scoped to glibc targets rather than compiled in everywhere and ignored.
-[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+# Two uses. `malloc_trim` behind `mem::trim`, which is how a dropped embedding
+# session's heap actually leaves the process (see `mem.rs` for the
+# measurements); that call is a glibc entry point and is cfg-gated to glibc in
+# the source. And `statvfs` behind the archive walk's free-space floor
+# (`Store::free_disk_bytes`), which every unix has, the self-hosted Mac
+# included. So the dependency is scoped to unix rather than to glibc.
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]

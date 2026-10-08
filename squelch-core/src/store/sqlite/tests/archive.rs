@@ -565,6 +565,65 @@ fn the_walk_cursor_round_trips_per_account() {
     );
 }
 
+/// THE FORWARD EDGE is born with the cursor row, at the same instant, and the
+/// backward cursor's later moves leave it where it is. A row from before the
+/// column existed reads as its `walked_to`.
+#[test]
+fn the_forward_edge_starts_at_the_walks_start_and_moves_only_by_its_own_setter() {
+    let (store, acct) = store();
+    assert_eq!(store.archive_covered_to(acct).unwrap(), None);
+    store.set_archive_covered_to(acct, days_ago(1)).unwrap();
+    assert_eq!(
+        store.archive_covered_to(acct).unwrap(),
+        None,
+        "no cursor row, nothing to move"
+    );
+
+    let start = days_ago(30);
+    store.set_archive_walked_to(acct, start).unwrap();
+    assert_eq!(store.archive_covered_to(acct).unwrap(), Some(start));
+    let further = days_ago(37);
+    store.set_archive_walked_to(acct, further).unwrap();
+    assert_eq!(
+        store.archive_covered_to(acct).unwrap(),
+        Some(start),
+        "walking backwards does not un-cover anything forwards"
+    );
+    let forward = days_ago(23);
+    store.set_archive_covered_to(acct, forward).unwrap();
+    assert_eq!(store.archive_covered_to(acct).unwrap(), Some(forward));
+    assert_eq!(store.archive_walked_to(acct).unwrap(), Some(further));
+
+    store
+        .lock()
+        .unwrap()
+        .execute("UPDATE archive_walk SET covered_to=NULL", [])
+        .unwrap();
+    assert_eq!(
+        store.archive_covered_to(acct).unwrap(),
+        Some(further),
+        "a cursor from before the column starts from its backward edge"
+    );
+}
+
+/// THE DISK FLOOR'S NUMBER: a real figure for a database on disk, and "no
+/// disk to fill" for one in memory.
+#[test]
+fn free_disk_bytes_reads_the_databases_own_filesystem() {
+    let (memory, _) = store();
+    assert_eq!(memory.free_disk_bytes().unwrap(), u64::MAX);
+
+    let dir = std::env::temp_dir().join(format!("squelch-free-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let on_disk = SqliteStore::open(dir.join("squelch.db")).unwrap();
+    let free = on_disk.free_disk_bytes().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(
+        free > 0 && free < u64::MAX,
+        "a real number of bytes: {free}"
+    );
+}
+
 #[test]
 fn stored_ids_are_found_in_any_tier_across_a_list_longer_than_one_statement_can_bind() {
     let (store, acct) = store();

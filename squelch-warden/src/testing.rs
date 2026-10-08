@@ -89,6 +89,7 @@ pub fn test_config() -> Config {
         llm_stage2_daily_cap: None,
         embed_idle_unload_secs: None,
         archive_days: None,
+        archive_min_free_mb: None,
         // Unset, so the agent door is unpublished: the tests that publish it
         // set it themselves.
         mcp_oauth_issuer: None,

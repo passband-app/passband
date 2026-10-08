@@ -1429,10 +1429,17 @@ fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
         env.push(plain("SQUELCH_EMBED_IDLE_UNLOAD_SECS", &secs.to_string()));
     }
 
-    // How far back the tenant daemon's archive walk reaches, present only when
-    // the operator set one. Unset, the daemon keeps its own default.
-    if let Some(days) = config.archive_days {
-        env.push(plain("SQUELCH_ARCHIVE_DAYS", &days.to_string()));
+    // How far back the tenant daemon's archive walk reaches. ALWAYS RENDERED,
+    // and `0` (off) when the operator set nothing: the daemon's own default is
+    // a year, and an unset knob must not start a year-long walk on every
+    // tenant volume at the next roll. See `WardenConfig::archive_days`.
+    env.push(plain(
+        "SQUELCH_ARCHIVE_DAYS",
+        &config.archive_days.unwrap_or(0).to_string(),
+    ));
+    // The walk's free-space floor, present only when the operator pinned one.
+    if let Some(mb) = config.archive_min_free_mb {
+        env.push(plain("SQUELCH_ARCHIVE_MIN_FREE_MB", &mb.to_string()));
     }
 
     // The LLM gateway block, present only when the operator configured one.
@@ -1818,8 +1825,11 @@ mod tests {
         // Unpinned, the daemon picks its own embedding model, and the var is
         // absent rather than empty.
         assert!(!plain.contains_key("SQUELCH_EMBED_MODEL"));
-        // Unset by default, so the daemon keeps its own idle-unload window.
-        assert!(env.iter().all(|e| e.name != "SQUELCH_ARCHIVE_DAYS"));
+        // THE ARCHIVE IS OFF FOR A HOSTED TENANT UNLESS THE OPERATOR SAYS
+        // OTHERWISE: an unset knob reaches the pod as "0", never as nothing,
+        // because nothing would be the daemon's own year.
+        assert_eq!(plain["SQUELCH_ARCHIVE_DAYS"], "0");
+        assert!(!plain.contains_key("SQUELCH_ARCHIVE_MIN_FREE_MB"));
         assert!(
             env.iter()
                 .all(|e| e.name != "SQUELCH_EMBED_IDLE_UNLOAD_SECS"),
@@ -2065,7 +2075,8 @@ mod tests {
 
     /// The daemon reads `SQUELCH_ARCHIVE_DAYS`, and a hosted tenant only gets
     /// it if this CLOSED list renders it. `0` switches the archive walk off,
-    /// so it has to reach the pod as `"0"` rather than as nothing.
+    /// so it has to reach the pod as `"0"` rather than as nothing; an unset
+    /// knob renders the same `"0"` (asserted with the default env above).
     #[test]
     fn the_archive_depth_reaches_the_pod_when_the_operator_sets_one() {
         let mut c = test_config();
@@ -2077,6 +2088,16 @@ mod tests {
             .filter_map(|e| Some((e.name.as_str(), e.value.as_deref()?)))
             .collect();
         assert_eq!(plain["SQUELCH_ARCHIVE_DAYS"], "730");
+        assert!(!plain.contains_key("SQUELCH_ARCHIVE_MIN_FREE_MB"));
+
+        c.archive_min_free_mb = Some(4096);
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let env = pod.containers[0].env.clone().unwrap();
+        let floor = env
+            .iter()
+            .find(|e| e.name == "SQUELCH_ARCHIVE_MIN_FREE_MB")
+            .expect("the floor reaches the pod");
+        assert_eq!(floor.value.as_deref(), Some("4096"));
 
         c.archive_days = Some(0);
         let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();

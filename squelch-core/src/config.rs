@@ -242,6 +242,12 @@ impl std::str::FromStr for GmailQuotaProfile {
 }
 
 /// Sync tunables.
+/// The deepest `sync.archive_days` is allowed to reach: twenty years. A bound
+/// at all so the walk's date arithmetic cannot overflow and its listing never
+/// asks Gmail for an instant before the epoch; this one because no mailbox
+/// this daemon can read is older.
+pub const ARCHIVE_DAYS_MAX: u32 = 7300;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncConfig {
@@ -255,8 +261,16 @@ pub struct SyncConfig {
     /// the reader, with no model call at ingest. It is its own window and moves
     /// none of the others: triage cutover, the blank-body heal, the spam page
     /// and catch-up all keep reading `backfill_days`. Raising it resumes the
-    /// walk; 0 turns the archive off. Env: SQUELCH_ARCHIVE_DAYS.
+    /// walk; 0 turns the archive off. Env: SQUELCH_ARCHIVE_DAYS. Clamped to
+    /// [`ARCHIVE_DAYS_MAX`] at load.
     pub archive_days: u32,
+    /// THE ARCHIVE WALK'S DISK FLOOR, in MiB: the walk stores nothing while
+    /// the filesystem holding the database has less than this free, and holds
+    /// off just the same when free space cannot be read. A year of bodies is
+    /// the largest thing this daemon writes, and a full disk fails the LIVE
+    /// ingest, not the walk. 0 turns the check off.
+    /// Env: SQUELCH_ARCHIVE_MIN_FREE_MB.
+    pub archive_min_free_mb: u64,
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
     pub poll_secs: u64,
@@ -303,6 +317,7 @@ impl Default for SyncConfig {
             gmail_quota_profile: GmailQuotaProfile::Standard,
             backfill_days: 30,
             archive_days: 365,
+            archive_min_free_mb: 2048,
             poll_secs: 5,
             fetch_concurrency: 2,
             spam_max: 200,
@@ -1962,6 +1977,20 @@ impl Config {
         }
         env_override("SQUELCH_BACKFILL_DAYS", &mut self.sync.backfill_days);
         env_override("SQUELCH_ARCHIVE_DAYS", &mut self.sync.archive_days);
+        // AFTER the env, so the bound holds whichever of the file and the
+        // environment supplied the number.
+        if self.sync.archive_days > ARCHIVE_DAYS_MAX {
+            eprintln!(
+                "squelch: config sync.archive_days={} is past the {ARCHIVE_DAYS_MAX}-day limit; \
+                 clamping to {ARCHIVE_DAYS_MAX}",
+                self.sync.archive_days
+            );
+            self.sync.archive_days = ARCHIVE_DAYS_MAX;
+        }
+        env_override(
+            "SQUELCH_ARCHIVE_MIN_FREE_MB",
+            &mut self.sync.archive_min_free_mb,
+        );
         env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
         env_override(
             "SQUELCH_FETCH_CONCURRENCY",
@@ -2530,6 +2559,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.sync.backfill_days, 30);
         assert_eq!(c.sync.archive_days, 365);
+        assert_eq!(c.sync.archive_min_free_mb, 2048);
         assert_eq!(c.sync.poll_secs, 5);
         assert_eq!(c.sync.fetch_concurrency, 2);
         assert!(c.client_id.is_none());
@@ -2974,6 +3004,37 @@ archive_days = 730
             std::env::remove_var("SQUELCH_BACKFILL_DAYS");
             std::env::remove_var("SQUELCH_ARCHIVE_DAYS");
         }
+    }
+
+    /// AN ABSURD ARCHIVE DEPTH IS CLAMPED AT LOAD, from the file and from the
+    /// environment alike, so no caller downstream does date arithmetic on it.
+    #[test]
+    fn archive_days_is_clamped_at_load_and_the_disk_floor_reads_its_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut c = Config::default();
+        c.sync.archive_days = u32::MAX;
+        c.apply_env_overrides();
+        assert_eq!(c.sync.archive_days, ARCHIVE_DAYS_MAX);
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            std::env::set_var("SQUELCH_ARCHIVE_DAYS", "4000000000");
+            std::env::set_var("SQUELCH_ARCHIVE_MIN_FREE_MB", "512");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("SQUELCH_ARCHIVE_DAYS");
+            std::env::remove_var("SQUELCH_ARCHIVE_MIN_FREE_MB");
+        }
+        assert_eq!(c.sync.archive_days, ARCHIVE_DAYS_MAX);
+        assert_eq!(c.sync.archive_min_free_mb, 512);
+        let mut c = Config::default();
+        c.sync.archive_days = ARCHIVE_DAYS_MAX;
+        c.apply_env_overrides();
+        assert_eq!(
+            c.sync.archive_days, ARCHIVE_DAYS_MAX,
+            "the limit itself stands"
+        );
     }
 
     /// The pin itself. The default model is the full fp32 `model_code`, not the

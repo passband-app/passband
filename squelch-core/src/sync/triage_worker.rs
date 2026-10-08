@@ -254,7 +254,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             return false;
         }
         let day = Utc::now().format("%Y-%m-%d").to_string();
-        let since = Utc::now() - ChronoDuration::days(self.config.sync.backfill_days as i64);
+        // The one definition of the history window, shared with the backfill
+        // and the blank-body heal, so `sync.archive_days` cannot reach it.
+        let since = self.backfill_since();
         if let Err(error) = self.store.initialize_agent_cutover(self.account_id, since) {
             eprintln!("squelch: triage cutover could not queue historical work: {error}");
             return false;

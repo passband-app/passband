@@ -122,6 +122,30 @@ fn migrate_adds_is_archive_zero_to_a_preexisting_messages_table() {
 }
 
 #[test]
+fn migrate_adds_the_forward_edge_null_to_a_preexisting_walk_cursor() {
+    // A database that walked before the forward pass existed: the cursor row
+    // keeps its backward edge and gains a NULL forward one.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE archive_walk(
+             account_id INTEGER PRIMARY KEY, walked_to TEXT NOT NULL, updated_at TEXT NOT NULL);
+         INSERT INTO archive_walk VALUES (1, '2026-01-01T00:00:00+00:00', '2026-01-02T00:00:00+00:00');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let (walked_to, covered_to): (String, Option<String>) = conn
+        .query_row(
+            "SELECT walked_to, covered_to FROM archive_walk WHERE account_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(walked_to, "2026-01-01T00:00:00+00:00");
+    assert_eq!(covered_to, None);
+}
+
+#[test]
 fn migrate_adds_date_offset_null_and_its_partial_index_to_a_preexisting_messages_table() {
     // An install predating the timezone capture. The column arrives NULL on
     // every old row (the raw mail is gone, so nothing can fill it locally),

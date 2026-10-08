@@ -917,6 +917,22 @@ impl Store for SqliteStore {
         self.set_archive_walked_to(account_id, walked_to)
     }
 
+    fn free_disk_bytes(&self) -> Result<u64> {
+        self.free_disk_bytes()
+    }
+
+    fn archive_covered_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        self.archive_covered_to(account_id)
+    }
+
+    fn set_archive_covered_to(
+        &self,
+        account_id: AccountId,
+        covered_to: DateTime<Utc>,
+    ) -> Result<()> {
+        self.set_archive_covered_to(account_id, covered_to)
+    }
+
     fn stored_gmail_msg_ids(
         &self,
         account_id: AccountId,

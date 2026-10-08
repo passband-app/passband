@@ -12,6 +12,30 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.14 (2026-10-08)
+
+Hands Free
+
+### Mac
+
+- **Login codes come to you.** A sign-in code floats over the app you are in. Copy it without opening Passband
+- **Agent MCP can write.** Your agent drafts, you send. Choose how much it may do in Settings, under Agents
+- **Smart unsubscribe.** `u` now gets through preference pages and forms on its own
+- Profile photo
+- Delete drafts
+- Better reply composer
+- Better toasts
+- Muse support
+- UX improvements
+- Bug fixes
+
+### Daemon
+
+- Reads PINs and passcodes as login codes
+- Lets your agent draft and send, when you allow it
+- Finishes unsubscribes that need a form
+- Bug fixes
+
 ## 0.0.13 (2026-10-05)
 
 Cleanup Time

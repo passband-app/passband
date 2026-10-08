@@ -23,6 +23,9 @@ extension ReleaseVignette {
         case .unsubscribe: UnsubscribeScene.self
         case .clearStack: ClearStackScene.self
         case .smartBlock: SmartBlockScene.self
+        case .loginCode: LoginCodeScene.self
+        case .agentWrite: AgentWriteScene.self
+        case .smartUnsubscribe: SmartUnsubscribeScene.self
         case .agentSession: nil
         }
     }
@@ -843,4 +846,28 @@ enum SmartBlockScene: VignetteDrawing {
                 actor ? (pressed > 0.5 ? Color.white : VignettePalette.phosphorHot) : VignettePalette.dim)
         }
     }
+}
+
+// MARK: - login code
+
+/// NOT DRAWN YET.
+enum LoginCodeScene: VignetteDrawing {
+    static let posterTime: Double = 0
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {}
+}
+
+// MARK: - agent write
+
+/// NOT DRAWN YET.
+enum AgentWriteScene: VignetteDrawing {
+    static let posterTime: Double = 0
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {}
+}
+
+// MARK: - smart unsubscribe
+
+/// NOT DRAWN YET.
+enum SmartUnsubscribeScene: VignetteDrawing {
+    static let posterTime: Double = 0
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {}
 }

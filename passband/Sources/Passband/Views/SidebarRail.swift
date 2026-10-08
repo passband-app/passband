@@ -1,7 +1,8 @@
-// SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// digit keys, with Calendar second when it is offered (2, and every later page
-// one higher; see `MainView.railViews`); Update + Usage + Settings sit below a
-// divider, out of that sequence so adding one never renumbers it. The discovery
+// SIDEBAR — the slim icon rail: Sitrep / Emails / Auth on the digit keys, with
+// Calendar second when it is offered (2, and every later page one higher; see
+// `MainView.railViews`). Rules and Groups left for Settings. Update + Usage +
+// Settings sit below a divider, out of that sequence so adding one never
+// renumbers it. The discovery
 // ring sits just ABOVE that divider, alone after the spacer: a real destination
 // with no number key, its RailButton drawing the ring where the others draw a
 // symbol. ONE long-lived pane behind the icons is the selector, moved by

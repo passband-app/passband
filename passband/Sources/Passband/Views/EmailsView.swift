@@ -861,7 +861,7 @@ struct EmailsView: View {
                 Task { await Actions.notSpam(u, via: .key, on: .emails) }
             },
             KeyBinding("a", "browse all") { store.openSide(.browse) },
-            KeyBinding("T", "rules") { store.setView(.rules) },
+            KeyBinding("T", "rules") { store.openSettings(.rules) },
             // The audit log is a settings pane now, so `A` opens Settings ON
             // it rather than a routed page of its own.
             KeyBinding("A", "audit log") { store.openSettings(.audit) },

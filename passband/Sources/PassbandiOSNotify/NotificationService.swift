@@ -36,20 +36,17 @@ struct PushRoute {
     }
 }
 
-/// Main-actor isolated in full, because the fetch and the expiry timer race for
-/// the same one-shot handler and something has to serialize them.
-///
-/// The isolation ASSUMES what Apple's own extension template assumes: both
-/// callbacks arrive on this process's main queue. The SDK does not annotate
-/// `UNNotificationServiceExtension` to say so, but the template mutates two
-/// stored properties from both callbacks with no locking of its own, which is
-/// only sound on that reading. Stated here because it is an assumption, not a
-/// checked fact.
-@MainActor
-final class NotificationService: UNNotificationServiceExtension {
+/// NOT main-actor isolated. The fetch and the expiry timer race for the same
+/// one-shot handler, and an earlier version serialized them by isolating the
+/// whole class to the main actor — on the ASSUMPTION that the system calls both
+/// callbacks on the main queue. Nothing documents that, and under Swift 6 an
+/// isolated override called from anywhere else is a runtime trap: the extension
+/// dies, and the system delivers the relay's generic alert in its place. A
+/// lock makes no assumption about threads at all, so the shared state lives
+/// behind one, which is also what `@unchecked Sendable` is promising.
+final class NotificationService: UNNotificationServiceExtension, @unchecked Sendable {
     /// STATIC, so the two fetches below can be static too. See the launch
-    /// site: they run as concurrent children and this object is a
-    /// main-actor class, so anything they touch has to not be `self`.
+    /// site: they run as concurrent children and need nothing of `self`.
     private nonisolated(unsafe) static let session = Sessions.ephemeral(
         timeout: 10, resource: 20,
         cachePolicy: .reloadIgnoringLocalCacheData, emptyHeaders: true)
@@ -77,7 +74,8 @@ final class NotificationService: UNNotificationServiceExtension {
     /// Held so `serviceExtensionTimeWillExpire` can still answer: the system
     /// kills this process if nothing calls the handler, and a killed extension
     /// delivers the original push anyway — but only after making the human wait
-    /// for the timeout.
+    /// for the timeout. All three are read and written under `lock` only.
+    private let lock = NSLock()
     private var handler: ((UNNotificationContent) -> Void)?
     private var original: UNNotificationContent?
     private var work: Task<Void, Never>?
@@ -86,22 +84,19 @@ final class NotificationService: UNNotificationServiceExtension {
         _ request: UNNotificationRequest,
         withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
-        handler = contentHandler
-        original = request.content
+        lock.withLock {
+            handler = contentHandler
+            original = request.content
+        }
 
         guard let route = PushRoute(userInfo: request.content.userInfo) else {
             return deliver(request.content)
         }
-        work = Task { @MainActor [weak self] in
-            guard let self else { return }
+        let task = Task { [weak self] in
             // BOTH CALLS AT ONCE, because there is one timeout for the pair.
-            // `async let` spawns a CONCURRENT child, which is why both
-            // fetches are STATIC: this is a main-actor class and not Sendable,
-            // so a child task that captured `self` — even to call a nonisolated
-            // method on it — would be sending it across. Neither call needs the
-            // instance anyway; each is a keychain read, a request and a decode.
-            // The handler and the expiry timer, which is what the isolation is
-            // actually for, stay up here where the results land.
+            // Both fetches are STATIC: neither needs the instance, and a child
+            // task that captured it would have nothing to gain. Each is a
+            // keychain read, a request and a decode.
             // The banner's own fetch and the badge's are independent questions
             // to the same daemon, and running them back to back would spend two
             // round trips out of the seconds this process gets — enough, on a
@@ -110,12 +105,18 @@ final class NotificationService: UNNotificationServiceExtension {
             async let banner = Self.fetch(route)
             async let due = Self.dueToday(route)
             let (event, count) = await (banner, due)
+            guard let self else { return }
             guard let event else {
-                return self.deliver(Self.badged(request.content, count: count))
+                // The push's own content, read back from where it was stored
+                // rather than captured: it is not Sendable, and this task is
+                // not on the thread that received it.
+                guard let fallback = self.lock.withLock({ self.original }) else { return }
+                return self.deliver(Self.badged(fallback, count: count))
             }
             self.deliver(
                 Self.badged(Self.content(for: event, accountId: route.accountId), count: count))
         }
+        lock.withLock { work = task }
     }
 
     /// The app icon's number, stamped onto whatever banner is about to go out.
@@ -186,16 +187,21 @@ final class NotificationService: UNNotificationServiceExtension {
     /// Out of time. Whatever the fetch was doing, the original alert goes out
     /// now — this is the fallback the relay's generic copy exists for.
     override func serviceExtensionTimeWillExpire() {
-        work?.cancel()
+        let (task, original) = lock.withLock { (work, self.original) }
+        task?.cancel()
         if let original { deliver(original) }
     }
 
     /// Call the system's handler at most once. Both the fetch and the expiry
-    /// path can reach here, and the second call is a crash in some OS versions.
+    /// path can reach here, possibly on different threads, and the second call
+    /// is a crash in some OS versions. The handler is taken under the lock and
+    /// called outside it.
     private func deliver(_ content: UNNotificationContent) {
-        guard let handler else { return }
-        self.handler = nil
-        handler(content)
+        let handler = lock.withLock { () -> ((UNNotificationContent) -> Void)? in
+            defer { self.handler = nil }
+            return self.handler
+        }
+        handler?(content)
     }
 
     /// Ask THIS account's daemon what the event was. The bearer comes from the

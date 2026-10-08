@@ -63,23 +63,44 @@ enum Keychain {
         return value
     }
 
-    /// Upsert one generic-password slot.
-    static func write(account: String, value: String, service: String = keychainService) throws {
+    /// Upsert one generic-password slot. `accessible` is the protection class
+    /// a NEW item gets; on iOS an update re-asserts it too, so a slot written
+    /// under an older class moves to the one its writer asks for now.
+    static func write(
+        account: String, value: String, service: String = keychainService,
+        accessible: CFString = kSecAttrAccessibleWhenUnlocked
+    ) throws {
         let base = baseQuery(account: account, service: service)
         let data = Data(value.utf8)
+        var changes: [String: Any] = [kSecValueData as String: data]
+        #if os(iOS)
+            changes[kSecAttrAccessible as String] = accessible
+        #endif
         // Try update first (the common path after first run).
-        let update = SecItemUpdate(
-            base as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        let update = SecItemUpdate(base as CFDictionary, changes as CFDictionary)
         if update == errSecSuccess { return }
         if update == errSecItemNotFound {
             var add = base
             add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+            add[kSecAttrAccessible as String] = accessible
             let status = SecItemAdd(add as CFDictionary, nil)
             guard status == errSecSuccess else { throw KeychainError.write(status) }
             return
         }
         throw KeychainError.write(update)
+    }
+
+    /// Move an existing slot to another protection class without touching its
+    /// value. A missing entry is a no-op; any other failure throws.
+    static func setAccessible(
+        _ accessible: CFString, account: String, service: String = keychainService
+    ) throws {
+        let status = SecItemUpdate(
+            baseQuery(account: account, service: service) as CFDictionary,
+            [kSecAttrAccessible as String: accessible] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError.write(status)
+        }
     }
 
     /// Remove one slot entirely. A missing entry is a no-op.
@@ -138,17 +159,45 @@ enum SettingsStore {
         return ConnectionSettings(serverURL: url, apiToken: token)
     }
 
+    /// The protection class of the two connection slots.
+    ///
+    /// AFTER FIRST UNLOCK, NOT WHEN UNLOCKED, because the notification
+    /// extension reads these slots when a push lands — and a push lands on a
+    /// locked phone more often than not. Under `WhenUnlocked` every one of those
+    /// reads failed, the extension fell back to the relay's content-free alert,
+    /// and a locked phone only ever showed "New mail surfaced". This class keeps
+    /// the slots sealed from boot until the first unlock, and never syncs them
+    /// off the device (no `kSecAttrSynchronizable` is set anywhere here). The
+    /// BYOK assistant key does not use it: nothing in the background needs it.
+    static var accessible: CFString { kSecAttrAccessibleAfterFirstUnlock }
+
     /// The safe entry point: runs the (possibly prompting) read on a background
     /// executor so the UI keeps painting.
+    ///
+    /// On iOS a successful read also moves both slots to `accessible`, which is
+    /// how an install that saved its credentials under the old class gets
+    /// upgraded without asking anyone to sign in again. Idempotent and cheap;
+    /// a failure leaves the old class in place and is not worth surfacing.
     static func loadAsync(accountId: UUID) async -> Result<ConnectionSettings?, Error> {
-        await offMain { Result { try load(accountId: accountId) } }
+        await offMain {
+            let result = Result { try load(accountId: accountId) }
+            #if os(iOS)
+                if case .success(.some) = result {
+                    try? Keychain.setAccessible(accessible, account: urlSlot(accountId))
+                    try? Keychain.setAccessible(accessible, account: tokenSlot(accountId))
+                }
+            #endif
+            return result
+        }
     }
 
     /// Persist one account's settings into the OS keychain. The token never
     /// touches disk or logs.
     static func save(_ settings: ConnectionSettings, accountId: UUID) throws {
-        try Keychain.write(account: urlSlot(accountId), value: settings.serverURL)
-        try Keychain.write(account: tokenSlot(accountId), value: settings.apiToken)
+        try Keychain.write(
+            account: urlSlot(accountId), value: settings.serverURL, accessible: accessible)
+        try Keychain.write(
+            account: tokenSlot(accountId), value: settings.apiToken, accessible: accessible)
     }
 
     /// Off-main-actor write, for the same reason as `loadAsync`.

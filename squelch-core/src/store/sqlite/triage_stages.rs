@@ -399,7 +399,10 @@ impl SqliteStore {
                     "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.received_at>=?2
                      AND NOT ",
                     own_mail_sql!(),
-                    " AND m.is_spam=0"
+                    // A window never reaches into the archive, however many
+                    // days it names: that mail was stored on the promise that
+                    // no model reads it unasked. One named message still may.
+                    " AND m.is_spam=0 AND m.is_archive=0"
                 ))?;
                 stmt.query_map(params![account_id, cutoff], |row| row.get::<_, i64>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?
@@ -1388,7 +1391,8 @@ impl SqliteStore {
         let conn = self.lock()?;
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages
-             WHERE account_id = ?1 AND is_sent = 0 AND is_spam = 0 AND received_at >= ?2",
+             WHERE account_id = ?1 AND is_sent = 0 AND is_spam = 0 AND is_archive = 0
+               AND received_at >= ?2",
             params![account_id, since.to_rfc3339()],
             |r| r.get(0),
         )?;

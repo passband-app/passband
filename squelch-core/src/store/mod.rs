@@ -2028,6 +2028,37 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         scope: HealScope,
     ) -> Result<Option<i64>>;
 
+    /// [`Store::ingest_message`] for the ARCHIVE WALK: mail older than the
+    /// backfill window, stored to be found and for nothing else. INSERT-ONLY:
+    /// a message the store already holds, live or archive, is left exactly as
+    /// it is and the answer is `Ok(None)`.
+    ///
+    /// The row is marked `is_archive`, which is never changed afterwards (a
+    /// later [`Store::ingest_message`] of the same id is a no-op that returns
+    /// the stored id). It carries a neutral triage row with the same `n/a`
+    /// stage markers sent mail has and no notify stamp, its text is indexed
+    /// and its attachments stored, and its agent state is written at revision
+    /// 1 with access pending and NO job: no model reads it until an agent-door
+    /// caller explicitly surfaces it. Contacts, the unsubscribe ledger and
+    /// timezone observations are not touched.
+    fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>>;
+
+    /// The archive walk's cursor: the oldest instant the walk has fully
+    /// covered, or `None` before its first chunk.
+    fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
+    /// Persist the archive walk's cursor after a fully ingested chunk.
+    fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()>;
+
+    /// Which of `gmail_msg_ids` this account already stores, in any tier. The
+    /// walk lists a chunk and fetches only what this does not return, so a
+    /// re-listed chunk costs no `messages.get`.
+    fn stored_gmail_msg_ids(
+        &self,
+        account_id: AccountId,
+        gmail_msg_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>>;
+
     /// True if `addr` appears in this account's Sent-derived contacts (the
     /// "people I know" signal the sync engine feeds to Stage-1).
     fn is_known_contact(&self, account_id: AccountId, addr: &str) -> Result<bool>;

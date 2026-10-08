@@ -138,6 +138,11 @@ enum IngestOrigin {
     Backfill,
     /// A history walk or a catch-up re-scan: mail that may be genuinely new.
     Incremental,
+    /// The archive walk: mail older than the backfill window, stored to be
+    /// found and for nothing else. Silent like a backfill, and beyond that it
+    /// queues no model work, wakes no lane and moves no catch-up gauge (see
+    /// [`Store::ingest_archive_message`]).
+    Archive,
 }
 
 /// Persisted message and optional local embedding input. Provider spam is
@@ -2405,7 +2410,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // rather than every message: enough to prove movement in a log
             // somebody is tailing, few enough not to bury the lines that mean
             // something.
-            if let Some((_, total)) = self.metrics.catchup_progress() {
+            //
+            // Not for the archive walk, which runs beside a catch-up's
+            // aftermath and is no part of its denominator.
+            if origin != IngestOrigin::Archive
+                && let Some((_, total)) = self.metrics.catchup_progress()
+            {
                 let done = self.metrics.catchup_step();
                 if done.is_multiple_of(50) {
                     eprintln!("squelch: catch-up {done}/{total} messages");
@@ -2508,7 +2518,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // Not for spam: those rows queue no agent work, so a poke per spam
             // row is a round that claims nothing, two hundred times over when
             // somebody opens the Spam page.
-            if !mailbox.is_spam() {
+            //
+            // Nor for the archive, for the same reason at a larger scale: a
+            // year of rows that queue nothing.
+            if !mailbox.is_spam() && origin != IngestOrigin::Archive {
                 self.refine_wake.notify_one();
             }
         }
@@ -2552,7 +2565,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         triaged.foreground_triage = origin == IngestOrigin::Incremental
             && !triaged.message.is_sent
             && !triaged.message.is_spam;
-        let id = self.store.ingest_message(&triaged)?;
+        let id = if origin == IngestOrigin::Archive {
+            // Insert-only: an id the store already holds is left as it is, and
+            // there is nothing to embed for a row this call did not write.
+            let Some(id) = self.store.ingest_archive_message(&triaged)? else {
+                return Ok(None);
+            };
+            id
+        } else {
+            self.store.ingest_message(&triaged)?
+        };
         // Embeddings are internal evidence. Agent search separately checks the
         // current access assessment before releasing results.
         let embed_text = if triaged.message.is_spam {
@@ -6371,6 +6393,73 @@ mod tests {
         assert!(
             poked().await.is_err(),
             "the permit was consumed by the wait above; Notify holds exactly one"
+        );
+    }
+
+    /// THE ARCHIVE ORIGIN, through the engine: the row lands as archive with no
+    /// work behind it, the refine lane is not woken for it, a catch-up's gauge
+    /// does not count it, and a second sighting of the same id ingests nothing.
+    #[tokio::test]
+    async fn an_archive_ingest_wakes_no_lane_moves_no_gauge_and_queues_no_work() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.body("g-old", alert_eml(Utc::now()));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        // A catch-up is under way, as it may be when the walk's batch lands.
+        eng.metrics.catchup_begin(10);
+
+        let n = eng
+            .fetch_raw_and_ingest(
+                &["g-old".to_string()],
+                Mailbox::Inbox,
+                IngestOrigin::Archive,
+                GmailRetry::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, eng.refine_wake.notified())
+                .await
+                .is_err(),
+            "an archive row queues nothing, so there is nothing to wake for"
+        );
+        assert_eq!(eng.metrics.catchup_progress(), Some((0, 10)));
+        assert_eq!(
+            store
+                .stored_gmail_msg_ids(acct, &["g-old".to_string()])
+                .unwrap()
+                .len(),
+            1
+        );
+        // Fresh by its Date, on a path that is not Backfill: still no stamp,
+        // no job, no notification.
+        assert!(
+            store
+                .claim_agent_job(acct, "investigation", Utc::now(), 120)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .claim_agent_job(acct, "notification", Utc::now(), 120)
+                .unwrap()
+                .is_none()
+        );
+
+        // The same id again is counted as handled and writes nothing.
+        let raw = "From: alice@example.com\r\nSubject: Note\r\n\r\nHello";
+        assert!(
+            eng.ingest_one(
+                &fixture(acct, "g-old", raw, false),
+                &[],
+                Utc::now(),
+                IngestOrigin::Archive,
+            )
+            .unwrap()
+            .is_none()
         );
     }
 

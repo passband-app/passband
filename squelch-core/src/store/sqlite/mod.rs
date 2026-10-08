@@ -882,6 +882,26 @@ impl Store for SqliteStore {
         self.ingest_message_fresh(triaged, scope)
     }
 
+    fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>> {
+        self.ingest_archive_message(triaged)
+    }
+
+    fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        self.archive_walked_to(account_id)
+    }
+
+    fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()> {
+        self.set_archive_walked_to(account_id, walked_to)
+    }
+
+    fn stored_gmail_msg_ids(
+        &self,
+        account_id: AccountId,
+        gmail_msg_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        self.stored_gmail_msg_ids(account_id, gmail_msg_ids)
+    }
+
     fn is_known_contact(&self, account_id: AccountId, addr: &str) -> Result<bool> {
         self.is_known_contact(account_id, addr)
     }

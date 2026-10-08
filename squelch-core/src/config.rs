@@ -250,6 +250,13 @@ pub struct SyncConfig {
     pub gmail_quota_profile: GmailQuotaProfile,
     /// How many days of history to backfill on the initial sync.
     pub backfill_days: u32,
+    /// HOW FAR BACK THE ARCHIVE REACHES, in days: mail this old is fetched once
+    /// by a slow background walk and stored findable by search and openable in
+    /// the reader, with no model call at ingest. It is its own window and moves
+    /// none of the others: triage cutover, the blank-body heal, the spam page
+    /// and catch-up all keep reading `backfill_days`. Raising it resumes the
+    /// walk; 0 turns the archive off. Env: SQUELCH_ARCHIVE_DAYS.
+    pub archive_days: u32,
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
     pub poll_secs: u64,
@@ -295,6 +302,7 @@ impl Default for SyncConfig {
         Self {
             gmail_quota_profile: GmailQuotaProfile::Standard,
             backfill_days: 30,
+            archive_days: 365,
             poll_secs: 5,
             fetch_concurrency: 2,
             spam_max: 200,
@@ -1953,6 +1961,7 @@ impl Config {
             self.account_email = Some(v);
         }
         env_override("SQUELCH_BACKFILL_DAYS", &mut self.sync.backfill_days);
+        env_override("SQUELCH_ARCHIVE_DAYS", &mut self.sync.archive_days);
         env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
         env_override(
             "SQUELCH_FETCH_CONCURRENCY",
@@ -2520,6 +2529,7 @@ mod tests {
     fn sync_defaults_are_sane() {
         let c = Config::default();
         assert_eq!(c.sync.backfill_days, 30);
+        assert_eq!(c.sync.archive_days, 365);
         assert_eq!(c.sync.poll_secs, 5);
         assert_eq!(c.sync.fetch_concurrency, 2);
         assert!(c.client_id.is_none());
@@ -2679,6 +2689,7 @@ db_path = "/tmp/squelch.db"
 
 [sync]
 backfill_days = 90
+archive_days = 730
 "#,
         )
         .unwrap();
@@ -2690,6 +2701,7 @@ backfill_days = 90
         assert_eq!(c.account_email.as_deref(), Some("you@gmail.com"));
         assert_eq!(c.db_path, PathBuf::from("/tmp/squelch.db"));
         assert_eq!(c.sync.backfill_days, 90);
+        assert_eq!(c.sync.archive_days, 730);
         // unspecified sync field falls back to default
         assert_eq!(c.sync.poll_secs, 5);
         std::fs::remove_dir_all(&dir).ok();
@@ -2947,6 +2959,7 @@ backfill_days = 90
         unsafe {
             std::env::set_var("SQUELCH_CLIENT_ID", "env-id");
             std::env::set_var("SQUELCH_BACKFILL_DAYS", "7");
+            std::env::set_var("SQUELCH_ARCHIVE_DAYS", "0");
         }
         let mut c = Config {
             client_id: Some("file-id".to_string()),
@@ -2955,9 +2968,11 @@ backfill_days = 90
         c.apply_env_overrides();
         assert_eq!(c.client_id.as_deref(), Some("env-id"));
         assert_eq!(c.sync.backfill_days, 7);
+        assert_eq!(c.sync.archive_days, 0, "0 is the off switch, not a default");
         unsafe {
             std::env::remove_var("SQUELCH_CLIENT_ID");
             std::env::remove_var("SQUELCH_BACKFILL_DAYS");
+            std::env::remove_var("SQUELCH_ARCHIVE_DAYS");
         }
     }
 

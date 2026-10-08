@@ -773,8 +773,13 @@ impl SqliteStore {
     }
 
     pub(super) fn ingest_message(&self, triaged: &TriagedMessage) -> Result<i64> {
-        self.ingest_message_inner(triaged, None)
+        self.ingest_message_inner(triaged, None, false)
             .map(|id| id.expect("a plain ingest never refuses"))
+    }
+
+    /// See [`crate::store::Store::ingest_archive_message`].
+    pub(super) fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>> {
+        self.ingest_message_inner(triaged, None, true)
     }
 
     /// See [`crate::store::Store::ingest_message_fresh`].
@@ -783,7 +788,7 @@ impl SqliteStore {
         triaged: &TriagedMessage,
         scope: HealScope,
     ) -> Result<Option<i64>> {
-        self.ingest_message_inner(triaged, Some(scope))
+        self.ingest_message_inner(triaged, Some(scope), false)
     }
 
     /// The one ingest write. `heal` is the blank-body heal's flavour: refuse
@@ -792,13 +797,44 @@ impl SqliteStore {
     /// agent job the scope asks for rather than the one the sync origin would.
     /// Everything else — the body replacement, the content-revision bump and
     /// the access reset that follows it — is what a re-ingest already does.
+    ///
+    /// `archive` is the archive walk's flavour: insert-only, a neutral triage
+    /// row like sent mail's, an agent state row with no job behind it, and none
+    /// of the side effects an arrival has (contacts, the unsubscribe ledger,
+    /// timezone observations).
     fn ingest_message_inner(
         &self,
         triaged: &TriagedMessage,
         heal: Option<HealScope>,
+        archive: bool,
     ) -> Result<Option<i64>> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
+
+        // 00. ARCHIVE ROWS ARE WRITE-ONCE, in both directions, and this is the
+        //     one place that enforces it. An archive ingest of an id the store
+        //     already holds (live or archive) writes nothing: the walk re-lists
+        //     a chunk after a crash, and a live row must never be demoted. A
+        //     live sighting of an archive row (a catch-up or history overlap at
+        //     the window's edge) writes nothing either, and hands back the row
+        //     it found: promoting it here would bump its revision and queue a
+        //     model call nobody asked for, which is the one thing the tier
+        //     exists to prevent. A heal refuses it like any row it may not
+        //     touch.
+        let stored: Option<(i64, bool)> = tx
+            .query_row(
+                "SELECT id, is_archive FROM messages
+                 WHERE account_id = ?1 AND gmail_msg_id = ?2",
+                params![triaged.message.account_id, triaged.message.gmail_msg_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match stored {
+            Some(_) if archive => return Ok(None),
+            Some((_, true)) if heal.is_some() => return Ok(None),
+            Some((id, true)) => return Ok(Some(id)),
+            _ => {}
+        }
 
         // 0. HEAL PRE-CHECK, on the LIVE row inside the transaction. The sweep
         //    snapshotted its candidates minutes or hours ago; the on-demand spam
@@ -824,8 +860,22 @@ impl SqliteStore {
             }
         }
 
-        // 1. Upsert the message row (+ FTS).
-        let id = upsert_message_conn(&tx, &triaged.message, triaged.date_offset_minutes)?;
+        // 1. Upsert the message row (+ FTS). An archive row keeps no Date
+        //    offset: that column IS the timezone observation (`sqlite::zones`
+        //    counts it by query), and a year of old mail must not vote on where
+        //    a correspondent is now. The flag is set here, inside the insert's
+        //    own transaction, and by nothing else ever.
+        let id = upsert_message_conn(
+            &tx,
+            &triaged.message,
+            triaged.date_offset_minutes.filter(|_| !archive),
+        )?;
+        if archive {
+            tx.execute(
+                "UPDATE messages SET is_archive = 1 WHERE account_id = ?1 AND id = ?2",
+                params![triaged.message.account_id, id],
+            )?;
+        }
 
         // 1a. HEAL: the vector was computed from the text the row had, which
         //     was the subject alone; drop it so the vector backfill re-embeds
@@ -837,13 +887,18 @@ impl SqliteStore {
             )?;
         }
 
-        // 1b. Contacts from Sent-mail To/Cc, in the SAME transaction.
-        seed_contacts_conn(
-            &tx,
-            triaged.message.account_id,
-            &triaged.recipients,
-            &triaged.message.received_at.to_rfc3339(),
-        )?;
+        // 1b. Contacts from Sent-mail To/Cc, in the SAME transaction. Not from
+        //     the archive: a contact is "someone I write to", read by triage as
+        //     a live signal, and the walk arriving at 2025 must not re-rank
+        //     this week's mail.
+        if !archive {
+            seed_contacts_conn(
+                &tx,
+                triaged.message.account_id,
+                &triaged.recipients,
+                &triaged.message.received_at.to_rfc3339(),
+            )?;
+        }
 
         // 1b'. THE NORMALIZED RECIPIENT INDEX, from the FAITHFUL address set
         //      rather than the contact-filtered one beside it, and in the same
@@ -867,12 +922,14 @@ impl SqliteStore {
         //       when there is anything to learn. Under its own savepoint, so a
         //       failure costs the zone and not the message (see
         //       `zones::guarded` for the one exception).
-        super::zones::observe_guarded(
-            &tx,
-            triaged.message.account_id,
-            id,
-            triaged.invite_zone.as_ref(),
-        )?;
+        if !archive {
+            super::zones::observe_guarded(
+                &tx,
+                triaged.message.account_id,
+                id,
+                triaged.invite_zone.as_ref(),
+            )?;
+        }
 
         // 1c. UNSUBSCRIBE VIOLATION LEDGER: inbound mail from a sender the user
         //     unsubscribed from, past the 72h grace, bumps that sender's
@@ -880,7 +937,9 @@ impl SqliteStore {
         //     the ledger cannot drift from the mail that drives it.
         //     NOT on a heal: the message was counted when it arrived, and the
         //     bump is a blind `+ 1` with no idempotency key.
-        if !triaged.message.is_sent && heal.is_none() {
+        //     NOT for the archive: it predates whatever the user has since
+        //     unsubscribed from, or was counted in its own day.
+        if !triaged.message.is_sent && heal.is_none() && !archive {
             bump_unsub_violation_conn(
                 &tx,
                 triaged.message.account_id,
@@ -936,6 +995,7 @@ impl SqliteStore {
             != Sensitivity::Normal
             || triaged.message.is_sent
             || triaged.message.is_spam
+            || archive
         {
             (Some("n/a"), 0)
         } else if triaged.matched_rule.is_some() && !triaged.confident {
@@ -984,6 +1044,7 @@ impl SqliteStore {
             && triaged.sensitivity == Sensitivity::Normal
             && !triaged.message.is_sent
             && !triaged.message.is_spam
+            && !archive
         {
             Some("pending")
         } else {
@@ -1073,7 +1134,11 @@ impl SqliteStore {
                 now_s,
                 field_reasons_json,
                 ship_extract_model,
-                triaged.notify_eligible_at.map(|t| t.to_rfc3339()),
+                // Never for the archive, whatever the caller stamped.
+                triaged
+                    .notify_eligible_at
+                    .filter(|_| !archive)
+                    .map(|t| t.to_rfc3339()),
             ],
         )?;
 
@@ -1145,6 +1210,15 @@ impl SqliteStore {
         //    a background investigation of the re-read row, and the text-only
         //    scope queues an access reassessment alone (`source_access` is the
         //    trigger the store already resolves to an `access` job).
+        //
+        //    THE ARCHIVE GETS THE STATE ROW AND NO JOB: the same snapshot at
+        //    revision 1, access pending, so the agent door fails closed on it
+        //    and the first explicit surfacing has a revision to assess.
+        if archive {
+            super::agent_triage::seed_archive_state_conn(&tx, triaged.message.account_id, id)?;
+            tx.commit()?;
+            return Ok(Some(id));
+        }
         let trigger = match heal {
             None if triaged.foreground_triage => "ingest",
             None => "backfill",
@@ -1192,6 +1266,61 @@ impl SqliteStore {
             uidvalidity: uv as u32,
             last_uid: lu as u64,
         }))
+    }
+
+    pub(super) fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT walked_to FROM archive_walk WHERE account_id=?1",
+            params![account_id],
+            |r| dt(r, 0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub(super) fn set_archive_walked_to(
+        &self,
+        account_id: AccountId,
+        walked_to: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO archive_walk(account_id, walked_to, updated_at)
+             VALUES(?1,?2,?3)
+             ON CONFLICT(account_id) DO UPDATE SET
+                 walked_to=excluded.walked_to, updated_at=excluded.updated_at",
+            params![account_id, walked_to.to_rfc3339(), Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn stored_gmail_msg_ids(
+        &self,
+        account_id: AccountId,
+        gmail_msg_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        // Chunked well under SQLite's bound-variable limit (999 on old builds),
+        // with one slot kept for the account.
+        const CHUNK: usize = 500;
+        let conn = self.lock()?;
+        let mut stored = std::collections::HashSet::new();
+        for chunk in gmail_msg_ids.chunks(CHUNK) {
+            let placeholders = (2..chunk.len() + 2)
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT gmail_msg_id FROM messages
+                 WHERE account_id=?1 AND gmail_msg_id IN ({placeholders})"
+            ))?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&account_id];
+            binds.extend(chunk.iter().map(|id| id as &dyn rusqlite::ToSql));
+            for id in stmt.query_map(binds.as_slice(), |r| r.get::<_, String>(0))? {
+                stored.insert(id?);
+            }
+        }
+        Ok(stored)
     }
 
     pub(super) fn set_sync_state(
@@ -1522,6 +1651,7 @@ impl SqliteStore {
                AND m.body_html IS NOT NULL
                AND m.is_sent = 0
                AND m.is_spam = 0
+               AND m.is_archive = 0
                AND t.sensitivity = 'normal'
              ORDER BY m.id DESC
              LIMIT ?3",

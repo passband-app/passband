@@ -17,7 +17,7 @@ pub(crate) const SENDER_RULE_DIGEST_SQL: &str =
      JOIN triage t ON t.message_id = m.id
      WHERE m.account_id = ?1
        AND m.from_addr = ?2 COLLATE NOCASE
-       AND m.is_sent = 0 AND m.is_spam = 0
+       AND m.is_sent = 0 AND m.is_spam = 0 AND m.is_archive = 0
        AND t.sensitivity = 'normal'
      ORDER BY m.received_at DESC
      LIMIT ?3";

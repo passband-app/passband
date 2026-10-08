@@ -299,6 +299,11 @@ pub trait AgentTriageStore: Send + Sync {
     ) -> Result<Vec<AgentSourceSnapshot>>;
     fn agent_thread_context(&self, account: AccountId, thread: &str) -> Result<AgentContext>;
     fn agent_read_message(&self, account: AccountId, message: i64) -> Result<AgentMessage>;
+    /// [`Self::agent_read_message`] for the HUMAN door's message open, which
+    /// may read anything the account holds. It differs on archive mail only:
+    /// the row is returned (the triage agent's read answers `NotFound` for an
+    /// archive row nobody has asked about) and opening it queues nothing.
+    fn human_read_message(&self, account: AccountId, message: i64) -> Result<AgentMessage>;
     fn agent_read_thread(
         &self,
         account: AccountId,

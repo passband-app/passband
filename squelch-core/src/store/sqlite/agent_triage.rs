@@ -80,6 +80,44 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     .expect("serializable user state");
     Ok(message)
 }
+/// ARCHIVE MAIL IS NOT EVIDENCE UNTIL SOMEBODY ASKED FOR IT. True of every live
+/// row, and of an archive row only once an explicit surfacing has had it
+/// assessed as allowed, or while work that somebody explicitly queued for it is
+/// in flight (so that job can read its own message). Every read the triage
+/// agent's tools make carries this, and it is what keeps the tier free: a row
+/// the agent is never shown is a row [`ensure_source_assessments`] is never
+/// asked to assess. Written against the alias `m`.
+///
+/// A macro beside the `const` for the same reason `own_mail_sql!` is one:
+/// static SQL can `concat!` it.
+macro_rules! archive_evidence_sql {
+    () => {
+        "(m.is_archive=0 \
+         OR EXISTS(SELECT 1 FROM agent_message_state s WHERE s.account_id=m.account_id \
+             AND s.message_id=m.id AND s.access='allowed') \
+         OR EXISTS(SELECT 1 FROM agent_triage_jobs j WHERE j.account_id=m.account_id \
+             AND j.message_id=m.id AND j.kind IN ('triage','access') \
+             AND j.state IN ('queued','leased')))"
+    };
+}
+const ARCHIVE_EVIDENCE_SQL: &str = archive_evidence_sql!();
+
+/// [`read_message`] for the triage agent's evidence tools: an archive row
+/// nobody has asked about does not exist (see [`ARCHIVE_EVIDENCE_SQL`]).
+fn read_evidence_message(conn: &Connection, account: AccountId, id: i64) -> Result<AgentMessage> {
+    let readable: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM messages m
+             WHERE m.account_id=?1 AND m.id=?2 AND {ARCHIVE_EVIDENCE_SQL})"
+        ),
+        params![account, id],
+        |row| row.get(0),
+    )?;
+    if !readable {
+        return Err(CoreError::NotFound);
+    }
+    read_message(conn, account, id)
+}
 fn read_message(conn: &Connection, account: AccountId, id: i64) -> Result<AgentMessage> {
     conn.query_row(
         &format!(
@@ -110,9 +148,12 @@ fn read_thread(
     thread: &str,
     limit: usize,
 ) -> Result<Vec<AgentMessage>> {
+    // The thread as the triage agent sees it: old archive siblings nobody has
+    // asked about are absent, so a reply to a 2025 conversation does not buy
+    // an assessment of the whole of it.
     let mut stmt = conn.prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM messages m LEFT JOIN triage t ON t.message_id=m.id AND
-             t.account_id=m.account_id WHERE m.account_id=?1 AND m.thread_id=?2 ORDER BY m.received_at
-             DESC,m.id DESC LIMIT ?3"))?;
+             t.account_id=m.account_id WHERE m.account_id=?1 AND m.thread_id=?2 AND {ARCHIVE_EVIDENCE_SQL}
+             ORDER BY m.received_at DESC,m.id DESC LIMIT ?3"))?;
     let rows = stmt
         .query_map(
             params![account, thread, limit.min(1000) as i64],
@@ -587,6 +628,26 @@ fn release_followup(conn: &Connection, job: &AgentJob) -> Result<()> {
     Ok(())
 }
 
+/// The archive walk's half of [`enqueue_agent_triage_lane`]: the state row and
+/// nothing behind it. Same snapshot function, revision 1, access pending, so
+/// the row reads as unchanged to any later touch and stays closed to the agent
+/// door until something explicit asks for its assessment. Insert-only: the
+/// caller has just inserted the message, and a row that somehow has state keeps
+/// it.
+pub(crate) fn seed_archive_state_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<()> {
+    let snapshot = content_snapshot(&read_message(conn, account, message)?)?;
+    conn.execute(
+        "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,revision,access)
+             VALUES(?1,?2,?3,1,'pending') ON CONFLICT(account_id,message_id) DO NOTHING",
+        params![account, message, snapshot],
+    )?;
+    Ok(())
+}
+
 /// Call inside the message ingest transaction. Duplicate provider fetches leave
 /// revisions and notification eligibility untouched.
 pub(crate) fn enqueue_agent_triage_conn(
@@ -727,7 +788,9 @@ pub(crate) fn enqueue_agent_triage_lane(
                 concat!(
                     "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2 AND NOT ",
                     own_mail_sql!(),
-                    " AND m.is_spam=0
+                    // Never an archive row: a reply into an old conversation
+                    // re-evaluates live mail or nothing.
+                    " AND m.is_spam=0 AND m.is_archive=0
              ORDER BY m.received_at DESC,m.id DESC LIMIT 1"
                 ),
                 params![account, m.thread_id],
@@ -963,15 +1026,30 @@ pub(super) fn ensure_agent_source_ids_conn(
         .iter()
         .map(|id| read_message(conn, account, *id))
         .collect::<Result<Vec<_>>>()?;
-    ensure_source_assessments(conn, account, &messages)
+    // The one explicit caller: a thread somebody opened at the agent door.
+    ensure_source_assessments(conn, account, &messages, true)
 }
 
+/// `explicit` is whether a caller outside the daemon asked for these rows by
+/// name. Everything else (the triage agent's own evidence reads, a human
+/// opening a message) is unprompted, and unprompted work never assesses an
+/// archive row: that is a model call per message over a year of mail.
 fn ensure_source_assessments(
     conn: &Connection,
     account: AccountId,
     messages: &[AgentMessage],
+    explicit: bool,
 ) -> Result<()> {
     for message in messages {
+        if !explicit
+            && conn.query_row(
+                "SELECT is_archive FROM messages WHERE account_id=?1 AND id=?2",
+                params![account, message.id],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            continue;
+        }
         let access: Option<String> = conn
             .query_row(
                 "SELECT access FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
@@ -1775,9 +1853,9 @@ impl AgentTriageStore for SqliteStore {
         let conn = self.lock()?;
         let messages = ids
             .iter()
-            .map(|id| read_message(&conn, account, *id))
+            .map(|id| read_evidence_message(&conn, account, *id))
             .collect::<Result<Vec<_>>>()?;
-        ensure_source_assessments(&conn, account, &messages)?;
+        ensure_source_assessments(&conn, account, &messages, false)?;
         messages
             .into_iter()
             .map(|message| read_message(&conn, account, message.id).map(|m| m.source))
@@ -1788,7 +1866,9 @@ impl AgentTriageStore for SqliteStore {
         let id: i64 = conn
             .query_row(
                 concat!(
-                    "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2 ORDER BY
+                    "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2 AND ",
+                    archive_evidence_sql!(),
+                    " ORDER BY
              ",
                     own_mail_sql!(),
                     ",m.is_spam,m.received_at DESC,m.id DESC LIMIT 1"
@@ -1802,8 +1882,14 @@ impl AgentTriageStore for SqliteStore {
     }
     fn agent_read_message(&self, account: AccountId, message: i64) -> Result<AgentMessage> {
         let conn = self.lock()?;
+        let message = read_evidence_message(&conn, account, message)?;
+        ensure_source_assessments(&conn, account, std::slice::from_ref(&message), false)?;
+        read_message(&conn, account, message.id)
+    }
+    fn human_read_message(&self, account: AccountId, message: i64) -> Result<AgentMessage> {
+        let conn = self.lock()?;
         let message = read_message(&conn, account, message)?;
-        ensure_source_assessments(&conn, account, std::slice::from_ref(&message))?;
+        ensure_source_assessments(&conn, account, std::slice::from_ref(&message), false)?;
         read_message(&conn, account, message.id)
     }
     fn agent_read_thread(
@@ -1814,7 +1900,7 @@ impl AgentTriageStore for SqliteStore {
     ) -> Result<Vec<AgentMessage>> {
         let conn = self.lock()?;
         let messages = read_thread(&conn, account, thread, limit)?;
-        ensure_source_assessments(&conn, account, &messages)?;
+        ensure_source_assessments(&conn, account, &messages, false)?;
         read_thread(&conn, account, thread, limit)
     }
     fn agent_search_mail(
@@ -1832,6 +1918,7 @@ impl AgentTriageStore for SqliteStore {
             "SELECT {MESSAGE_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid
              LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              WHERE messages_fts MATCH ?2 AND m.account_id=?1 AND m.is_sent=0 AND m.is_spam=0
+               AND {ARCHIVE_EVIDENCE_SQL}
              ORDER BY bm25(messages_fts),m.received_at DESC,m.id DESC LIMIT ?3"
         ))?;
         let limit = limit.min(100);
@@ -1851,7 +1938,7 @@ impl AgentTriageStore for SqliteStore {
                 }
             }
         }
-        ensure_source_assessments(&conn, account, &rows)?;
+        ensure_source_assessments(&conn, account, &rows, false)?;
         rows.into_iter()
             .map(|message| read_message(&conn, account, message.id))
             .collect()
@@ -1866,12 +1953,13 @@ impl AgentTriageStore for SqliteStore {
         let mut statement = conn.prepare(&format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages m LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              WHERE m.account_id=?1 AND m.from_addr=?2 COLLATE NOCASE AND m.is_sent=0 AND m.is_spam=0
+               AND {ARCHIVE_EVIDENCE_SQL}
              ORDER BY m.received_at DESC,m.id DESC LIMIT ?3"
         ))?;
         let rows = statement
             .query_map(params![account, sender, limit.min(100) as i64], message_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        ensure_source_assessments(&conn, account, &rows)?;
+        ensure_source_assessments(&conn, account, &rows, false)?;
         rows.into_iter()
             .map(|message| read_message(&conn, account, message.id))
             .collect()
@@ -2124,7 +2212,7 @@ fn apply_attention(
             .query_row(
                 concat!("SELECT strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?3)),julianday(?3))) AS activity,m.id
              FROM messages m LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
-             WHERE m.account_id=?1 AND m.thread_id=?2
+             WHERE m.account_id=?1 AND m.thread_id=?2 AND m.is_archive=0
              ORDER BY (NOT ",own_mail_sql!()," AND m.is_spam=0) DESC,activity DESC,m.id DESC LIMIT 1"),
                 params![account, thread,Utc::now().to_rfc3339()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -3415,6 +3503,58 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_row_is_never_a_threads_fallback_representative() {
+        use crate::triage::decision::RelatedAttentionUpdate;
+        // Evidence in thread "two" updates attention on thread "one" without
+        // naming a message there, so the representative is the fallback's
+        // pick. With thread "one" live that is message 1; with it archived
+        // there is nothing to anchor a card to, and none is made.
+        for archived in [false, true] {
+            let store = fixture();
+            if archived {
+                // Assessed as allowed, so the agent may read it as evidence;
+                // it still may not become the card.
+                let conn = store.lock().unwrap();
+                conn.execute("UPDATE messages SET is_archive=1 WHERE id=1", [])
+                    .unwrap();
+                seed_archive_state_conn(&conn, 1, 1).unwrap();
+                conn.execute(
+                    "UPDATE agent_message_state SET access='allowed' WHERE message_id=1",
+                    [],
+                )
+                .unwrap();
+            }
+            let (job, context) = claim(&store, 2);
+            let sources = store.snapshot_agent_sources(1, &[1, 2]).unwrap();
+            let mut verdict = decision(2);
+            let mut attention = decision(1).attention;
+            attention.relevant_message_ids.clear();
+            verdict.related_updates.push(RelatedAttentionUpdate {
+                thread_id: "one".into(),
+                expected_revision: 0,
+                attention,
+                evidence: vec![],
+            });
+            assert_eq!(
+                store
+                    .commit_agent_decision(&job, &context, &verdict, &sources)
+                    .unwrap(),
+                AgentCommitOutcome::Applied
+            );
+            let anchored: Vec<i64> = store
+                .lock()
+                .unwrap()
+                .prepare("SELECT message_id FROM agent_thread_attention WHERE thread_id='one'")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert_eq!(anchored, if archived { vec![] } else { vec![1] });
+        }
+    }
+
+    #[test]
     fn unclassified_representative_stays_visible_without_borrowing_source_classification() {
         use crate::triage::decision::RelatedAttentionUpdate;
         for same_thread in [false, true] {
@@ -3662,6 +3802,44 @@ mod tests {
                 .message_id,
             1
         );
+    }
+
+    #[test]
+    fn only_an_explicit_request_assesses_an_archive_source() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        conn.execute("UPDATE messages SET is_archive=1 WHERE id=1", [])
+            .unwrap();
+        seed_archive_state_conn(&conn, 1, 1).unwrap();
+        let queued = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT kind,trigger FROM agent_triage_jobs WHERE message_id=1")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let message = read_message(&conn, 1, 1).unwrap();
+
+        // The triage agent's own reads, and a human's open: nothing.
+        ensure_source_assessments(&conn, 1, std::slice::from_ref(&message), false).unwrap();
+        assert!(queued(&conn).is_empty());
+
+        // A thread opened at the agent door: one access job, on the revision
+        // the archive write recorded.
+        ensure_agent_source_ids_conn(&conn, 1, &[1]).unwrap();
+        assert_eq!(
+            queued(&conn),
+            vec![("access".to_string(), "source_access".to_string())]
+        );
+        let revision: i64 = conn
+            .query_row(
+                "SELECT revision FROM agent_message_state WHERE message_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, 1, "being asked about is not a change of content");
     }
 
     #[test]
@@ -4882,7 +5060,7 @@ fn human_inventory(
          LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
          LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
-         WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
+         WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2 AND m.is_archive=0
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
            AND (?4 IS NULL OR m.received_at<?4 OR (m.received_at=?4 AND m.id<?5))
          ORDER BY m.received_at DESC,m.id DESC"

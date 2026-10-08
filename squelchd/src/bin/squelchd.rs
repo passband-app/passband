@@ -449,11 +449,69 @@ fn other_err(msg: String) -> squelch_core::CoreError {
 /// How long shutdown waits for the calendar sync loop before aborting it.
 const CALENDAR_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The floor on tokio worker threads, whatever the box reports.
+///
+/// Left to its default the runtime sizes itself by
+/// `available_parallelism()`, which honours the cgroup CPU quota, and the
+/// hosted tenant pod's limit is one CPU: ONE worker thread, on which both
+/// HTTP doors, every SSE pump, every timer, and the sync engine's and triage
+/// worker's direct store calls all run. The store is a `Mutex<Connection>`,
+/// so whenever a `spawn_blocking` handler, an embed or a triage commit holds
+/// it, that lone worker parks in `lock()` and nothing else progresses: no
+/// accept, no auth, no keep-alive, no tick.
+///
+/// Four, because three always-on tasks make direct store calls and can all
+/// be parked in `lock()` at the same moment (the sync engine, the triage
+/// worker, an MCP tool call), and the door should still answer then. Workers
+/// park when idle, so on a one-core box the extra three cost a stack each
+/// and nothing more. A floor and not a cap: a self-host box with eight cores
+/// keeps eight, as it always has.
+const MIN_WORKER_THREADS: usize = 4;
+
+/// tokio's own override. Read here, because calling `worker_threads` on the
+/// builder is exactly what makes tokio stop reading it, and an operator's
+/// no-rebuild knob for a stalled daemon should not vanish silently.
+const WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
+
+/// The box's parallelism as the runtime sees it: cgroup-quota-aware, so on a
+/// hosted pod it reads 1 whatever the node has.
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Worker threads for a runtime: the operator's override when it is set and a
+/// positive integer, else the box's `parallelism`; either floored at
+/// [`MIN_WORKER_THREADS`].
+fn worker_threads_for(parallelism: usize, env_override: Option<&str>) -> usize {
+    env_override
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(parallelism)
+        .max(MIN_WORKER_THREADS)
+}
+
 fn build_runtime() -> Result<tokio::runtime::Runtime, squelch_core::CoreError> {
-    tokio::runtime::Builder::new_multi_thread()
+    let parallelism = available_parallelism();
+    let env_override = std::env::var(WORKER_THREADS_ENV).ok();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads_for(parallelism, env_override.as_deref()))
         .enable_all()
         .build()
-        .map_err(|e| other_err(format!("tokio runtime: {e}")))
+        .map_err(|e| other_err(format!("tokio runtime: {e}")))?;
+    // Said once at boot, by both long-lived modes, so a stall is diagnosed
+    // against the number that applies rather than the cores the node claims.
+    eprintln!(
+        "squelchd: tokio runtime: {} worker thread(s), quota-aware parallelism {}{}",
+        runtime.metrics().num_workers(),
+        parallelism,
+        env_override
+            .as_deref()
+            .map(|v| format!(", {WORKER_THREADS_ENV}={v}"))
+            .unwrap_or_default()
+    );
+    Ok(runtime)
 }
 
 /// Load config plus the Stage-2 cap sources, which `serve` reports as "default"
@@ -2812,6 +2870,28 @@ mod tests {
     use squelch_core::credentials::{CredentialKind, StoredToken};
 
     const BROKER: &str = "https://auth.passband.email";
+
+    /// A one-CPU quota (the hosted tenant pod) gets the floor, not one; a
+    /// wider box keeps its count; the operator's override is honoured and
+    /// floored like everything else; and the real runtime is sized by exactly
+    /// this rule, so dropping the builder call cannot pass on a wide CI box.
+    #[test]
+    fn the_runtime_never_runs_on_a_single_worker() {
+        assert_eq!(worker_threads_for(1, None), MIN_WORKER_THREADS);
+        assert_eq!(worker_threads_for(8, None), 8);
+        assert_eq!(worker_threads_for(8, Some("6")), 6);
+        assert_eq!(worker_threads_for(8, Some("1")), MIN_WORKER_THREADS);
+        assert_eq!(worker_threads_for(8, Some("nonsense")), 8);
+        assert_eq!(worker_threads_for(8, Some("")), 8);
+        let runtime = build_runtime().expect("a runtime");
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            worker_threads_for(
+                available_parallelism(),
+                std::env::var(WORKER_THREADS_ENV).ok().as_deref()
+            )
+        );
+    }
 
     /// PID 1 in the image stops on SIGTERM or not at all: the stop future must
     /// resolve on it, not only on Ctrl-C.

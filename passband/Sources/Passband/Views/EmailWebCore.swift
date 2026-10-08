@@ -1494,7 +1494,14 @@ final class EmailFrameCoordinator: NSObject {
     }
 
     private func applyCollapse(_ webView: WKWebView) {
-        guard appliedCollapse != wantedCollapse else { return }
+        // NOT BEFORE THE DOCUMENT IS HERE. A frame taken from the spares is
+        // still showing the empty document it was warmed with until the mail
+        // commits, and the settle below would hand the host THAT document's
+        // measurement: empty, and as tall as the viewport. The host collapses
+        // the card to nothing on the strength of it, the reader lands on a
+        // card with no body, and the mail arrives off screen.
+        // `documentDidLoad` applies the wish once there is something to fold.
+        guard documentLive, appliedCollapse != wantedCollapse else { return }
         appliedCollapse = wantedCollapse
         webView.evaluateJavaScript(
             "window.__passbandSetQuotes && window.__passbandSetQuotes(\(wantedCollapse))"

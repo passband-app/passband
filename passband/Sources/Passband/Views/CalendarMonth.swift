@@ -17,6 +17,10 @@
 //   - Blue is state only: today's date and the now line. Selection is an even
 //     1pt edge in ink, all the way round, on a cell or on a chip.
 //
+// WAVE 6: the hours (`HoursGutter`, `HoursWell`), the trip bars (`SpanBar`),
+// the bar over the grid (`MonthBar`) and the footer are shared with the week
+// view (Views/CalendarWeek.swift), which is why they are not private.
+//
 // WAVE 4:
 //   - NO GAP UNDER THE DATE. A trip's bar keeps its lane only over the days
 //     it covers, and a cell's own rows fill what is free above before going
@@ -51,16 +55,14 @@
 
     // MARK: - the header switch
 
-    /// Month or agenda, in the page header, month first. Two options rather
-    /// than the mock's Day / Week / Month: the day is the column beside the
-    /// month and there is no week, so a control offering either would be a
-    /// lie, and a disabled one would be furniture.
+    /// Month, week or agenda, in the page header, month first. No Day: the
+    /// day is the column beside the month, and one of the week's seven.
     struct CalendarModeSwitch: View {
         @Environment(AppStore.self) private var store
 
         var body: some View {
             GlassSegmented(
-                options: CalendarViewMode.pickerOrder.map { (value: $0, label: $0 == .month ? "Month" : "Agenda") },
+                options: CalendarViewMode.pickerOrder.map { (value: $0, label: $0.label) },
                 selection: Binding(
                     get: { store.calendarMode },
                     set: { store.setCalendarMode($0) }))
@@ -193,7 +195,7 @@
 
         var body: some View {
             VStack(spacing: 0) {
-                MonthBar(title: MonthGrid.title(place.month, calendar: calendar), day: place.day)
+                MonthBar(title: MonthGrid.title(place.month, calendar: calendar), day: place.day, unit: .month)
                 HStack(alignment: .top, spacing: Space.scaled(18)) {
                     if drafting || twoPanes || (item == nil && !store.calendarDayOpen) {
                         MonthGridView(
@@ -242,7 +244,7 @@
     }
 
     /// "‹ Thu Oct 8": one level back up the stack.
-    private struct BackLink: View {
+    struct BackLink: View {
         let text: String
         let action: () -> Void
 
@@ -262,21 +264,31 @@
         }
     }
 
-    /// The month's own bar: which month, the way to the ones beside it, back
-    /// to today, and a new event on the selected day. The page header above
-    /// it carries the mode switch.
-    private struct MonthBar: View {
+    /// The month's own bar, and the week's: which month (or week), the way
+    /// to the ones beside it, back to today, and a new event on the selected
+    /// day. The page header above it carries the mode switch.
+    struct MonthBar: View {
         @Environment(AppStore.self) private var store
         let title: String
         let day: Date
+        let unit: Unit
+
+        /// What the arrows turn.
+        enum Unit {
+            case month
+            case week
+
+            var word: String { self == .month ? "month" : "week" }
+            func move(_ n: Int) -> MonthMove { self == .month ? .months(n) : .days(7 * n) }
+        }
 
         var body: some View {
             HStack(spacing: Space.s8) {
-                ChromeChip(icon: "chevron.left", help: "Previous month ( [ )") {
-                    store.moveCalendarMonth(.months(-1))
+                ChromeChip(icon: "chevron.left", help: "Previous \(unit.word) ( [ )") {
+                    store.moveCalendarMonth(unit.move(-1))
                 }
-                ChromeChip(icon: "chevron.right", help: "Next month ( ] )") {
-                    store.moveCalendarMonth(.months(1))
+                ChromeChip(icon: "chevron.right", help: "Next \(unit.word) ( ] )") {
+                    store.moveCalendarMonth(unit.move(1))
                 }
                 Text(title)
                     .font(Typo.ui(15, weight: .semibold))
@@ -376,11 +388,13 @@
     }
 
     /// Loading, and the keys.
-    private struct MonthFooter: View {
+    struct MonthFooter: View {
         let loading: Bool
         let canCreate: Bool
         /// The event pane is open: the grid's one job beside it is said.
         let drafting: Bool
+        /// The week's footer: its arrows move the day and walk its items.
+        var week = false
 
         var body: some View {
             HStack(spacing: Space.s12) {
@@ -400,7 +414,12 @@
                     if canCreate {
                         KeyHint("n", "new event")
                     }
-                    KeyHint(["←", "→", "↑", "↓"], "move")
+                    if week {
+                        KeyHint(["←", "→"], "day")
+                        KeyHint(["j", "k"], "items")
+                    } else {
+                        KeyHint(["←", "→", "↑", "↓"], "move")
+                    }
                     KeyHint("↵", "open")
                 }
             }
@@ -687,7 +706,7 @@
     /// and fill: rounded where it really begins and ends, flat where it runs
     /// on into the row before or after. Its words are at full strength
     /// whatever the fill: a ghost's container thins, never its ink.
-    private struct SpanBar: View {
+    struct SpanBar: View {
         let segment: SpanSegment
         let label: (title: String, sub: String?)
         let selected: Bool
@@ -891,15 +910,9 @@
         }
     }
 
-    /// The hours: a gutter of times, and the well they label.
-    ///
-    /// DRAG TO CREATE. A press on the empty well and a drag down (or up) it
-    /// sweeps a span of time: a dashed block follows the pointer, snapped to
-    /// the quarter hour, saying its times as it goes; letting go opens the
-    /// event pane with that day and those times. The arithmetic is
-    /// Lib/DaySweep.swift. A plain click on the well does nothing new, a
-    /// press on a block is that block's click, and Escape mid-drag drops the
-    /// sweep (`AppStore.calendarMonthBack`).
+    /// The hours: a gutter of times, and the well they label. The month's
+    /// day column is one of each; the week (Views/CalendarWeek.swift) is one
+    /// gutter and seven wells.
     private struct HoursGrid: View {
         @Environment(AppStore.self) private var store
         let column: DayColumn
@@ -908,6 +921,71 @@
         let selected: String?
         let now: Date?
         let calendar: Calendar
+
+        var body: some View {
+            HStack(alignment: .top, spacing: Space.s6) {
+                HoursGutter(pph: pph, nightHeight: nightHeight)
+                HoursWell(
+                    column: column, pph: pph, nightHeight: nightHeight, selected: selected, now: now,
+                    calendar: calendar
+                ) { store.calendarMonthItem = $0.id }
+            }
+        }
+    }
+
+    /// The times down the side of the hours: "night" on the folded cap, then
+    /// each hour on its line.
+    struct HoursGutter: View {
+        let pph: CGFloat
+        let nightHeight: CGFloat
+
+        @MainActor static var width: CGFloat { Typo.measure(38) }
+
+        var body: some View {
+            let from = MonthGrid.dayFromHour
+            let total = nightHeight + CGFloat(MonthGrid.dayHours) * pph
+            ZStack(alignment: .topTrailing) {
+                Text("night")
+                    .offset(y: nightHeight / 2 - 6)
+                ForEach((from + 1)..<24, id: \.self) { h in
+                    Text(h == 12 ? "noon" : (h < 12 ? "\(h)am" : "\(h - 12)pm"))
+                        .offset(y: nightHeight + CGFloat(h - from) * pph - 6)
+                }
+            }
+            .font(Typo.num(10))
+            .foregroundStyle(Palette.inkFaintest)
+            .frame(width: Self.width, height: total, alignment: .topTrailing)
+        }
+    }
+
+    /// One day's well under the hours: the night's cap, a line per hour, the
+    /// day's blocks side by side where they overlap, and now.
+    ///
+    /// DRAG TO CREATE. A press on the empty well and a drag down (or up) it
+    /// sweeps a span of time: a dashed block follows the pointer, snapped to
+    /// the quarter hour, saying its times as it goes; letting go opens the
+    /// event pane with that day and those times. The arithmetic is
+    /// Lib/DaySweep.swift. A plain click on the well is `tap` (nothing, on
+    /// the month's column), a press on a block is that block's click, and
+    /// Escape mid-drag drops the sweep (`AppStore.calendarMonthBack`).
+    struct HoursWell: View {
+        @Environment(AppStore.self) private var store
+        let column: DayColumn
+        let pph: CGFloat
+        let nightHeight: CGFloat
+        let selected: String?
+        let now: Date?
+        let calendar: Calendar
+        /// The week draws one cap across all seven days, under the wells.
+        var nightCap = true
+        /// A narrow column (the week's): a block is its title alone.
+        var showsTime = true
+        /// A plain click on the empty well: the week selects the day.
+        var tap: (() -> Void)?
+        /// The event pane is open beside the page: the blocks do not take
+        /// the click, the well does (the day it was aimed at).
+        var drafting = false
+        let pick: (AgendaItem) -> Void
 
         @State private var width: CGFloat = 0
         /// The sweep under way: where the press landed and where the pointer
@@ -921,7 +999,6 @@
             var to: CGFloat
         }
 
-        private var gutter: CGFloat { Typo.measure(38) }
         private var from: Int { MonthGrid.dayFromHour }
         private var scale: DaySweepScale {
             DaySweepScale(nightHeight: Double(nightHeight), pointsPerHour: Double(pph), fromHour: from)
@@ -930,67 +1007,54 @@
         var body: some View {
             let hours = CGFloat(MonthGrid.dayHours)
             let total = nightHeight + hours * pph
-            HStack(alignment: .top, spacing: Space.s6) {
-                ZStack(alignment: .topTrailing) {
-                    Text("night")
-                        .offset(y: nightHeight / 2 - 6)
-                    ForEach((from + 1)..<24, id: \.self) { h in
-                        Text(hourLabel(h))
-                            .offset(y: nightHeight + CGFloat(h - from) * pph - 6)
-                    }
-                }
-                .font(Typo.num(10))
-                .foregroundStyle(Palette.inkFaintest)
-                .frame(width: gutter, height: total, alignment: .topTrailing)
-
-                ZStack(alignment: .topLeading) {
-                    // The empty well itself, UNDER everything drawn on it: a
-                    // block above it keeps its own click, and a press that
-                    // starts on one never starts a sweep.
-                    Color.clear
-                        .frame(maxWidth: .infinity)
-                        .frame(height: total)
-                        .contentShape(Rectangle())
-                        .gesture(sweepGesture)
+            ZStack(alignment: .topLeading) {
+                // The empty well itself, UNDER everything drawn on it: a
+                // block above it keeps its own click, and a press that
+                // starts on one never starts a sweep.
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: total)
+                    .contentShape(Rectangle())
+                    .gesture(sweepGesture)
+                    .onTapGesture { tap?() }
+                if nightCap {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(Palette.hairline.opacity(0.4))
                         .frame(height: nightHeight - 2)
                         .allowsHitTesting(false)
-                    ForEach(from...24, id: \.self) { h in
-                        Rectangle()
-                            .fill(Palette.hairline)
-                            .frame(height: 0.5)
-                            .offset(y: nightHeight + CGFloat(h - from) * pph)
-                            .allowsHitTesting(false)
-                    }
-                    ForEach(column.night) { block in
-                        nightBlock(block)
-                    }
-                    ForEach(column.blocks) { block in
-                        dayBlock(block)
-                    }
-                    if let now, let mark = MonthGrid.nowMark(now, day: column.day, calendar: calendar) {
-                        let y = mark.part == .night
-                            ? nightHeight * mark.at : nightHeight + hours * pph * mark.at
-                        Rectangle()
-                            .fill(Palette.accent)
-                            .frame(height: 2)
-                            .offset(y: y - 1)
-                            .allowsHitTesting(false)
-                    }
-                    if let sweep {
-                        sweptBlock(sweep)
-                    }
                 }
-                // The well's width comes from the pane, never from its blocks.
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .frame(height: total, alignment: .topLeading)
-                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+                ForEach(from...24, id: \.self) { h in
+                    Rectangle()
+                        .fill(Palette.hairline)
+                        .frame(height: 0.5)
+                        .offset(y: nightHeight + CGFloat(h - from) * pph)
+                        .allowsHitTesting(false)
+                }
+                ForEach(column.night) { block in
+                    nightBlock(block)
+                        .allowsHitTesting(!drafting)
+                }
+                ForEach(column.blocks) { block in
+                    dayBlock(block)
+                        .allowsHitTesting(!drafting)
+                }
+                if let now, let mark = MonthGrid.nowMark(now, day: column.day, calendar: calendar) {
+                    let y = mark.part == .night
+                        ? nightHeight * mark.at : nightHeight + hours * pph * mark.at
+                    Rectangle()
+                        .fill(Palette.accent)
+                        .frame(height: 2)
+                        .offset(y: y - 1)
+                        .allowsHitTesting(false)
+                }
+                if let sweep {
+                    sweptBlock(sweep)
+                }
             }
-        }
-
-        private func hourLabel(_ h: Int) -> String {
-            h == 12 ? "noon" : (h < 12 ? "\(h)am" : "\(h - 12)pm")
+            // The well's width comes from the pane, never from its blocks.
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(height: total, alignment: .topLeading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         }
 
         // MARK: drag to create
@@ -1071,8 +1135,9 @@
                 capHeight: s.continuesBefore ? 0 : pph / 2,
                 time: MonthGrid.rangeText(s.item, on: column.day, calendar: calendar),
                 end: Agenda.endLabel(s.item, on: column.day, calendar: calendar),
-                selected: selected == s.item.id
-            ) { store.calendarMonthItem = s.item.id }
+                selected: selected == s.item.id,
+                showsTime: showsTime
+            ) { pick(s.item) }
                 .frame(width: w, height: height)
                 .offset(x: x, y: top)
         }
@@ -1093,7 +1158,7 @@
                 ? "until \(s.item.endEstimated ? "~" : "")\(s.item.end.map { Agenda.clock($0, calendar) } ?? "")"
                 : s.item.title
             return Button {
-                store.calendarMonthItem = s.item.id
+                pick(s.item)
             } label: {
                 Text(height >= 11 ? text : "")
                     .font(Typo.ui(9.5))
@@ -1101,7 +1166,11 @@
                     .lineLimit(1)
                     .padding(.horizontal, Space.s6)
                     .frame(width: w, height: height, alignment: .leading)
-                    .background { ChipFill(style: style, inks: ChipColors.inks(style.hue), shape: shape) }
+                    .background {
+                        ChipFill(
+                            style: style, inks: ChipColors.inks(style.hue), shape: shape,
+                            provisional: s.item.id == EventForm.provisionalId)
+                    }
                     .overlay(shape.strokeBorder(Palette.ink.opacity(selected == s.item.id ? 0.7 : 0), lineWidth: 1))
                     .contentShape(shape)
             }
@@ -1124,6 +1193,8 @@
         let time: String
         let end: Agenda.EndLabel?
         let selected: Bool
+        /// False in a narrow column: the title alone, the time in the help.
+        var showsTime = true
         let action: () -> Void
 
         var body: some View {
@@ -1159,7 +1230,7 @@
                 .contentShape(shape)
             }
             .buttonStyle(.plain)
-            .help(item.title)
+            .help(showsTime ? item.title : "\(item.title), \(time)")
         }
 
         @ViewBuilder
@@ -1189,7 +1260,11 @@
                                 .init(color: fade > 0 ? .clear : .black, location: 1),
                             ], startPoint: .top, endPoint: .bottom))
             } else {
-                ChipFill(style: style, inks: inks, shape: shape)
+                // The event pane's draft, on the week's hours: the same
+                // dashed chip it is on the month.
+                ChipFill(
+                    style: style, inks: inks, shape: shape,
+                    provisional: segment.item.id == EventForm.provisionalId)
             }
         }
 
@@ -1213,13 +1288,22 @@
             // With the end said at the foot, the time line says only when it
             // starts.
             let meta = showsEnd ? time.components(separatedBy: " to ").first ?? time : time
-            if tight {
-                HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
-                    title.layoutPriority(1)
-                    Text(meta)
-                        .font(Typo.ui(10.5))
-                        .foregroundStyle(inks.ink)
-                        .lineLimit(1)
+            if !showsTime {
+                title
+            } else if tight {
+                // A short block is one line. The time rides beside the title
+                // only where both fit whole: a time cut to "8" beside a
+                // title cut to "Earlier to..." says neither.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
+                        title.fixedSize()
+                        Text(meta)
+                            .font(Typo.ui(10.5))
+                            .foregroundStyle(inks.ink)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    title
                 }
             } else {
                 VStack(alignment: .leading, spacing: 1) {

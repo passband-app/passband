@@ -63,7 +63,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// it, so a guard on it would protect nothing. A decision that does not parse
 /// is not known to be harmless, and feeds nothing. The SQL form, for messages
 /// `m` joined by [`ELIGIBLE_JOINS`]; [`may_feed`] is its Rust half.
-const ELIGIBLE: &str = "m.is_sent=0 AND m.is_spam=0 AND COALESCE(a.access,'pending')='allowed' \
+pub(super) const ELIGIBLE: &str = "m.is_sent=0 AND m.is_spam=0 AND COALESCE(a.access,'pending')='allowed' \
      AND (CASE WHEN ed.decision_json IS NULL THEN 1 \
                WHEN json_valid(ed.decision_json) \
                THEN COALESCE(json_array_length(ed.decision_json,'$.auth.kinds'),0)=0 \
@@ -71,7 +71,7 @@ const ELIGIBLE: &str = "m.is_sent=0 AND m.is_spam=0 AND COALESCE(a.access,'pendi
 
 /// The rows [`ELIGIBLE`] reads, LEFT JOINed to messages `m`: no access state
 /// is a review not yet done, and no decision row names no auth kind.
-const ELIGIBLE_JOINS: &str = "LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id \
+pub(super) const ELIGIBLE_JOINS: &str = "LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id \
      LEFT JOIN agent_message_decisions ed ON ed.account_id=m.account_id AND ed.message_id=m.id";
 
 /// What a decision itself says about whether its message may feed a ghost:

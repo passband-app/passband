@@ -12,6 +12,10 @@
 //     system prompt of a question that never asked.
 //   * SAFE WRITES touch Passband's LOCAL store only (status, triage rules,
 //     drafts). Reversible in the app, invisible to Gmail, so no card.
+//     create_calendar_event is the calendar's draft: it fills in the event
+//     pane and writes NOTHING, to the daemon or to Google; the user adds the
+//     event themselves (Lib/EventProposal.swift). Offered only while the
+//     Calendar page is.
 //   * GATED WRITES touch the mailbox. They park on a confirmation card and only
 //     an approval reaches the API. The daemon demands `confirm: true` on those
 //     routes and APIClient sends it — which is honest ONLY because the tap has
@@ -54,6 +58,7 @@ enum AgentTools {
         case labelMessage = "label_message"
         case sendEmail = "send_email"
         case unsubscribeSender = "unsubscribe_sender"
+        case createCalendarEvent = "create_calendar_event"
         case productHelp = "product_help"
         case listShortcuts = "list_shortcuts"
         case findSetting = "find_setting"
@@ -76,6 +81,7 @@ enum AgentTools {
             case .labelMessage: "tag"
             case .sendEmail: "paperplane"
             case .unsubscribeSender: "hand.raised"
+            case .createCalendarEvent: "calendar.badge.plus"
             case .productHelp: "book"
             case .listShortcuts: "keyboard"
             case .findSetting: "gearshape"
@@ -89,7 +95,9 @@ enum AgentTools {
         /// has a guide of its own.
         var isAvailable: Bool {
             switch self {
-            case .productHelp, .listShortcuts, .findSetting:
+            // The calendar tool opens the Mac's event pane, and the phone
+            // has no Calendar page to open it on.
+            case .productHelp, .listShortcuts, .findSetting, .createCalendarEvent:
                 #if os(macOS)
                     true
                 #else
@@ -114,12 +122,15 @@ enum AgentTools {
         name: String, input: [String: JSONValue], gate: ActionGate,
         cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void
     ) async -> ToolOutcome {
-        guard let tool = Tool(rawValue: name), tool.isAvailable else {
+        // Whether the guide may speak of the Calendar page, and whether the
+        // calendar tool exists: only while this mailbox has the page
+        // (ProductGuide.topics(calendar:), EventProposals.mayRun). Off, the
+        // tool's name is answered as any invented name is.
+        let calendar = AppStore.shared.calendarPageAvailable
+        guard let tool = Tool(rawValue: name), tool.isAvailable, EventProposals.mayRun(name, calendar: calendar)
+        else {
             return failure("unknown tool \(name)", summary: "unknown tool")
         }
-        // Whether the guide may speak of the Calendar page: only while this
-        // mailbox has one (ProductGuide.topics(calendar:)).
-        let calendar = AppStore.shared.calendarPageAvailable
         do {
             switch tool {
             case .searchMail: return try await searchMail(input, cite: cite)
@@ -136,6 +147,7 @@ enum AgentTools {
             case .labelMessage: return await labelMessage(input, gate)
             case .sendEmail: return await sendEmail(input, gate)
             case .unsubscribeSender: return await unsubscribeSender(input, gate)
+            case .createCalendarEvent: return createCalendarEvent(input)
             case .productHelp: return productHelp(input, calendar: calendar)
             case .listShortcuts: return listShortcuts(calendar: calendar)
             case .findSetting: return findSetting(input)
@@ -428,6 +440,39 @@ enum AgentTools {
             ])
         }
         return ok(["contacts": rows], summary: "looked up \(quoted(query))")
+    }
+
+    // MARK: - the calendar (a draft in the event pane, never a write)
+
+    /// THE ASSISTANT NEVER ADDS AN EVENT AND NEVER INVITES ANYONE. This
+    /// reads the proposal, checks it by the event pane's own rules, and opens
+    /// the pane on the Calendar page with it filled in. No daemon call, no
+    /// confirmation card: the pane is the confirmation, and its "add event"
+    /// (or "add and invite N") is the user's own press. A proposal that does
+    /// not check out, or a pane already holding something, is an error the
+    /// model can relay or correct, and nothing on screen changes.
+    @MainActor
+    private static func createCalendarEvent(_ input: [String: JSONValue]) -> ToolOutcome {
+        let store = AppStore.shared
+        let proposal: EventProposal
+        switch EventProposals.read(input) {
+        case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
+        case .success(let read): proposal = read
+        }
+        let draft: EventDraft
+        switch EventProposals.draft(
+            proposal, feed: store.calendarFeed, owner: store.calendarAccountEmail, today: Date(),
+            calendar: .current)
+        {
+        case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
+        case .success(let made): draft = made
+        }
+        if let refusal = store.proposeEvent(draft) {
+            return failure(refusal, summary: "event not drafted")
+        }
+        return ok(
+            ["status": "drafted_not_saved", "message": EventProposals.draftedText],
+            summary: "drafted \(quoted(proposal.title))")
     }
 
     // MARK: - help (the app's own tables)
@@ -931,12 +976,62 @@ enum AgentTools {
     /// guide's topic list depends on the mailbox (the Calendar page, see
     /// `productHelpDefinition`); with the page off this is the inventory
     /// from before the calendar existed, byte for byte.
+    ///
+    /// With the page ON the list also gains `create_calendar_event`, after
+    /// the last of the acting tools (`EventProposals.inventory` is the
+    /// order, and the suite holds it: off, no such name).
     static func definitions(calendar: Bool) -> [Wire.ToolDef] {
         guard calendar else { return definitions }
-        return definitions.map {
-            $0.name == Tool.productHelp.rawValue ? productHelpDefinition(calendar: true) : $0
-        }
+        var byName: [String: Wire.ToolDef] = [:]
+        for def in definitions { byName[def.name] = def }
+        byName[Tool.productHelp.rawValue] = productHelpDefinition(calendar: true)
+        byName[EventProposals.toolName] = calendarEventDefinition
+        return EventProposals.inventory(
+            definitions.map(\.name), calendar: true, after: Tool.unsubscribeSender.rawValue
+        ).compactMap { byName[$0] }
     }
+
+    /// The one calendar tool. Its words carry the rule: a draft, never a
+    /// write, never an invitation.
+    private static let calendarEventDefinition = Wire.ToolDef(
+        name: EventProposals.toolName,
+        description: """
+            Draft a calendar event for the user to confirm. This opens Passband's event \
+            pane on the Calendar page, filled in with what you propose. It does NOT add \
+            the event to their calendar and does NOT invite or email anyone: the user \
+            reads the pane and presses its add control themselves. After calling it, say \
+            the event is drafted and waiting for them, never that it was created or that \
+            anyone was invited. You cannot read the calendar, and you cannot edit or \
+            delete events. If the result says an event is already open, relay that and \
+            stop. Only propose guests the user asked for.
+            """,
+        input_schema: .init(
+            properties: [
+                "title": .init(type: "string", description: "The event's title, 200 characters at most."),
+                "start": .init(
+                    type: "string",
+                    description:
+                        "When it starts, in the user's own local time: 2026-10-09T16:00:00 (an RFC3339 "
+                        + "offset is accepted too). For an all-day event, the date: 2026-10-09."),
+                "end": .init(
+                    type: "string",
+                    description:
+                        "When it ends, same form as start. Optional: a timed event defaults to one hour. "
+                        + "For an all-day event, its LAST day (inclusive); leave out for a single day."),
+                "all_day": .init(type: "boolean", description: "True for an all-day event (start and end are dates)."),
+                "calendar": .init(
+                    type: "string",
+                    description: "Which of the user's calendars, by name. Leave out for their primary calendar."),
+                "location": .init(type: "string", description: "Where, as plain text."),
+                "notes": .init(type: "string", description: "The event's description, 2,000 characters at most."),
+                "guests": .init(
+                    type: "array",
+                    description:
+                        "Email addresses of people the user asked to invite. They are shown in the pane; "
+                        + "Google emails them only if the user then chooses the control that says so.",
+                    items: .init()),
+            ],
+            required: ["title", "start"]))
 
     private static func productHelpDefinition(calendar: Bool) -> Wire.ToolDef {
         Wire.ToolDef(

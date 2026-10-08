@@ -635,11 +635,68 @@ Wave 4, from the founder using wave 3 on screen:
   event pane with that day and those times. A plain click does nothing new, a
   press on an existing block is that block's click, and Esc mid-drag drops it.
 
+Wave 6, from the founder ("lets add a week view too", "you should be able to
+change the end date on the create event form", "when i type the title, i
+should be able to type 'dinner with steven on friday 4pm'"):
+
+- **Week.** The header reads Month | Week | Agenda (`m` / `w` / `a`), Month
+  still the default. The week is seven of the month's day columns over one
+  hours axis: the same folded night, hour lines, blocks side by side where
+  they overlap, calendar colours, band fills and now line (in today's column
+  only), because they are the same views (`HoursGutter`, `HoursWell`).
+  All-day items and trips sit in a strip across the top in the month's own
+  lanes (`MonthGrid.spanRow`), so a trip reads the same in both views; past
+  four lanes a day says "+N more", which opens that day in the month. Today's
+  date is on the blue capsule and the selected day's head takes the even 1pt
+  edge. `←` `→` move the day, `[` `]` (or `,` `.`) a week, `t` today, `j` /
+  `k` and `↑` `↓` walk the selected day's items, `↵` opens. A block clicked
+  opens the detail beside the week (in place of it on a narrow window). Drag
+  to create works in any day's column, and with the event pane open the week
+  keeps its half and draws the draft as the dashed chip. Columns are a
+  seventh of the container, both ways; narrow ones shorten their heads ("T
+  6") and drop a block's time. The week shares the month's place, so the
+  timeline range asked for is the month's and covers it. Arithmetic:
+  `Lib/WeekGrid.swift`.
+- **The end day.** A timed event shows its end day beside its end time,
+  always. Before wave 6 that well was drawn only for an event that ALREADY
+  ran past the next morning, so a new event had nothing to change. Left
+  empty it follows the start (the next day when the end time is at or before
+  the start, so 7pm to 7pm is a whole day) and the well shows that day in
+  the dim ink; a day typed into it is the user's and stops following. The
+  line under the fields says what will be saved either way.
+- **A title that reads itself** (`Lib/TitleParse.swift`, no model). On a NEW
+  event the title is read as it is typed for a day ("on friday", "tomorrow",
+  "oct 12", "next tue"), a time or range ("4pm", "at noon", "4-6pm", "from 4
+  to 5:30") and "with <name>". The wells it fills wear a soft accent wash,
+  and a line under the title says what will be saved: the typed title less
+  the words that named the day and time ("Dinner with steven"; one capital
+  is added only when the user typed none). It never fights the user: a well
+  typed into, or a day clicked on the grid, is never written again; deleting
+  the words puts back what was there; Esc in the title, or `⌘Z`, takes the
+  title as typed. Ambiguity resolves to nothing: a bare number is never a
+  time ("meet at 4"), the word after "with" is never a day or time ("call
+  with 4pm people"), a month needs its day number ("May day parade"), a
+  three-letter weekday needs a neighbour that says it is one, and two
+  different days or two different times are neither. "next tue" is next
+  week's Tuesday by the user's own weeks. An edit's title is never read.
+- **A guest suggested, not added.** For each "with <name>" the client asks
+  the daemon who that most likely is (`GET /client/calendar/people`, §8) and
+  shows the best answer on the guests line in a dashed box: name, address, a
+  checkmark and an x, with up to two other candidates after "or". It is not
+  a guest until the checkmark: it is not in the draft's guests, does not
+  change the save control, and is sent nowhere. A dismissed or accepted
+  name is not offered again in that pane, and nothing is offered on a
+  calendar that may not invite. `Tab` from the title moves to the box; `↵`
+  there adds, `⌫` or `x` dismisses, Esc goes back to the title.
+- **The assistant drafts events** (§10).
+
 **Keymap as built.** `1` to `6` the rail (Calendar `2` while offered), `⇧C`
-the calendar; on the page `m` / `a` month and agenda, `j` / `k` the selection,
+the calendar; on the page `m` / `w` / `a` month, week and agenda, `j` / `k` the selection,
 `↵` open, `y` going, `x` dismiss, `n` new event, `e` edit, `⌫` delete; in the
 month the arrows move the day, `[` `]` (or `,` `.`) the month, `t` today, Esc
-closes the item, then the day; in the event pane `⌘↵` saves, `↵` saves from a
+closes the item, then the day; in the week `←` `→` move the day, `[` `]` the
+week, `↑` `↓` walk the day's items; in the event pane `Tab` from the title
+reaches a suggested guest (`↵` adds, `⌫` dismisses), `⌘↵` saves, `↵` saves from a
 single-line field or picks a highlighted place, `↑` `↓` move in the place
 list, Esc closes the place list, then the delete question, then the pane.
 
@@ -649,7 +706,7 @@ list, Esc closes the place list, then the delete question, then the pane.
 - **Day column.** Hours down the side, real events solid, ghosts by band,
   estimated tails soft. It is the unit the other views are built from, and the
   body of the time pane (§7).
-- **Week.** Seven day columns.
+- **Week.** Seven day columns. BUILT in wave 6 (above).
 - **Month** (DECIDED: in the first version). The shape of the month: multi-day
   spans for trips and stays, load per day, ghost marks, and a day opens its
   column. Not a wall of truncated titles.
@@ -1367,6 +1424,33 @@ server only: no request of this wave has been sent to the real Google API.
   - what the invitation looks like when the organizer is a secondary
     calendar the user owns rather than the primary one.
 
+### Who a name is (BUILT in wave 6)
+
+`GET /client/calendar/people?name=<text>`, with the calendar routes behind
+the `calendar` feature, bearer authed on the human door and served
+`no-store`. It answers `{"people":[{"addr","name"}]}`, at most three, for
+the event pane's guest suggestion (§5). No model is involved.
+
+- **Only people the user has written to.** A candidate is a row of
+  `contacts` with at least one sent mail. Somebody who has only ever written
+  TO the user is never one, so a stranger cannot make themselves a suggested
+  guest by sending mail under a matching name. Never the account's own
+  address.
+- **A given name or its prefix.** The words asked for must each start the
+  person's name from its first word ("ste" and "steven n" find "Steven Ng";
+  "ng" and "even" do not). The name is the one the user's own sent mail used
+  when there is one.
+- **Most recent exchange first.** Two-way correspondents rank above people
+  the user has only written to, by the older of the last mail each way.
+  Mail from them counts only when it is not spam, not sealed (the Auth
+  page's own test, never the retired sensitivity column) and passed sender
+  authentication.
+- **Nothing is added.** The client shows the answer as a suggestion; a guest
+  exists only after the user's checkmark, and Google emails nobody without
+  the save control that says so (above).
+- Empty, over-long or address-like input answers an empty list. The agent
+  door, `/mcp` and the assistant have no such route.
+
 ### Location lookup (BUILT in wave 4, client only)
 
 The event pane's location line suggests places as it is typed. Google
@@ -1463,8 +1547,38 @@ event, or lets mail move or delete one, these exist:
 ## 10. Agents
 
 The agent door stays read-only. Whether `/mcp` serves the timeline (with
-estimates and likelihood marked as such) is open. The in-app assistant may
-create an event only behind its existing confirm step.
+estimates and likelihood marked as such) is open.
+
+**The in-app assistant drafts events (BUILT in wave 6).** The founder: "lets
+give the assistant the ability to create events." It has ONE calendar tool,
+`create_calendar_event` (title, start, end, all_day, and optionally a
+calendar by name, a location, notes and guest addresses), and the tool
+writes nothing:
+
+- It reads the proposal, checks it by the event pane's own rules
+  (`EventProposals.draft`, which ends in `EventForm.wire`), and opens the
+  event pane on the Calendar page FILLED IN, guests as real guest pills since
+  the user asked the assistant for them. It never calls the daemon's write
+  routes. The user presses "add event" or "add and invite N" themselves.
+  The same rule as mail: the assistant drafts, the person sends.
+- The model is answered that the event is drafted and waiting, that nothing
+  was added and nobody invited. There is no confirmation card: the pane is
+  the confirmation.
+- A bad proposal (no title, times that do not read, a calendar that is not
+  writable, guests on a calendar that may not invite, the user's own address
+  as a guest) is an error the model can correct, and no pane opens.
+- A pane that already holds something, on screen or parked, is never
+  replaced: the tool answers "finish or close the open event first". A
+  proposed pane counts as holding something, so it parks instead of closing
+  when the user changes page and a second proposal waits its turn.
+- The assistant does not READ the calendar: it gets no event, and a calendar
+  name that matches nothing is refused without listing the ones there are.
+  No edit and no delete tool. Nothing on `/mcp` or `/client/agent/*`.
+- Offered only on the Mac and only while the Calendar page is
+  (`AppStore.calendarPageAvailable`, the gate the guide's calendar topic
+  uses). With the page off the tool list and the system prompt are the ones
+  from before the tool existed, and a call to its name is answered as any
+  invented tool is.
 
 ## 11. Feature flag
 

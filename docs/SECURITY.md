@@ -1058,7 +1058,8 @@ row is written even when the client disconnects mid-request: each write's checks
 Google call and audit run in a task of their own that the handler awaits, so
 dropping the request does not cancel them. The `calendar:` prefix keeps the
 audit listing's join to `messages` (a numeric target) from matching a calendar id
-that starts with digits. The in-app assistant has no tool for any of it.
+that starts with digits. The in-app assistant has no tool that reaches any of
+these routes (see "The assistant's calendar tool" below).
 
 **Guests: a human-door route can make Google email third parties**
 (docs/CALENDAR.md §8, "Guests, invited by Google"). Since wave 5 the three write
@@ -1074,8 +1075,11 @@ reaches people outside the account and cannot be undone. What gates it:
   (`gcal/client.rs:Notify`) has two values and defaults to the silent one, and
   `sendUpdates` is always named, never left to Google's default.
 - **The human door alone.** The three routes are bearer authed on `/client`; no
-  agent route, MCP tool or assistant tool can name a guest or set `notify`, and
-  nothing the daemon does on its own (the sync, triage, ghosts) calls a write.
+  agent route or MCP tool can name a guest or set `notify`, and nothing the
+  daemon does on its own (the sync, triage, ghosts) calls a write. The
+  assistant's one calendar tool can put addresses in the event pane's guests
+  line, where the user sees them as pills; it cannot send the request, and
+  `notify` is decided only by which save control the user then presses.
 - **Whose calendar.** Guests only on the user's own calendar (the primary one, or
   one they are `owner` of): `gcal/mod.rs:may_invite`. A shared calendar the user
   can write to cannot be made to invite anyone, nor to mail an update or a
@@ -1107,6 +1111,53 @@ not mean it (the client's controls must say what they send, and offer it only
 where the daemon would accept it; the daemon cannot tell intent), and Google's own behaviour with `sendUpdates=none`, which the reference
 hedges ("some emails might still be sent") and which has not been tested against
 a real account.
+
+**The assistant's calendar tool (client, wave 6).** The embedded assistant
+(§6) has one calendar tool, `create_calendar_event`, and it is a draft, not a
+write (`passband/Sources/Passband/Lib/EventProposal.swift`,
+`AgentTools.createCalendarEvent`).
+- **It calls no route.** The tool reads the model's proposal, validates it with
+  the event pane's own rules, and opens the pane on the Calendar page filled
+  in. The create route is reached only by the user pressing the pane's save
+  control, with the same body rules, create id and uncertain-write handling as
+  an event they typed. So a prompt injection in mail the assistant read can at
+  worst put a filled-in pane in front of the user; it cannot add an event or
+  cause an invitation.
+- **It never invites.** Proposed guests are shown as guest pills. Google emails
+  them only if the user presses the control labelled "add and invite N"; plain
+  Enter does not save an event with guests (§ "Guests" above).
+- **It does not read the calendar.** No event reaches the model. A proposal
+  names a calendar or leaves it to the primary; a name that matches no writable
+  calendar is refused with a fixed sentence that lists none of them.
+- **It never replaces the user's work.** A pane holding anything (typed, or an
+  earlier proposal, on screen or parked) refuses the tool with a fixed sentence
+  the model relays.
+- **It follows the page.** Offered only on the Mac and only while
+  `calendarPageAvailable`; with the flag off the tool definitions and system
+  prompt sent to the model are the ones from before the tool existed, and a
+  call naming it is answered as any unknown tool. No edit or delete tool.
+  Nothing was added to `/mcp`, `/client/agent/*` or the relay.
+
+**Who a name is: `GET /client/calendar/people` (wave 6).** The event pane reads
+"with steven" out of a new event's title (a deterministic parser in the client,
+no model) and asks the daemon who that most likely is, to SUGGEST a guest.
+- Behind `require_calendar` with the other calendar routes (404 with the flag
+  off), bearer authed on the human door, `no-store`, at most three answers. Not
+  on the agent door, `/mcp` or the assistant relay.
+- **A candidate is somebody the user has written to** (`contacts`, `sent_count >
+  0`), never the account's own address. Receiving mail from someone never makes
+  them a candidate, so mail under a matching display name cannot plant a guest.
+- **Ranking reads mail only where mail may be read.** Inbound mail counts toward
+  "most recently exchanged" only when it is not sent, not spam, not sealed (the
+  ghosts' `ELIGIBLE` test plus the legacy column, never `triage.sensitivity`
+  alone) and passed sender authentication (`auth_pass = 1`; never evaluated
+  reads as no).
+- **Nothing is added by the answer.** The client draws it as a dashed
+  suggestion with a checkmark and an x; it is not in the draft's guests, does
+  not change the save control and is never sent until the user accepts it, and
+  then only as any typed guest would be.
+- Empty, over-long (more than 64 characters) or `@`-bearing input answers an
+  empty list; the input is never echoed.
 
 **What the event pane sends to Apple (client).** The location line of the
 client's event pane suggests places from Apple's MapKit
@@ -1183,6 +1234,12 @@ minute.
   or run a write's Google call and audit inside the request future alone.
 - Do not gate ghosts on `triage.sensitivity`; use the sealed test
   `sealed_messages` uses.
+- Do not let the assistant's calendar tool call a write route, set `notify`,
+  skip the pane, replace a pane that holds anything, or be offered while the
+  Calendar page is not; do not hand the model an event or a list of calendars.
+- Do not let `/client/calendar/people` return somebody the user has not written
+  to, read sealed, spam or auth-failed mail for its ranking, or move to the
+  agent door.
 - Do not let a mail path load the Calendar slot, or the calendar loop load the
   Write slot: the token in either can do more than its job.
 - Do not loosen `google_link`, drop the `fields` mask or `maxAttendees`, or ask

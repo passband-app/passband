@@ -217,7 +217,10 @@ struct EventDraftTests {
         expect(problem(draft(date: "someday")) == .badDate, "an unreadable date")
         expect(problem(draft(start: "lunchtime")) == .badStart, "an unreadable start")
         expect(problem(draft(end: "later")) == .badEnd, "an unreadable end")
-        expect(problem(draft(start: "7pm", end: "7pm")) == .noLength, "ending when it starts")
+        expect(problem(draft(start: "7pm", end: "7pm")) == nil,
+               "the same time with no end day said is the next day's: a whole day")
+        expect(problem(draft(start: "7pm", end: "7pm", endDate: "Oct 8")) == .noLength,
+               "ending when it starts, on an end day said by hand")
         expect(problem(draft(start: "7pm", end: "8pm", endDate: "Oct 7")) == .endsBeforeStart,
                "an end day before the start")
         expect(problem(draft(allDay: true, endDate: "Oct 7")) == .endsBeforeStart, "a last day before the first")
@@ -330,8 +333,10 @@ struct EventDraftTests {
         expect(row(draft(date: "Oct 14"))?.start == at("2026-10-14T19:45:00-07:00"), "it moves with the date")
         expect(row(draft(start: "8pm", end: "10pm"))?.start == at("2026-10-08T20:00:00-07:00"), "and the time")
         expect(row(draft(), color: "#f4511e")?.event?.color == "#f4511e", "and recolours with the calendar")
-        expect(row(draft(date: "someday")) == nil && row(draft(start: "7pm", end: "7pm")) == nil,
+        expect(row(draft(date: "someday")) == nil && row(draft(start: "7pm", end: "sometime")) == nil,
                "while the times do not read there is no chip, not a wrong one")
+        expect(row(draft(start: "7pm", end: "7pm"))?.end == at("2026-10-09T19:00:00-07:00"),
+               "the same time twice is a whole day (wave 6), and the chip shows it")
         let trip = row(draft(date: "Oct 14", allDay: true, endDate: "Oct 19"))
         expect(trip?.allDay == true && trip?.start == day("2026-10-14") && trip?.end == day("2026-10-20"),
                "an all-day run covers through its last day")

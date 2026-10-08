@@ -2875,6 +2875,66 @@ pub async fn get_contacts(
     Ok((no_store(), Json(items)))
 }
 
+// --- GET /client/calendar/people --------------------------------------------
+//
+// The calendar event pane's guest SUGGESTION: a title says "dinner with steven"
+// and the pane offers the Steven the user most recently exchanged mail with.
+// It offers; it never adds. HUMAN DOOR ONLY, like the contacts it reads: no
+// `/mcp` tool, no `/client/agent/*` route and nothing in the assistant relay
+// reaches it. No model is involved: the client finds the name in the title and
+// the store matches it against people the user has written to.
+
+#[derive(Debug, Deserialize)]
+pub struct CalendarPeopleQuery {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CalendarPersonView {
+    addr: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CalendarPeopleView {
+    people: Vec<CalendarPersonView>,
+}
+
+/// People one answer names at most. A suggestion, not a directory.
+const CALENDAR_PEOPLE_LIMIT: u32 = 3;
+/// A given name longer than this is not a given name.
+const CALENDAR_PEOPLE_NAME_MAX: usize = 64;
+
+/// `GET /client/calendar/people?name=steven`: up to three people the user has
+/// WRITTEN TO whose name starts with the typed words, best first (see
+/// `SqliteStore::people_named` for who qualifies and the order). A name that
+/// is empty, too long or an address answers the empty list, never an error
+/// and never the input.
+pub async fn get_calendar_people(
+    State(state): State<ApiState>,
+    Query(params): Query<CalendarPeopleQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let name = params.name.trim().to_string();
+    let people =
+        if name.is_empty() || name.chars().count() > CALENDAR_PEOPLE_NAME_MAX || name.contains('@')
+        {
+            Vec::new()
+        } else {
+            store_call(&state, move |store, account_id| {
+                store.people_named(account_id, &name, CALENDAR_PEOPLE_LIMIT)
+            })
+            .await?
+            .into_iter()
+            .map(|p| CalendarPersonView {
+                addr: p.addr,
+                name: p.display_name,
+            })
+            .collect()
+        };
+    Ok((no_store(), Json(CalendarPeopleView { people })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SendersQuery {
     /// OPTIONAL, unlike the search box's `q`: a missing fragment IS the

@@ -1995,6 +1995,27 @@ struct ContactHit: Codable, Sendable, Equatable, Identifiable {
     var id: String { addr }
 }
 
+/// One answer to "who is steven" (GET /client/calendar/people): somebody the
+/// user has written to whose name starts that way, most recent exchange
+/// first. The event pane offers the first as a guest; it never adds one.
+struct NamedPerson: Codable, Sendable, Hashable {
+    var addr: String
+    var name: String?
+}
+
+/// The route's envelope. Lenient: a daemon that answers without the list
+/// offers nobody.
+struct NamedPeople: Codable, Sendable, Equatable {
+    var people: [NamedPerson]
+
+    init(people: [NamedPerson] = []) { self.people = people }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        people = (try? c.decodeIfPresent([NamedPerson].self, forKey: .people)) ?? []
+    }
+}
+
 /// One row of the daemon's sender directory (GET /client/senders): somebody who
 /// has written to this account, for the search field's `from:` menu. The other
 /// direction of mail from `ContactHit`, which is who the user writes TO.

@@ -1,0 +1,354 @@
+// The assistant's one calendar tool, held to its rule: it PROPOSES, in the
+// event pane, and writes nothing (Lib/EventProposal.swift).
+//
+// Each of these is wrong only once, on somebody's real calendar: the tool
+// offered to a mailbox with no Calendar page, a proposal for 4pm landing at
+// 11pm because an offset was dropped, an all-day trip a day short, guests on
+// a calendar that cannot invite them, a second proposal silently replacing an
+// event the user was half way through typing, a malformed proposal opening a
+// half-filled pane. Today is the event suite's: Monday October 5 2026, 3:40pm
+// in San Francisco.
+
+import Foundation
+
+@main
+struct EventProposalTests {
+    nonisolated(unsafe) static var failures = 0
+    nonisolated(unsafe) static var checks = 0
+
+    static let zone = TimeZone(identifier: "America/Los_Angeles")!
+    static var cal: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = zone
+        return c
+    }
+    static let now = AgendaTime.parse("2026-10-05T15:40:00-07:00", zone: nil, calendar: cal)!.date
+
+    static func main() {
+        theToolIsOfferedOnlyWithTheCalendar()
+        readingTheCall()
+        aTimedProposalBecomesTheDraft()
+        anAllDayProposalBecomesTheDraft()
+        theCalendarItGoesOn()
+        guestsAreRealGuestsWhereTheyMayBe()
+        aBadProposalIsAnErrorNotAHalfFilledPane()
+        aPaneInUseRefuses()
+        whatTheModelIsTold()
+
+        if failures > 0 {
+            print("FAILED: \(failures) of \(checks) checks")
+            exit(1)
+        }
+        print("ok: \(checks) checks passed")
+    }
+
+    static func expect(_ ok: Bool, _ what: String) {
+        checks += 1
+        if !ok {
+            failures += 1
+            print("  FAIL: \(what)")
+        }
+    }
+
+    // MARK: fixtures
+
+    static func calendarRow(_ id: String, _ name: String, primary: Bool = false, writable: Bool = true, invite: Bool? = nil)
+        -> TimelineCalendar
+    {
+        let json = """
+            {"id":"\(id)","name":"\(name)","color":"#039be5","primary":\(primary),"writable":\(writable)\
+            \(invite.map { ",\"can_invite\":\($0)" } ?? "")}
+            """
+        return try! JSONDecoder().decode(TimelineCalendar.self, from: Data(json.utf8))
+    }
+
+    /// A wave-5 daemon's feed: a primary that may invite, a second writable
+    /// calendar that may not, and one that is read-only.
+    static var feed: TimelineFeed {
+        var f = TimelineFeed(ghosts: [], events: [])
+        f.calendars = [
+            calendarRow("me@example.com", "Braelyn", primary: true, invite: true),
+            calendarRow("family", "Family", invite: false),
+            calendarRow("holidays", "Holidays", writable: false),
+        ]
+        return f
+    }
+
+    static func input(_ pairs: [String: JSONValue]) -> [String: JSONValue] { pairs }
+
+    static func proposal(
+        _ title: String = "Dinner with Steven", start: String = "2026-10-09T16:00:00", end: String? = nil,
+        allDay: Bool = false, calendar: String? = nil, location: String? = nil, notes: String? = nil,
+        guests: [String] = []
+    ) -> EventProposal {
+        EventProposal(
+            title: title, start: start, end: end, allDay: allDay, calendar: calendar, location: location,
+            notes: notes, guests: guests)
+    }
+
+    static func draft(_ p: EventProposal, feed f: TimelineFeed? = feed) -> Result<EventDraft, ProposalRefusal> {
+        EventProposals.draft(p, feed: f, owner: "me@example.com", today: now, calendar: cal)
+    }
+
+    static func made(_ p: EventProposal) -> EventDraft? {
+        if case .success(let d) = draft(p) { return d }
+        return nil
+    }
+
+    static func refusal(_ p: EventProposal, feed f: TimelineFeed? = feed) -> String? {
+        if case .failure(let r) = draft(p, feed: f) { return r.text }
+        return nil
+    }
+
+    static func body(_ d: EventDraft?) -> EventWrite? {
+        guard let d, case .success(let w) = EventForm.wire(
+            d, today: now, calendar: cal, guests: GuestTerms(open: true, owner: "me@example.com"))
+        else { return nil }
+        return w
+    }
+
+    // MARK: the gate
+
+    /// MAIN'S INVENTORY, spelled out: the seventeen tools from before the
+    /// calendar tool existed, in the order the model is shown them. With the
+    /// Calendar page off the assistant is sent exactly these.
+    static let mains = [
+        "search_mail", "get_thread", "get_updates", "explain_triage", "get_records", "search_contacts",
+        "show_emails", "set_status", "create_sender_rule", "save_draft", "archive_message", "label_message",
+        "send_email", "unsubscribe_sender", "product_help", "list_shortcuts", "find_setting",
+    ]
+
+    static func theToolIsOfferedOnlyWithTheCalendar() {
+        let off = EventProposals.inventory(mains, calendar: false, after: "unsubscribe_sender")
+        expect(off == mains, "off: main's tools, in main's order, and nothing else")
+        expect(!off.contains(EventProposals.toolName), "off: no calendar tool")
+        let on = EventProposals.inventory(mains, calendar: true, after: "unsubscribe_sender")
+        expect(on.count == mains.count + 1, "on: exactly one more tool")
+        expect(on.filter { $0 != EventProposals.toolName } == mains, "on: the others unmoved")
+        expect(on.firstIndex(of: EventProposals.toolName) == mains.firstIndex(of: "unsubscribe_sender").map { $0 + 1 },
+               "on: after the last acting tool")
+        // Even handed a list that already names it, off means off.
+        expect(EventProposals.inventory(on, calendar: false, after: "unsubscribe_sender") == mains,
+               "off strips the tool from any list")
+        expect(EventProposals.inventory(on, calendar: true, after: "unsubscribe_sender") == on, "on is stable")
+        expect(EventProposals.inventory(mains, calendar: true, after: "no_such_tool").last == EventProposals.toolName,
+               "an unknown neighbour puts it last, never drops it")
+        expect(!EventProposals.mayRun(EventProposals.toolName, calendar: false),
+               "off: a call to it is a call to a tool that does not exist")
+        expect(EventProposals.mayRun(EventProposals.toolName, calendar: true), "on: it runs")
+        expect(EventProposals.mayRun("search_mail", calendar: false), "every other tool is as it was")
+        expect(EventProposals.toolName == "create_calendar_event", "the wire name")
+    }
+
+    // MARK: the call
+
+    static func readingTheCall() {
+        let full = EventProposals.read(input([
+            "title": .string("  Dinner with Steven "), "start": .string("2026-10-09T16:00:00"),
+            "end": .string("2026-10-09T18:00:00"), "all_day": .bool(false), "calendar": .string("Family"),
+            "location": .string("Zuni"), "notes": .string("Bring the wine"),
+            "guests": .array([.string("steven@example.com"), .string(" ana@example.com ")]),
+        ]))
+        guard case .success(let p) = full else {
+            expect(false, "a whole call reads")
+            return
+        }
+        expect(p.title == "Dinner with Steven", "the title, trimmed")
+        expect(p.start == "2026-10-09T16:00:00" && p.end == "2026-10-09T18:00:00" && !p.allDay, "the times")
+        expect(p.calendar == "Family" && p.location == "Zuni" && p.notes == "Bring the wine", "the rest")
+        expect(p.guests == ["steven@example.com", "ana@example.com"], "the guests, trimmed")
+        func fails(_ i: [String: JSONValue]) -> String? {
+            if case .failure(let r) = EventProposals.read(i) { return r.text }
+            return nil
+        }
+        expect(fails(["start": .string("2026-10-09")]) == "missing title", "no title")
+        expect(fails(["title": .string("   "), "start": .string("2026-10-09")]) == "missing title", "a blank title")
+        expect(fails(["title": .string("x")]) == "missing start", "no start")
+        expect(fails(["title": .string("x"), "start": .number(5)]) == "missing start", "a start that is not text")
+        expect(fails(["title": .string("x"), "start": .string("2026-10-09"), "guests": .array([.number(1)])]) != nil,
+               "a guest list of something else is refused, not guessed at")
+        expect(fails(["title": .string("x"), "start": .string("2026-10-09"), "guests": .bool(true)]) != nil,
+               "and guests that are not a list")
+        func reads(_ i: [String: JSONValue]) -> EventProposal? {
+            if case .success(let p) = EventProposals.read(i) { return p }
+            return nil
+        }
+        let minimal = reads(["title": .string("x"), "start": .string("2026-10-09T16:00:00")])
+        expect(minimal?.end == nil && minimal?.allDay == false && minimal?.guests.isEmpty == true
+            && minimal?.calendar == nil, "title and start are enough")
+        expect(reads(["title": .string("x"), "start": .string("2026-10-09"), "all_day": .string("true")])?.allDay == true,
+               "a quoted boolean is read")
+        expect(reads(["title": .string("x"), "start": .string("2026-10-09"), "guests": .string("a@b.co, c@d.co")])?.guests
+            == ["a@b.co", "c@d.co"], "a lone string of guests is split")
+        expect(reads(["title": .string("x"), "start": .string("2026-10-09"), "guests": .null])?.guests.isEmpty == true,
+               "a null guest list is none")
+        expect(reads(["title": .string("x"), "start": .string("2026-10-09"), "unknown": .string("y")]) != nil,
+               "a field it has never heard of is ignored")
+    }
+
+    // MARK: the draft
+
+    static func aTimedProposalBecomesTheDraft() {
+        let d = made(proposal(end: "2026-10-09T18:30:00", location: "Zuni", notes: "Bring the wine"))
+        expect(d?.title == "Dinner with Steven" && d?.calendarId == "me@example.com", "title, on the primary calendar")
+        expect(d?.date == "Fri Oct 9" && d?.start == "4pm" && d?.end == "6:30pm" && d?.allDay == false,
+               "the form's own fields: \(d?.date ?? "") \(d?.start ?? "") \(d?.end ?? "")")
+        expect(d?.endDate == "", "an end the same day leaves the end day following")
+        expect(d?.location == "Zuni" && d?.notes == "Bring the wine" && d?.guests == "", "the rest, and no guests")
+        expect(d?.titleRead.on == false, "a proposed title is never read for a day or a time")
+        let w = body(d)
+        expect(w?.start == "2026-10-09T16:00:00-07:00" && w?.end == "2026-10-09T18:30:00-07:00",
+               "what the user's press would send: \(w?.start ?? "") to \(w?.end ?? "")")
+        expect(w?.title == "Dinner with Steven" && w?.guests == nil && w?.notify == nil, "and it tells nobody")
+        // One hour when no end is said.
+        expect(body(made(proposal()))?.end == "2026-10-09T17:00:00-07:00", "a timed event defaults to an hour")
+        // An offset is honoured, and said back in the user's own zone.
+        let utc = made(proposal(start: "2026-10-09T23:00:00Z", end: "2026-10-10T00:30:00Z"))
+        expect(utc?.date == "Fri Oct 9" && utc?.start == "4pm" && utc?.end == "5:30pm",
+               "23:00Z is 4pm in San Francisco: \(utc?.start ?? "")")
+        let east = made(proposal(start: "2026-10-09T19:00:00-04:00", end: "2026-10-09T20:00:00-04:00"))
+        expect(east?.start == "4pm" && east?.end == "5pm", "7pm Eastern is 4pm here")
+        // Overnight and multi-day.
+        let late = made(proposal(start: "2026-10-09T22:00:00", end: "2026-10-10T02:00:00"))
+        expect(late?.start == "10pm" && late?.end == "2am" && late?.endDate == "", "overnight is said as it is typed")
+        expect(body(late)?.end == "2026-10-10T02:00:00-07:00", "and ends the next morning")
+        let long = made(proposal(start: "2026-10-09T18:00:00", end: "2026-10-11T10:00:00"))
+        expect(long?.endDate == "Sun Oct 11", "a run past the next morning names its end day: \(long?.endDate ?? "")")
+        expect(body(long)?.end == "2026-10-11T10:00:00-07:00", "and saves it")
+        // Next year carries its year.
+        let far = made(proposal(start: "2027-03-02T09:00:00"))
+        expect(far?.date == "Tue Mar 2 2027" && body(far)?.start == "2027-03-02T09:00:00-08:00",
+               "another year, and that day's own offset")
+        expect(made(proposal(start: "2026-10-09T16:15")) != nil, "minutes without seconds read")
+    }
+
+    static func anAllDayProposalBecomesTheDraft() {
+        let one = made(proposal("Rent", start: "2026-10-09", allDay: true))
+        expect(one?.allDay == true && one?.date == "Fri Oct 9", "one day")
+        let w1 = body(one)
+        expect(w1?.all_day == true && w1?.start == "2026-10-09" && w1?.end == "2026-10-09", "ends on itself")
+        let trip = made(proposal("Lisbon", start: "2026-10-14", end: "2026-10-19", allDay: true))
+        expect(trip?.date == "Wed Oct 14" && trip?.endDate == "Mon Oct 19", "a run names its LAST day")
+        let w = body(trip)
+        expect(w?.start == "2026-10-14" && w?.end == "2026-10-19", "inclusive, as the wire wants it")
+        expect(refusal(proposal("x", start: "2026-10-14", end: "2026-10-12", allDay: true)) == "the event ends before it starts",
+               "a last day before the first")
+        expect(refusal(proposal("x", start: "2026-10-09T16:00:00", allDay: true)) != nil,
+               "all day with a time is mixed precision")
+        expect(refusal(proposal("x", start: "2026-10-09", end: "2026-10-10T10:00:00", allDay: true)) != nil,
+               "and so is a timed end")
+        expect(refusal(proposal("x", start: "2026-10-09")) != nil, "a date without all_day is refused, not guessed")
+        expect(refusal(proposal("x", start: "2026-02-30", allDay: true)) != nil, "February 30 is not a date")
+    }
+
+    static func theCalendarItGoesOn() {
+        expect(made(proposal(calendar: "Family"))?.calendarId == "family", "a calendar by name")
+        expect(made(proposal(calendar: "family"))?.calendarId == "family", "folded")
+        expect(made(proposal(calendar: "me@example.com"))?.calendarId == "me@example.com", "or by id")
+        expect(made(proposal(calendar: "primary"))?.calendarId == "me@example.com", "\"primary\" is the primary")
+        expect(refusal(proposal(calendar: "Holidays")) == EventProposals.unknownCalendarText,
+               "a calendar the user cannot write to is not one")
+        expect(refusal(proposal(calendar: "Work")) == EventProposals.unknownCalendarText, "nor one that is not there")
+        expect(!EventProposals.unknownCalendarText.contains("Family") && !EventProposals.unknownCalendarText.contains("Braelyn"),
+               "the refusal names none of the user's calendars: the assistant does not read the calendar")
+        expect(refusal(proposal(), feed: nil) == EventProposals.noCalendarText, "no feed, no calendar")
+        expect(refusal(proposal(), feed: TimelineFeed(ghosts: [], events: [])) == EventProposals.noCalendarText,
+               "an older daemon lists none")
+        var readOnly = TimelineFeed(ghosts: [], events: [])
+        readOnly.calendars = [calendarRow("holidays", "Holidays", writable: false)]
+        expect(refusal(proposal(), feed: readOnly) == EventProposals.noCalendarText, "only read-only calendars")
+    }
+
+    static func guestsAreRealGuestsWhereTheyMayBe() {
+        let d = made(proposal(guests: ["steven@example.com", "Ana <ana@example.com>"]))
+        expect(EventGuests.read(d?.guests ?? "").addresses == ["steven@example.com", "ana@example.com"],
+               "real guests on the line, as addresses: \(d?.guests ?? "")")
+        expect(d?.guests.hasSuffix(",") == true && EventGuests.read(d?.guests ?? "").unread.isEmpty, "all whole pills")
+        let w = body(d)
+        expect(w?.guests == ["steven@example.com", "ana@example.com"], "the body the user's press would send names them")
+        expect(w?.notify == nil, "and says nothing about telling them: only the control pressed decides that")
+        // The control the pane shows for this draft says it invites.
+        let controls = EventGuests.controls(editing: false, before: 0, after: 2)
+        expect(controls.primary.label.contains("invite"), "the pane's control says it will invite: \(controls.primary.label)")
+        expect(!EventGuests.enterMaySave(controls), "and plain Enter saves nothing")
+        expect(refusal(proposal(calendar: "Family", guests: ["steven@example.com"])) == EventProposals.cannotInviteText,
+               "a calendar that may not invite refuses guests")
+        expect(made(proposal(calendar: "Family")) != nil, "and takes the event without them")
+        expect(refusal(proposal(guests: ["steven"])) == "every guest must be a whole email address", "a name is not a guest")
+        expect(refusal(proposal(guests: ["me@example.com"])) == EventDraftProblem.guestIsYou.text,
+               "the user's own address, in the pane's own words")
+        let crowd = (1...51).map { "g\($0)@example.com" }
+        expect(refusal(proposal(guests: crowd)) == EventDraftProblem.tooManyGuests.text, "51 guests")
+        expect(made(proposal(guests: Array(crowd.prefix(50)))) != nil, "50 is the most")
+        // A daemon older than guests: no guests line, so no proposed guests.
+        var old = TimelineFeed(ghosts: [], events: [])
+        old.calendars = [calendarRow("me@example.com", "Braelyn", primary: true)]
+        expect(refusal(proposal(guests: ["steven@example.com"]), feed: old) == EventProposals.cannotInviteText,
+               "a daemon that cannot invite refuses guests")
+    }
+
+    /// Every one of these answers with words and makes NO draft.
+    static func aBadProposalIsAnErrorNotAHalfFilledPane() {
+        let bad: [(EventProposal, String)] = [
+            (proposal(String(repeating: "a", count: 201)), EventDraftProblem.titleTooLong.text),
+            (proposal(notes: String(repeating: "n", count: 2001)), EventDraftProblem.notesTooLong.text),
+            (proposal(start: "friday at 4"), "start must be a date and time like 2026-10-09T16:00:00, or set all_day to true for a date"),
+            (proposal(start: "2026-10-09T16:00:00", end: "later"), "end must be a date and time like 2026-10-09T17:00:00"),
+            (proposal(start: "2026-10-09T16:00:00", end: "2026-10-09T15:00:00"), "the event must end after it starts"),
+            (proposal(start: "2026-10-09T16:00:00", end: "2026-10-09T16:00:00"), "the event must end after it starts"),
+            (proposal(start: "2026-10-09T16:00:00", end: "2026-10-10"), "end must be a date and time like 2026-10-09T17:00:00"),
+            (proposal(start: "2026-13-40T16:00:00"), "start must be a date and time like 2026-10-09T16:00:00, or set all_day to true for a date"),
+        ]
+        for (p, want) in bad {
+            expect(refusal(p) == want, "\"\(p.start)\" / \(p.title.prefix(12)): \(refusal(p) ?? "drafted!")")
+            expect(made(p) == nil, "and no draft")
+        }
+        expect(made(proposal(String(repeating: "a", count: 200))) != nil, "200 characters of title is allowed")
+        for text in [EventProposals.draftedText, EventProposals.paneBusyText, EventProposals.noCalendarText,
+                     EventProposals.unknownCalendarText, EventProposals.cannotInviteText,
+                     EventProposals.questionOpenText, EventProposals.promptLine] {
+            expect(!text.contains("\u{2014}") && !text.contains("\u{2013}"), "no dash the house style forbids: \(text.prefix(24))")
+        }
+    }
+
+    // MARK: the pane
+
+    static func aPaneInUseRefuses() {
+        func refusal(exists: Bool, touched: Bool = false, editable: Bool = true, deleteAsked: Bool = false) -> String? {
+            EventProposals.paneRefusal(paneExists: exists, touched: touched, editable: editable, deleteAsked: deleteAsked)
+        }
+        expect(refusal(exists: false) == nil, "no pane: the proposal opens one")
+        expect(refusal(exists: true) == nil, "an untouched pane gives way")
+        expect(refusal(exists: true, touched: true) == EventProposals.paneBusyText,
+               "a pane with typed content is never replaced")
+        expect(refusal(exists: true, touched: false, editable: false) == EventProposals.paneBusyText,
+               "nor one whose write is out or in doubt")
+        expect(refusal(exists: false, deleteAsked: true) == EventProposals.questionOpenText,
+               "nor under the delete question")
+        expect(EventProposals.paneBusyText.contains("finish or close the open event first"),
+               "the words the assistant relays")
+        // A PROPOSED pane counts as typed: it opens touched, because what it
+        // opened with is a blank event and the proposal is what is in it.
+        let blank = EventForm.newDraft(day: now, now: now, calendarId: "me@example.com", calendar: cal)
+        if let d = made(proposal()) {
+            var initial = blank
+            initial.titleRead = d.titleRead
+            expect(d != initial, "a proposal differs from the blank event its pane opened with")
+            expect(EventPaneTravel.leaving(open: true, touched: d != initial) == .park,
+                   "so leaving the page parks it instead of throwing it away")
+            expect(EventPaneTravel.composer(open: true, parked: false, touched: d != initial).allow == false,
+                   "and a composer does not replace it")
+        } else {
+            expect(false, "the proposal drafts")
+        }
+    }
+
+    static func whatTheModelIsTold() {
+        let said = EventProposals.draftedText
+        expect(said.contains("drafted") && said.contains("waiting for the user to confirm"), "drafted, and waiting")
+        expect(said.contains("Nothing has been added") && said.contains("nobody has been invited"),
+               "and what did not happen, in as many words")
+        expect(EventProposals.promptLine.contains(EventProposals.toolName), "the prompt names the tool")
+        expect(EventProposals.promptLine.contains("invites nobody"), "and says it invites nobody")
+    }
+}

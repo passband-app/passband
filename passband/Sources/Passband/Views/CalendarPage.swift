@@ -1,6 +1,7 @@
 // THE CALENDAR PAGE: the month (Views/CalendarMonth.swift), which it opens
-// on, and an agenda, switched with `m` / `a` and the header's control. From
-// either, `n` makes an event on one of the user's own Google calendars and
+// on, the week (Views/CalendarWeek.swift) and an agenda, switched with `m` /
+// `w` / `a` and the header's control. From
+// any, `n` makes an event on one of the user's own Google calendars and
 // `e` changes one, in a pane that takes half the window the way the composer
 // does (Views/CalendarEventPane.swift). While that pane is open this page has
 // the other half: the month keeps its grid and puts the day column and the
@@ -102,6 +103,8 @@
                     page(days: days, next: next, rows: rows, selected: selected, now: now, cal: cal)
                 case .month:
                     monthPage(now: now, cal: cal)
+                case .week:
+                    weekPage(now: now, cal: cal)
                 }
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
@@ -151,6 +154,29 @@
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .keyBindings(.modal, monthBindings(order: order, item: item, day: place.day))
+        }
+
+        // MARK: - the week
+
+        /// The week the month's selected day is in: the same place, the same
+        /// selected item, the same draft on the grid.
+        private func weekPage(now: Date, cal: Calendar) -> some View {
+            let place = store.calendarMonthPlace(now: now, calendar: cal)
+            let drafting = store.eventPaneOpen
+            let model = monthMemo.week(
+                store.calendarFeed, day: place.day, calendar: cal,
+                provisional: store.calendarProvisional(now: now, calendar: cal),
+                editing: drafting ? store.calendarEditor?.event : nil)
+            let order = model.columns.first { $0.day == place.day }?.order ?? []
+            let item = store.calendarMonthItem.flatMap { id in monthMemo.items.first { $0.id == id } }
+            return VStack(spacing: 0) {
+                CalendarStatusLines()
+                CalendarWeekView(
+                    model: model, place: place, item: item, twoPanes: monthTwoPanes, drafting: drafting,
+                    paneWidth: Self.detailWidth, now: now, calendar: cal)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .keyBindings(.modal, weekBindings(order: order, item: item, day: place.day))
         }
 
         @ViewBuilder
@@ -408,9 +434,14 @@
             ]
         }
 
-        /// `a` and `m`, on both: the agenda and the month.
+        /// `m`, `w` and `a`, on all three: the month, the week, the agenda.
         private func modeBindings() -> [KeyBinding] {
             [
+                KeyBinding(declining: "w", "week") {
+                    guard !store.modalOverlayOpen else { return false }
+                    store.setCalendarMode(.week)
+                    return true
+                },
                 KeyBinding(declining: "a", "agenda") {
                     guard !store.modalOverlayOpen else { return false }
                     store.setCalendarMode(.agenda)
@@ -466,6 +497,56 @@
                         store.calendarDayOpen = true
                         return true
                     }
+                    guard let first = order.first else { return false }
+                    store.calendarMonthItem = first.id
+                    return true
+                },
+                KeyBinding(declining: "y", "going") {
+                    guard free(), let ghost = item?.ghost else { return false }
+                    let state: GhostState? = ghost.state == .going ? nil : .going
+                    Task { await store.markGhost(ghost, state, viaKey: true) }
+                    return true
+                },
+                KeyBinding(declining: "x", "dismiss") {
+                    guard free(), let ghost = item?.ghost else { return false }
+                    Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
+                    return true
+                },
+            ]
+        }
+
+        /// The week's keys. Left and right move the day (and turn the week off
+        /// its edge), `[` `]` and `,` `.` turn a week, `t` is today. j / k and
+        /// the up and down arrows walk the selected day's items, top-down as
+        /// drawn; Enter opens the first of them, then that item's mail. The
+        /// rest (`n`, `e`, ⌫, `y`, `x`) are the month's.
+        private func weekBindings(order: [AgendaItem], item: AgendaItem?, day: Date) -> [KeyBinding] {
+            let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
+            func move(_ m: MonthMove) -> Bool {
+                guard !store.modalOverlayOpen else { return false }
+                store.moveCalendarMonth(m)
+                return true
+            }
+            func step(_ delta: Int) -> Bool {
+                guard free(), let id = WeekGrid.step(order, from: item?.id, by: delta) else { return false }
+                store.calendarMonthItem = id
+                return true
+            }
+            return modeBindings() + writeBindings(selected: item, day: day) + [
+                KeyBinding(declining: "ArrowLeft", "previous day") { move(.days(-1)) },
+                KeyBinding(declining: "ArrowRight", "next day") { move(.days(1)) },
+                KeyBinding(declining: "ArrowUp", "previous") { step(-1) },
+                KeyBinding(declining: "ArrowDown", "next") { step(+1) },
+                KeyBinding(declining: "t", "today") { move(.today) },
+                KeyBinding(declining: "[", "previous week") { move(.days(-7)) },
+                KeyBinding(declining: "]", "next week") { move(.days(7)) },
+                KeyBinding(declining: ",", "previous week") { move(.days(-7)) },
+                KeyBinding(declining: ".", "next week") { move(.days(7)) },
+                KeyBinding(declining: "j", "next") { step(+1) },
+                KeyBinding(declining: "k", "previous") { step(-1) },
+                KeyBinding(declining: "Enter", "open") {
+                    guard free() else { return false }
+                    if let item { return open(item) }
                     guard let first = order.first else { return false }
                     store.calendarMonthItem = first.id
                     return true
@@ -928,17 +1009,19 @@
         private var built = MonthModel(month: .distantPast, weeks: [])
         private var day: Date?
         private var builtColumn: DayColumn?
+        private var weekDay: Date?
+        private var weekFirstWeekday: Int?
+        private var builtWeek: WeekModel?
 
-        func month(
-            _ feed: TimelineFeed?, month: Date, calendar: Calendar, provisional: AgendaItem? = nil,
-            editing: TimelineEvent? = nil
-        ) -> MonthModel {
-            var stale = false
+        /// The items and the draft's row, kept current: whatever was built
+        /// from the ones before is dropped.
+        private func sync(
+            _ feed: TimelineFeed?, calendar: Calendar, provisional: AgendaItem?, editing: TimelineEvent?
+        ) {
             if feed != self.feed || calendar.timeZone != zone {
                 items = feed.map { Agenda.items($0, calendar: calendar) } ?? []
                 (self.feed, zone) = (feed, calendar.timeZone)
-                builtColumn = nil
-                stale = true
+                (builtColumn, month, builtWeek) = (nil, nil, nil)
             }
             // The event pane's draft is one more row, re-placed as it is
             // typed: the grid is rebuilt when the row itself changes (its
@@ -946,15 +1029,35 @@
             // in the notes.
             if provisional != self.provisional || editing != self.editing {
                 (self.provisional, self.editing) = (provisional, editing)
-                stale = true
+                (month, builtWeek) = (nil, nil)
             }
-            if stale || month != self.month || calendar.firstWeekday != firstWeekday {
+        }
+
+        func month(
+            _ feed: TimelineFeed?, month: Date, calendar: Calendar, provisional: AgendaItem? = nil,
+            editing: TimelineEvent? = nil
+        ) -> MonthModel {
+            sync(feed, calendar: calendar, provisional: provisional, editing: editing)
+            if month != self.month || calendar.firstWeekday != firstWeekday {
                 built = MonthGrid.build(
                     EventForm.withProvisional(items, provisional, editing: editing), month: month,
                     calendar: calendar)
                 (self.month, firstWeekday) = (month, calendar.firstWeekday)
             }
             return built
+        }
+
+        /// The week `day` is in, the draft's row among its blocks.
+        func week(
+            _ feed: TimelineFeed?, day: Date, calendar: Calendar, provisional: AgendaItem? = nil,
+            editing: TimelineEvent? = nil
+        ) -> WeekModel {
+            sync(feed, calendar: calendar, provisional: provisional, editing: editing)
+            if let builtWeek, day == weekDay, calendar.firstWeekday == weekFirstWeekday { return builtWeek }
+            let model = WeekGrid.build(
+                EventForm.withProvisional(items, provisional, editing: editing), day: day, calendar: calendar)
+            (weekDay, weekFirstWeekday, builtWeek) = (day, calendar.firstWeekday, model)
+            return model
         }
 
         /// Call after `month(_:month:calendar:)`, which keeps `items` current.

@@ -32,8 +32,9 @@ struct EventDraft: Hashable, Sendable {
     /// The day, or the first day of an all-day run.
     var date = ""
     /// All-day: the last day, inclusive ("" is the same day). Timed: the day
-    /// it ends, ONLY for an event that runs past the next morning ("" is the
-    /// start's day, or the next when the end time is not after the start).
+    /// it ends, once the user has said one. "" FOLLOWS the start: the start's
+    /// day, or the next when the end time is at or before the start
+    /// (`EventForm.impliedEndDate` is what the pane shows in its place).
     var endDate = ""
     var start = ""
     var end = ""
@@ -42,6 +43,9 @@ struct EventDraft: Hashable, Sendable {
     /// Wave 5. The guests line, as the recipient field holds it: addresses
     /// joined by commas, a half-typed one last (read by `EventGuests.read`).
     var guests = ""
+    /// Wave 6. How the title is being read for a day, a time and a name
+    /// (Lib/TitleParse.swift). Off on an edit.
+    var titleRead = TitleRead()
 }
 
 /// Why a draft cannot be saved yet, in the card's own words. One at a time,
@@ -154,6 +158,7 @@ enum EventForm {
         d.date = dateText(day, today: now, calendar: calendar)
         d.start = clockText(startMinutes)
         d.end = clockText((startMinutes + 60) % 1440)
+        d.titleRead.on = true
         return d
     }
 
@@ -168,6 +173,10 @@ enum EventForm {
         d.date = dateText(calendar.startOfDay(for: day), today: now, calendar: calendar)
         d.start = clockText(max(0, min(1439, startMinutes)))
         d.end = clockText(max(0, endMinutes) % 1440)
+        // Swept on the hours: the day and the times are the user's own, and
+        // the title reads only who it is with.
+        d.titleRead.on = true
+        d.titleRead.hand = [.date, .start, .end]
         return d
     }
 
@@ -176,7 +185,8 @@ enum EventForm {
     /// start. An end day that does not read is left for the form to say so.
     static func moved(_ d: EventDraft, to day: Date, today: Date, calendar: Calendar) -> EventDraft {
         let day = calendar.startOfDay(for: day)
-        var out = d
+        // A day picked by hand: the title stops writing it.
+        var out = handSet(d, .date)
         out.date = dateText(day, today: today, calendar: calendar)
         let endText = trimmed(d.endDate)
         if !endText.isEmpty, let from = parseDate(d.date, today: today, calendar: calendar),
@@ -202,7 +212,7 @@ enum EventForm {
         _ d: EventDraft, color: String?, today: Date, calendar: Calendar
     ) -> AgendaItem? {
         guard case .success(let w) = when(d, today: today, calendar: calendar) else { return nil }
-        let title = trimmed(d.title)
+        let title = savedTitle(d, today: today, calendar: calendar)
         let (start, end) = wireTimes(w, calendar)
         let event = TimelineEvent(
             id: provisionalId, calendar_id: d.calendarId ?? "", calendar_name: nil,
@@ -288,13 +298,29 @@ enum EventForm {
             endDay = parsed
         }
         guard var end = at(endDay, e, calendar) else { return .failure(.badEndDate) }
-        if endDateText.isEmpty {
-            if e == s.minutes { return .failure(.noLength) }
-            // Not after the start: the next day. "10pm to 2am".
-            if end <= start, let next = at(addDays(1, day, calendar), e, calendar) { end = next }
+        // No end day said: it follows the start, and an end time at or
+        // before the start is the next day. "10pm to 2am"; "7pm to 7pm" is a
+        // whole day, and the line under the fields says so.
+        if endDateText.isEmpty, end <= start, let next = at(addDays(1, day, calendar), e, calendar) {
+            end = next
         }
+        // A day said by hand is taken at its word.
+        if end == start { return .failure(.noLength) }
         guard end > start else { return .failure(.endsBeforeStart) }
         return .success(ResolvedWhen(allDay: false, start: start, end: end))
+    }
+
+    /// The end day a timed draft has while its end-day well is empty: the
+    /// start's day, or the day after when the end time is at or before the
+    /// start. What the well shows until the user types a day of their own.
+    /// Nil for all day, and while the start day does not read.
+    static func impliedEndDate(_ d: EventDraft, today: Date, calendar: Calendar) -> String? {
+        guard !d.allDay, let day = parseDate(d.date, today: today, calendar: calendar) else { return nil }
+        var end = day
+        if let s = parseTime(d.start), let e = parseEnd(d.end, after: s.minutes), e <= s.minutes {
+            end = addDays(1, day, calendar)
+        }
+        return dateText(end, today: today, calendar: calendar)
     }
 
     /// The first thing in the way of saving a NEW event, in field order.
@@ -320,7 +346,7 @@ enum EventForm {
     static func wire(
         _ d: EventDraft, today: Date, calendar: Calendar, guests: GuestTerms = .closed
     ) -> Result<EventWrite, EventDraftProblem> {
-        let title = trimmed(d.title)
+        let title = savedTitle(d, today: today, calendar: calendar)
         if let p = titleProblem(title) { return .failure(p) }
         guard let calendarId = d.calendarId, !calendarId.isEmpty else { return .failure(.noCalendar) }
         let when: ResolvedWhen
@@ -360,7 +386,9 @@ enum EventForm {
         guests: GuestTerms = .closed
     ) -> Result<EventPatch, EventDraftProblem> {
         var p = EventPatch()
-        let title = trimmed(d.title)
+        // An edit's title is never read for a day or a time (`TitleRead.on`
+        // is a new event's), so this is the typed title, trimmed.
+        let title = savedTitle(d, today: today, calendar: calendar)
         if title != trimmed(initial.title) {
             if let problem = titleProblem(title) { return .failure(problem) }
             p.title = title

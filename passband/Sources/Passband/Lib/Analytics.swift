@@ -199,7 +199,7 @@ enum Analytics {
             "going", "dismissed", "cleared",
             // calendar_opened's `view`: which way the page was drawn when it
             // opened (CalendarViewMode's raw values).
-            "agenda", "month",
+            "agenda", "month", "week",
             // group_* modes — how an audience is addressed. "individual" is the
             // only one that is not also a header name.
             "to", "bcc", "individual",

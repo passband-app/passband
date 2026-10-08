@@ -246,12 +246,16 @@ extension AppStore {
 
     /// The month the timeline request has to cover, while one is on screen.
     func calendarRequestMonth(now: Date) -> Date? {
-        guard calendarMode == .month else { return nil }
+        // The week on screen is one of its month's grid rows (the place's
+        // day is always a cell of the place's month), so the month's range
+        // covers it, lookback for trips included.
+        guard calendarMode.isGrid else { return nil }
         return calendarMonthPlace(now: now, calendar: .current).month
     }
 
-    /// `a` / `m` and the header's switch. The levels the month had open are
-    /// closed, so coming back to it starts from the grid.
+    /// `m` / `w` / `a` and the header's switch. The levels the month had open
+    /// are closed, so coming back to it starts from the grid. The place is
+    /// kept: the week opens on the month's selected day, and back.
     func setCalendarMode(_ mode: CalendarViewMode) {
         guard mode != calendarMode else { return }
         calendarMode = mode
@@ -295,11 +299,12 @@ extension AppStore {
         calendarMonthItem = id
     }
 
-    /// Escape on the month: closes the item's detail, then the opened day.
+    /// Escape on the month or the week: closes the item's detail, then (the
+    /// month's) opened day.
     /// False when there is nothing to close, so Escape goes on to its usual
     /// "back to the sitrep".
     func calendarMonthBack() -> Bool {
-        guard activeView == .calendar, calendarMode == .month else { return false }
+        guard activeView == .calendar, calendarMode.isGrid else { return false }
         // A sweep under way on the day column is the first thing Escape ends.
         if let cancel = calendarSweepCancel {
             calendarSweepCancel = nil
@@ -422,14 +427,56 @@ extension AppStore {
         openEventPane(CalendarEditorRequest(mode: .edit(event), initial: draft, epoch: epoch))
     }
 
+    /// THE ASSISTANT'S PROPOSAL (wave 6, Lib/EventProposal.swift): the pane
+    /// opened on the Calendar page with `draft` filled in, and NOTHING
+    /// written. The user adds it, or not, with the pane's own control.
+    /// Returns why not, in words for the assistant, or nil when the pane is
+    /// open.
+    ///
+    /// The pane opens TOUCHED: what it opened with is a blank new event, and
+    /// the proposal is what is in it. So it parks rather than closes when
+    /// the user goes to another page, a composer does not replace it, and a
+    /// second proposal is refused until this one is answered, exactly as if
+    /// the user had typed it.
+    func proposeEvent(_ draft: EventDraft, now: Date = Date()) -> String? {
+        guard calendarPageAvailable, calendarCanCreate else { return EventProposals.noCalendarText }
+        if let refusal = EventProposals.paneRefusal(
+            paneExists: calendarEditor != nil, touched: eventDraftTouched,
+            editable: calendarPaneState.fieldsEditable && !calendarWriting, deleteAsked: calendarDeleteAsk != nil)
+        {
+            return refusal
+        }
+        // An untouched pane (opened and left empty) gives way.
+        if calendarEditor != nil { closeEventEditor() }
+        let cal = Calendar.current
+        if activeView != .calendar { setView(.calendar) }
+        guard activeView == .calendar else { return EventProposals.noCalendarText }
+        // A grid, turned to the event's day, so its dashed chip is in view.
+        if !calendarMode.isGrid { setCalendarMode(.month) }
+        if case .success(let when) = EventForm.when(draft, today: now, calendar: cal) {
+            calendarPlace = MonthGrid.select(
+                when.start, in: calendarMonthPlace(now: now, calendar: cal), calendar: cal)
+            calendarMonthItem = nil
+        }
+        var blank = EventForm.newDraft(day: now, now: now, calendarId: draft.calendarId, calendar: cal)
+        // The proposal's title is not read for a day or a time (it already
+        // says when), and neither is anything typed over it.
+        blank.titleRead = draft.titleRead
+        openEventPane(CalendarEditorRequest(mode: .create, initial: blank, epoch: epoch), draft: draft)
+        return nil
+    }
+
     /// ONE PANE AT A TIME. The event pane takes the half of the window the
     /// composer and the side panel use, so both step aside for it. A composer
     /// is closed the way Escape closes it: its mail is kept in drafts and the
     /// usual toast says so, so nothing is lost by the swap.
-    private func openEventPane(_ request: CalendarEditorRequest) {
+    ///
+    /// `draft`: what the pane holds when it opens, when that is not what it
+    /// opened WITH (a proposal).
+    private func openEventPane(_ request: CalendarEditorRequest, draft: EventDraft? = nil) {
         if compose != nil { closeCompose() }
         if sideView.isOpen { closeSide() }
-        calendarDraft = request.initial
+        calendarDraft = draft ?? request.initial
         calendarEditor = request
         calendarPaneState = .editing
         calendarPaneSent = nil

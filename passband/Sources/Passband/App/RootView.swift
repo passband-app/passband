@@ -777,7 +777,7 @@ struct RoutedHost<Content: View>: View {
     /// in user-facing copy, which this app does not do.)
     private var heading: (title: String, subtitle: String?) {
         switch view {
-        case .calendar: ("Calendar", store.calendarMode == .month ? "month" : "agenda")
+        case .calendar: ("Calendar", store.calendarMode.label.lowercased())
         case .rules: ("Rules", "sender rules")
         case .groups: ("Groups", "named audiences")
         default: (view.label, nil)
@@ -794,7 +794,7 @@ struct RoutedHost<Content: View>: View {
                 VStack(alignment: .leading, spacing: 0) {
                     RoutedHeader(title: heading.title, subtitle: heading.subtitle) {
                         // The calendar's one header control: which way the
-                        // page is drawn (`a` / `m`).
+                        // page is drawn (`m` / `w` / `a`).
                         if view == .calendar { CalendarModeSwitch() }
                     }
                     content

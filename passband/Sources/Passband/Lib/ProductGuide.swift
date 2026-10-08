@@ -72,7 +72,7 @@ enum ProductGuide {
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
                     + "receipts cards, flow mode"
             case .calendar:
-                "the Calendar page: month and agenda, events guessed from mail, connecting "
+                "the Calendar page: month, week and agenda, events guessed from mail, connecting "
                     + "Google Calendar, new, edited and deleted events, guests"
             case .readingMail:
                 "an open email: moving between messages and emails, done, skip, unsubscribe, "
@@ -275,18 +275,26 @@ enum ProductGuide {
         - Connecting: the "Connect calendar" card or button opens Google's consent screen. Unticking calendar there leaves the mailbox working and simply connects no calendar.
 
         Views:
-        - m shows the month, a the agenda. The month is the default. Trips and stays are bars across the days they cover, and "+N more" is what does not fit in a day.
+        - m shows the month, w the week, a the agenda. The month is the default. Trips and stays are bars across the days they cover, and "+N more" is what does not fit in a day.
         - In the month the arrow keys move the day, [ and ] go to the previous and next month, and t goes to today. Enter opens the selected day: its hours in a column beside the month.
+        - The week shows seven days side by side under one column of hours, with all-day events and trips in a strip across the top. The left and right arrows move the day, [ and ] go to the previous and next week, t goes to today, and j / k or the up and down arrows step through the selected day's events.
         - j / k move the selection. Enter opens the mail behind an event guessed from mail. y marks it going (again: not going), x dismisses it.
 
         Making and changing events (only on the user's own calendars):
         - n, or "New event", opens the event pane. It takes half the window, like the composer, and the month stays usable beside it: clicking a day sets the event's date.
-        - Pressing and dragging down the day column's hours sweeps a time, in quarter hours; letting go opens the event pane with that day and those times.
+        - Pressing and dragging down a day's hours (the month's day column, or any day of the week view) sweeps a time, in quarter hours; letting go opens the event pane with that day and those times.
         - e edits the selected event. ⌫ deletes it, after asking once.
         - The pane has the title, the calendar, all day, the day and times, a location that suggests places from Apple Maps as it is typed (arrows and Enter pick one), guests and notes.
+        - A timed event shows its end day beside its end time. Left alone it follows the start day, or the next day when the end time is at or before the start; typing a day into it sets it, for an event that runs overnight or over several days.
+        - A new event's title reads itself as it is typed: "dinner with steven on friday 4pm" fills in Friday and 4pm, and the event is saved as "Dinner with steven". The line under the title says what will be saved. A day or time typed by hand is never overwritten, deleting the words puts back what was there, and Esc in the title (or ⌘Z) keeps the title exactly as typed.
+        - "with steven" in a new event's title also suggests a guest: the Steven the user most recently exchanged mail with, in a dashed box on the guests line with a checkmark and an x. The checkmark adds them as a guest, the x dismisses the suggestion. Tab from the title moves to it; there Enter adds and ⌫ dismisses. A suggestion is not a guest, and nobody is invited, until the checkmark and then the save control.
         - ⌘↵ saves from anywhere in the pane. Plain Enter saves from a one-line field, but only when the event has no guests. With guests, plain Enter does nothing: only ⌘↵ or a click on the save control does.
         - Google, not Passband, emails the guests, and only when the control says so: "add and invite 3", "save and tell guests" or "delete and tell guests". "save without telling" and "delete without telling" change the event and tell nobody.
         - Esc closes the place list first, then the delete question, then the pane. The event pane and the composer share that half of the window, so only one is open at a time.
+
+        The assistant and the calendar:
+        - Asked to put something on the calendar, the assistant drafts it: the event pane opens filled in with the title, the times and any guests the user asked for. The user reads it and presses the pane's add control themselves.
+        - The assistant never adds an event on its own and never invites anyone. It cannot read the calendar, and it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
         """
 
     private static let readingMail = """

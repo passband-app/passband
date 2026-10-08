@@ -513,3 +513,96 @@ enum EventGuests {
         return "GMT\(seconds < 0 ? "-" : "+")\(hours)" + (minutes == 0 ? "" : ":\(String(format: "%02d", minutes))")
     }
 }
+
+// MARK: - a guest the title named (wave 6)
+
+/// "with steven" in the title, and who the daemon says that most likely is:
+/// OFFERED on the guests line, never added. Not a guest until the user says
+/// so, and so not in the draft's guests, not counted by the save controls and
+/// never sent anywhere.
+struct GuestSuggestion: Hashable, Sendable {
+    /// The name as typed in the title.
+    let name: String
+    /// The correspondent of that name the user most recently exchanged mail
+    /// with.
+    let best: NamedPerson
+    /// The daemon's other candidates, quietly, at most two.
+    let others: [NamedPerson]
+}
+
+extension EventGuests {
+    /// Candidates one suggestion shows at most: the daemon's own cap.
+    static let suggestionCap = 3
+
+    /// A typed name's identity: folded, single-spaced.
+    static func nameKey(_ name: String) -> String {
+        name.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// The names the daemon is asked about: every name the title carries
+    /// that has not been answered in this pane, while the guests line is open
+    /// (a calendar that may not invite offers nobody).
+    static func namesToAsk(_ d: EventDraft, reading: TitleReading?, access: GuestAccess) -> [String] {
+        guard access == .field, let reading else { return [] }
+        var seen = Set<String>()
+        return reading.names.map(nameKey).filter { !$0.isEmpty && !d.titleRead.answered.contains($0) && seen.insert($0).inserted }
+    }
+
+    /// The one suggestion on offer, or nil: the first named person, in the
+    /// title's order, who has candidates and has not been answered. A name is
+    /// answered by its checkmark, by its x, and by the user putting any of
+    /// its candidates on the line themselves. The account's own address and
+    /// anything that is not a whole address are never offered.
+    static func suggestion(
+        _ d: EventDraft, reading: TitleReading?, access: GuestAccess, people: [String: [NamedPerson]],
+        owner: String?
+    ) -> GuestSuggestion? {
+        guard access == .field, let reading else { return nil }
+        let onLine = read(d.guests).keys
+        let me = owner.map(key) ?? ""
+        for name in reading.names {
+            let id = nameKey(name)
+            guard !id.isEmpty, !d.titleRead.answered.contains(id), let found = people[id] else { continue }
+            var seen = Set<String>()
+            let candidates = found.filter { person in
+                let k = key(person.addr)
+                return isAddress(person.addr) && k != me && seen.insert(k).inserted
+            }.prefix(suggestionCap)
+            guard let best = candidates.first else { continue }
+            // Already invited by hand: there is nothing to suggest.
+            if candidates.contains(where: { onLine.contains(key($0.addr)) }) { continue }
+            return GuestSuggestion(name: name, best: best, others: Array(candidates.dropFirst()))
+        }
+        return nil
+    }
+
+    /// The checkmark: the person becomes a real guest, at the end of the
+    /// line as a whole pill, and the name is answered.
+    static func accepting(_ person: NamedPerson, for name: String, in d: EventDraft) -> EventDraft {
+        var out = d
+        let existing = split(d.guests)
+        if !existing.contains(where: { key(bare($0)) == key(person.addr) }) {
+            // A list ending in a comma is all pills.
+            out.guests = (existing + [person.addr]).joined(separator: ", ") + ","
+        }
+        out.titleRead.answered.insert(nameKey(name))
+        return out
+    }
+
+    /// The x: nobody is added, and the name is not offered again in this
+    /// pane.
+    static func dismissing(_ name: String, in d: EventDraft) -> EventDraft {
+        var out = d
+        out.titleRead.answered.insert(nameKey(name))
+        return out
+    }
+
+    /// What the daemon is asked for a typed name, most specific first: the
+    /// name as typed, then its first word alone ("ana downtown" is Ana).
+    static func queries(for name: String) -> [String] {
+        let words = nameKey(name).split(separator: " ").map(String.init)
+        guard let first = words.first else { return [] }
+        return words.count > 1 ? [words.joined(separator: " "), first] : [first]
+    }
+}
+

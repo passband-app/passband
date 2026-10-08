@@ -276,7 +276,7 @@ struct AgentConnectTests {
     static func chipOrder() {
         expect(
             AgentKind.shown(for: .signIn)
-                == [.claude, .openClaw, .hermes, .chatGPT, .claudeCode, .codex, .cursor, .vsCode, .other],
+                == [.claude, .openClaw, .hermes, .muse, .chatGPT, .claudeCode, .codex, .cursor, .vsCode, .other],
             "sign-in door leads with Claude, OpenClaw and Hermes Agent")
         expect(
             AgentKind.shown(for: .none)
@@ -284,7 +284,7 @@ struct AgentConnectTests {
             "self-hosted door leads with OpenClaw and Hermes Agent, keeps Claude Desktop")
         expect(AgentKind.defaultChoice(for: .signIn) == .claude, "the sign-in door opens on Claude")
         expect(AgentKind.defaultChoice(for: .none) == .openClaw, "the self-hosted door opens on OpenClaw")
-        for web in [AgentKind.claude, .chatGPT] {
+        for web in [AgentKind.claude, .muse, .chatGPT] {
             expect(!AgentKind.shown(for: .none).contains(web), "\(web) is not offered at the self-hosted door")
             expect(AgentKind.shown(for: .signIn).contains(web), "\(web) is offered at the sign-in door")
         }
@@ -366,11 +366,12 @@ struct AgentConnectTests {
             (.hermes, .signIn, "Copy config"), (.hermes, .none, "Copy config"),
             (.claudeDesktop, .none, "Copy config"), (.other, .signIn, "Copy config"),
             (.cursor, .none, "Copy config"), (.vsCode, .signIn, "Copy config"),
+            (.muse, .signIn, "Copy prompt"),
         ]
         for (kind, auth, label) in copies {
             expect(kind.copyAction(auth: auth) == AgentAction(label: label, note: nil, kind: .copy), "\(kind) copy fallback is \(label)")
         }
-        for kind in [AgentKind.openClaw, .hermes, .claudeCode, .codex, .claudeDesktop, .other] {
+        for kind in [AgentKind.openClaw, .hermes, .muse, .claudeCode, .codex, .claudeDesktop, .other] {
             for auth in [AgentDoorAuth.none, .signIn] {
                 expect(kind.action(endpoint: url, auth: auth).kind == .copy, "\(kind) has no link scheme, so it copies")
             }
@@ -396,6 +397,11 @@ struct AgentConnectTests {
                     url: "\(selfHost)"
                 """, "Hermes open config has no auth line")
         expect(AgentKind.hermes.check == "hermes mcp test passband", "Hermes check")
+        let ask = AgentKind.muse.snippet(endpoint: hosted, auth: .signIn)
+        expect(ask.contains("URL: \(hosted)\n"), "Muse is told the address on its own line")
+        expect(ask.contains("OAuth"), "Muse is told to sign in, since it asks otherwise")
+        expect(AgentKind.muse.snippetIsPrompt && !AgentKind.muse.isCommand, "Muse's snippet is a message, not a command")
+        expect(AgentKind.muse.signIn(for: .signIn) == nil && AgentKind.muse.check == nil, "Muse has no CLI to name")
         expect(AgentKind.hermes.signIn(for: .none) == nil, "no Hermes login at the open door")
         for auth in [AgentDoorAuth.none, .signIn] {
             expect(
@@ -408,7 +414,7 @@ struct AgentConnectTests {
                     """, "VS Code config")
         }
         let forbidden = ["token", "bearer", "authorization", "api_key", "apikey", "secret", "<", ">", "your-", "xxx", "..."]
-        for kind in [AgentKind.hermes, .chatGPT, .vsCode] {
+        for kind in [AgentKind.hermes, .muse, .chatGPT, .vsCode] {
             for auth in [AgentDoorAuth.none, .signIn] {
                 for url in [hosted, selfHost] {
                     let text = kind.snippet(endpoint: url, auth: auth)

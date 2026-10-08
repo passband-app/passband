@@ -6311,7 +6311,18 @@ pub async fn unsubscribe(
         match crate::unsub_job::choose_plan(from_header, fields.list_unsub_one_click, url, &sender)
         {
             Some(job) => {
-                crate::unsub_job::start(&state, sender.clone(), message_id, job).await?;
+                // The one string the browser rung may type, settled here where
+                // the message is in hand: the address this mail was sent to.
+                let to_addrs = fields.to_addrs.clone();
+                let email = store_call(&state, move |store, account_id| {
+                    let account = store.account_email(account_id)?;
+                    Ok(crate::unsub_job::address_to_type(
+                        &account,
+                        to_addrs.as_deref(),
+                    ))
+                })
+                .await?;
+                crate::unsub_job::start(&state, sender.clone(), message_id, job, email).await?;
                 audit_action(&state, "unsubscribe", target, &format!("auto:{sender}")).await;
                 resolve_sender_done(&state, &sender).await;
                 return Ok(Json(

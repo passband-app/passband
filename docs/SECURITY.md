@@ -1123,6 +1123,13 @@ write (`passband/Sources/Passband/Lib/EventProposal.swift`,
   an event they typed. So a prompt injection in mail the assistant read can at
   worst put a filled-in pane in front of the user; it cannot add an event or
   cause an invitation.
+- **It writes no description.** The tool has no notes or description
+  parameter, and `EventProposals.read` refuses a call that carries one under
+  any of the usual names, so the model is told rather than left to believe
+  they were saved. The reason is the guests: Google emails an event's
+  description to them, and model-written prose must never reach other people
+  through Passband. The title is the only text the model supplies; the notes
+  line of the pane it opens is always empty.
 - **It never invites.** Proposed guests are shown as guest pills. Google emails
   them only if the user presses the control labelled "add and invite N"; plain
   Enter does not save an event with guests (§ "Guests" above).
@@ -1234,6 +1241,9 @@ minute.
   or run a write's Google call and audit inside the request future alone.
 - Do not gate ghosts on `triage.sensitivity`; use the sealed test
   `sealed_messages` uses.
+- Do not give the assistant's calendar tool a notes or description parameter,
+  or let anything it supplies but the title, the place and the times reach an
+  event's body.
 - Do not let the assistant's calendar tool call a write route, set `notify`,
   skip the pane, replace a pane that holds anything, or be offered while the
   Calendar page is not; do not hand the model an event or a list of calendars.

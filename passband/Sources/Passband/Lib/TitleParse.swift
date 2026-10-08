@@ -33,8 +33,9 @@
 //
 // WHAT IS SAVED. The words that named the day and the time come out of the
 // title ("on friday 4pm"), with the "on" / "at" / "from" that led them. The
-// "with <name>" words stay: "Dinner with steven". When the user typed no
-// capital at all, the first letter gets one. A title with nothing recognised
+// "with <name>" words stay, and a name typed in lower case gets its capital:
+// "Dinner with Steven". When the user typed no capital at all, the first
+// letter gets one. A title with nothing recognised
 // is returned exactly as typed.
 
 import Foundation
@@ -76,11 +77,14 @@ enum TitleParse {
         // reading.
         var shielded = Set<Int>()
         var names: [String] = []
+        var nameWords = Set<Int>()
         for i in low.indices where low[i] == "with" {
             shielded.insert(i + 1)
             let (found, used) = namesAfter(i, words: words, low: low)
             for name in found where names.count < maxNames { names.append(name) }
             shielded.formUnion(used)
+            // The words that ARE names, not the "and" between them.
+            nameWords.formUnion(used.filter { low[$0] != "and" && low[$0] != "&" })
         }
 
         // TIMES first: a three-letter weekday may lean on one.
@@ -122,7 +126,7 @@ enum TitleParse {
             for k in only.range { taken[k] = true }
         }
         guard reading.filled else { return reading }
-        reading.title = rebuilt(words, taken: taken, raw: raw)
+        reading.title = rebuilt(words, taken: taken, nameWords: nameWords, raw: raw)
         return reading
     }
 
@@ -451,9 +455,16 @@ enum TitleParse {
     /// The words left, in order, tidied: a clause mark left hanging where
     /// words came out is dropped, and a first letter is given a capital only
     /// when the user typed none anywhere.
-    private static func rebuilt(_ words: [String], taken: [Bool], raw: String) -> String {
+    ///
+    /// A NAME GETS ITS CAPITAL. Each word of a "with <name>" typed all in
+    /// lower case is given one ("with steven and ana" saves as "with Steven
+    /// and Ana"); a name the user capitalised or mixed ("McKay", "DJ", "van")
+    /// is theirs and is left exactly as typed, and "and" is not a name.
+    private static func rebuilt(_ words: [String], taken: [Bool], nameWords: Set<Int>, raw: String) -> String {
         var kept: [String] = []
-        for (k, word) in words.enumerated() where !taken[k] { kept.append(word) }
+        for (k, word) in words.enumerated() where !taken[k] {
+            kept.append(nameWords.contains(k) ? named(word) : word)
+        }
         // "dinner, friday 7pm" leaves "dinner,": the comma was about what
         // went.
         if let lastKept = words.indices.last(where: { !taken[$0] }), lastKept < words.count - 1, var last = kept.popLast() {
@@ -467,6 +478,17 @@ enum TitleParse {
             title = first.uppercased() + title.dropFirst()
         }
         return title
+    }
+}
+
+extension TitleParse {
+    /// A name word as saved: all lower case as typed, each part of it
+    /// ("mary-jane") takes a capital; anything else is left alone.
+    static func named(_ word: String) -> String {
+        guard !word.contains(where: \.isUppercase) else { return word }
+        return word.split(separator: "-", omittingEmptySubsequences: false).map { part in
+            part.first.map { $0.uppercased() + part.dropFirst() } ?? ""
+        }.joined(separator: "-")
     }
 }
 

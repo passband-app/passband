@@ -286,14 +286,14 @@ enum ProductGuide {
         - e edits the selected event. ⌫ deletes it, after asking once.
         - The pane has the title, the calendar, all day, the day and times, a location that suggests places from Apple Maps as it is typed (arrows and Enter pick one), guests and notes.
         - A timed event shows its end day beside its end time. Left alone it follows the start day, or the next day when the end time is at or before the start; typing a day into it sets it, for an event that runs overnight or over several days.
-        - A new event's title reads itself as it is typed: "dinner with steven on friday 4pm" fills in Friday and 4pm, and the event is saved as "Dinner with steven". The line under the title says what will be saved. A day or time typed by hand is never overwritten, deleting the words puts back what was there, and Esc in the title (or ⌘Z) keeps the title exactly as typed.
+        - A new event's title reads itself as it is typed: "dinner with steven on friday 4pm" fills in Friday and 4pm, and the event is saved as "Dinner with Steven". The line under the title says what will be saved. A day or time typed by hand is never overwritten, deleting the words puts back what was there, and Esc in the title (or ⌘Z) keeps the title exactly as typed.
         - "with steven" in a new event's title also suggests a guest: the Steven the user most recently exchanged mail with, in a dashed box on the guests line with a checkmark and an x. The checkmark adds them as a guest, the x dismisses the suggestion. Tab from the title moves to it; there Enter adds and ⌫ dismisses. A suggestion is not a guest, and nobody is invited, until the checkmark and then the save control.
         - ⌘↵ saves from anywhere in the pane. Plain Enter saves from a one-line field, but only when the event has no guests. With guests, plain Enter does nothing: only ⌘↵ or a click on the save control does.
         - Google, not Passband, emails the guests, and only when the control says so: "add and invite 3", "save and tell guests" or "delete and tell guests". "save without telling" and "delete without telling" change the event and tell nobody.
         - Esc closes the place list first, then the delete question, then the pane. The event pane and the composer share that half of the window, so only one is open at a time.
 
         The assistant and the calendar:
-        - Asked to put something on the calendar, the assistant drafts it: the event pane opens filled in with the title, the times and any guests the user asked for. The user reads it and presses the pane's add control themselves.
+        - Asked to put something on the calendar, the assistant drafts it: the event pane opens filled in with the title, the times, a place and any guests the user asked for. It writes no notes: the title is the only text it supplies, and the notes are the user's to type. The user reads it and presses the pane's add control themselves.
         - The assistant never adds an event on its own and never invites anyone. It cannot read the calendar, and it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
         """
 

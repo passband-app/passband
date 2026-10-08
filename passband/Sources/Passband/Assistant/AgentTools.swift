@@ -1003,7 +1003,9 @@ enum AgentTools {
             the event is drafted and waiting for them, never that it was created or that \
             anyone was invited. You cannot read the calendar, and you cannot edit or \
             delete events. If the result says an event is already open, relay that and \
-            stop. Only propose guests the user asked for.
+            stop. Only propose guests the user asked for. There is no notes or description \
+            field, on purpose: the title is the only text you supply, and the user types \
+            any notes themselves.
             """,
         input_schema: .init(
             properties: [
@@ -1023,7 +1025,6 @@ enum AgentTools {
                     type: "string",
                     description: "Which of the user's calendars, by name. Leave out for their primary calendar."),
                 "location": .init(type: "string", description: "Where, as plain text."),
-                "notes": .init(type: "string", description: "The event's description, 2,000 characters at most."),
                 "guests": .init(
                     type: "array",
                     description:

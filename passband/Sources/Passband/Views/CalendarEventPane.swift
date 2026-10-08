@@ -38,7 +38,7 @@
 // "dinner with steven on friday 4pm" fills the day and the times as it is
 // typed (the wells it filled wear a soft accent wash until the user types in
 // them), and a line under the title says what will be saved: "Dinner with
-// steven". A well the user set by hand is never written again; deleting the
+// Steven". A well the user set by hand is never written again; deleting the
 // words puts back what was there; Esc on the title (or ⌘Z) takes the title as
 // typed. "with steven" also asks the daemon who that most likely is and
 // OFFERS them on the guests line, in a dashed box with a checkmark and an x:

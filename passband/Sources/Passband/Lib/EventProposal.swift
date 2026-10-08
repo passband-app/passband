@@ -14,6 +14,13 @@
 // when a pane already open refuses a new proposal, and which mailboxes are
 // offered the tool at all.
 //
+// THE TITLE IS THE ONLY PROSE IT SUPPLIES. The tool takes no notes and no
+// description: with guests on an event, Google emails its description to
+// them, and Passband never puts model-written prose in front of other
+// people. A call that sends notes anyway is refused in words, not quietly
+// trimmed, so the model does not tell the user they were saved; the notes
+// line of the pane it opens is always empty, for the user to type in.
+//
 // THE ASSISTANT DOES NOT READ THE CALENDAR. A proposal names a calendar or
 // leaves it to the primary one; a name that matches nothing is refused
 // without listing the calendars there are.
@@ -30,7 +37,6 @@ struct EventProposal: Hashable, Sendable {
     /// A calendar's id or name; nil is the primary.
     var calendar: String?
     var location: String?
-    var notes: String?
     var guests: [String] = []
 }
 
@@ -84,6 +90,12 @@ enum EventProposals {
         "No calendar the user can add events to has that name. Leave calendar out to use their primary calendar."
     static let cannotInviteText =
         "Guests cannot be invited on that calendar from Passband. Leave guests out, or leave calendar out to use the primary calendar."
+    static let noNotesText =
+        "This tool takes no notes or description: Passband does not put assistant-written text in an event, "
+        + "because Google emails an event's description to its guests. Call it again without them, and tell "
+        + "the user they can type notes in the event pane themselves."
+    /// The keys a model reaches for when it wants to write a description.
+    static let notesKeys: Set<String> = ["notes", "description", "body", "details", "agenda"]
     static let questionOpenText =
         "The Calendar page is asking the user a question. Ask them to answer it first, then try again."
 
@@ -92,6 +104,7 @@ enum EventProposals {
         - create_calendar_event drafts an event in Passband's event pane for the user to
           confirm. It adds nothing to their calendar and invites nobody; only the user
           can, by pressing the pane's own control. Say it is drafted, never that it exists.
+          It takes a title and no notes or description: you never write text into an event.
         """
 
     // MARK: reading the call
@@ -104,6 +117,12 @@ enum EventProposals {
             guard let v = input[key]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty
             else { return nil }
             return v
+        }
+        // Notes in any spelling: refused, never dropped in silence.
+        for key in notesKeys {
+            if let value = input[key], value != .null, value != .string("") {
+                return .failure(ProposalRefusal(text: noNotesText))
+            }
         }
         guard let title = string("title") else { return .failure(ProposalRefusal(text: "missing title")) }
         guard let start = string("start") else { return .failure(ProposalRefusal(text: "missing start")) }
@@ -129,8 +148,7 @@ enum EventProposals {
         return .success(
             EventProposal(
                 title: title, start: start, end: string("end"), allDay: allDay ?? false,
-                calendar: string("calendar"), location: string("location"), notes: string("notes"),
-                guests: guests))
+                calendar: string("calendar"), location: string("location"), guests: guests))
     }
 
     // MARK: the draft
@@ -213,9 +231,11 @@ enum EventProposals {
             id: "", calendar_id: target.id, calendar_name: target.name, title: p.title, start: start, end: end,
             all_day: p.allDay, start_timezone: nil, location: p.location, status: .confirmed,
             self_response: nil, busy: true, organizer: nil, html_link: nil, color: target.color,
-            editable: true, description: p.notes)
+            editable: true, description: nil)
         var d = EventForm.draft(editing: event, today: today, calendar: calendar)
         d.calendarId = target.id
+        // Never the assistant's: the notes line opens empty.
+        d.notes = ""
 
         // GUESTS, as whole pills: the user asked the assistant for them. Only
         // where this calendar may invite at all.

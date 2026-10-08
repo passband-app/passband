@@ -63,10 +63,12 @@
 //! still stored and the row still written, so a write that may have mailed
 //! guests is never left unaudited.
 //!
-//! WHEN GOOGLE'S ANSWER IS LOST. A refusal from Google (any HTTP error) is a
-//! 502, [`GOOGLE_REFUSED`], code `google_refused`: nothing changed. A write
-//! that went out and got no usable answer (a timeout or a lost connection
-//! after sending, a 2xx body that does not read: [`CallError::Uncertain`]) is
+//! WHEN GOOGLE'S ANSWER IS LOST. A refusal from Google (a 4xx: it read the
+//! request and said no) is a 502, [`GOOGLE_REFUSED`], code `google_refused`:
+//! nothing changed. A write that went out and got no usable answer (a timeout
+//! or a lost connection after sending, a 2xx body that does not read, or
+//! Google's OWN 5xx, which does not say the write was not applied:
+//! [`CallError::Uncertain`]) is
 //! a 504, [`GOOGLE_UNCERTAIN`], code `uncertain`, and kicks a sync: Google
 //! may have made the change, so the client refreshes before offering to try
 //! again, and a "save and tell guests" is not sent twice on a guess. So is a
@@ -261,10 +263,11 @@ impl Refusal {
             GOOGLE_REFUSED,
         )
     }
-    /// The WRITE itself failed. An answer Google gave is a refusal (502); no
-    /// usable answer after sending ([`CallError::Uncertain`]) means the change
-    /// may have happened: 504 with its own message, and a sync is kicked so
-    /// the client's refresh shows what Google holds.
+    /// The WRITE itself failed. A 4xx Google gave is a refusal (502). No
+    /// usable answer after sending, or a 5xx from Google
+    /// ([`CallError::Uncertain`]), means the change may have happened: 504
+    /// with its own message, and a sync is kicked so the client's refresh
+    /// shows what Google holds.
     fn written(state: &ApiState, action: &str, error: CallError) -> Self {
         if error != CallError::Uncertain {
             return Self::google(action, error);

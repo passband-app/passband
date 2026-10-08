@@ -669,8 +669,11 @@ should be able to type 'dinner with steven on friday 4pm'"):
   "oct 12", "next tue"), a time or range ("4pm", "at noon", "4-6pm", "from 4
   to 5:30") and "with <name>". The wells it fills wear a soft accent wash,
   and a line under the title says what will be saved: the typed title less
-  the words that named the day and time ("Dinner with steven"; one capital
-  is added only when the user typed none). It never fights the user: a well
+  the words that named the day and time ("Dinner with Steven": a name
+  after "with" typed in lower case gets its capital, one the user
+  capitalised or mixed is left alone, and the first letter gets one only
+  when the user typed no capital at all). Accepting a suggested guest does
+  not rewrite the title. It never fights the user: a well
   typed into, or a day clicked on the grid, is never written again; deleting
   the words puts back what was there; Esc in the title, or `⌘Z`, takes the
   title as typed. Ambiguity resolves to nothing: a bare number is never a
@@ -1552,8 +1555,16 @@ estimates and likelihood marked as such) is open.
 **The in-app assistant drafts events (BUILT in wave 6).** The founder: "lets
 give the assistant the ability to create events." It has ONE calendar tool,
 `create_calendar_event` (title, start, end, all_day, and optionally a
-calendar by name, a location, notes and guest addresses), and the tool
-writes nothing:
+calendar by name, a location and guest addresses), and the tool writes
+nothing:
+
+- **The title is the only prose it supplies.** There is no notes or
+  description parameter. With guests on an event, Google emails its
+  description to them, and Passband never puts model-written prose in front
+  of other people (§13). A call that sends notes anyway (`notes`,
+  `description`, `body`, `details`, `agenda`) is refused in words rather
+  than trimmed, so the model cannot report them as saved; the pane's notes
+  line always opens empty, for the user to type in.
 
 - It reads the proposal, checks it by the event pane's own rules
   (`EventProposals.draft`, which ends in `EventForm.wire`), and opens the

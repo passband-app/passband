@@ -42,6 +42,7 @@ struct EventDraftTests {
         refusalsAreFixedSentences()
         anUncertainWriteIsSettledByTheFeed()
         aTimedOutWriteIsUncertainNotUnsaved()
+        neverSentIsDecidedByEvidence()
         anUncertainCreateIsFoundByItsId()
         anUncertainEditLooksOnlyAtWhatItChanged()
         aDeleteThatCanNoLongerTellIsRefused()
@@ -581,11 +582,17 @@ struct EventDraftTests {
             expect(e.kind == .network && e.mayHaveArrived, "\(code): may have arrived")
             expect(CalendarWrite.verdict(of: e) == .mayHaveHappened(code: nil), "\(code): settled, may have happened")
         }
-        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .notConnectedToInternet, .dnsLookupFailed,
+        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
                      .secureConnectionFailed] {
             let e = APIError.transport(URLError(code))
             expect(!e.mayHaveArrived && CalendarWrite.verdict(of: e) == .notSent, "\(code): never got there")
         }
+        // verify6 Z1: "not connected" is also what an interface dropping
+        // under a LIVE request reads as, so the code alone proves nothing.
+        let offline = APIError.transport(URLError(.notConnectedToInternet))
+        expect(offline.mayHaveArrived && CalendarWrite.verdict(of: offline).mayHaveHappened,
+               "notConnectedToInternet with no evidence: may have arrived")
+        expect(!APIError.notSentCodes.contains(.notConnectedToInternet), "and it is off the unsent list")
         // verify5 Y2: when in doubt, freeze. Anything not provably before the
         // send (a cancellation, an unknown code, a decode failure, an error
         // that is not a URLError) may have arrived.
@@ -977,6 +984,50 @@ struct EventDraftTests {
         cleared.location = nil
         expect(CalendarWrite.edited(a, clear, in: TimelineFeed(events: [cleared])) != nil, "cleared")
         expect(CalendarWrite.edited(a, clear, in: TimelineFeed(events: [a])) == nil, "not cleared yet")
+    }
+
+    /// verify6 Z1: "never sent" is decided by what the task itself recorded,
+    /// and by the error's code only when it recorded nothing.
+    static func neverSentIsDecidedByEvidence() {
+        func sent(_ code: URLError.Code?, _ e: SendEvidence?) -> Bool { !APIError.neverSent(code: code, evidence: e) }
+        let started = SendEvidence(requestStarted: true, bodyBytesSent: 0, hadBody: true)
+        let neverStarted = SendEvidence(requestStarted: false, bodyBytesSent: 0, hadBody: true)
+        let noMetricsNoBytes = SendEvidence(requestStarted: nil, bodyBytesSent: 0, hadBody: true)
+        let noMetricsBytes = SendEvidence(requestStarted: nil, bodyBytesSent: 212, hadBody: true)
+        let bodylessUnknown = SendEvidence(requestStarted: nil, bodyBytesSent: 0, hadBody: false)
+        let nothing = SendEvidence(requestStarted: nil, bodyBytesSent: nil, hadBody: true)
+        // 1. Evidence of a send wins over any code, the "unsent" ones too.
+        for code in [URLError.Code.notConnectedToInternet, .cannotConnectToHost, .secureConnectionFailed, .timedOut] {
+            expect(sent(code, started), "\(code) after the request started: may have arrived")
+            expect(sent(code, noMetricsBytes), "\(code) with body bytes sent: may have arrived")
+        }
+        expect(sent(.notConnectedToInternet, SendEvidence(requestStarted: false, bodyBytesSent: 1, hadBody: true)),
+               "bytes sent outvote metrics that saw no request")
+        // 2. Metrics that saw no request start are proof, whatever the code:
+        // a true offline save keeps its friendly message.
+        for code in [URLError.Code.notConnectedToInternet, .timedOut, .networkConnectionLost, .cancelled, .unknown] {
+            expect(!sent(code, neverStarted), "\(code) with no request ever started: never sent")
+        }
+        expect(!sent(nil, neverStarted), "and an error that is not a URLError")
+        expect(!sent(.notConnectedToInternet, SendEvidence(requestStarted: false, bodyBytesSent: nil, hadBody: false)),
+               "a bodyless request (a delete) is proved by its metrics alone")
+        // 3. No metrics: a body of which nothing went is proof; a bodyless
+        // request proves nothing by its zero.
+        expect(!sent(.notConnectedToInternet, noMetricsNoBytes), "a body, none of it sent: never sent")
+        expect(!sent(.timedOut, noMetricsNoBytes), "whatever the code")
+        expect(sent(.notConnectedToInternet, bodylessUnknown), "a delete's zero bytes prove nothing: may have arrived")
+        expect(sent(.timedOut, bodylessUnknown), "nor for a timeout")
+        // 4. Nothing recorded: the code list, as with no evidence at all.
+        expect(sent(.notConnectedToInternet, nothing) && sent(.notConnectedToInternet, nil),
+               "no evidence: notConnectedToInternet may have arrived")
+        expect(sent(.timedOut, nothing) && sent(nil, nothing) && sent(nil, nil), "and so may anything unlisted")
+        expect(!sent(.cannotFindHost, nothing) && !sent(.cannotFindHost, nil) && !sent(.cannotConnectToHost, bodylessUnknown),
+               "no evidence: the provably-before codes are still unsent")
+        // Through the door the client uses, to the pane's verdict.
+        let live = APIError.transport(URLError(.notConnectedToInternet), evidence: started)
+        expect(CalendarWrite.verdict(of: live).mayHaveHappened, "an interface dropped mid-request freezes the pane")
+        let dead = APIError.transport(URLError(.notConnectedToInternet), evidence: neverStarted)
+        expect(CalendarWrite.verdict(of: dead) == .notSent, "a save while truly offline is unsent, and says so")
     }
 
     /// verify3 W10: an answer that came back but could not be read means

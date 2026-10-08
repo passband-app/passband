@@ -107,7 +107,7 @@ struct TitleParseTests {
     /// The founder's own example.
     static func thePhrase() {
         let r = read("dinner with steven on friday 4pm")
-        expect(r.title == "Dinner with steven", "the day and time come out, \"with steven\" stays, one capital: \(r.title)")
+        expect(r.title == "Dinner with Steven", "the day and time come out, \"with steven\" stays, one capital: \(r.title)")
         expect(r.day == day("2026-10-09"), "friday is the coming Friday, Oct 9")
         expect(r.start == 16 * 60 && r.end == nil, "4pm, and no end said")
         expect(r.names == ["steven"], "with steven")
@@ -258,10 +258,27 @@ struct TitleParseTests {
         expect(read("on friday at 4pm dinner").title == "Dinner", "leading words go with what they led")
         expect(read("dinner - friday 7pm").title == "Dinner", "a dash left hanging is dropped")
         expect(read("dinner: friday").title == "Dinner", "and a colon")
-        expect(read("dinner  with   steven   friday").title == "Dinner with steven", "spaces are single")
+        expect(read("dinner  with   steven   friday").title == "Dinner with Steven", "spaces are single")
         expect(read("  dinner friday  ").title == "Dinner", "and trimmed")
         expect(read("école friday").title == "École", "the capital is the letter's own")
         expect(!read("dinner with steven on friday 4pm").title.contains("\u{2014}"), "no em dash")
+        // A NAME GETS ITS CAPITAL, when it was typed without one.
+        expect(read("dinner with steven and ana friday").title == "Dinner with Steven and Ana",
+               "each lower-case name is capitalised, and \"and\" is not a name")
+        expect(read("dinner with steven ng, ana & bo friday").title == "Dinner with Steven Ng, Ana & Bo",
+               "two-word names, a comma and an ampersand")
+        expect(read("dinner with mary-jane friday").title == "Dinner with Mary-Jane", "both halves of a hyphened name")
+        expect(read("Dinner with steven on friday").title == "Dinner with Steven",
+               "a name is capitalised even when the user typed a capital elsewhere")
+        expect(read("dinner with sTeven friday").title == "dinner with sTeven", "a mixed-case name is the user's own")
+        expect(read("dinner with DJ friday").title == "dinner with DJ", "and so is one in capitals")
+        expect(read("lunch with McKay and ana friday").title == "lunch with McKay and Ana",
+               "each name on its own: the typed capital is kept, the lower-case one gets its own")
+        expect(read("sync with the team friday").title == "Sync with the team", "words that are not names are left alone")
+        expect(read("dinner for steven friday").title == "Dinner for steven", "only a name after \"with\" is one")
+        expect(read("dinner with steven").title == "dinner with steven",
+               "a title that named no day or time is still saved exactly as typed")
+        expect(read("dinner with steven friday").names == ["steven"], "the name asked about is the one typed")
     }
 
     /// Words for a field the user set by hand stay in the title: nothing is
@@ -290,7 +307,7 @@ struct TitleParseTests {
         expect(Set(d.titleRead.filled.keys) == [.date, .start, .end], "all three are marked as the title's")
         expect(d.titleRead.filled[.date] == "Mon Oct 5" && d.titleRead.filled[.start] == "4pm",
                "and what was there before is kept for the way back")
-        expect(EventForm.savedTitle(d, today: now, calendar: cal) == "Dinner with steven", "the saved title")
+        expect(EventForm.savedTitle(d, today: now, calendar: cal) == "Dinner with Steven", "the saved title")
         let ranged = typed(base, "workshop friday 2-4pm")
         expect(ranged.start == "2pm" && ranged.end == "4pm", "a range fills both ends")
         let overnight = typed(base, "party sat 10pm-2am")
@@ -401,12 +418,12 @@ struct TitleParseTests {
             expect(false, "the read draft saves")
             return
         }
-        expect(body.title == "Dinner with steven", "the body carries the saved title: \(body.title)")
+        expect(body.title == "Dinner with Steven", "the body carries the saved title: \(body.title)")
         expect(body.start == "2026-10-09T19:00:00-07:00" && body.end == "2026-10-09T20:00:00-07:00",
                "on the day and at the time it named")
         expect(body.guests == nil, "and names nobody: a name in the title is not a guest")
         let chip = EventForm.provisional(d, color: nil, today: now, calendar: cal)
-        expect(chip?.title == "Dinner with steven", "the grid's chip shows the saved title")
+        expect(chip?.title == "Dinner with Steven", "the grid's chip shows the saved title")
         let empty = typed(fresh(), "friday 7pm")
         expect(EventForm.problem(empty, today: now, calendar: cal) == .noTitle,
                "a title that was only a day and a time needs a title")
@@ -560,6 +577,11 @@ struct TitleParseTests {
         expect(EventGuests.read(added.guests).addresses == ["steven@example.com"], "the checkmark makes a real guest")
         expect(EventGuests.read(added.guests).unread.isEmpty && added.guests.hasSuffix(","), "as a whole pill")
         expect(offer(added, people: people)?.name == "ana", "and the next name is offered")
+        expect(added.title == d.title, "the checkmark does not touch the typed title")
+        expect(EventForm.savedTitle(added, today: now, calendar: cal) == EventForm.savedTitle(d, today: now, calendar: cal)
+            && EventForm.savedTitle(added, today: now, calendar: cal) == "Dinner with Steven and Ana",
+               "nor rewrite the saved one: \"Steven\" does not become the contact's \"Steven Ng\"")
+        expect(added.date == d.date && added.start == d.start && added.end == d.end, "nor the when")
         expect(EventGuests.controls(editing: false, before: 0, after: 1).primary.label.contains("invite"),
                "now the control says it will invite")
         // An "or" candidate instead of the best.

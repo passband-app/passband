@@ -32,6 +32,7 @@ struct EventProposalTests {
         theCalendarItGoesOn()
         guestsAreRealGuestsWhereTheyMayBe()
         aBadProposalIsAnErrorNotAHalfFilledPane()
+        theAssistantWritesNoNotes()
         aPaneInUseRefuses()
         whatTheModelIsTold()
 
@@ -78,12 +79,12 @@ struct EventProposalTests {
 
     static func proposal(
         _ title: String = "Dinner with Steven", start: String = "2026-10-09T16:00:00", end: String? = nil,
-        allDay: Bool = false, calendar: String? = nil, location: String? = nil, notes: String? = nil,
+        allDay: Bool = false, calendar: String? = nil, location: String? = nil,
         guests: [String] = []
     ) -> EventProposal {
         EventProposal(
             title: title, start: start, end: end, allDay: allDay, calendar: calendar, location: location,
-            notes: notes, guests: guests)
+            guests: guests)
     }
 
     static func draft(_ p: EventProposal, feed f: TimelineFeed? = feed) -> Result<EventDraft, ProposalRefusal> {
@@ -99,6 +100,8 @@ struct EventProposalTests {
         if case .failure(let r) = draft(p, feed: f) { return r.text }
         return nil
     }
+
+    static func w0(_ d: EventDraft?) -> EventWrite? { body(d) }
 
     static func body(_ d: EventDraft?) -> EventWrite? {
         guard let d, case .success(let w) = EventForm.wire(
@@ -146,7 +149,7 @@ struct EventProposalTests {
         let full = EventProposals.read(input([
             "title": .string("  Dinner with Steven "), "start": .string("2026-10-09T16:00:00"),
             "end": .string("2026-10-09T18:00:00"), "all_day": .bool(false), "calendar": .string("Family"),
-            "location": .string("Zuni"), "notes": .string("Bring the wine"),
+            "location": .string("Zuni"),
             "guests": .array([.string("steven@example.com"), .string(" ana@example.com ")]),
         ]))
         guard case .success(let p) = full else {
@@ -155,7 +158,7 @@ struct EventProposalTests {
         }
         expect(p.title == "Dinner with Steven", "the title, trimmed")
         expect(p.start == "2026-10-09T16:00:00" && p.end == "2026-10-09T18:00:00" && !p.allDay, "the times")
-        expect(p.calendar == "Family" && p.location == "Zuni" && p.notes == "Bring the wine", "the rest")
+        expect(p.calendar == "Family" && p.location == "Zuni", "the rest")
         expect(p.guests == ["steven@example.com", "ana@example.com"], "the guests, trimmed")
         func fails(_ i: [String: JSONValue]) -> String? {
             if case .failure(let r) = EventProposals.read(i) { return r.text }
@@ -189,12 +192,13 @@ struct EventProposalTests {
     // MARK: the draft
 
     static func aTimedProposalBecomesTheDraft() {
-        let d = made(proposal(end: "2026-10-09T18:30:00", location: "Zuni", notes: "Bring the wine"))
+        let d = made(proposal(end: "2026-10-09T18:30:00", location: "Zuni"))
         expect(d?.title == "Dinner with Steven" && d?.calendarId == "me@example.com", "title, on the primary calendar")
         expect(d?.date == "Fri Oct 9" && d?.start == "4pm" && d?.end == "6:30pm" && d?.allDay == false,
                "the form's own fields: \(d?.date ?? "") \(d?.start ?? "") \(d?.end ?? "")")
         expect(d?.endDate == "", "an end the same day leaves the end day following")
-        expect(d?.location == "Zuni" && d?.notes == "Bring the wine" && d?.guests == "", "the rest, and no guests")
+        expect(d?.location == "Zuni" && d?.guests == "", "the rest, and no guests")
+        expect(d?.notes == "" && w0(d)?.description == nil, "the notes line opens empty, and the body carries none")
         expect(d?.titleRead.on == false, "a proposed title is never read for a day or a time")
         let w = body(d)
         expect(w?.start == "2026-10-09T16:00:00-07:00" && w?.end == "2026-10-09T18:30:00-07:00",
@@ -291,7 +295,6 @@ struct EventProposalTests {
     static func aBadProposalIsAnErrorNotAHalfFilledPane() {
         let bad: [(EventProposal, String)] = [
             (proposal(String(repeating: "a", count: 201)), EventDraftProblem.titleTooLong.text),
-            (proposal(notes: String(repeating: "n", count: 2001)), EventDraftProblem.notesTooLong.text),
             (proposal(start: "friday at 4"), "start must be a date and time like 2026-10-09T16:00:00, or set all_day to true for a date"),
             (proposal(start: "2026-10-09T16:00:00", end: "later"), "end must be a date and time like 2026-10-09T17:00:00"),
             (proposal(start: "2026-10-09T16:00:00", end: "2026-10-09T15:00:00"), "the event must end after it starts"),
@@ -306,7 +309,7 @@ struct EventProposalTests {
         expect(made(proposal(String(repeating: "a", count: 200))) != nil, "200 characters of title is allowed")
         for text in [EventProposals.draftedText, EventProposals.paneBusyText, EventProposals.noCalendarText,
                      EventProposals.unknownCalendarText, EventProposals.cannotInviteText,
-                     EventProposals.questionOpenText, EventProposals.promptLine] {
+                     EventProposals.questionOpenText, EventProposals.promptLine, EventProposals.noNotesText] {
             expect(!text.contains("\u{2014}") && !text.contains("\u{2013}"), "no dash the house style forbids: \(text.prefix(24))")
         }
     }
@@ -341,6 +344,34 @@ struct EventProposalTests {
         } else {
             expect(false, "the proposal drafts")
         }
+    }
+
+    /// THE TITLE IS THE ONLY PROSE. Notes in any spelling refuse the call
+    /// (so the model cannot think they were saved), and nothing reaches the
+    /// draft or the body an "add and invite" would send.
+    static func theAssistantWritesNoNotes() {
+        func fails(_ extra: [String: JSONValue]) -> String? {
+            var i: [String: JSONValue] = ["title": .string("Dinner"), "start": .string("2026-10-09T19:00:00")]
+            for (k, v) in extra { i[k] = v }
+            if case .failure(let r) = EventProposals.read(i) { return r.text }
+            return nil
+        }
+        for key in ["notes", "description", "body", "details", "agenda"] {
+            expect(fails([key: .string("Looking forward to it")]) == EventProposals.noNotesText,
+                   "\(key): refused, in words")
+        }
+        expect(fails(["notes": .number(3)]) == EventProposals.noNotesText, "notes of any type are refused")
+        expect(fails(["notes": .null]) == nil && fails(["notes": .string("")]) == nil,
+               "an empty or null notes field is nothing to refuse")
+        expect(fails([:]) == nil, "and a call without them reads")
+        expect(EventProposals.noNotesText.contains("type notes in the event pane themselves"),
+               "the refusal says who may write them")
+        // With guests: the body the user's press would send has no description.
+        let d = made(proposal(guests: ["steven@example.com"]))
+        expect(d?.notes == "", "a proposal with guests opens with empty notes")
+        expect(body(d)?.description == nil && body(d)?.guests == ["steven@example.com"],
+               "so nothing the model wrote but the title can reach a guest")
+        expect(EventProposals.promptLine.contains("no notes or description"), "the prompt says so")
     }
 
     static func whatTheModelIsTold() {

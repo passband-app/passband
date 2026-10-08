@@ -340,9 +340,31 @@ enum AccountIndex {
     static func loadOrMigrate() async -> AccountIndexState {
         await offMain {
             sweepOrphans()
-            return migrate()
+            let state = migrate()
+            #if os(iOS)
+                adoptKeychainClass(state)
+            #endif
+            return state
         }
     }
+
+    #if os(iOS)
+        private static let keychainClassKey = "passband.keychain.afterFirstUnlock"
+
+        /// One-time move of every account's connection slots to the class the
+        /// notification extension can read on a locked phone (see
+        /// `SettingsStore.accessible`). Slots saved since already have it; this
+        /// is for the ones saved before. Concluded only when every account
+        /// moved, so a failure is retried next launch rather than forgotten.
+        private static func adoptKeychainClass(_ state: AccountIndexState) {
+            guard !defaults.bool(forKey: keychainClassKey) else { return }
+            var allMoved = true
+            for account in state.accounts {
+                do { try SettingsStore.adoptAccessible(accountId: account.id) } catch { allMoved = false }
+            }
+            if allMoved { defaults.set(true, forKey: keychainClassKey) }
+        }
+    #endif
 
     /// The one-time repair, in commit order. Each early return leaves the
     /// legacy install exactly as it was — no half-migrated state is ever

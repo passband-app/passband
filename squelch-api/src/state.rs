@@ -875,6 +875,16 @@ impl ApiState {
         self
     }
 
+    /// Where the automatic unsubscribe's browser rung rents its browser
+    /// (`crate::unsub_browser`). `None` and that rung does not exist here.
+    pub(crate) fn with_unsub_browser(
+        mut self,
+        browser: Option<crate::unsub_browser::Browserbase>,
+    ) -> Self {
+        self.unsub.browser = browser.map(Arc::new);
+        self
+    }
+
     /// TEST HOOK: let the automatic unsubscribe's fetcher reach loopback and
     /// any port, so a test can serve the sender's pages itself. Production
     /// never calls this; the SSRF guard in `unsub_fetch` is otherwise absolute.
@@ -1176,6 +1186,9 @@ impl ApiState {
             // The unsubscribe page reader rides the same key and the notify
             // model, billed under its own ledger category.
             .with_unsub_page_reader(UnsubPageClient::from_config(cfg))
+            // The browser rung, for a daemon that was given a Browserbase key.
+            // The key is the whole switch: no key, no rung.
+            .with_unsub_browser(crate::unsub_browser::Browserbase::from_env())
             // The assistant relay resolves only when BOTH the gateway base URL
             // and the assistant key are present; anything less is `None` and
             // the route 404s (see `Stage2Config::resolve_assistant`).

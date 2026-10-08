@@ -102,7 +102,7 @@ const BLANK_BODY_HEAL_MAX_FETCHES: usize = 400;
 
 /// `wake_budget.thread_id` sentinel for the per-account-per-day Stage-2 budget.
 /// Gmail thread ids are hex, so no real thread can collide with it.
-const GLOBAL_BUDGET_KEY: &str = "__global__";
+const GLOBAL_BUDGET_KEY: &str = crate::triage::agent_config::TOTAL_BUDGET_KEY;
 
 /// The `wake_budget` sentinel for the NOTIFY FAST LANE (docs/NOTIFY.md §11.5).
 /// Its own key beside the other three, and for the sharpest version of the same

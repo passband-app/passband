@@ -1012,14 +1012,26 @@ second deadline, below the app's 45 second wait; past it the answer is the same
 504 and kick, and the app treats a wait of its own that runs out, or a
 connection lost mid-request, as that 504 too. A create may name its own event id
 (base32hex, 5 to 1024 characters, else a 400); the daemon reads that id before
-inserting and answers an event already there (or a 409 `duplicate` from Google)
-with that event and no insert, so a create sent twice never makes two events or
-mails a second invitation (audited `ok:existing ... notified=false`). A delete
+inserting. An event already there (or found after a 409 `duplicate` from Google)
+is answered, with no insert and no second invitation (audited `ok:existing ...
+notified=false`), ONLY when it is the event the create would make: same
+calendar, laundered title, start, end, all-day flag and guest set. Anything else
+under the id is a 409 with no write (`rejected:id_in_use`), so an id can never be
+used to claim an event, or an invitation, the request did not describe. A second
+create with an id whose first create is still in flight (an in-memory set of
+account, calendar and id, released however the first ends) is a 409 before
+Google hears it (`rejected:in_flight`). This makes a duplicate from a retried
+create unlikely, not impossible: Google does not guarantee to catch a taken id
+at insert time and a read may lag one just made, and the read is per calendar.
+The app closes the rest from its side: after an uncertain save it freezes the
+pane and can only send the same body again (docs/CALENDAR.md section 5). A delete
 Google answers 410 found the event gone and removes the local row; a 404 does the
 same only on the primary calendar or on a calendar `calendarList.get` still
-lists, and is otherwise a 410 "that calendar is no longer available to you" that
-leaves the row for the kicked sync (Google answers 404 for a calendar the user
-lost, too). The app refuses a "delete and tell guests" whose calendar may no
+lists, not deleted, with an `accessRole` of `owner` or `writer`; otherwise it is
+a 410 "that calendar is no longer available to you" that leaves the row for the
+kicked sync (Google answers 404 for a calendar the user lost, and for an event
+they can no longer see). A calendar list read that fails is a 502 and deletes
+nothing. The app refuses a "delete and tell guests" whose calendar may no
 longer tell them rather than deleting silently. Event and calendar ids of `.` or `..` (or empty) are refused at read
 and again when the URL is built, because a URL path would read them as "here"
 and "up one". Error bodies are fixed strings that never

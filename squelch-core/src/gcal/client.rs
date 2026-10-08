@@ -359,14 +359,22 @@ impl CalendarApi {
     }
 
     /// `calendarList.get`: whether the calendar is still on the user's
-    /// calendar list (and not marked `deleted`). A 404 is NO: the user has
-    /// lost the calendar. Needs the list scope, which every calendar other
-    /// than the primary one is read with.
+    /// calendar list, not marked `deleted`, AND still one the user writes to
+    /// (`accessRole` `owner` or `writer`). A 404 is NO: the user has lost the
+    /// calendar. So is a calendar still listed whose role dropped to a
+    /// reader's: an event the user can no longer see is a 404 to them, and
+    /// that is not "already deleted". Needs the list scope, which every
+    /// calendar other than the primary one is read with.
     pub async fn calendar_listed(&self, token: &str, calendar_id: &str) -> Result<bool, CallError> {
         let mut url = self.url(&["users", "me", "calendarList", calendar_id])?;
-        url.query_pairs_mut().append_pair("fields", "id,deleted");
+        url.query_pairs_mut()
+            .append_pair("fields", "id,deleted,accessRole");
         match self.get(url, token).await {
-            Ok(entry) => Ok(entry.get("deleted").and_then(Value::as_bool) != Some(true)),
+            Ok(entry) => Ok(entry.get("deleted").and_then(Value::as_bool) != Some(true)
+                && matches!(
+                    entry.get("accessRole").and_then(Value::as_str),
+                    Some("owner" | "writer")
+                )),
             Err(CallError::NotFound | CallError::Gone) => Ok(false),
             Err(e) => Err(e),
         }

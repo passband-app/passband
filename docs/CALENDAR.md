@@ -581,10 +581,24 @@ Wave 4, from the founder using wave 3 on screen:
 - **When Google's answer is lost.** A save or delete answered 504 shows a
   quiet toast ("Google may have made this change. Refreshing…"), keeps the
   control locked, and reloads the feed up to 3 times, 2 seconds apart. The
-  pane closes only once the change is visible in the feed; otherwise it stays
-  open with its contents. Calendar writes wait 45 seconds on the client, longer
-  than the daemon's 30 seconds on Google, so the daemon's answer (504
-  included) always arrives first.
+  pane closes as a success once the change is visible in the feed. A delete
+  not yet seen keeps its question up. A SAVE not yet seen FREEZES the pane
+  (`EventPaneState` in Lib/CalendarWrite.swift): the fields go read-only with
+  the draft as sent still showing, one line says "Google may have made this
+  change. Passband could not confirm it yet.", and the footer offers three
+  controls: "check again" (⌘↵: the daemon is asked to sync, the feed is
+  reloaded and looked at again; seen closes as a success, unseen stays
+  frozen), "send again" (exactly the body already sent, the same create id
+  with it; for an edit that tells guests it reads "send again, guests may be
+  told twice"; a create's id keeps Google from inviting twice, so it says
+  nothing more) and "close" (Esc: the event, if Google made it, arrives with
+  the next sync; no draft is kept). Plain ↵ does nothing. There is no way
+  from a frozen pane back to an editable one: changing the event after an
+  uncertain save means closing and starting a new event, under a new id. A
+  "send again" refused outright keeps the pane frozen, since the first send
+  may still have worked. Calendar writes wait 45 seconds on the client,
+  longer than the daemon's 35 second deadline on a write, so the daemon's
+  answer (504 included) arrives first.
 - **Telling guests only where it is allowed.** On a calendar that may not
   invite (`can_invite` false: one the user only writes to), the pane and the
   delete question offer only the silent controls, with one line saying why;
@@ -1013,9 +1027,13 @@ promoting a ghost to a real event is later work.
     one it does not know (404) while the calendar is still the user's: the
     primary calendar always is, any other is looked up on the user's
     calendar list (`calendarList.get`), because Google answers 404 too for a
-    calendar the user has lost. A calendar no longer listed is a 410, "that
-    calendar is no longer available to you", the row is left for the sync
-    the write kicks, and the app says nothing was deleted.
+    calendar the user has lost, and for an event they can no longer see.
+    "Still the user's" means listed, not `deleted`, AND an `accessRole` of
+    `owner` or `writer`: a calendar still listed whose role dropped to a
+    reader's is not. Otherwise it is a 410, "that calendar is no longer
+    available to you", the row is left for the sync the write kicks, and the
+    app says nothing was deleted. A calendar list read that fails is a 502
+    and deletes nothing locally.
 - **Times.** RFC3339 with an offset for a timed event, `YYYY-MM-DD` for an
   all-day one, both of one precision, the end after the start. An all-day
   `end` is the INCLUSIVE last day, as the timeline serves it (equal to the
@@ -1074,25 +1092,50 @@ promoting a ghost to a real event is later work.
   settles against the reloaded page, never "nothing was saved". A request
   that never reached the daemon still says nothing was saved.
 - **A create sent twice.** The app names each new event's `id` itself, one
-  per open pane, the same on every press of it: a UUID's 32 hex digits, which
-  Google takes ("characters allowed in the ID are those used in base32hex
-  encoding, i.e. lowercase letters a-v and digits 0-9", "between 5 and 1024
-  characters"). Google also says "we cannot guarantee that ID collisions will
-  be detected at event creation time", so the daemon does not rely on its
-  409: a create naming an id first reads it (`events.get`), and an event
-  already there is answered 200 as it stands, with no insert and so no second
-  invitation (audited `ok:existing ... notified=false`). An insert Google
-  answers 409 (`duplicate`, "The requested identifier already exists") is
-  answered the same way. An id already used by an event since deleted is a
-  409. Any other id shape is a 400 before Google hears anything.
+  per open pane: a UUID's 32 hex digits, which Google takes ("characters
+  allowed in the ID are those used in base32hex encoding, i.e. lowercase
+  letters a-v and digits 0-9", "between 5 and 1024 characters"). Google also
+  says "we cannot guarantee that ID collisions will be detected at event
+  creation time", so the daemon does not rely on its 409: a create naming an
+  id first reads it (`events.get`). An event already there is the answer
+  ONLY when it is the event this create would make: the same calendar (the
+  read is on the calendar the create names), the same title (both read back
+  through the daemon's own laundering), start, end, all-day flag and guest
+  set (case folded, the calendar's own entry and the organizer's left out;
+  a list Google cut short never matches). Then it is answered 200 as it
+  stands, with no insert and so no second invitation (audited `ok:existing
+  ... notified=false`). Anything else under that id is a 409, "that event id
+  is already used for a different event", with no write (audited
+  `rejected:id_in_use`). An insert Google answers 409 (`duplicate`, "The
+  requested identifier already exists") is read and judged the same way. An
+  id already used by an event since deleted is a 409. Any other id shape is
+  a 400 before Google hears anything.
+- **One create per id at a time.** The daemon holds an in-memory set of
+  (account, calendar, id) for the creates in flight. A second create with
+  the same key while the first is still running is a 409, "that event is
+  already being created", before Google hears anything (audited
+  `rejected:in_flight`). The key is let go however the first ends: an
+  answer, a refusal, the deadline, or a panic.
+- **What this does not close.** The id makes a duplicate unlikely, not
+  impossible. A read that lags a just-made insert, followed by an insert
+  Google fails to flag as a duplicate, can still make two events with one
+  id; and the read is per calendar, so the same id on another calendar is
+  not seen. The app's frozen pane (§5) is the other half: after an
+  uncertain create it only ever resends the same body to the same calendar.
 - **Settling an uncertain write (app).** After a 504 the app reloads the page
   up to three times. A create is found by its id, whatever its title came
-  back as. An edit is found only when EVERY field it changed reads as typed
-  (laundered as the daemon launders: invisible characters out, whitespace
-  collapsed, a link cut to host and path; times compared as instants; guests
-  as addresses), so a guest's answer or a colour changed meanwhile is never
-  taken for it. A delete is found when the event is gone. Until then the pane
-  stays open and its save stays locked.
+  back as; when no event carries the id (a calendar daemon older than ids
+  ignores it and Google picks its own), by a new event on that calendar at
+  that start with the title sent. An edit is confirmed only when EVERY field
+  it changed is seen to have MOVED from the original event's value: the app
+  does not copy the daemon's cleaning of text (links cut down, markup out, a
+  length cap), so a title, place or notes is judged by whether the served
+  value differs from what was served before; times, the all-day flag and the
+  guests come back exactly, so they must also read as sent. A change that
+  cannot be seen at all (one that vanished under the cleaning) is never
+  confirmed. A guest's answer or a colour changed meanwhile is never looked
+  at. A delete is found when the event is gone. A save not found freezes the
+  pane (§5).
 - **"Delete and tell guests" that can no longer tell.** If the page reloaded
   under the delete question and the calendar may no longer tell guests, the
   delete is refused with a toast and the question stays up, as a save
@@ -1105,7 +1148,8 @@ promoting a ghost to a real event is later work.
   empty or over 200, a missing field, an unknown or read-only calendar, two
   `notify` keys), 403 when calendar is not granted or the event is not
   editable, 404 for an unknown event, 409 for a create id already used by a
-  deleted event, 410 for a delete on a calendar no longer listed, 502 when
+  deleted event or by a different event, or still being created, 410 for a
+  delete on a calendar no longer listed or no longer written to, 502 when
   Google refuses, 504 when Google's answer was lost or the write ran past
   its deadline (above). Error bodies are fixed strings and
   never echo the request.
@@ -1116,7 +1160,8 @@ promoting a ghost to a real event is later work.
   (`rejected:body`, `rejected:calendar`, `rejected:read_only`,
   `rejected:not_granted`, `rejected:not_editable`, `failed:target`,
   `failed:google`, `failed:uncertain`, `failed:answer`,
-  `failed:calendar_gone`, `rejected:already_deleted`; a create answered
+  `failed:calendar_gone`, `rejected:already_deleted`, `rejected:id_in_use`,
+  `rejected:in_flight`; a create answered
   with an event an earlier send made is `ok:existing`). Never a title,
   place, description or guest's address. The target does carry the
   calendar id, which for a personal calendar someone shared with the user is

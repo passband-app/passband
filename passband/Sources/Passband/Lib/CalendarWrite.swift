@@ -26,10 +26,16 @@ struct EventWrite: Encodable, Hashable, Sendable {
     /// `stamped(notify:)`, from `EventGuests.notify`.
     var notify: Bool?
     /// The new event's id, chosen here (`CalendarWrite.newEventId`), one per
-    /// pane and the same on every press of it. The daemon creates the event
-    /// under it, and answers a second send with the event the first one made,
-    /// so a create retried after an uncertain answer can never make two or
-    /// invite twice. Nil is no key: Google picks the id.
+    /// pane (`CalendarWrite.createWrite`). The daemon reads it before
+    /// inserting, and answers a second send of the SAME event (same calendar,
+    /// title, times and guests) with the one the first send made; the same id
+    /// with anything else is refused (409). After an uncertain answer the
+    /// pane freezes (`EventPaneState`) and can only send this exact body
+    /// again, so a retry cannot make a second event on that calendar or
+    /// invite twice. Google "cannot guarantee" to catch a taken id at insert
+    /// time, and a read can lag, so this narrows the window rather than
+    /// closing it outright (docs/CALENDAR.md section 8). Nil is no key: Google
+    /// picks the id.
     var id: String?
 
     /// The body with what a labelled control decided about telling people.
@@ -183,9 +189,20 @@ enum CalendarWrite {
     /// Said at once, while the page reloads to find out.
     static let uncertainText = "Google may have made this change. Refreshing…"
 
-    /// Said when the reloads still do not show the change. The pane stays
-    /// open with everything in it.
+    /// Said when the reloads still do not show a DELETE. The question stays
+    /// up. (A save that cannot be confirmed freezes its pane instead, which
+    /// says `frozenText`.)
     static let uncertainUnseenText = "Not on your calendar yet. Check it before trying again."
+
+    /// The frozen pane's one line (`EventPaneState.uncertain`).
+    static let frozenText = "Google may have made this change. Passband could not confirm it yet."
+
+    /// The same line while "check again" or "send again" is out.
+    static let frozenCheckingText = "Checking with Google Calendar…"
+
+    /// Said when "send again" is refused outright: the first send may still
+    /// have worked, so the pane stays frozen.
+    static let resendRefusedText = "Sending again did not go through. The first send may still have worked."
 
     /// A new event's id, as Google takes a client's: "lowercase letters a-v
     /// and digits 0-9", 5 to 1024 of them. A UUID's 32 hex digits are both,
@@ -221,12 +238,41 @@ enum CalendarWrite {
     /// Said when `deleteNotify` refuses.
     static let cannotTellText = "This calendar can no longer tell guests, so the event was not deleted."
 
+    // MARK: the bodies a pane sends
+
+    /// A create's body: the wire draft, what the control decided about
+    /// telling the guests (`EventWrite.stamped`), and THE PANE'S id. Every
+    /// send from one pane carries the same `createId`; a new pane makes a new
+    /// one (`newEventId`).
+    static func createWrite(_ made: EventWrite, notify: Bool, createId: String, before: Set<String>) -> SentWrite {
+        var body = made.stamped(notify: notify)
+        body.id = createId
+        return .create(body, before: before)
+    }
+
+    /// An edit's body, or nil when it changes nothing (nothing is sent, and
+    /// nobody is told whatever the control said).
+    static func editWrite(_ original: TimelineEvent, _ patch: EventPatch, notify: Bool) -> SentWrite? {
+        patch.isEmpty ? nil : .edit(original, patch, notify: notify)
+    }
+
+    /// A delete: the event and whether Google tells its guests, or nil when
+    /// `deleteNotify` refuses it (nothing is sent).
+    static func deleteWrite(
+        _ event: TimelineEvent, tellGuests: Bool, hasGuests: Bool, mayTell: Bool
+    ) -> (calendarId: String, id: String, notify: Bool)? {
+        guard let notify = deleteNotify(tellGuests: tellGuests, hasGuests: hasGuests, mayTell: mayTell)
+        else { return nil }
+        return (event.calendar_id, event.id, notify)
+    }
+
     // MARK: text as the daemon stores it
 
     /// Text the way the daemon stores what Google holds, as near as the
     /// app can say it: control, bidi and invisible characters out (the
-    /// daemon's `plain`), whitespace runs collapsed, trimmed. Used to
-    /// recognise what was typed in what the reloaded page shows.
+    /// daemon's `plain`), whitespace runs collapsed, trimmed. Used only to
+    /// recognise a create's title when no event carries its id (`made`);
+    /// an edit is never judged by it (`edited`).
     static func laundered(_ s: String) -> String {
         let invisible: Set<UInt32> = [0x061C, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x200E, 0x200F]
         let kept = s.unicodeScalars.filter { u in
@@ -242,22 +288,6 @@ enum CalendarWrite {
         }
         return String(String.UnicodeScalarView(kept))
             .components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
-    }
-
-    /// `laundered`, and every link cut to host and path, without `www.`,
-    /// a query or a fragment: how a location or a note comes back.
-    static func looseText(_ s: String?) -> String {
-        laundered(s ?? "").split(separator: " ").map { word -> String in
-            let w = String(word)
-            guard w.contains("://") || w.lowercased().hasPrefix("www."),
-                let url = URL(string: w.contains("://") ? w : "https://" + w), var host = url.host
-            else { return w }
-            host = host.lowercased()
-            if host.hasPrefix("www.") { host.removeFirst(4) }
-            var path = url.path
-            while path.hasSuffix("/") { path.removeLast() }
-            return host + path
-        }.joined(separator: " ")
     }
 
     /// Two wire times name the same moment (a timed one) or day (all-day).
@@ -277,15 +307,15 @@ enum CalendarWrite {
     static func keys(_ feed: TimelineFeed?) -> Set<String> { Set((feed?.events ?? []).map(key)) }
 
     /// After an uncertain create: the event the reloaded feed shows that the
-    /// write made. With an id (the app always sends one): THE event with
-    /// that id on the calendar written to, whatever its title came back as.
-    /// Without one (never sent by this app; kept for a body built by hand):
-    /// a new event on that calendar at that start whose title, laundered as
-    /// the daemon launders it, is the one sent.
+    /// write made. First THE event with the body's id on the calendar written
+    /// to, whatever its title came back as. When no event carries the id (no
+    /// id was sent, or a calendar daemon older than ids ignored it and let
+    /// Google pick one): a new event on that calendar at that start whose
+    /// title, laundered as the daemon launders it, is the one sent.
     static func made(_ body: EventWrite, before: Set<String>, in feed: TimelineFeed?) -> TimelineEvent? {
         let events = feed?.events ?? []
-        if let id = body.id {
-            return events.first { $0.calendar_id == body.calendar_id && $0.id == id }
+        if let id = body.id, let byId = events.first(where: { $0.calendar_id == body.calendar_id && $0.id == id }) {
+            return byId
         }
         return events.first {
             $0.calendar_id == body.calendar_id && !before.contains(key($0))
@@ -294,34 +324,69 @@ enum CalendarWrite {
     }
 
     /// After an uncertain edit: the event as the reloaded feed has it, once
-    /// EVERY field the edit changed reads as the user typed it (laundered as
-    /// the daemon launders it). Anything the edit did not touch (a guest's
-    /// answer, the colour) is not looked at, so a change somebody else made
-    /// meanwhile is never taken for this one. Nil while any changed field
-    /// still differs, or the event is gone (which is not this edit's doing).
+    /// EVERY field the edit changed is SEEN to have moved there from the
+    /// original event. The daemon launders text on the way back in (links
+    /// cut down, markup out, a length cap), which the app does not copy, so a
+    /// text field is judged only by whether it moved: the served title,
+    /// place or notes now differ from what was served before. Times, the
+    /// all-day flag and the guests come back exactly, so they must also read
+    /// as sent. Anything the edit did not touch (a guest's answer, the
+    /// colour) is not looked at.
+    ///
+    /// Nil is "not confirmed": while any changed field has not moved, while
+    /// nothing the edit changed can be observed at all (a change that
+    /// vanished under cleaning), or when the event is gone. With the pane
+    /// frozen (`EventPaneState`) that answer is always safe.
     static func edited(_ original: TimelineEvent, _ patch: EventPatch, in feed: TimelineFeed?) -> TimelineEvent? {
         guard let now = (feed?.events ?? []).first(where: { key($0) == key(original) }) else { return nil }
-        if let title = patch.title, laundered(now.title ?? "") != laundered(title) { return nil }
-        if let allDay = patch.all_day, now.all_day != allDay { return nil }
-        if let start = patch.start, !sameTime(now.start, start) { return nil }
+        var seen = 0
+        if patch.title != nil {
+            guard now.title != original.title else { return nil }
+            seen += 1
+        }
+        if let allDay = patch.all_day, allDay != original.all_day {
+            guard now.all_day == allDay else { return nil }
+            seen += 1
+        }
+        if let start = patch.start, !sameTime(start, original.start) {
+            guard sameTime(now.start, start) else { return nil }
+            seen += 1
+        }
         if let end = patch.end {
             // A one-day all-day event is served with no end: its last day is
             // its start.
-            let served = now.end ?? (now.all_day ? now.start : nil)
-            if !sameTime(served, end) { return nil }
-        }
-        for (typed, held) in [(patch.location, now.location), (patch.description, now.description)] {
-            switch typed {
-            case nil: continue
-            case .clear?: if !looseText(held).isEmpty { return nil }
-            case .set(let text)?: if looseText(held) != looseText(text) { return nil }
+            let served = { (e: TimelineEvent) in e.end ?? (e.all_day ? e.start : nil) }
+            if !sameTime(end, served(original)) {
+                guard sameTime(served(now), end) else { return nil }
+                seen += 1
             }
         }
-        if let guests = patch.guests {
-            let held = Set(now.guests.map { $0.filter { $0.isSelf != true }.map { $0.email.lowercased() } } ?? [])
-            if held != Set(guests.map { $0.lowercased() }) { return nil }
+        for (typed, held, was) in [
+            (patch.location, now.location, original.location),
+            (patch.description, now.description, original.description),
+        ] {
+            let had = !(was ?? "").isEmpty
+            switch typed {
+            case nil: continue
+            case .clear?:
+                guard had else { continue }
+                guard (held ?? "").isEmpty else { return nil }
+            case .set?:
+                guard held != was else { return nil }
+            }
+            seen += 1
         }
-        return now
+        if let guests = patch.guests {
+            let others = { (e: TimelineEvent) in
+                Set(e.guests.map { $0.filter { $0.isSelf != true }.map { $0.email.lowercased() } } ?? [])
+            }
+            let typed = Set(guests.map { $0.lowercased() })
+            if typed != others(original) {
+                guard others(now) == typed else { return nil }
+                seen += 1
+            }
+        }
+        return seen > 0 ? now : nil
     }
 
     /// After an uncertain delete: the reloaded feed no longer has it. A feed
@@ -373,5 +438,135 @@ enum CalendarWrite {
         default:
             return deleting ? "Could not delete the event." : "Could not save the event."
         }
+    }
+}
+
+/// What a pane sent, kept whole while its answer is in doubt: "send again"
+/// sends exactly this, and "check again" looks for exactly this.
+enum SentWrite: Hashable, Sendable {
+    /// `before`: every event the page held when it was first sent, so the
+    /// event it made can be told from one already there (`made`).
+    case create(EventWrite, before: Set<String>)
+    case edit(TimelineEvent, EventPatch, notify: Bool)
+
+    var isEdit: Bool {
+        if case .edit = self { return true }
+        return false
+    }
+
+    /// Google is asked to mail the guests.
+    var tellsGuests: Bool {
+        switch self {
+        case .create(let body, _): body.notify == true
+        case .edit(_, _, let notify): notify
+        }
+    }
+
+    /// The event the reloaded page shows this write made, or nil while it
+    /// cannot be confirmed.
+    func found(in feed: TimelineFeed?) -> TimelineEvent? {
+        switch self {
+        case .create(let body, let before): CalendarWrite.made(body, before: before, in: feed)
+        case .edit(let original, let patch, _): CalendarWrite.edited(original, patch, in: feed)
+        }
+    }
+}
+
+/// THE EVENT PANE'S WRITE, as a small state machine (fix round 3). A save
+/// whose answer never came and that the reloaded page cannot confirm
+/// FREEZES the pane: its fields go read-only with the draft still showing,
+/// one line says Google may have made the change, and the only ways on are
+/// "check again" (the page reloaded and looked at again), "send again"
+/// (exactly the body already sent, `SentWrite`) and "close". Nothing leads
+/// from a frozen pane back to an editable one: changing the event after an
+/// uncertain save means closing and starting again, under a new id.
+enum EventPaneState: Hashable, Sendable {
+    /// The fields are the user's.
+    case editing
+    /// A write is out. `again`: sent from the frozen pane (a check or a
+    /// resend), so whatever it answers, the pane never thaws.
+    case sending(again: Bool)
+    /// Google may have made the change; the page could not confirm it.
+    case uncertain
+    /// The change is on the page. The pane closes.
+    case confirmed
+
+    enum Event: Hashable, Sendable {
+        /// A save control pressed in an editable pane.
+        case send
+        /// The daemon answered with the event, or the page showed it.
+        case answered
+        /// A definite refusal: Google was not changed by THIS send.
+        case refused
+        /// No answer, and the page does not show the change.
+        case unsure
+        case checkAgain
+        case sendAgain
+    }
+
+    func next(_ event: Event) -> EventPaneState {
+        switch (self, event) {
+        case (.editing, .send): .sending(again: false)
+        case (.sending, .answered): .confirmed
+        case (.sending(again: false), .refused): .editing
+        case (.sending(again: true), .refused): .uncertain
+        case (.sending, .unsure): .uncertain
+        case (.uncertain, .checkAgain), (.uncertain, .sendAgain): .sending(again: true)
+        default: self
+        }
+    }
+
+    /// The fields take typing.
+    var fieldsEditable: Bool { self == .editing }
+
+    /// The frozen footer is drawn: its line and its three controls.
+    var frozen: Bool { self == .uncertain || self == .sending(again: true) }
+
+    enum Control: Hashable, Sendable {
+        case checkAgain, sendAgain, close
+    }
+
+    /// The frozen footer's controls that may be pressed now: all three while
+    /// uncertain, only close while a check or a resend is out, none
+    /// otherwise (the editable footer is the save controls').
+    var frozenControls: [Control] {
+        switch self {
+        case .uncertain: [.checkAgain, .sendAgain, .close]
+        case .sending(again: true): [.close]
+        default: []
+        }
+    }
+
+    enum Key: Hashable, Sendable {
+        case enter, commandEnter, escape
+    }
+
+    enum KeyAction: Hashable, Sendable {
+        /// The editable pane's own rules (`EventGuests.enter`, the footer's
+        /// main control).
+        case editingRules
+        case checkAgain
+        case close
+        /// Swallowed: nothing happens.
+        case nothing
+    }
+
+    func action(_ key: Key) -> KeyAction {
+        switch (self, key) {
+        case (_, .escape): .close
+        case (.editing, _): .editingRules
+        case (.uncertain, .commandEnter): .checkAgain
+        default: .nothing
+        }
+    }
+
+    static let checkAgainLabel = "check again"
+    static let closeLabel = "close"
+
+    /// "send again". An edit that tells guests says it may tell them twice;
+    /// a create's id keeps Google from inviting twice, so it says nothing
+    /// more.
+    static func sendAgainLabel(_ sent: SentWrite) -> String {
+        sent.isEdit && sent.tellsGuests ? "send again, guests may be told twice" : "send again"
     }
 }

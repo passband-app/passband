@@ -32,9 +32,11 @@ struct APIError: Error, Sendable {
     /// Redacted guard kinds parsed from a 422 send response, if any.
     var guardKinds: [String]?
     /// A transport failure after which the server may still have received
-    /// the request and acted on it: the wait timed out, or the connection
-    /// dropped mid-request. False for one that never got there (refused,
-    /// no route, bad address). Only ever true with `kind == .network`.
+    /// the request and acted on it: the wait timed out, the connection
+    /// dropped mid-request, or an answer came back that could not be read
+    /// (a bad or empty response: the server got the request). False for one
+    /// that never got there (refused, no route, bad address). Only ever true
+    /// with `kind == .network`.
     var mayHaveArrived = false
 
     init(_ kind: APIErrorKind, _ status: Int, _ message: String, guardKinds: [String]? = nil) {
@@ -49,9 +51,17 @@ struct APIError: Error, Sendable {
     static func transport(_ error: Error) -> APIError {
         var out = APIError(.network, 0, "cannot reach squelch server")
         let code = (error as? URLError)?.code
-        out.mayHaveArrived = code == .timedOut || code == .networkConnectionLost
+        out.mayHaveArrived = code.map(arrivedCodes.contains) ?? false
         return out
     }
+}
+
+extension APIError {
+    /// The transport failures that may have followed the request reaching
+    /// the server (`mayHaveArrived`).
+    static let arrivedCodes: Set<URLError.Code> = [
+        .timedOut, .networkConnectionLost, .badServerResponse, .cannotParseResponse, .zeroByteResource,
+    ]
 }
 
 extension APIError: LocalizedError {

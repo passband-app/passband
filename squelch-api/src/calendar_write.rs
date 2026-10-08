@@ -78,25 +78,35 @@
 //! the same 504 and the same kick, since the write may have gone out. The
 //! task keeps no Google call running past it.
 //!
-//! A CREATE SENT TWICE MAKES ONE EVENT. The app names the new event's `id`
+//! A CREATE SENT AGAIN FINDS THE FIRST. The app names the new event's `id`
 //! itself (Google allows a client-chosen id: lowercase `a`-`v` and digits, 5
-//! to 1024 characters, [`write::event_id`]), one per pane, and sends the same
-//! one with every press. Google "cannot guarantee that ID collisions will be
-//! detected at event creation time", so the daemon does not rely on its 409:
-//! a create naming an id READS it first ([`CalendarApi::get_event`]), and an
-//! event already there is answered 200 as it stands, with no insert and so no
-//! second invitation (audited `ok:existing notified=false`). An insert Google
-//! does answer 409 (`duplicate`) is answered the same way. One already made
-//! and since deleted is a 409, [`ALREADY_DELETED`]. A create with no `id` (an
-//! older app) lets Google choose, as before.
+//! to 1024 characters, [`write::event_id`]), one per pane, and after an
+//! uncertain answer can only resend the same body. Google "cannot guarantee
+//! that ID collisions will be detected at event creation time", so the daemon
+//! does not rely on its 409: a create naming an id READS it first
+//! ([`CalendarApi::get_event`]). An event already there is answered 200 as it
+//! stands, with no insert and so no second invitation (audited `ok:existing
+//! notified=false`), but ONLY when it is the event this create would make
+//! ([`write::is_same_create`]: title, times, all-day and guests, on the
+//! calendar read). The same id with anything else is a 409, [`ID_IN_USE`],
+//! with no write. An insert Google answers 409 (`duplicate`) is read and
+//! judged the same way. One already made and since deleted is a 409,
+//! [`ALREADY_DELETED`]. A second create with the same id while the first is
+//! still running is a 409, [`ALREADY_CREATING`], before Google hears it
+//! ([`InFlight`]). What this does NOT close: a read that lags an insert just
+//! made, followed by an insert Google fails to flag, can still make two; and
+//! the read is per calendar. A create with no `id` (an older app) lets Google
+//! choose, as before.
 //!
 //! A DELETE GOOGLE ANSWERS 410 found the event already gone, and removes the
 //! local row (204). A 404 says the same only while the calendar is still the
 //! user's: Google answers 404 too for a calendar the user can no longer
-//! reach. So on a calendar other than the primary one a 404 is checked
-//! against the calendar list ([`CalendarApi::calendar_listed`]): still
-//! listed is done (204); no longer listed is a 410, [`CALENDAR_GONE`], the
-//! row is left for the kicked sync, and the app does not say "deleted".
+//! reach, or an event they can no longer see. So on a calendar other than
+//! the primary one a 404 is checked against the calendar list
+//! ([`CalendarApi::calendar_listed`]): still listed with an `owner` or
+//! `writer` role is done (204); anything else is a 410, [`CALENDAR_GONE`],
+//! the row is left for the kicked sync, and the app does not say "deleted".
+//! A list read that fails is a 502 and deletes nothing.
 //!
 //! Error bodies are fixed strings that never echo the request, and logs carry
 //! the action and an error kind only (a calendar id is usually an address).
@@ -145,6 +155,8 @@ pub(crate) const GUESTS_READ_ONLY: &str = "this event's guest list cannot be cha
 pub(crate) const CALENDAR_GONE: &str = "that calendar is no longer available to you";
 pub(crate) const ALREADY_DELETED: &str =
     "that event was already created and has since been deleted";
+pub(crate) const ID_IN_USE: &str = "that event id is already used for a different event";
+pub(crate) const ALREADY_CREATING: &str = "that event is already being created";
 
 /// The most one calendar write may take in all ([`within`]): below the app's
 /// own 45 second wait, so the app hears the 504 rather than giving up first.
@@ -393,6 +405,38 @@ async fn detached<T: Send + 'static>(
     })
 }
 
+/// One create naming its own id, held in
+/// [`ApiState::calendar_creates_in_flight`] for as long as this value lives.
+/// Dropped on every way out of the work, an answer, a refusal, the deadline
+/// dropping the work, or a panic unwinding it, so a key is never left
+/// behind.
+pub(crate) struct InFlight {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<(i64, String, String)>>>,
+    key: (i64, String, String),
+}
+
+impl InFlight {
+    /// Take the key, or None when a create holding it is still running.
+    fn take(state: &ApiState, calendar_id: &str, id: &str) -> Option<Self> {
+        let key = (state.account_id, calendar_id.to_string(), id.to_string());
+        let set = state.calendar_creates_in_flight.clone();
+        let fresh = set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone());
+        fresh.then_some(Self { set, key })
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
+
 fn guests_read_only() -> Refusal {
     Refusal::new(
         "rejected:guests_read_only",
@@ -494,6 +538,14 @@ async fn create(state: ApiState, body: Bytes) -> Result<(StatusCode, Value), Api
             may_carry_guests(&cal, &draft.guests, creds.account_email())?;
         }
         let google_body = write::insert_body(&draft).map_err(Refusal::body)?;
+        // One create per id at a time: a second send while the first is
+        // still out is refused before Google hears it, not raced.
+        let _in_flight = match &draft.id {
+            None => None,
+            Some(id) => Some(InFlight::take(&state, &cal.calendar_id, id).ok_or_else(|| {
+                Refusal::new("rejected:in_flight", StatusCode::CONFLICT, ALREADY_CREATING)
+            })?),
+        };
         let (token, api) = google(&state, &creds, CREATE).await?;
         // A create naming its own id may have been sent before: read it, and
         // an event already there is the answer. Nothing is inserted, nobody
@@ -528,7 +580,8 @@ async fn create(state: ApiState, body: Bytes) -> Result<(StatusCode, Value), Api
                 Err(e) => return Err(Refusal::written(&state, CREATE, e)),
             },
         };
-        // The event an earlier send made. This send told nobody.
+        // An event already under the id. This send writes nothing and tells
+        // nobody, whatever it answers.
         audit_target = Some(target(&cal.calendar_id, draft.id.as_deref()));
         note = note.map(|n| GuestNote {
             notify: Notify::Nobody,
@@ -539,6 +592,21 @@ async fn create(state: ApiState, body: Bytes) -> Result<(StatusCode, Value), Api
                 "rejected:already_deleted",
                 StatusCode::CONFLICT,
                 ALREADY_DELETED,
+            ));
+        }
+        // It is the answer only when it is the event THIS create would make.
+        // The same id with another title, time or guest list (an edited
+        // draft, or someone else's event) is refused, never answered with
+        // what is there: that would drop the edit, or claim an invitation
+        // nobody sent.
+        let zone = cal.time_zone.as_deref();
+        let ours = read_written_event(&answer, zone)
+            .is_some_and(|found| write::is_same_create(&draft, &found, zone));
+        if !ours {
+            return Err(Refusal::new(
+                "rejected:id_in_use",
+                StatusCode::CONFLICT,
+                ID_IN_USE,
             ));
         }
         let (row, view) = keep_answer(&state, &cal, &answer, creds.account_email()).await?;

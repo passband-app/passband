@@ -109,9 +109,10 @@ pub struct NewEvent {
     pub guests: Vec<String>,
     pub notify: Notify,
     /// The event id the client chose for it, or None to let Google choose.
-    /// THE CREATE'S IDEMPOTENCY KEY: the app picks one per pane and sends it
-    /// with every press, so a create sent again finds the event the first
-    /// one made ([`event_id`]).
+    /// THE CREATE'S IDEMPOTENCY KEY: the app picks one per pane and, after an
+    /// uncertain answer, resends only the same body under it, so a create
+    /// sent again finds the event the first one made ([`event_id`]). An event
+    /// under the id is that answer only when it matches ([`is_same_create`]).
     pub id: Option<String>,
 }
 
@@ -518,6 +519,40 @@ pub fn insert_body(event: &NewEvent) -> Result<Value, Invalid> {
         body["attendees"] = Value::Array(attendees);
     }
     Ok(body)
+}
+
+/// Whether `found`, the event Google already holds under a create's own id,
+/// is the event THIS create would make: the same title (both laundered the
+/// way every stored event is, by reading the create's own insert body back
+/// through [`super::read_written_event`]), start, end, all-day flag, and the
+/// same guests (case folded, the calendar's own entry and the organizer's
+/// left out). Only then may a create naming an id be answered with an event
+/// already there; anything else under that id is a different event, and the
+/// create is refused rather than answered with it. A guest list Google cut
+/// short cannot be shown to match, so it does not. The calendar is the
+/// caller's: `found` was read from the calendar the create names.
+pub fn is_same_create(draft: &NewEvent, found: &EventRow, calendar_zone: Option<&str>) -> bool {
+    let Ok(mut body) = insert_body(draft) else {
+        return false;
+    };
+    body["id"] = json!(found.event_id);
+    let Some(want) = super::read_written_event(&body, calendar_zone) else {
+        return false;
+    };
+    let fold = |addr: &str| addr.trim().to_ascii_lowercase();
+    let wanted: HashSet<String> = draft.guests.iter().map(|g| fold(g)).collect();
+    let held: HashSet<String> = found
+        .guests
+        .iter()
+        .filter(|g| !g.is_self && !g.organizer)
+        .map(|g| fold(&g.email))
+        .collect();
+    !found.guests_truncated
+        && want.summary == found.summary
+        && want.start == found.start
+        && want.end == found.end
+        && want.all_day() == found.all_day()
+        && wanted == held
 }
 
 /// The `events.patch` body: only what the edit changes, its text as typed
@@ -1068,5 +1103,101 @@ mod tests {
             patch_body(&edit, None, Some(Vec::new())).unwrap(),
             json!({"attendees": []})
         );
+    }
+
+    /// A CREATE NAMING AN ID IS ANSWERED ONLY BY ITS OWN EVENT (verify3 W1,
+    /// W2): the event Google holds under the id must be the one this create
+    /// would make, title as laundered, times, all-day and guests.
+    #[test]
+    fn an_event_under_a_creates_id_is_its_own_only_when_it_matches() {
+        let draft = create(|b| {
+            b["title"] = json!(" Dinner\u{200B} with  Sam ");
+            b["guests"] = json!(["Sam@Example.com"]);
+            b["notify"] = json!(true);
+            b["id"] = json!("abcdef0123");
+        })
+        .unwrap();
+        // As Google answers it: the times in another offset, the organizer
+        // and the calendar's own entry among the attendees, the address
+        // folded.
+        let google = |edit: &dyn Fn(&mut Value)| {
+            let mut event = json!({
+                "id": "abcdef0123", "status": "confirmed",
+                // What Google stores is what was sent.
+                "summary": draft.title,
+                "start": {"dateTime": "2026-10-05T23:00:00Z"},
+                "end": {"dateTime": "2026-10-06T01:00:00Z"},
+                "organizer": {"email": "me@example.com", "self": true},
+                "attendees": [
+                    {"email": "me@example.com", "self": true, "organizer": true},
+                    {"email": "sam@example.com"},
+                ],
+            });
+            edit(&mut event);
+            super::super::read_written_event(&event, Some("America/New_York")).unwrap()
+        };
+        let same = |edit: &dyn Fn(&mut Value)| {
+            is_same_create(&draft, &google(edit), Some("America/New_York"))
+        };
+        assert!(same(&|_| {}), "the event this create makes");
+        assert!(!same(&|e| e["summary"] = json!("Lunch")), "another title");
+        assert!(
+            !same(&|e| e["start"] = json!({"dateTime": "2026-10-05T22:00:00Z"})),
+            "another start"
+        );
+        assert!(
+            !same(&|e| e["end"] = json!({"dateTime": "2026-10-06T02:00:00Z"})),
+            "another end"
+        );
+        assert!(
+            !same(&|e| {
+                e["start"] = json!({"date": "2026-10-05"});
+                e["end"] = json!({"date": "2026-10-06"});
+            }),
+            "all day"
+        );
+        assert!(
+            !same(&|e| e["attendees"][1]["email"] = json!("kim@example.com")),
+            "another guest"
+        );
+        assert!(
+            !same(&|e| e["attendees"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"email": "kim@example.com"}))),
+            "one guest more"
+        );
+        assert!(
+            !same(&|e| {
+                e["attendees"].as_array_mut().unwrap().pop();
+            }),
+            "no guests"
+        );
+        assert!(
+            !same(&|e| e["attendeesOmitted"] = json!(true)),
+            "a list Google cut short"
+        );
+        // An all-day create matches its own all-day event.
+        let day = create(|b| {
+            b["all_day"] = json!(true);
+            b["start"] = json!("2026-10-05");
+            b["end"] = json!("2026-10-06");
+            b["id"] = json!("abcdef0123");
+        })
+        .unwrap();
+        let held = google(&|e| {
+            e["summary"] = json!("Dinner");
+            e["start"] = json!({"date": "2026-10-05"});
+            e["end"] = json!({"date": "2026-10-07"});
+            e.as_object_mut().unwrap().remove("attendees");
+        });
+        assert!(is_same_create(&day, &held, None));
+        let shorter = google(&|e| {
+            e["summary"] = json!("Dinner");
+            e["start"] = json!({"date": "2026-10-05"});
+            e["end"] = json!({"date": "2026-10-06"});
+            e.as_object_mut().unwrap().remove("attendees");
+        });
+        assert!(!is_same_create(&day, &shorter, None), "one day, not two");
     }
 }

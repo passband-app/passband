@@ -87,6 +87,8 @@ struct Google {
     misses_duplicates: bool,
     /// The calendar ids of every `calendarList.get`, in order.
     list_gets: Vec<String>,
+    /// Answer every `calendarList.get` with this status instead.
+    list_get_status: Option<u16>,
     /// Answer this many of the next one-event reads 404, found or not, as a
     /// replica that has not caught up would.
     stale_reads: usize,
@@ -322,6 +324,9 @@ fn bearer(headers: &axum::http::HeaderMap) -> String {
 async fn list_get_route(State(g): State<Fake>, Path(id): Path<String>) -> Response {
     let mut g = g.lock().unwrap();
     g.list_gets.push(id.clone());
+    if let Some(status) = g.list_get_status {
+        return StatusCode::from_u16(status).unwrap().into_response();
+    }
     match g.list.iter().find(|e| e["id"] == id.as_str()) {
         Some(entry) => Json(entry.clone()).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -4881,7 +4886,7 @@ async fn a_write_past_its_deadline_is_a_504_and_kicks_a_sync() {
 
 const CLIENT_ID: &str = "0f3c9a7e5b2d4e6f8a1b3c5d7e9f0a2b";
 
-/// A CREATE SENT TWICE MAKES ONE EVENT (verify2 V2). The app names the new
+/// A CREATE SENT AGAIN FINDS THE FIRST (verify2 V2). The app names the new
 /// event's id and sends the same one with every press of the same pane. The
 /// daemon reads that id first, so a second send (after a 504, or a timeout
 /// in the app) is answered 200 with the event the first one made: nothing
@@ -5108,6 +5113,225 @@ async fn a_write_that_never_connects_is_a_502_and_kicks_nothing() {
         );
     }
     assert_eq!(served(&w, "own").await.unwrap()["title"], "My event");
+}
+
+/// THE SAME ID FOR A DIFFERENT EVENT IS REFUSED (verify3 W1, W2). An event
+/// already under a create's id answers it only when it is the event this
+/// create would make. A changed title, time or guest list under the same id
+/// is a 409 that says so: nothing inserted, nobody invited, and never a 200
+/// with the old event standing in for the new one. The same through the
+/// 409-then-read path.
+#[tokio::test]
+async fn a_create_whose_id_holds_a_different_event_is_refused() {
+    let (w, start) = write_world("create-id-in-use").await;
+    w.google().misses_duplicates = true;
+    let request = json!({"calendar_id": "primary", "title": "Dinner", "start": rfc(start),
+                         "end": rfc(start + Duration::hours(1)), "all_day": false,
+                         "guests": ["sam@example.com"], "id": CLIENT_ID});
+    let (status, first, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let in_use = json!({"error": "that event id is already used for a different event"});
+    type Change<'a> = (&'a str, &'a dyn Fn(&mut Value));
+    let changed: [Change; 5] = [
+        ("title", &|r| r["title"] = json!("Supper")),
+        ("start", &|r| {
+            r["start"] = json!(rfc(start - Duration::hours(1)))
+        }),
+        ("end", &|r| {
+            r["end"] = json!(rfc(start + Duration::hours(2)))
+        }),
+        ("guest added, and told", &|r| {
+            r["guests"] = json!(["sam@example.com", "kim@example.com"]);
+            r["notify"] = json!(true);
+        }),
+        ("guest gone", &|r| r["guests"] = json!([])),
+    ];
+    for (what, change) in changed {
+        let mut again = request.clone();
+        change(&mut again);
+        let (status, answer, _) =
+            send(&w.app, "POST", "/client/calendar/events", Some(again)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{what}: {answer}");
+        assert_eq!(answer, in_use, "{what}");
+        assert_eq!(writes(&w).len(), 1, "{what}: nothing inserted");
+        assert_eq!(
+            audit(&w)[0]
+                .2
+                .as_deref()
+                .map(|d| d.split(' ').next().unwrap()),
+            Some("rejected:id_in_use"),
+            "{what}"
+        );
+        assert!(
+            audit(&w)[0]
+                .2
+                .as_deref()
+                .unwrap()
+                .ends_with("notified=false"),
+            "{what}: this send told nobody"
+        );
+    }
+    // Through Google's 409: a read that misses it, an insert refused, the
+    // read after it finds the old event, and the changed draft is refused.
+    w.google().misses_duplicates = false;
+    w.google().stale_reads = 1;
+    let mut moved = request.clone();
+    moved["title"] = json!("Supper");
+    let (status, answer, _) = send(&w.app, "POST", "/client/calendar/events", Some(moved)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(answer, in_use);
+    assert_eq!(writes(&w).len(), 2, "the insert Google refused");
+    // The draft as first sent is still answered with its event.
+    let (status, same, _) = send(&w.app, "POST", "/client/calendar/events", Some(request)).await;
+    assert_eq!(status, StatusCode::OK, "{same}");
+    assert_eq!(same, first);
+    let held = w
+        .google()
+        .full
+        .get(PRIMARY)
+        .unwrap()
+        .iter()
+        .flatten()
+        .filter(|e| e["id"] == CLIENT_ID)
+        .count();
+    assert_eq!(held, 1);
+    assert_eq!(served(&w, CLIENT_ID).await.unwrap()["title"], "Dinner");
+}
+
+/// ONE CREATE PER ID AT A TIME (verify3 W9). A second create naming an id
+/// whose first create is still out is a 409 at once, before Google hears
+/// it; the key is let go when the first finishes, and when the deadline
+/// drops it.
+#[tokio::test]
+async fn a_second_create_with_an_id_in_flight_is_refused_without_google() {
+    let (w, start) = write_world_with("create-in-flight", |state, _| {
+        state.with_calendar_write_deadline(StdDuration::from_millis(1500))
+    })
+    .await;
+    let request = json!({"calendar_id": "primary", "title": "Twice", "start": rfc(start),
+                         "end": rfc(start + Duration::hours(1)), "all_day": false,
+                         "guests": ["sam@example.com"], "notify": true, "id": CLIENT_ID});
+    w.google().answer_delay = Some(StdDuration::from_millis(600));
+    let app = w.app.clone();
+    let body = request.clone();
+    let first =
+        tokio::spawn(
+            async move { send(&app, "POST", "/client/calendar/events", Some(body)).await },
+        );
+    tokio::time::sleep(StdDuration::from_millis(200)).await;
+    let reads_before = w.google().reads.len();
+    let (status, answer, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"error": "that event is already being created"})
+    );
+    assert_eq!(w.google().reads.len(), reads_before, "Google was not read");
+    assert_eq!(
+        audit(&w)[0]
+            .2
+            .as_deref()
+            .map(|d| d.split(' ').next().unwrap()),
+        Some("rejected:in_flight")
+    );
+    let (status, made, _) = first.await.unwrap();
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    assert_eq!(writes(&w).len(), 1, "one insert, one invitation");
+    // Done: the key is free, and the same create is answered by its event.
+    w.google().answer_delay = None;
+    let (status, again, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    // A create the deadline drops lets its key go too.
+    let mut other = request.clone();
+    other["id"] = json!("0f3c9a7e5b2d4e6f8a1b3c5d7e9f0a2c");
+    w.google().answer_delay = Some(StdDuration::from_secs(3));
+    let (status, _, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(other.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    w.google().answer_delay = None;
+    let (status, answer, _) = send(&w.app, "POST", "/client/calendar/events", Some(other)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the made event, not 'being created': {answer}"
+    );
+    assert_eq!(writes(&w).len(), 2);
+}
+
+/// A 404 delete on a calendar still LISTED but no longer written to by the
+/// user (verify3 W8) is not "already deleted": an event the user cannot see
+/// is a 404 to them too. Refused like an unlisted calendar, the row kept.
+#[tokio::test]
+async fn a_delete_404_on_a_calendar_the_user_only_reads_now_is_refused() {
+    let (w, _) = write_world("delete-404-reader").await;
+    w.google().write_fail = Some(404);
+    for entry in w.google().list.iter_mut().filter(|e| e["id"] == TEAM) {
+        entry["accessRole"] = json!("freeBusyReader");
+    }
+    let uri = event_uri(TEAM, "team-1");
+    let (status, answer, _) = send(&w.app, "DELETE", &uri, None).await;
+    assert_eq!(status, StatusCode::GONE, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"error": "that calendar is no longer available to you"})
+    );
+    assert!(
+        served(&w, "team-1").await.is_some(),
+        "the row is the sync's"
+    );
+    // An owner's role is still the user's: the 404 is the event gone.
+    for entry in w.google().list.iter_mut().filter(|e| e["id"] == TEAM) {
+        entry["accessRole"] = json!("owner");
+    }
+    let (status, _, _) = send(&w.app, "DELETE", &uri, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(served(&w, "team-1").await.is_none());
+}
+
+/// A 404 delete whose calendar list read FAILS (verify3 W7) cannot say the
+/// calendar is still the user's: a 502, nothing deleted here, the row kept.
+#[tokio::test]
+async fn a_delete_404_whose_list_read_fails_deletes_nothing() {
+    let (w, _) = write_world("delete-404-list-fails").await;
+    w.google().write_fail = Some(404);
+    let uri = event_uri(TEAM, "team-1");
+    for failure in [500, 403] {
+        w.google().list_get_status = Some(failure);
+        let (status, answer, _) = send(&w.app, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{failure}: {answer}");
+        assert_eq!(
+            answer,
+            json!({"error": "Google Calendar did not accept the change"})
+        );
+        assert!(served(&w, "team-1").await.is_some(), "{failure}: row kept");
+        assert_eq!(
+            audit(&w)[0].2.as_deref(),
+            Some("failed:google guests=0 notified=false")
+        );
+    }
 }
 
 /// THE FLAG STOPS A PASS IN FLIGHT at the next calendar: turned off while the

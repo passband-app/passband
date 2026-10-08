@@ -47,6 +47,11 @@ struct EventDraftTests {
         aDeleteThatCanNoLongerTellIsRefused()
         anAnswerAfterTheGateClosedIsNobodys()
         aTypedPaneSurvivesAPageChange()
+        anUncertainSaveFreezesThePane()
+        aPaneSendsItsOwnIdAndOnlyWhatItSent()
+        anUncertainCreateFallsBackWhenNoEventHasTheId()
+        anUncertainEditIsJudgedByWhatMoved()
+        aResponseThatCameBackMayHaveArrived()
         theWave3WireDecodes()
 
         if failures > 0 {
@@ -588,8 +593,8 @@ struct EventDraftTests {
         expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [stored])) == nil,
                "the id on another calendar is another event")
         let lookalike = event("other", title: body.title, start: body.start, end: body.end)
-        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [lookalike])) == nil,
-               "with an id, a lookalike is not it")
+        expect(CalendarWrite.made(body, before: [CalendarWrite.key(lookalike)], in: TimelineFeed(events: [lookalike]))
+               == nil, "with an id, a lookalike already there before the send is not it")
         var plain = body
         plain.id = nil
         let laundered = event("g1", title: "Lunch with Sam https://x.test/a?pwd=1", start: body.start, end: body.end)
@@ -694,6 +699,196 @@ struct EventDraftTests {
         expect(gives.allow && gives.closePane, "an untouched one gives way to it")
         let parked = EventPaneTravel.composer(open: false, parked: true, touched: true)
         expect(parked.allow && !parked.closePane, "a parked one lets a composer open elsewhere and stays parked")
+    }
+
+    // MARK: fix round 3: the frozen pane
+
+    /// THE FROZEN PANE, the whole table: every state, every event, every key.
+    /// An uncertain save that the page cannot confirm freezes the pane; the
+    /// only ways on are check again, send again (the same body) and close;
+    /// and nothing ever leads from a frozen pane back to an editable one.
+    static func anUncertainSaveFreezesThePane() {
+        typealias S = EventPaneState
+        let states: [S] = [.editing, .sending(again: false), .sending(again: true), .uncertain, .confirmed]
+        let events: [S.Event] = [.send, .answered, .refused, .unsure, .checkAgain, .sendAgain]
+        let table: [S: [S.Event: S]] = [
+            .editing: [.send: .sending(again: false)],
+            .sending(again: false): [.answered: .confirmed, .refused: .editing, .unsure: .uncertain],
+            .sending(again: true): [.answered: .confirmed, .refused: .uncertain, .unsure: .uncertain],
+            .uncertain: [.checkAgain: .sending(again: true), .sendAgain: .sending(again: true)],
+            .confirmed: [:],
+        ]
+        for state in states {
+            for event in events {
+                let want = table[state]?[event] ?? state
+                expect(state.next(event) == want, "\(state) + \(event) is \(want)")
+            }
+        }
+        // No way back: from a frozen pane, any run of events never reaches
+        // an editable one.
+        var seen: Set<S> = [.uncertain]
+        var frontier: [S] = [.uncertain]
+        while let s = frontier.popLast() {
+            for e in events where !seen.contains(s.next(e)) {
+                seen.insert(s.next(e))
+                frontier.append(s.next(e))
+            }
+        }
+        expect(!seen.contains(.editing) && !seen.contains { $0.fieldsEditable },
+               "nothing leads from uncertain back to editable")
+        expect(seen == [.uncertain, .sending(again: true), .confirmed], "frozen, checking, or done")
+
+        expect(states.filter(\.fieldsEditable) == [.editing], "fields take typing only while editing")
+        expect(states.filter(\.frozen) == [.sending(again: true), .uncertain], "the frozen footer")
+        expect(S.uncertain.frozenControls == [.checkAgain, .sendAgain, .close], "frozen: three ways on")
+        expect(S.sending(again: true).frozenControls == [.close], "checking: only close")
+        expect(S.editing.frozenControls.isEmpty && S.sending(again: false).frozenControls.isEmpty,
+               "an editable pane has its save controls instead")
+
+        let keys: [(S, S.Key, S.KeyAction)] = [
+            (.editing, .enter, .editingRules), (.editing, .commandEnter, .editingRules), (.editing, .escape, .close),
+            (.sending(again: false), .enter, .nothing), (.sending(again: false), .commandEnter, .nothing),
+            (.sending(again: false), .escape, .close),
+            (.uncertain, .enter, .nothing), (.uncertain, .commandEnter, .checkAgain), (.uncertain, .escape, .close),
+            (.sending(again: true), .enter, .nothing), (.sending(again: true), .commandEnter, .nothing),
+            (.sending(again: true), .escape, .close),
+        ]
+        for (state, key, want) in keys {
+            expect(state.action(key) == want, "\(state): \(key) is \(want)")
+        }
+
+        let body = EventWrite(
+            calendar_id: "primary", title: "x", start: "2026-10-08T19:45:00-07:00",
+            end: "2026-10-08T21:00:00-07:00", all_day: false, location: nil, description: nil,
+            guests: ["sam@x.test"])
+        let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00")
+        let invite = CalendarWrite.createWrite(body, notify: true, createId: "abcde12345", before: [])
+        expect(EventPaneState.sendAgainLabel(invite) == "send again", "a create's id keeps it to one invitation")
+        let tell = SentWrite.edit(a, EventPatch(title: "y"), notify: true)
+        expect(EventPaneState.sendAgainLabel(tell) == "send again, guests may be told twice",
+               "an edit that tells guests says it may tell them twice")
+        expect(EventPaneState.sendAgainLabel(.edit(a, EventPatch(title: "y"), notify: false)) == "send again",
+               "an edit that tells nobody")
+        for text in [CalendarWrite.frozenText, CalendarWrite.frozenCheckingText, CalendarWrite.resendRefusedText,
+                     EventPaneState.sendAgainLabel(tell), EventPaneState.checkAgainLabel, EventPaneState.closeLabel] {
+            expect(!text.contains("\u{2014}"), "no em dash: \(text)")
+        }
+        expect(CalendarWrite.frozenText == "Google may have made this change. Passband could not confirm it yet.",
+               "the frozen line")
+    }
+
+    /// verify3 W6: the bodies a pane sends, built in one pure place. A
+    /// create carries the PANE'S id (the same on every send from it, a new
+    /// one for a new pane); a create is what "send again" resends whole; an
+    /// edit that changes nothing sends nothing; a delete that can no longer
+    /// tell is refused.
+    static func aPaneSendsItsOwnIdAndOnlyWhatItSent() {
+        let made = EventWrite(
+            calendar_id: "primary", title: "Dinner", start: "2026-10-08T19:45:00-07:00",
+            end: "2026-10-08T21:00:00-07:00", all_day: false, location: nil, description: nil,
+            guests: ["sam@x.test"])
+        let paneId = CalendarWrite.newEventId()
+        let first = CalendarWrite.createWrite(made, notify: true, createId: paneId, before: ["primary\nold"])
+        let second = CalendarWrite.createWrite(made, notify: true, createId: paneId, before: ["primary\nold"])
+        guard case .create(let body, let before) = first else { return expect(false, "a create") }
+        expect(body.id == paneId, "the pane's id is on the body")
+        expect(body.notify == true && first.tellsGuests, "the control's word is on the body")
+        expect(before == ["primary\nold"], "what the page held when it was sent")
+        expect(first == second, "two sends from one pane are one body, one id")
+        let otherPane = CalendarWrite.createWrite(
+            made, notify: true, createId: CalendarWrite.newEventId(), before: ["primary\nold"])
+        expect(otherPane != first, "a new pane, a new id")
+        guard case .create(let quiet, _) = CalendarWrite.createWrite(made, notify: false, createId: paneId, before: [])
+        else { return expect(false, "a create") }
+        expect(quiet.notify == nil && quiet.id == paneId, "telling nobody sends no notify key, the id still")
+
+        let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00")
+        expect(CalendarWrite.editWrite(a, EventPatch(), notify: true) == nil, "an empty edit sends nothing")
+        expect(CalendarWrite.editWrite(a, EventPatch(title: "x"), notify: true)
+               == .edit(a, EventPatch(title: "x"), notify: true), "an edit as sent")
+
+        expect(CalendarWrite.deleteWrite(a, tellGuests: true, hasGuests: true, mayTell: false) == nil,
+               "asked to tell, may not: no delete is sent")
+        let told = CalendarWrite.deleteWrite(a, tellGuests: true, hasGuests: true, mayTell: true)
+        expect(told?.notify == true && told?.calendarId == "primary" && told?.id == "a", "a delete that tells")
+        expect(CalendarWrite.deleteWrite(a, tellGuests: false, hasGuests: true, mayTell: true)?.notify == false,
+               "a delete that tells nobody")
+    }
+
+    /// verify3 W3: a calendar daemon older than ids ignores the one sent and
+    /// lets Google pick its own, so no event carries it. The title at that
+    /// start, new since the send, is then the event made.
+    static func anUncertainCreateFallsBackWhenNoEventHasTheId() {
+        var body = EventWrite(
+            calendar_id: "primary", title: "Lunch with Sam", start: "2026-10-08T12:00:00-07:00",
+            end: "2026-10-08T13:00:00-07:00", all_day: false, location: nil, description: nil)
+        body.id = "abcdef0123456789"
+        let googles = event("g9", title: "Lunch with Sam", start: body.start, end: body.end)
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [googles]))?.id == "g9",
+               "no event has the id: the title at that start is it")
+        expect(CalendarWrite.made(body, before: [CalendarWrite.key(googles)], in: TimelineFeed(events: [googles])) == nil,
+               "one already there before the send is not it")
+        let ours = event(body.id!, title: "Lunch with Sam", start: body.start, end: body.end)
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [googles, ours]))?.id == body.id,
+               "the id, when an event has it, wins")
+        let sent = SentWrite.create(body, before: [])
+        expect(sent.found(in: TimelineFeed(events: [googles]))?.id == "g9", "a sent create looks the same way")
+    }
+
+    /// verify3 W4, W5: an uncertain edit is judged by whether each changed
+    /// field MOVED from the original, not by copying the daemon's cleaning.
+    static func anUncertainEditIsJudgedByWhatMoved() {
+        let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00",
+                      location: "zoom.us/j/1", description: "Old")
+        // W4: the daemon cuts a link the app would not have: applied, and
+        // seen to have moved.
+        let link = EventPatch(location: .set("Zoom:https://zoom.us/j/2?pwd=abc"))
+        var applied = a
+        applied.location = "Zoom:zoom.us/j/2"
+        expect(CalendarWrite.edited(a, link, in: TimelineFeed(events: [applied])) != nil,
+               "W4: a link cleaned differently is still seen to have moved")
+        let notes = EventPatch(description: .set("a <b>bold</b> &amp; c"))
+        var noted = a
+        noted.description = "a bold & c"
+        expect(CalendarWrite.edited(a, notes, in: TimelineFeed(events: [noted])) != nil,
+               "W4: notes with markup, cleaned, moved")
+        // W5: a change that vanishes under cleaning (only the passcode) is
+        // never claimed, applied or not.
+        let passcode = EventPatch(location: .set("https://zoom.us/j/1?pwd=NEW"))
+        expect(CalendarWrite.edited(a, passcode, in: TimelineFeed(events: [a])) == nil,
+               "W5: a change that cannot be seen is not confirmed")
+        // A title that did not move is not this edit, whatever was typed.
+        expect(CalendarWrite.edited(a, EventPatch(title: "Dreamers  Dinner"), in: TimelineFeed(events: [a])) == nil,
+               "a title still as it was is not confirmed")
+        // Times sent as a pair: an unchanged start is not asked to move.
+        let later = EventPatch(start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T11:00:00-07:00")
+        var stretched = a
+        stretched.end = "2026-10-08T18:00:00Z"
+        expect(CalendarWrite.edited(a, later, in: TimelineFeed(events: [stretched])) != nil,
+               "only the end moved, and it reads as sent")
+        expect(CalendarWrite.edited(a, later, in: TimelineFeed(events: [a])) == nil, "the end not moved yet")
+        // Nothing the patch names can move: nothing confirms it.
+        let same = EventPatch(start: "2026-10-08T16:00:00Z", end: "2026-10-08T17:00:00Z")
+        expect(CalendarWrite.edited(a, same, in: TimelineFeed(events: [a])) == nil,
+               "an edit with nothing observable is never confirmed")
+        // A clear of something already empty is no change; of something
+        // there, it must be gone.
+        let clear = EventPatch(location: .clear)
+        var cleared = a
+        cleared.location = nil
+        expect(CalendarWrite.edited(a, clear, in: TimelineFeed(events: [cleared])) != nil, "cleared")
+        expect(CalendarWrite.edited(a, clear, in: TimelineFeed(events: [a])) == nil, "not cleared yet")
+    }
+
+    /// verify3 W10: an answer that came back but could not be read means
+    /// the request reached the server, so a calendar write may have
+    /// happened.
+    static func aResponseThatCameBackMayHaveArrived() {
+        for code in [URLError.Code.badServerResponse, .cannotParseResponse, .zeroByteResource] {
+            let e = APIError.transport(URLError(code))
+            expect(e.mayHaveArrived && CalendarWrite.status(of: e) == CalendarWrite.uncertainStatus,
+                   "\(code): may have arrived")
+        }
     }
 
     // MARK: wire

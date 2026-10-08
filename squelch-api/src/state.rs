@@ -168,6 +168,13 @@ pub struct ApiState {
     /// ([`crate::calendar_write::WRITE_DEADLINE`]). Past it the write is
     /// answered 504, "may have happened". Shorter only in tests.
     pub(crate) calendar_write_deadline: std::time::Duration,
+    /// The creates naming their own event id that are in flight, as
+    /// (account, calendar, id), shared by every clone: a second create with
+    /// the same key while the first is still running is refused at once
+    /// rather than racing it to Google
+    /// ([`crate::calendar_write::InFlight`]).
+    pub(crate) calendar_creates_in_flight:
+        Arc<std::sync::Mutex<std::collections::HashSet<(AccountId, String, String)>>>,
     /// The one Google Calendar consent this daemon may have in flight for the
     /// app's Connect button (`POST /client/calendar/connect`, self-host only),
     /// and the loopback listener that waits for its redirect. Shared by every
@@ -529,6 +536,7 @@ impl ApiState {
             calendar_refresh: CalendarRefresh::default(),
             calendar_api_base: None,
             calendar_write_deadline: crate::calendar_write::WRITE_DEADLINE,
+            calendar_creates_in_flight: Default::default(),
             calendar_consent: Default::default(),
             calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
             calendar_consent_endpoints: Default::default(),

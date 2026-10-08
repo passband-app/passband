@@ -85,7 +85,7 @@ enum ProductGuide {
             case .triage:
                 "how mail gets sorted, what done means, fixing a wrong call"
             case .senderRules:
-                "rules for a sender (allow, mute, filter) and the Rules page"
+                "rules for a sender (allow, mute, filter) and the Rules pane in Settings"
             case .reminders:
                 "remind me later: parking an email until a time"
             case .search:
@@ -178,8 +178,8 @@ enum ProductGuide {
             "Sitrep: the home board. What needs the user, what there is to read, and today's records.",
             "Emails: every message in one list, plus sent and spam.",
             "Auth: login codes, password resets and security alerts.",
-            "Rules: sender rules.",
-            "Groups: named sets of recipients.",
+            "Rules: sender rules. A pane in Settings, not on the rail; the key opens Settings > Rules.",
+            "Groups: named sets of recipients. A pane in Settings, not on the rail; the key opens Settings > Groups.",
         ]
         if calendar {
             pages.insert(
@@ -354,7 +354,7 @@ enum ProductGuide {
 
         Groups:
         - "groups" on the To line addresses a saved group. New messages only, not replies or forwards.
-        - Groups are made on the Groups page (key 5): n new, e or Enter edit, x delete.
+        - Groups are made in Settings > Groups (key 5): n new, e or Enter edit, x delete.
         - On the iPhone, Groups is under the person icon at the top left of the Sitrep: + makes one, tap opens it, swipe a group to the left to edit or delete it.
         - Each group is set to go out one way: To (one email, everyone sees the list), Bcc (one email, nobody sees anyone else) or Individually (a separate email per person).
 
@@ -402,7 +402,7 @@ enum ProductGuide {
         - e or d done, r reply, h remind, v fix triage, t write a rule for this sender.
         - f searches everything from this sender.
         - a opens "browse all": a side panel of mail ranked by importance, with a noise filter slider that + and - move.
-        - T goes to Rules, g to Auth, A to the audit log.
+        - T goes to Rules and A to the audit log, both in Settings. g goes to Auth.
 
         Sent:
         - The "sent" segment at the top. Rows show who the mail went to and, if read tracking fired, an eye with the open count.
@@ -452,12 +452,12 @@ enum ProductGuide {
 
         Making one:
         - From an email: press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The editor opens for that sender and may suggest a sentence; Tab takes the suggestion.
-        - From the Rules page (key 4, or T on the Emails page): n. Typing in the match field lists senders who have written to the user, by name or address; typing *@ lists whole domains instead. Arrows pick, Enter or Tab takes one, Esc hides the list.
+        - From Settings > Rules (key 4, or T on the Emails page): n. Typing in the match field lists senders who have written to the user, by name or address; typing *@ lists whole domains instead. Arrows pick, Enter or Tab takes one, Esc hides the list.
         - In the editor: Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition.
         - This assistant can write one when asked. It only adds rules; it never changes one the user wrote.
 
         Managing them:
-        - On the Rules page: j / k move, e or Enter or a click edits, x deletes (with undo).
+        - In Settings > Rules: j / k move, e or Enter or a click edits, x deletes (with undo).
         - On the iPhone, Rules is under the person icon at the top left of the Sitrep: + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
         - Rules are grouped by what they do (allow, filter, mute) and then by domain.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
@@ -561,9 +561,9 @@ enum ProductGuide {
 
     private static let appAndAccounts = """
         Accounts:
-        - Add one from the Accounts menu ("Add Account…") or Settings > Account: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
-        - Switch with ⌘1 to ⌘9, in the order listed in Settings > Account, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
-        - Rename an account by editing its name in Settings > Account. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
+        - Add one from the Accounts menu ("Add Account…") or Settings > Accounts: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
+        - Switch with ⌘1 to ⌘9, in the order listed in Settings > Accounts, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
+        - Rename an account by editing its name in Settings > Accounts. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
         - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
         - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
@@ -587,8 +587,8 @@ enum ProductGuide {
         - Audit log (Settings > Audit, or A on the Emails page): every action taken on the mail by the user or by an agent, with undo for the reversible ones.
 
         Sharing:
-        - Settings > Account > Invites sends a friend an invite from the user's own address. Shown only where the server supports it.
-        - Settings > Account also has the link to the iPhone app on TestFlight.
+        - Settings > Accounts > Invites sends a friend an invite from the user's own address. Shown only where the server supports it.
+        - Settings > Accounts also has the link to the iPhone app on TestFlight.
 
         Privacy:
         - Settings > Privacy sets telemetry to Full, Minimal or None.

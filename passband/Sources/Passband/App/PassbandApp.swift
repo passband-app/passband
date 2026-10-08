@@ -239,7 +239,7 @@ struct PassbandCommands: Commands {
         }
 
         CommandMenu("Go") {
-            // NO KEYBOARD SHORTCUT. These five used to hold ⌘1–⌘5; the digits
+            // NO KEYBOARD SHORTCUT. These used to hold ⌘1–⌘5; the digits
             // went to account switching, and the BARE `1`–`5` in
             // RootView.globalBindings do the routing — which they always did,
             // behind the dispatcher's input guard, so nothing was lost but the
@@ -254,6 +254,13 @@ struct PassbandCommands: Commands {
             Button("Usage") { store.setView(.usage) }
                 .disabled(blocked)
             Button("Settings") { store.setView(.settings) }
+                .disabled(blocked)
+            // Settings panes, named here because they were destinations of
+            // their own until they left the rail, and a menu is where somebody
+            // looks for a page that is no longer where it was.
+            Button("Rules") { store.openSettings(.rules) }
+                .disabled(blocked)
+            Button("Groups") { store.openSettings(.groups) }
                 .disabled(blocked)
             Divider()
             Button("Back") { store.goBack() }

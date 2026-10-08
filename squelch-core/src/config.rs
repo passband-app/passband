@@ -1943,6 +1943,10 @@ impl Config {
             &mut self.triage.agent.background_daily_run_cap,
         );
         env_override(
+            "SQUELCH_TRIAGE_ARCHIVE_ACCESS_DAILY_CAP",
+            &mut self.triage.agent.archive_access_daily_cap,
+        );
+        env_override(
             "SQUELCH_TRIAGE_MAX_ATTEMPTS",
             &mut self.triage.agent.max_attempts,
         );
@@ -2528,6 +2532,7 @@ mod tests {
             "SQUELCH_TRIAGE_MAX_ATTEMPTS",
             "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
             "SQUELCH_TRIAGE_BACKGROUND_DAILY_RUN_CAP",
+            "SQUELCH_TRIAGE_ARCHIVE_ACCESS_DAILY_CAP",
         ];
         let previous = names.map(std::env::var_os);
         // SAFETY: every environment-mutating config test holds ENV_LOCK.
@@ -2536,8 +2541,10 @@ mod tests {
             std::env::set_var(names[1], "4");
             std::env::set_var(names[2], "600");
             std::env::set_var(names[3], "5");
+            std::env::set_var(names[4], "9");
         }
         let mut config = Config::default();
+        assert_eq!(config.triage.agent.archive_access_daily_cap, 50);
         config.apply_env_overrides();
         unsafe {
             for (name, value) in names.into_iter().zip(previous) {
@@ -2550,6 +2557,7 @@ mod tests {
         }
         assert_eq!(config.triage.agent.daily_run_cap, 17);
         assert_eq!(config.triage.agent.background_daily_run_cap, 5);
+        assert_eq!(config.triage.agent.archive_access_daily_cap, 9);
         assert_eq!(config.triage.agent.max_attempts, 4);
         assert_eq!(config.triage.agent.outage_retry_secs, 600);
     }

@@ -172,8 +172,13 @@ pub(super) fn escape_like(value: &str) -> String {
 /// Shared by the keyword path and the filter-only listing so the two cannot
 /// drift apart in what `from:2026-01-01` means.
 fn push_filter_clauses(sql: &mut String, args: &mut Vec<Value>, filter: &SearchFilter) {
+    // AN ARCHIVE ROW READS AS DONE, here and in every hit this module builds
+    // (the same expression, so the `done:` operator, the unfinished-first
+    // grouping and a hit's own flag cannot disagree). Its triage row says
+    // 'new' for good, because nothing ever triages it; taken at its word, a
+    // year of old mail would sort ahead of everything the reader has finished.
     if let Some(done) = filter.done {
-        sql.push_str(" AND (COALESCE(t.status, 'new') = 'done') = ?");
+        sql.push_str(" AND (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1) = ?");
         args.push(Value::Integer(i64::from(done)));
     }
     if let Some(from) = &filter.from {
@@ -280,14 +285,23 @@ fn fuse_ranked(lists: &[&[Candidate]], sort: SearchSort, now: DateTime<Utc>) -> 
     ranked.into_iter().map(|(c, _)| c).collect()
 }
 
-/// What an external search may return, and what it may only count.
+/// The widest recall window an external search may grow to. Most of a walked
+/// mailbox is hidden from an external caller, so a window that doubled until
+/// it filled a page would end up hydrating the whole matching archive under
+/// the store mutex; this is also sqlite-vec's own ceiling for one KNN query.
+pub const EXTERNAL_RECALL_MAX: usize = 4096;
+
+/// What an external search may return, and what this process alone may know.
 #[derive(Debug, Default)]
 pub struct ExternalSearch {
     /// Readable results, in rank order.
     pub hits: Vec<SearchHit>,
-    /// Ids of matching archive rows awaiting an access check, in rank order.
-    /// INTERNAL: an id here is a row the caller has not been allowed to see.
-    pub pending_archive: Vec<i64>,
+    /// Ids of KEYWORD-matched archive rows awaiting an access check, in rank
+    /// order. Crate-private on purpose: an id here is a row the caller has not
+    /// been allowed to see, and neither door can read this field, count it or
+    /// branch on it. Its one consumer is `store::archive_surface`, which
+    /// queues the checks.
+    pub(crate) pending_archive: Vec<i64>,
 }
 
 impl SqliteStore {
@@ -300,48 +314,62 @@ impl SqliteStore {
         account_id: AccountId,
         hits: &[SearchHit],
     ) -> Result<Vec<SearchHit>> {
-        Ok(self.external_search_partition(account_id, hits)?.hits)
+        Ok(self
+            .external_partition(account_id, hits.iter().map(|hit| (hit.id, false)))?
+            .hits)
     }
 
-    /// [`Self::external_search_hits`], plus the ids of the candidates that
-    /// were dropped ONLY because they are archive rows nobody has assessed
-    /// yet, in retrieval order. Those ids are for the caller to queue an
-    /// access check with ([`Self::request_archive_access`]) and to count;
-    /// nothing else about such a row may leave the process.
+    /// [`Self::external_search_hits`], also noting (for this crate only, see
+    /// [`ExternalSearch`]) the candidates that were dropped ONLY because they
+    /// are archive rows nobody has assessed yet, in retrieval order.
+    ///
+    /// KEYWORD-LEG CANDIDATES ONLY. The vector leg returns the `k` nearest
+    /// rows with no relevance floor, so in a walked mailbox every search has
+    /// archive "neighbours" that match nothing; counting those would buy
+    /// access checks for mail nobody searched for, on every call.
     pub fn external_search_partition(
         &self,
         account_id: AccountId,
-        hits: &[SearchHit],
+        candidates: &[LeggedHit],
+    ) -> Result<ExternalSearch> {
+        self.external_partition(account_id, candidates.iter().map(|c| (c.hit.id, c.keyword)))
+    }
+
+    fn external_partition(
+        &self,
+        account_id: AccountId,
+        candidates: impl Iterator<Item = (i64, bool)>,
     ) -> Result<ExternalSearch> {
         let conn = self.lock()?;
         let mut allowed = Vec::new();
         let mut pending_archive = Vec::new();
-        for candidate in hits {
-            if !super::messages::external_message_allowed_conn(&conn, account_id, candidate.id)? {
-                let unassessed: bool = conn.query_row(
-                    concat!(
-                        "SELECT EXISTS(SELECT 1 FROM messages m
+        for (id, keyword) in candidates {
+            if !super::messages::external_message_allowed_conn(&conn, account_id, id)? {
+                let unassessed: bool = keyword
+                    && conn.query_row(
+                        concat!(
+                            "SELECT EXISTS(SELECT 1 FROM messages m
                          LEFT JOIN agent_message_state a
                            ON a.account_id=m.account_id AND a.message_id=m.id
                          WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0 AND ",
-                        archive_unassessed_sql!(),
-                        ")"
-                    ),
-                    params![account_id, candidate.id],
-                    |row| row.get(0),
-                )?;
+                            archive_unassessed_sql!(),
+                            ")"
+                        ),
+                        params![account_id, id],
+                        |row| row.get(0),
+                    )?;
                 if unassessed {
-                    pending_archive.push(candidate.id);
+                    pending_archive.push(id);
                 }
                 continue;
             }
             let hit = conn
                 .query_row(
                     "SELECT m.id,m.thread_id,m.from_addr,m.from_name,m.subject,m.received_at,m.snippet,
-                        (COALESCE(t.status, 'new') = 'done')
+                        (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
                  FROM messages m LEFT JOIN triage t ON t.message_id=m.id
                  WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0",
-                    params![account_id, candidate.id],
+                    params![account_id, id],
                     map_search_hit,
                 )
                 .optional()?;
@@ -375,8 +403,9 @@ impl SqliteStore {
             .hits)
     }
 
-    /// [`Self::external_search`], also reporting the unassessed archive rows
-    /// that matched inside the recall window it ended on.
+    /// [`Self::external_search`], also noting the unassessed archive rows the
+    /// keyword leg matched inside the recall window it ended on. The window
+    /// stops growing at [`EXTERNAL_RECALL_MAX`].
     pub fn external_search_surfacing(
         &self,
         account_id: AccountId,
@@ -384,12 +413,8 @@ impl SqliteStore {
         sort: SearchSort,
         limit: usize,
     ) -> Result<ExternalSearch> {
-        if limit == 0 {
-            return Ok(ExternalSearch::default());
-        }
-        let mut window = limit;
-        loop {
-            let (hits, full) = self.hybrid_search_legs(
+        self.external_recall(account_id, limit, |window| {
+            self.hybrid_search_legs(
                 account_id,
                 query,
                 &SearchFilter::default(),
@@ -397,31 +422,84 @@ impl SqliteStore {
                 false,
                 false,
                 window,
-            )?;
-            let candidates: Vec<_> = hits.into_iter().map(|hit| hit.hit).collect();
+            )
+        })
+    }
+
+    /// THE ONE RECALL LOOP every external search runs. `fetch(window)` returns
+    /// the best `window` candidates and whether that window was full; access
+    /// is applied to them, and the window doubles until `limit` readable hits
+    /// survive, the corpus is exhausted, or it reaches
+    /// [`EXTERNAL_RECALL_MAX`]. Both doors call this, so neither can grow a
+    /// window the other would have stopped.
+    pub fn external_recall(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+        fetch: impl FnMut(usize) -> Result<(Vec<LeggedHit>, bool)>,
+    ) -> Result<ExternalSearch> {
+        self.external_recall_within(account_id, limit, EXTERNAL_RECALL_MAX, fetch)
+    }
+
+    /// [`Self::external_recall`] with the ceiling as a parameter, so a test
+    /// can reach it without four thousand rows.
+    pub(crate) fn external_recall_within(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+        max_window: usize,
+        mut fetch: impl FnMut(usize) -> Result<(Vec<LeggedHit>, bool)>,
+    ) -> Result<ExternalSearch> {
+        if limit == 0 {
+            return Ok(ExternalSearch::default());
+        }
+        let mut window = limit.min(max_window);
+        loop {
+            let (candidates, full) = fetch(window)?;
             let mut found = self.external_search_partition(account_id, &candidates)?;
-            if found.hits.len() >= limit || !full {
+            if found.hits.len() >= limit || !full || window >= max_window {
                 found.hits.truncate(limit);
                 return Ok(found);
             }
-            window = window.saturating_mul(2);
+            window = window.saturating_mul(2).min(max_window);
         }
     }
 
-    /// The oldest instant search can reach for this account: the earliest
-    /// non-spam `received_at`. Dates before 1990 are a broken `Date` header,
-    /// not old mail, and would make the horizon a lie.
-    pub fn indexed_since(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+    /// The date search reaches back to when there is no archive walk to ask:
+    /// the oldest `received_at` date that has at least three non-spam,
+    /// agent-readable messages in the seven days from it. ONE ROW NEVER SETS
+    /// IT. `received_at` prefers the `Date` header, so a single message
+    /// claiming 2011 would otherwise make the horizon promise years of
+    /// coverage, and a horizon read off one row's timestamp would hand that
+    /// row's date to whoever asked. Dates before 1990 are broken headers.
+    ///
+    /// ONLY MAIL ASSESSED AS ALLOWED COUNTS, because this date is reported at
+    /// the agent door: built from every row, it would move with the arrival
+    /// dates of mail that door may not read. It is the horizon of what an
+    /// external caller can find, which is the question it was asked.
+    pub fn indexed_since(&self, account_id: AccountId) -> Result<Option<chrono::NaiveDate>> {
         let conn = self.lock()?;
-        let oldest: Option<String> = conn.query_row(
-            "SELECT MIN(received_at) FROM messages
-             WHERE account_id=?1 AND is_spam=0 AND received_at>='1990-01-01'",
-            params![account_id],
-            |row| row.get(0),
-        )?;
-        Ok(oldest
-            .and_then(|at| DateTime::parse_from_rfc3339(&at).ok())
-            .map(|at| at.with_timezone(&Utc)))
+        let oldest: Option<String> = conn
+            .query_row(
+                "SELECT date(m.received_at) FROM messages m
+                 JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+                 WHERE m.account_id=?1 AND m.is_spam=0 AND m.received_at>='1990-01-01'
+                   AND a.access='allowed'
+                   AND (SELECT COUNT(*) FROM (SELECT 1 FROM messages n
+                        JOIN agent_message_state b
+                          ON b.account_id=n.account_id AND b.message_id=n.id
+                        WHERE n.account_id=m.account_id AND n.is_spam=0
+                          AND b.access='allowed'
+                          AND n.received_at>=m.received_at
+                          AND n.received_at<strftime('%Y-%m-%dT%H:%M:%S',m.received_at,'+7 days')
+                        LIMIT 3))>=3
+                 ORDER BY m.received_at ASC LIMIT 1",
+                params![account_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(oldest.and_then(|date| chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()))
     }
 
     // ON-BOX SEMANTIC RECALL. Inherent methods rather than `Store` ones because
@@ -890,7 +968,7 @@ impl SqliteStore {
         let row = conn
             .prepare_cached(
                 "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                        m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done')
+                        m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
                  FROM messages m
                  LEFT JOIN triage t ON t.message_id = m.id
                  WHERE m.account_id = ?1 AND m.id = ?2
@@ -951,7 +1029,7 @@ impl SqliteStore {
         // snippet.
         let mut sql = format!(
             "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done'),
+                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1),
                     highlight(messages_fts, 0, char(1), char(2)), {BODY_WINDOW}
              FROM messages_fts f
              CROSS JOIN messages m ON m.id = f.rowid
@@ -1456,7 +1534,7 @@ impl SqliteStore {
     ) -> Result<Vec<SearchHit>> {
         let mut sql = String::from(
             "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done')
+                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id
              WHERE m.account_id = ?

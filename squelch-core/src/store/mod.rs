@@ -13,7 +13,10 @@ pub mod sqlite;
 pub use search_query::{
     FtsQuery, SearchDiagnostics, SearchFilter, SearchSort, TermDf, parse_search_query,
 };
-pub use sqlite::{ARCHIVE_SURFACE_CAP, ExternalSearch, SqliteStore};
+pub use sqlite::{
+    ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX, ARCHIVE_SURFACE_CAP, AccessProgress,
+    ArchiveAccessCaps, BACKGROUND_BUDGET_KEY, EXTERNAL_RECALL_MAX, ExternalSearch, SqliteStore,
+};
 
 use crate::error::Result;
 // ONE closed vocabulary for the metric label and the stored ledger string; see

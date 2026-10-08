@@ -2063,7 +2063,7 @@ fn cmd_serve(
     // Refine poke: an agent search that just queued access checks for archive
     // mail fires it (MCP `search_mail`, `GET /client/agent/search`) and the
     // refine lane starts on them now instead of at its next interval.
-    let refine_poke = Arc::new(tokio::sync::Notify::new());
+    let refine_poke = squelch_core::store::archive_surface::RefinePoke::new();
 
     // Wake channel: the store pokes it on every real `append_event`, and each
     // open `GET /client/events` stream re-reads the table past its own cursor.

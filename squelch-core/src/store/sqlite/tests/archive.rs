@@ -6,6 +6,7 @@ use super::super::*;
 use super::support::*;
 use crate::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
 use crate::store::{SitrepBand, SpamScope};
+use std::sync::Arc;
 
 fn days_ago(days: i64) -> DateTime<Utc> {
     Utc::now() - chrono::Duration::days(days)
@@ -513,20 +514,21 @@ fn archive_mail_is_in_search_and_the_reader_and_in_no_count_or_listing() {
         .collect();
     assert_eq!(attention, vec![live]);
 
-    // ---- the agent door's lists -------------------------------------------
-    // Even assessed as allowed, an archive row has no decision, so it is in
-    // none of the decision-backed lists.
+    // ---- the lists ---------------------------------------------------------
+    // Assessed as allowed AND given everything a committed triage writes to
+    // put a row in FYE, Reading and Records (a decision with a record, a
+    // Reading placement, the thread's attention card). The live row gets the
+    // identical rows and is in all six lists; the archive rows are in none.
+    // Without those rows this block passed with no archive code at all.
     for id in archived {
         allow(&store, id);
     }
-    let now = Utc::now();
-    let fye = store
-        .external_agent_fye(acct, 50, &Default::default(), now)
-        .unwrap();
-    let reading = store.external_agent_reading(acct, 50).unwrap();
-    let records = store.external_agent_records(acct, 50).unwrap();
-    for item in fye.iter().chain(&reading).chain(&records) {
-        assert!(!archived.contains(&item.message_id));
+    allow(&store, live);
+    place_everywhere(&store, acct, old, "t-old");
+    place_everywhere(&store, acct, recent, "t-recent");
+    place_everywhere(&store, acct, live, "t-live");
+    for (index, list) in six_lists(&store, acct).iter().enumerate() {
+        assert_eq!(list, &vec![live], "list {index}");
     }
     assert!(
         store
@@ -928,7 +930,7 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
     // Not this account's row, and not an archive row: neither is queued.
     assert!(
         store
-            .request_archive_access(acct, &[foreign, live])
+            .request_archive_access(acct, &[foreign, live], Default::default(), Utc::now())
             .unwrap()
             .is_empty()
     );
@@ -949,14 +951,14 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
     allow(&store, settled);
     assert!(
         store
-            .request_archive_access(acct, &[bare, settled])
+            .request_archive_access(acct, &[bare, settled], Default::default(), Utc::now())
             .unwrap()
             .is_empty()
     );
     assert_eq!(jobs(&store, bare) + jobs(&store, settled), 0);
 
     let queued = store
-        .request_archive_access(acct, &found.pending_archive)
+        .request_archive_access(acct, &found.pending_archive, Default::default(), Utc::now())
         .unwrap();
     assert_eq!(
         queued,
@@ -975,15 +977,16 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
     }
     assert_eq!(
         store
-            .archive_access_waiting(acct, &queued, Utc::now())
-            .unwrap(),
+            .archive_access_progress(acct, &queued, Utc::now())
+            .unwrap()
+            .waiting,
         10
     );
 
     // Asking again buys nothing for the ten already queued.
     assert!(
         store
-            .request_archive_access(acct, &queued)
+            .request_archive_access(acct, &queued, Default::default(), Utc::now())
             .unwrap()
             .is_empty()
     );
@@ -1013,13 +1016,14 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
     );
     assert_eq!(
         store
-            .archive_access_waiting(acct, &[parked], Utc::now())
-            .unwrap(),
+            .archive_access_progress(acct, &[parked], Utc::now())
+            .unwrap()
+            .waiting,
         0
     );
     assert!(
         store
-            .request_archive_access(acct, &[parked])
+            .request_archive_access(acct, &[parked], Default::default(), Utc::now())
             .unwrap()
             .is_empty()
     );
@@ -1040,15 +1044,16 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
     assert!(store.fail_agent_job(&job, "test").unwrap());
     assert!(
         store
-            .request_archive_access(acct, &[failed])
+            .request_archive_access(acct, &[failed], Default::default(), Utc::now())
             .unwrap()
             .is_empty()
     );
     assert_eq!(jobs(&store, failed), 1);
     assert_eq!(
         store
-            .archive_access_waiting(acct, &[failed], Utc::now())
-            .unwrap(),
+            .archive_access_progress(acct, &[failed], Utc::now())
+            .unwrap()
+            .waiting,
         0
     );
 }
@@ -1077,7 +1082,7 @@ fn a_surfaced_archive_row_is_returned_once_allowed_and_never_once_restricted() {
     assert_eq!(found.pending_archive, vec![fine, secret]);
     assert_eq!(
         store
-            .request_archive_access(acct, &found.pending_archive)
+            .request_archive_access(acct, &found.pending_archive, Default::default(), Utc::now())
             .unwrap(),
         vec![fine, secret]
     );
@@ -1088,8 +1093,9 @@ fn a_surfaced_archive_row_is_returned_once_allowed_and_never_once_restricted() {
     assert_eq!(found.pending_archive, vec![secret]);
     assert_eq!(
         store
-            .archive_access_waiting(acct, &[fine, secret], Utc::now())
-            .unwrap(),
+            .archive_access_progress(acct, &[fine, secret], Utc::now())
+            .unwrap()
+            .waiting,
         1
     );
 
@@ -1105,7 +1111,7 @@ fn a_surfaced_archive_row_is_returned_once_allowed_and_never_once_restricted() {
     // The same search again spends nothing: one job each, ever.
     assert!(
         store
-            .request_archive_access(acct, &[fine, secret])
+            .request_archive_access(acct, &[fine, secret], Default::default(), Utc::now())
             .unwrap()
             .is_empty()
     );
@@ -1196,43 +1202,95 @@ fn a_reminder_surfaces_an_archive_row_to_the_human_and_not_to_the_agent() {
     assert_eq!(fye(), vec![reminded]);
 }
 
-/// THE HORIZON an agent is told: the oldest real date in the index, how far
-/// back the walk is going, and whether it has got there.
+/// THE HORIZON an agent is told, and what it is NOT built from. With a walk it
+/// is the walk's own cursor, as a date. Without one it is where stored mail
+/// first becomes dense, so one stray `Date` header cannot claim years of
+/// coverage and no single row's timestamp is ever handed out.
 #[test]
-fn the_search_horizon_reports_the_oldest_real_date_and_the_walks_progress() {
-    use crate::store::archive_surface::search_horizon;
+fn the_search_horizon_is_a_date_no_single_message_can_set() {
+    use crate::store::archive_surface::{OLDER_MAIL_POLICY, search_horizon};
     let (store, acct) = store();
     let now = Utc::now();
     assert_eq!(store.indexed_since(acct).unwrap(), None);
+    let readable = |key: &str, at: DateTime<Utc>| {
+        live_allowed(&store, &triaged(acct, key, key).received_at(at))
+    };
 
-    let oldest = days_ago(200);
-    archive(&store, &triaged(acct, "g-old", "t-old").received_at(oldest));
-    triaged(acct, "g-new", "t-new").ingest(&store);
-    // A broken Date header and a spam row are not how far back search reaches.
+    // One message claiming 2011, one from 1970, old spam, another account's
+    // mail: none of them is how far back search reaches.
+    let stray = DateTime::parse_from_rfc3339("2011-03-04T05:06:07Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    readable("g-stray", stray);
     let epoch = DateTime::parse_from_rfc3339("1970-01-01T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
-    archive(
-        &store,
-        &triaged(acct, "g-junk", "t-junk").received_at(epoch),
-    );
-    triaged(acct, "g-spam", "t-spam")
-        .is_spam(true)
-        .received_at(days_ago(300))
-        .ingest(&store);
+    for i in 0..3 {
+        readable(&format!("g-junk{i}"), epoch + chrono::Duration::hours(i));
+    }
+    for i in 0..3 {
+        let spam = triaged(acct, &format!("g-spam{i}"), "t-spam")
+            .is_spam(true)
+            .received_at(days_ago(300) + chrono::Duration::hours(i))
+            .ingest(&store);
+        allow(&store, spam);
+    }
     let other = store.ensure_account("other@example.com").unwrap();
-    archive(
-        &store,
-        &triaged(other, "g-o", "t-o").received_at(days_ago(350)),
+    for i in 0..3 {
+        live_allowed(
+            &store,
+            &triaged(other, &format!("g-o{i}"), "t-o")
+                .received_at(days_ago(350) + chrono::Duration::hours(i)),
+        );
+    }
+    // Nor is mail the agent door may not read, however much of it there is:
+    // pending, restricted, and unassessed archive rows, a dense week of each.
+    for i in 0..3 {
+        let at = days_ago(250) + chrono::Duration::hours(i);
+        triaged(acct, &format!("g-pend{i}"), &format!("t-pend{i}"))
+            .received_at(at)
+            .ingest(&store);
+        let sealed = triaged(acct, &format!("g-seal{i}"), &format!("t-seal{i}"))
+            .received_at(at)
+            .ingest(&store);
+        access(&store, sealed, "restricted");
+        archive(
+            &store,
+            &triaged(acct, &format!("g-arch{i}"), &format!("t-arch{i}")).received_at(at),
+        );
+    }
+    // One readable message in the middle of that week does not make the
+    // unreadable ones around it count toward its three.
+    readable("g-lone", days_ago(250) + chrono::Duration::hours(1));
+    assert_eq!(
+        store.indexed_since(acct).unwrap(),
+        None,
+        "a single old row, and mail the door cannot read, are not coverage"
     );
 
-    let indexed = store.indexed_since(acct).unwrap().unwrap();
-    assert_eq!(indexed.timestamp(), oldest.timestamp());
+    // Two in a week is still not three. And an unreadable message the day
+    // before the readable week does not get to date the horizon.
+    let dense = days_ago(40);
+    triaged(acct, "g-eve", "t-eve")
+        .received_at(dense - chrono::Duration::days(1))
+        .ingest(&store);
+    readable("g-d0", dense);
+    readable("g-d1", dense + chrono::Duration::days(2));
+    assert_eq!(store.indexed_since(acct).unwrap(), None);
+    // A third just outside the week does not complete it; one inside does.
+    readable("g-d2", dense + chrono::Duration::days(8));
+    assert_eq!(store.indexed_since(acct).unwrap(), None);
+    readable("g-d3", dense + chrono::Duration::days(5));
+    assert_eq!(store.indexed_since(acct).unwrap(), Some(dense.date_naive()));
 
     let off = search_horizon(&store, acct, 0, now).unwrap();
-    assert_eq!(off.indexed_since, Some(indexed));
+    let date = off.indexed_since.clone().unwrap();
+    assert_eq!(date, dense.format("%Y-%m-%d").to_string());
+    assert_eq!(date.len(), 10, "a date, never an instant");
     assert_eq!(off.archive, None, "no archive, nothing to report");
-    assert!(serde_json::to_value(&off).unwrap().get("archive").is_none());
+    let wire = serde_json::to_value(&off).unwrap();
+    assert!(wire.get("archive").is_none());
+    assert_eq!(wire["indexed_since"], date);
 
     let walking = search_horizon(&store, acct, 365, now).unwrap();
     let archive_horizon = walking.archive.unwrap();
@@ -1243,13 +1301,23 @@ fn the_search_horizon_reports_the_oldest_real_date_and_the_walks_progress() {
             .to_string()
     );
     assert!(!archive_horizon.walk_complete, "no cursor yet");
-    store.set_archive_walked_to(acct, days_ago(100)).unwrap();
-    assert!(
-        !search_horizon(&store, acct, 365, now)
-            .unwrap()
-            .archive
-            .unwrap()
-            .walk_complete
+    assert_eq!(archive_horizon.older_mail, OLDER_MAIL_POLICY);
+    assert_eq!(archive_horizon.older_mail, "checked_on_first_match");
+
+    // WITH A WALK the cursor is the horizon, whatever the rows say: older
+    // than the dense week, newer than the stray.
+    let cursor = days_ago(100);
+    store.set_archive_walked_to(acct, cursor).unwrap();
+    let walked = search_horizon(&store, acct, 365, now).unwrap();
+    assert_eq!(
+        walked.indexed_since,
+        Some(cursor.format("%Y-%m-%d").to_string())
+    );
+    assert!(!walked.archive.unwrap().walk_complete);
+    // And with the archive since turned off, the cursor still answers.
+    assert_eq!(
+        search_horizon(&store, acct, 0, now).unwrap().indexed_since,
+        Some(cursor.format("%Y-%m-%d").to_string())
     );
     store.set_archive_walked_to(acct, days_ago(366)).unwrap();
     assert!(
@@ -1259,4 +1327,1158 @@ fn the_search_horizon_reports_the_oldest_real_date_and_the_walks_progress() {
             .unwrap()
             .walk_complete
     );
+    // An absurd depth is clamped, not overflowed.
+    assert!(search_horizon(&store, acct, u32::MAX, now).is_ok());
+}
+
+// ---- fix round B -------------------------------------------------------------
+
+/// [`store`], for a test that needs more than one.
+fn fresh() -> (SqliteStore, AccountId) {
+    store()
+}
+
+fn is_archive(store: &SqliteStore, message: i64) -> bool {
+    count(
+        store,
+        "SELECT is_archive FROM messages WHERE id=?1",
+        message,
+    ) == 1
+}
+
+fn heron_archive(store: &SqliteStore, acct: AccountId, n: usize) -> Vec<i64> {
+    (0..n)
+        .map(|i| {
+            archive(
+                store,
+                &triaged(acct, &format!("g-h{i}"), &format!("t-h{i}"))
+                    .subject("heron survey")
+                    .body("the heron count")
+                    .received_at(days_ago(100 + i as i64)),
+            )
+        })
+        .collect()
+}
+
+/// B2. THE VECTOR LEG NEVER BUYS A CHECK. Fifty archive rows that share no
+/// word with the query are still its fifty nearest neighbours, because KNN has
+/// no relevance floor; none of them is a match, and none is queued.
+#[tokio::test]
+async fn a_vector_only_neighbour_never_queues_an_access_check() {
+    use crate::embed::StubEmbedder;
+    use crate::store::archive_surface::{ArchiveSurfacing, search_with_surfacing};
+    let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
+    let (store, acct) = store_with_embedder(embedder.clone());
+    let store = Arc::new(store);
+    let mut old = Vec::new();
+    for i in 0..50 {
+        let (subject, body) = (format!("ledger {i}"), format!("quarterly ledger entry {i}"));
+        let id = archive(
+            &store,
+            &triaged(acct, &format!("g-{i}"), &format!("t-{i}"))
+                .subject(&subject)
+                .body(&body)
+                .received_at(days_ago(100 + i)),
+        );
+        embed_and_store(&store, embedder.as_ref(), acct, id, &subject, &body);
+        old.push(id);
+    }
+    // The vector leg really does return them...
+    let (legs, _): (Vec<crate::store::LeggedHit>, bool) = store
+        .hybrid_search_legs(
+            acct,
+            "osprey migration",
+            &Default::default(),
+            crate::store::SearchSort::Recent,
+            false,
+            false,
+            50,
+        )
+        .unwrap();
+    assert_eq!(legs.len(), 50);
+    assert!(legs.iter().all(|hit| hit.vector && !hit.keyword));
+    // ...and the door sends none of them for a check.
+    assert!(
+        agent_search(&store, acct, "osprey migration")
+            .pending_archive
+            .is_empty()
+    );
+    let (hits, _) = search_with_surfacing(
+        &store,
+        acct,
+        &ArchiveSurfacing {
+            archive_days: 365,
+            ..Default::default()
+        },
+        move |store: &SqliteStore| {
+            store.external_search_surfacing(
+                acct,
+                "osprey migration",
+                crate::store::SearchSort::Recent,
+                10,
+            )
+        },
+    )
+    .await
+    .unwrap();
+    assert!(hits.is_empty());
+    for id in &old {
+        assert_eq!(jobs(&store, *id), 0);
+    }
+    // A keyword match among them is still surfaced: the leg, not the tier.
+    assert_eq!(
+        agent_search(&store, acct, "ledger").pending_archive.len(),
+        50
+    );
+}
+
+/// B3. THE THREE CEILINGS on what a search may queue.
+#[test]
+fn surfacing_stops_at_the_outstanding_ceiling_the_daily_cap_and_a_spent_background_budget() {
+    use crate::store::{ARCHIVE_ACCESS_BUDGET_KEY, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY};
+    let now = Utc::now();
+    let day = now.format("%Y-%m-%d").to_string();
+    let caps = ArchiveAccessCaps::default();
+    assert_eq!(caps.daily, 50);
+
+    // Twenty outstanding and not one more, however many searches ask.
+    let (store, acct) = fresh();
+    let old = heron_archive(&store, acct, 30);
+    assert_eq!(
+        store
+            .request_archive_access(acct, &old[..10], caps, now)
+            .unwrap()
+            .len(),
+        10
+    );
+    assert_eq!(
+        store
+            .request_archive_access(acct, &old[10..], caps, now)
+            .unwrap(),
+        old[10..20].to_vec()
+    );
+    assert!(
+        store
+            .request_archive_access(acct, &old[20..], caps, now)
+            .unwrap()
+            .is_empty(),
+        "twenty are outstanding"
+    );
+    // A finished check frees its place.
+    run_access_check(&store, acct, old[0], false);
+    assert_eq!(
+        store
+            .request_archive_access(acct, &old[20..], caps, now)
+            .unwrap(),
+        vec![old[20]]
+    );
+
+    // The daily sub-cap counts what is spent AND what is already queued.
+    let (store, acct) = fresh();
+    let old = heron_archive(&store, acct, 12);
+    let small = ArchiveAccessCaps { daily: 5, ..caps };
+    let limits = vec![(ARCHIVE_ACCESS_BUDGET_KEY.to_string(), 5)];
+    for _ in 0..2 {
+        assert!(store.reserve_agent_budget(acct, &day, &limits).unwrap());
+    }
+    assert_eq!(
+        store
+            .request_archive_access(acct, &old, small, now)
+            .unwrap(),
+        old[..3].to_vec(),
+        "five a day, two spent"
+    );
+    assert!(
+        store
+            .request_archive_access(acct, &old, small, now)
+            .unwrap()
+            .is_empty(),
+        "and three already queued"
+    );
+    // Tomorrow's budget is not today's, but what is still queued from today
+    // will be paid for out of it.
+    assert_eq!(
+        store
+            .request_archive_access(acct, &old, small, now + chrono::Duration::days(1))
+            .unwrap(),
+        old[3..5].to_vec(),
+        "five tomorrow, three already owed"
+    );
+    let off = ArchiveAccessCaps { daily: 0, ..caps };
+    let (store, acct) = fresh();
+    let old = heron_archive(&store, acct, 2);
+    assert!(
+        store
+            .request_archive_access(acct, &old, off, now)
+            .unwrap()
+            .is_empty(),
+        "a zero cap turns surfacing off"
+    );
+
+    // A spent background budget: every check would park, so none is queued.
+    let tight = ArchiveAccessCaps {
+        background_daily: 2,
+        ..caps
+    };
+    let background = vec![(BACKGROUND_BUDGET_KEY.to_string(), 2)];
+    assert!(store.reserve_agent_budget(acct, &day, &background).unwrap());
+    assert_eq!(
+        store
+            .request_archive_access(acct, &old[..1], tight, now)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store.reserve_agent_budget(acct, &day, &background).unwrap());
+    assert!(
+        store
+            .request_archive_access(acct, &old[1..], tight, now)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(jobs(&store, old[1]), 0);
+}
+
+/// B3. Tier 1 is for a check nobody has pushed back. Parked on the budget
+/// and due again, it is ordinary background work behind what was already
+/// waiting.
+#[test]
+fn a_deferred_archive_check_loses_its_place_at_the_head_of_the_queue() {
+    let (store, acct) = store();
+    let live = triaged(acct, "g-live", "t-live").ingest(&store);
+    let old = heron_archive(&store, acct, 1)[0];
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_triage_jobs SET trigger='backfill' WHERE message_id=?1",
+            params![live],
+        )
+        .unwrap();
+    store
+        .request_archive_access(acct, &[old], Default::default(), Utc::now())
+        .unwrap();
+
+    let first = store
+        .claim_agent_job(acct, "investigation", Utc::now(), 120)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.message_id, old, "fresh: ahead of the backlog");
+    assert!(
+        store
+            .defer_agent_job(
+                &first,
+                Utc::now() + chrono::Duration::hours(20),
+                "daily_budget_exhausted"
+            )
+            .unwrap()
+    );
+    // Tomorrow: both are due, and the backlog job has waited longer.
+    let tomorrow = Utc::now() + chrono::Duration::hours(21);
+    let next = store
+        .claim_agent_job(acct, "investigation", tomorrow, 120)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.message_id, live, "deferred once, tier 1 no more");
+}
+
+/// B7. A failed check is asked for again once it is a day old, by a search
+/// and by a thread open, so a row is not pending for good.
+#[test]
+fn a_failed_archive_check_is_asked_for_again_after_a_day() {
+    let (store, acct) = store();
+    let old = heron_archive(&store, acct, 1)[0];
+    let caps = Default::default();
+    let now = Utc::now();
+    store
+        .request_archive_access(acct, &[old], caps, now)
+        .unwrap();
+    let job = store
+        .claim_agent_job(acct, "access", Utc::now(), 120)
+        .unwrap()
+        .unwrap();
+    assert!(store.fail_agent_job(&job, "attempts_exhausted").unwrap());
+
+    for soon in [now, now + chrono::Duration::hours(23)] {
+        assert!(
+            store
+                .request_archive_access(acct, &[old], caps, soon)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        store
+            .request_archive_access(acct, &[old], caps, now + chrono::Duration::hours(25))
+            .unwrap(),
+        vec![old]
+    );
+    assert_eq!(
+        job_rows(&store, old),
+        vec![("access".into(), "archive_access".into(), "queued".into())],
+        "the same job, queued again"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT attempts FROM agent_triage_jobs WHERE message_id=?1",
+            old
+        ),
+        0
+    );
+    // Not twice: it is in flight now.
+    assert!(
+        store
+            .request_archive_access(acct, &[old], caps, now + chrono::Duration::hours(26))
+            .unwrap()
+            .is_empty()
+    );
+
+    // The thread open does the same for a sibling it queued itself.
+    let sibling = archive(
+        &store,
+        &triaged(acct, "g-sib", "t-mix")
+            .subject("osprey notes")
+            .received_at(days_ago(150)),
+    );
+    live_allowed(&store, &triaged(acct, "g-live", "t-mix").subject("osprey"));
+    assert_eq!(
+        store.request_thread_access(acct, "t-mix").unwrap(),
+        vec![sibling]
+    );
+    let job = store
+        .claim_agent_job(acct, "access", Utc::now(), 120)
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.trigger, "source_access");
+    assert!(store.fail_agent_job(&job, "attempts_exhausted").unwrap());
+    assert!(
+        store
+            .request_thread_access(acct, "t-mix")
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_triage_jobs SET available_at=?2 WHERE message_id=?1",
+            params![sibling, days_ago(2).to_rfc3339()],
+        )
+        .unwrap();
+    assert_eq!(
+        store.request_thread_access(acct, "t-mix").unwrap(),
+        vec![sibling]
+    );
+    assert_eq!(
+        job_rows(&store, sibling),
+        vec![("access".into(), "source_access".into(), "queued".into())]
+    );
+    // A restricted row is a verdict, not a failure: never asked again.
+    access(&store, sibling, "restricted");
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_triage_jobs SET state='failed',available_at=?2 WHERE message_id=?1",
+            params![sibling, days_ago(2).to_rfc3339()],
+        )
+        .unwrap();
+    assert!(
+        store
+            .request_thread_access(acct, "t-mix")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// B8. A PARKED JOB GRANTS NOTHING. The triage agent may read an archive row
+/// as evidence while a check on it is really in flight; a check waiting on
+/// tomorrow's budget, or due again after a push-back, is not that.
+#[test]
+fn only_a_check_in_flight_makes_an_archive_row_evidence() {
+    let (store, acct) = store();
+    let old = heron_archive(&store, acct, 1)[0];
+    let readable = || store.agent_read_message(acct, old).is_ok();
+    let reschedule = |at: DateTime<Utc>, error: Option<&str>| {
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agent_triage_jobs SET state='queued',available_at=?2,last_error=?3
+                 WHERE message_id=?1",
+                params![old, at.to_rfc3339(), error],
+            )
+            .unwrap();
+    };
+    assert!(!readable(), "nobody asked");
+
+    store
+        .request_archive_access(acct, &[old], Default::default(), Utc::now())
+        .unwrap();
+    assert!(readable(), "queued, due, never pushed back");
+
+    reschedule(Utc::now() + chrono::Duration::hours(20), None);
+    assert!(!readable(), "not due");
+    reschedule(
+        Utc::now() + chrono::Duration::hours(20),
+        Some("daily_budget_exhausted"),
+    );
+    assert!(!readable(), "parked on the budget");
+    reschedule(
+        Utc::now() - chrono::Duration::minutes(1),
+        Some("daily_budget_exhausted"),
+    );
+    assert!(!readable(), "due again, but it has been pushed back once");
+    assert!(
+        store
+            .agent_search_mail(acct, "heron", 10)
+            .unwrap()
+            .is_empty(),
+        "nor is it found by the agent's own search"
+    );
+
+    let job = store
+        .claim_agent_job(acct, "access", Utc::now(), 120)
+        .unwrap()
+        .unwrap();
+    assert!(readable(), "leased: the check is running");
+    assert!(
+        store
+            .defer_agent_job(
+                &job,
+                Utc::now() + chrono::Duration::hours(20),
+                "provider_cooldown"
+            )
+            .unwrap()
+    );
+    assert!(!readable());
+    assert_eq!(jobs(&store, old), 1, "and none of this queued anything");
+}
+
+fn verdict(id: i64) -> crate::triage::decision::MessageDecision {
+    use crate::triage::decision::*;
+    MessageDecision {
+        kinds: vec![EmailKind::Correspondence],
+        summary: "Summary".into(),
+        reason: "Reason".into(),
+        destinations: vec![MessageDestination::Reading],
+        records: vec![RecordProposal::Receipt {
+            merchant: "Shop".into(),
+            amount: Some(12.0),
+            currency: Some("USD".into()),
+            evidence: vec![EvidenceRef {
+                message_id: id,
+                location: "body".into(),
+            }],
+        }],
+        attention: ThreadAttentionDecision {
+            show_in_fye: true,
+            summary: "Attention".into(),
+            relevant_message_ids: vec![id],
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Everything a committed triage would have written to put a LIVE row in FYE,
+/// Reading and Records, written by hand onto `id`.
+fn place_everywhere(store: &SqliteStore, acct: AccountId, id: i64, thread: &str) {
+    let decision = verdict(id);
+    let conn = store.lock().unwrap();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+         VALUES(?1,?2,1,?3,?4)",
+        params![acct, id, serde_json::to_string(&decision).unwrap(), now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_message_destinations(account_id,message_id,destination)
+         VALUES(?1,?2,'reading')",
+        params![acct, id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_thread_attention(decision_message_id,account_id,thread_id,message_id,
+             show_in_fye,attention_json,relevant_activity)
+         VALUES(?2,?1,?3,?2,1,?4,?5)",
+        params![
+            acct,
+            id,
+            thread,
+            serde_json::to_string(&decision.attention).unwrap(),
+            now
+        ],
+    )
+    .unwrap();
+}
+
+fn six_lists(store: &SqliteStore, acct: AccountId) -> [Vec<i64>; 6] {
+    let ids = |items: Vec<crate::store::agent_triage::AgentListItem>| -> Vec<i64> {
+        items.iter().map(|item| item.message_id).collect()
+    };
+    let now = Utc::now();
+    [
+        ids(store.agent_fye(acct, 50, &Default::default(), now).unwrap()),
+        ids(store.agent_reading(acct, 50).unwrap()),
+        ids(store.agent_records(acct, 50).unwrap()),
+        ids(store
+            .external_agent_fye(acct, 50, &Default::default(), now)
+            .unwrap()),
+        ids(store.external_agent_reading(acct, 50).unwrap()),
+        ids(store.external_agent_records(acct, 50).unwrap()),
+    ]
+}
+
+/// B9 / B14. THE LISTS' BACKSTOP. An archive row given every row a committed
+/// triage writes (a decision with a record, a Reading placement, the thread's
+/// attention card) is still in none of the six lists; the identical rows on a
+/// live message put it in all six, which is what makes the first half a test.
+#[test]
+fn an_archive_row_with_a_full_decision_is_still_in_no_list() {
+    let (store, acct) = store();
+    let live = live_allowed(&store, &triaged(acct, "g-live", "t-live"));
+    // Recent, as the walk's forward pass stores mail that skipped the inbox:
+    // Reading and Records list a recent window by default, so an old row
+    // would be absent for that reason and prove nothing about this one.
+    let old = archive(
+        &store,
+        &triaged(acct, "g-old", "t-old").received_at(days_ago(2)),
+    );
+    allow(&store, old);
+    place_everywhere(&store, acct, live, "t-live");
+    place_everywhere(&store, acct, old, "t-old");
+
+    for (index, list) in six_lists(&store, acct).iter().enumerate() {
+        assert_eq!(list, &vec![live], "list {index}");
+    }
+
+    // The one exemption, as in the human inventory: a reminder the owner set
+    // that has fired.
+    assert!(
+        store
+            .set_reminder(acct, old, Utc::now() + chrono::Duration::hours(1))
+            .unwrap()
+    );
+    assert_eq!(six_lists(&store, acct)[0], vec![live], "set, not yet fired");
+    store
+        .fire_due_reminders(acct, Utc::now() + chrono::Duration::hours(2))
+        .unwrap();
+    for (index, list) in six_lists(&store, acct).iter().enumerate() {
+        let mut list = list.clone();
+        list.sort();
+        assert_eq!(list, vec![live, old], "list {index} after the reminder");
+    }
+}
+
+/// B9. A changed source refreshes the live mail that cited it and never an
+/// archive row that did.
+#[test]
+fn a_changed_source_never_queues_an_archive_dependent() {
+    let (store, acct) = store();
+    let source = live_allowed(&store, &triaged(acct, "g-src", "t-src").body("first"));
+    let live = live_allowed(&store, &triaged(acct, "g-dep", "t-dep"));
+    let old = archive(
+        &store,
+        &triaged(acct, "g-old", "t-old").received_at(days_ago(200)),
+    );
+    allow(&store, old);
+    {
+        let conn = store.lock().unwrap();
+        for dependent in [live, old] {
+            conn.execute(
+                "INSERT INTO agent_decision_sources(account_id,message_id,source_message_id,source_revision)
+                 VALUES(?1,?2,?3,1)",
+                params![acct, dependent, source],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE messages SET body='second' WHERE id=?1",
+            params![source],
+        )
+        .unwrap();
+    }
+    store
+        .enqueue_agent_triage(acct, source, "ingest", false)
+        .unwrap();
+    assert!(
+        job_rows(&store, live)
+            .iter()
+            .any(|job| job.1.starts_with("source_changed:")),
+        "the live dependent is refreshed"
+    );
+    assert_eq!(jobs(&store, old), 0, "the archive one is not");
+}
+
+/// B10. PROMOTION, by the owner's single-message re-triage.
+#[test]
+fn the_owners_single_message_retriage_promotes_an_archive_row() {
+    let (store, acct) = store();
+    let old = archive(
+        &store,
+        &triaged(acct, "g-old", "t-old").received_at(days_ago(200)),
+    );
+    let bystander = archive(
+        &store,
+        &triaged(acct, "g-by", "t-by").received_at(days_ago(2)),
+    );
+    // A window never promotes, however far back it reaches.
+    store.retriage_reset(acct, None, 400).unwrap();
+    assert!(is_archive(&store, old) && is_archive(&store, bystander));
+    assert_eq!(jobs(&store, old) + jobs(&store, bystander), 0);
+    assert_eq!(store.count_inbound_since(acct, days_ago(400)).unwrap(), 0);
+
+    assert_eq!(store.retriage_reset(acct, Some(old), 7).unwrap(), 1);
+    assert!(!is_archive(&store, old), "promoted");
+    assert!(is_archive(&store, bystander), "and only the one named");
+    let rows = job_rows(&store, old);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "triage", "a live row now: full triage");
+    assert!(rows[0].1.starts_with("manual:"));
+    assert_eq!(store.count_inbound_since(acct, days_ago(400)).unwrap(), 1);
+
+    // ONE WAY. Neither the walk meeting it again nor a live sighting nor a
+    // second request changes it back.
+    assert_eq!(
+        store
+            .ingest_archive_message(
+                &triaged(acct, "g-old", "t-old")
+                    .received_at(days_ago(200))
+                    .build()
+            )
+            .unwrap(),
+        None
+    );
+    assert!(!is_archive(&store, old));
+    store.retriage_reset(acct, Some(old), 7).unwrap();
+    assert!(!is_archive(&store, old));
+}
+
+/// B10. PROMOTION, by a correction to how the row is filed; and the one
+/// correction that is not that.
+#[test]
+fn a_filing_correction_promotes_and_a_seal_does_not() {
+    let (store, acct) = store();
+    let mk = |key: &str| archive(&store, &triaged(acct, key, key).received_at(days_ago(200)));
+
+    // Sealing an archive row: restricted at once, still archive, no job.
+    let sealed = mk("sealed");
+    store
+        .correct_agent_triage(
+            acct,
+            sealed,
+            "external_access",
+            &serde_json::json!(true),
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(is_archive(&store, sealed));
+    assert_eq!(jobs(&store, sealed), 0, "a seal buys no model call");
+    assert_eq!(state(&store, sealed).1, "restricted");
+    // Unsealing it: allowed at once, the same.
+    let opened = mk("opened");
+    store
+        .correct_agent_triage(
+            acct,
+            opened,
+            "external_access",
+            &serde_json::json!(false),
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(is_archive(&store, opened));
+    assert_eq!(jobs(&store, opened), 0);
+    assert_eq!(state(&store, opened).1, "allowed");
+
+    // Any other field is the owner filing it as live mail.
+    let fye = mk("fye");
+    store
+        .correct_agent_triage(
+            acct,
+            fye,
+            "show_in_fye",
+            &serde_json::json!(true),
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(!is_archive(&store, fye));
+    let rows = job_rows(&store, fye);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "triage");
+    assert!(rows[0].1.starts_with("correction:"));
+
+    let reading = mk("reading");
+    store
+        .correct_agent_triage_delta(
+            acct,
+            reading,
+            "destinations",
+            &["reading".into()],
+            &[],
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(!is_archive(&store, reading));
+    assert_eq!(job_rows(&store, reading)[0].0, "triage");
+
+    // The legacy feedback endpoint is the same correction by another name.
+    let tier = mk("tier");
+    store
+        .correct_triage(
+            acct,
+            tier,
+            crate::types::TriageAxis::Tier,
+            "deadline",
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(!is_archive(&store, tier));
+    let seal = mk("seal");
+    store
+        .correct_triage(
+            acct,
+            seal,
+            crate::types::TriageAxis::Sensitivity,
+            "sealed",
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(is_archive(&store, seal));
+    assert_eq!(jobs(&store, seal), 0);
+}
+
+/// B10. A PROMOTED ROW IS LIVE, SO THE STRICT GUARD APPLIES. While it was an
+/// unassessed archive ancestor its thread stayed open with it omitted; once
+/// promoted and still pending, it closes the thread like any live pending
+/// row. And promotion never turns a 'restricted' into anything else.
+#[test]
+fn a_promoted_pending_row_closes_its_thread_and_a_restricted_one_stays_restricted() {
+    let (store, acct) = store();
+    let old = archive(
+        &store,
+        &triaged(acct, "g-old", "t-mix")
+            .subject("heron ledger")
+            .received_at(days_ago(200)),
+    );
+    let live = live_allowed(
+        &store,
+        &triaged(acct, "g-live", "t-mix").subject("osprey plans"),
+    );
+    assert_eq!(
+        store.thread_view(acct, "t-mix").unwrap().messages.len(),
+        1,
+        "omitted, thread open"
+    );
+    assert_eq!(hit_ids(&agent_search(&store, acct, "osprey")), vec![live]);
+
+    store.retriage_reset(acct, Some(old), 7).unwrap();
+    assert_eq!(state(&store, old).1, "pending");
+    assert!(matches!(
+        store.thread_view(acct, "t-mix"),
+        Err(CoreError::NotFound)
+    ));
+    assert!(!store.external_thread_allowed(acct, "t-mix").unwrap());
+    let found = agent_search(&store, acct, "osprey");
+    assert!(found.hits.is_empty());
+    assert!(
+        found.pending_archive.is_empty(),
+        "it is not archive any more"
+    );
+    assert!(
+        agent_search(&store, acct, "heron")
+            .pending_archive
+            .is_empty(),
+        "nor is the promoted row itself surfaced as one"
+    );
+
+    // Restricted before, restricted after, by either promoting path.
+    for by_correction in [false, true] {
+        let key = format!("r{by_correction}");
+        let secret = archive(
+            &store,
+            &triaged(acct, &key, &key).received_at(days_ago(200)),
+        );
+        access(&store, secret, "restricted");
+        if by_correction {
+            store
+                .correct_agent_triage(
+                    acct,
+                    secret,
+                    "show_in_fye",
+                    &serde_json::json!(true),
+                    Utc::now(),
+                )
+                .unwrap();
+        } else {
+            store.retriage_reset(acct, Some(secret), 7).unwrap();
+        }
+        assert!(!is_archive(&store, secret));
+        assert_eq!(state(&store, secret), (1, "restricted".into()));
+        assert!(matches!(
+            store.thread_view(acct, &key),
+            Err(CoreError::NotFound)
+        ));
+    }
+}
+
+/// B10. Whatever trigger reaches a row that is STILL in the archive, the job
+/// is an access check. Only the two promoting paths can buy it a triage, and
+/// they promote first.
+#[test]
+fn every_trigger_on_a_still_archive_row_is_an_access_check() {
+    let (store, acct) = store();
+    for trigger in [
+        "manual:by-hand",
+        "correction:by-hand",
+        "not_spam",
+        "thread_changed:1:2",
+    ] {
+        let key = trigger.replace(':', "-");
+        let old = archive(
+            &store,
+            &triaged(acct, &key, &key).received_at(days_ago(200)),
+        );
+        store
+            .enqueue_agent_triage(acct, old, trigger, false)
+            .unwrap();
+        assert!(is_archive(&store, old), "{trigger}");
+        let rows = job_rows(&store, old);
+        assert_eq!(rows.len(), 1, "{trigger}");
+        assert_eq!(rows[0].0, "access", "{trigger}");
+    }
+}
+
+/// B10. The own-mail redirect is the store's choice, not the owner's: asked to
+/// re-triage their own reply, it hands the request to the newest inbound
+/// message, and that must never be an archive row.
+#[test]
+fn the_own_mail_redirect_never_promotes_an_archive_row() {
+    let (store, acct) = store();
+    let old = archive(
+        &store,
+        &triaged(acct, "g-old", "t-conv")
+            .from("pat@old.example")
+            .received_at(days_ago(200)),
+    );
+    let mine = triaged(acct, "g-mine", "t-conv")
+        .from("me@example.com")
+        .is_sent(true)
+        .ingest(&store);
+    assert_eq!(store.retriage_reset(acct, Some(mine), 7).unwrap(), 1);
+    assert!(is_archive(&store, old));
+    assert_eq!(jobs(&store, old), 0);
+}
+
+/// B11. In the reader's search an archive row is DONE: for the grouping, for
+/// the `done:` operator and on the hit itself, all three from one expression.
+#[test]
+fn human_search_treats_archive_mail_as_done_everywhere() {
+    use crate::store::{SearchFilter, SearchSort};
+    let (store, acct) = store();
+    let old = archive(
+        &store,
+        &triaged(acct, "g-old", "t-old")
+            .subject("heron archive")
+            .body("heron")
+            .received_at(days_ago(200)),
+    );
+    let finished = triaged(acct, "g-done", "t-done")
+        .subject("heron finished")
+        .body("heron")
+        .received_at(days_ago(3))
+        .ingest(&store);
+    let open = triaged(acct, "g-open", "t-open")
+        .subject("heron open")
+        .body("heron")
+        .received_at(days_ago(5))
+        .ingest(&store);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE triage SET status='done' WHERE message_id=?1",
+            params![finished],
+        )
+        .unwrap();
+    let ids = |hits: Vec<crate::store::SearchHit>| -> Vec<i64> {
+        hits.iter().map(|hit| hit.id).collect()
+    };
+    let filter = |done: Option<bool>| SearchFilter {
+        done,
+        ..Default::default()
+    };
+
+    // Grouping: unfinished first, then the done group by recency. Taken at
+    // its triage row's word ('new') the archive row would lead.
+    let grouped = store
+        .search_unfinished_first(
+            acct,
+            "heron",
+            &filter(None),
+            SearchSort::Recent,
+            false,
+            10,
+            0,
+        )
+        .unwrap();
+    assert_eq!(ids(grouped.clone()), vec![open, finished, old]);
+    let flags: Vec<bool> = grouped.iter().map(|hit| hit.is_done).collect();
+    assert_eq!(flags, vec![false, true, true]);
+    // Paging across the seam agrees with the first page.
+    let second = store
+        .search_unfinished_first(
+            acct,
+            "heron",
+            &filter(None),
+            SearchSort::Recent,
+            false,
+            2,
+            1,
+        )
+        .unwrap();
+    assert_eq!(ids(second), vec![finished, old]);
+    // Filter-only listing (no text): the same grouping.
+    let from = SearchFilter {
+        after: Some(days_ago(400)),
+        ..Default::default()
+    };
+    let listing = store
+        .search_unfinished_first(acct, "", &from, SearchSort::Recent, false, 10, 0)
+        .unwrap();
+    assert_eq!(ids(listing.clone()), vec![open, finished, old]);
+    let flags: Vec<bool> = listing.iter().map(|hit| hit.is_done).collect();
+    assert_eq!(flags, vec![false, true, true]);
+
+    // The `done:` operator.
+    let done = |flag: bool| {
+        let mut found = ids(store
+            .search_filtered(
+                acct,
+                "heron",
+                &filter(Some(flag)),
+                SearchSort::Recent,
+                false,
+                10,
+                0,
+            )
+            .unwrap());
+        found.sort();
+        found
+    };
+    assert_eq!(done(true), {
+        let mut both = vec![old, finished];
+        both.sort();
+        both
+    });
+    assert_eq!(done(false), vec![open]);
+
+    // The hybrid path's hit, and its post-hoc filter.
+    let (legs, _) = store
+        .hybrid_search_legs(
+            acct,
+            "heron",
+            &filter(None),
+            SearchSort::Recent,
+            false,
+            false,
+            10,
+        )
+        .unwrap();
+    let archived = legs.iter().find(|hit| hit.hit.id == old).unwrap();
+    assert!(archived.hit.is_done);
+    let (unfinished, _) = store
+        .hybrid_search(
+            acct,
+            "heron",
+            &filter(Some(false)),
+            SearchSort::Recent,
+            false,
+            10,
+        )
+        .unwrap();
+    assert_eq!(ids(unfinished), vec![open]);
+
+    // The agent door's hit says the same, once the row is readable there.
+    allow(&store, old);
+    let external = agent_search(&store, acct, "archive");
+    assert_eq!(hit_ids(&external), vec![old]);
+    assert!(external.hits[0].is_done);
+
+    // Promoted, it is unfinished mail like any other.
+    store.retriage_reset(acct, Some(old), 7).unwrap();
+    assert_eq!(done(false).len(), 2);
+}
+
+/// B12. An agent's search asking about old mail is not the owner's mail
+/// waiting for triage: it is in neither the "triaging N" count, the parked
+/// count, nor the queue gauge.
+#[test]
+fn archive_access_jobs_are_not_counted_as_triage_waiting() {
+    let (store, acct) = store();
+    let old = heron_archive(&store, acct, 3);
+    store
+        .request_archive_access(acct, &old, Default::default(), Utc::now())
+        .unwrap();
+    assert_eq!(
+        store.triage_waiting_counts(acct, Utc::now()).unwrap(),
+        [0, 0]
+    );
+    assert_eq!(store.triage_job_counts(acct).unwrap(), [0, 0]);
+
+    let job = store
+        .claim_agent_job(acct, "access", Utc::now(), 120)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.triage_waiting_counts(acct, Utc::now()).unwrap(),
+        [0, 0]
+    );
+    assert_eq!(store.triage_job_counts(acct).unwrap(), [0, 0]);
+    store
+        .defer_agent_job(
+            &job,
+            Utc::now() + chrono::Duration::hours(20),
+            "daily_budget_exhausted",
+        )
+        .unwrap();
+    assert_eq!(
+        store.triage_waiting_counts(acct, Utc::now()).unwrap(),
+        [0, 0]
+    );
+    assert_eq!(store.triage_budget_parked(acct).unwrap().0, 0);
+
+    // Live mail still counts, so the zeroes above are the exclusion's.
+    triaged(acct, "g-live", "t-live").ingest(&store);
+    assert_eq!(
+        store.triage_waiting_counts(acct, Utc::now()).unwrap(),
+        [1, 0]
+    );
+    assert_eq!(store.triage_job_counts(acct).unwrap(), [1, 0]);
+}
+
+/// B12. The walk runs newest to oldest, and the sender directory keeps "the
+/// newest sighting's name". An older archive message must not put back the
+/// name the sender used a year ago.
+#[test]
+fn archive_ingest_never_renames_a_sender() {
+    let (store, acct) = store();
+    let name = |addr: &str| -> Option<String> {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT display_name FROM senders WHERE account_id=?1 AND addr=?2",
+                params![acct, addr],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    triaged(acct, "g-now", "t-now")
+        .from("pat@old.example")
+        .from_name(Some("Pat Current"))
+        .ingest(&store);
+    archive(
+        &store,
+        &triaged(acct, "g-then", "t-then")
+            .from("pat@old.example")
+            .from_name(Some("Patricia Formerly"))
+            .received_at(days_ago(200)),
+    );
+    assert_eq!(name("pat@old.example").as_deref(), Some("Pat Current"));
+    // The archive mail still counts toward the sender's mail.
+    let count: i64 = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT msg_count FROM senders WHERE account_id=?1 AND addr='pat@old.example'",
+            params![acct],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+
+    // A sender known only from the archive takes the first name the walk
+    // meets (its newest), and keeps it as the walk goes further back.
+    archive(
+        &store,
+        &triaged(acct, "g-a1", "t-a1")
+            .from("zed@old.example")
+            .from_name(Some("Zed Recent"))
+            .received_at(days_ago(100)),
+    );
+    archive(
+        &store,
+        &triaged(acct, "g-a2", "t-a2")
+            .from("zed@old.example")
+            .from_name(Some("Zed Earlier"))
+            .received_at(days_ago(300)),
+    );
+    assert_eq!(name("zed@old.example").as_deref(), Some("Zed Recent"));
+}
+
+/// B5. The recall window stops at its ceiling: readable mail ranked below a
+/// wall of hidden mail deeper than the ceiling is not dug for.
+#[test]
+fn the_external_recall_window_stops_at_its_ceiling() {
+    assert_eq!(crate::store::EXTERNAL_RECALL_MAX, 4096);
+    let (store, acct) = store();
+    // Twenty unassessed archive matches, all newer than the one readable hit.
+    for i in 0..20 {
+        archive(
+            &store,
+            &triaged(acct, &format!("g-{i}"), &format!("t-{i}"))
+                .subject("heron")
+                .body("heron")
+                .received_at(days_ago(50 + i)),
+        );
+    }
+    let deep = archive(
+        &store,
+        &triaged(acct, "g-deep", "t-deep")
+            .subject("heron")
+            .body("heron")
+            .received_at(days_ago(300)),
+    );
+    allow(&store, deep);
+    let search = |max: usize| {
+        let mut windows = Vec::new();
+        let found = store
+            .external_recall_within(acct, 2, max, |window| {
+                windows.push(window);
+                let hits = store.search_filtered(
+                    acct,
+                    "heron",
+                    &Default::default(),
+                    crate::store::SearchSort::Recent,
+                    false,
+                    window as u32,
+                    0,
+                )?;
+                let full = hits.len() == window;
+                Ok((
+                    hits.into_iter()
+                        .map(|hit| crate::store::LeggedHit {
+                            hit,
+                            keyword: true,
+                            vector: false,
+                        })
+                        .collect(),
+                    full,
+                ))
+            })
+            .unwrap();
+        (found, windows)
+    };
+    let (capped, windows) = search(8);
+    assert!(capped.hits.is_empty(), "the ceiling was reached first");
+    assert_eq!(capped.pending_archive.len(), 8);
+    assert_eq!(windows, vec![2, 4, 8], "doubling, and no further");
+    let (reached, windows) = search(64);
+    assert_eq!(hit_ids(&reached), vec![deep]);
+    assert_eq!(windows, vec![2, 4, 8, 16, 32]);
 }

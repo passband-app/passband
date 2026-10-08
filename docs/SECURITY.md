@@ -245,14 +245,47 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   not found. A `restricted` sibling, archive or not, an archive row the owner
   sealed by hand, and any NON-archive pending sibling close the thread as before.
 - The check is bought when an external caller surfaces the row: an agent search
-  that matches it (`search_mail`, `GET /client/agent/search`) queues one
-  `access` job with trigger `archive_access` for at most ten matches per call,
-  best-ranked first, and opening its thread queues `source_access` for it as for
-  any legacy source. A row that already has a job at its revision (finished,
-  failed, or parked on the daily budget) is never queued again. The search
-  wakes the refine lane, waits up to about twelve seconds, and runs again.
-- Until the row is `allowed` the caller learns ONE thing about it: the count
-  `pending_older_matches`. Never an id, subject, sender or snippet.
+  whose KEYWORD leg matches it (`search_mail`, `GET /client/agent/search`) queues
+  one `access` job with trigger `archive_access`, best-ranked first, and opening
+  its thread queues `source_access` for it as for any legacy source. A row the
+  vector leg alone returned is never queued: nearest neighbours are not matches.
+  A row that already has a job at its revision (finished, or parked on the daily
+  budget) is never queued again; one whose job FAILED may be asked for again
+  once that failure is a day old.
+- Three ceilings bound what a caller can make the daemon spend: ten rows per
+  call, twenty `archive_access` jobs outstanding per account, and
+  `triage.agent.archive_access_daily_cap` (default 50) a day, charged on top of
+  the total and background budgets. Nothing is queued once today's background
+  budget is spent. A check that has been deferred even once loses its place
+  ahead of ordinary background work.
+- The door waits for the checks it queued only while the refine lane says it
+  can run (a poll has succeeded, a model is configured, the provider circuit is
+  closed), gives up after two seconds if no worker has picked one up, and stops
+  at eight seconds (MCP) or six (HTTP). `get_thread` waits the same way for the
+  sibling checks its own open queued, BEFORE it applies the guard, so a thread
+  is not served with a sibling missing and then closed when the verdict lands.
+- UNTIL THE ROW IS `allowed` THE CALLER LEARNS NOTHING ABOUT IT. No id, subject,
+  sender or snippet, and no count or flag either: a search that matched
+  unassessed archive mail returns the same bytes as one that matched nothing.
+  An earlier draft reported a count of pending matches; that is an oracle (ask
+  it about any word, phrase, sender or date and read the answer off mail nobody
+  has cleared) and it must not come back in any form. What the response does
+  carry is the same for every query: `indexed_since`, a DATE that is the walk's
+  cursor (or, with no walk, where agent-readable mail first becomes dense, never
+  one row's timestamp), and `archive` = `{target, walk_complete, older_mail}`
+  where `older_mail` is the constant `"checked_on_first_match"`.
+- Accepted residual: the time a search takes still says that some unassessed
+  archive row keyword-matched and was queued. It is bounded by the ceilings
+  above and carries no content.
+- PROMOTION is the one way `is_archive` changes, 1 to 0 and never back: the
+  owner, at the human door, re-triages one archive message or corrects how it
+  is filed (`promote_archive_conn`, called from `retriage_reset`'s
+  single-message arm and from `correct_agent_triage_conn` for every field but
+  `external_access`). Nothing at the agent door, in the walk, in a live
+  re-sighting or in a heal reaches it. A promoted row is live mail: while its
+  access is pending it CLOSES its thread like any live pending row, and a
+  `restricted` verdict already on it is untouched. Sealing or unsealing an
+  archive row by hand does not promote it and queues nothing.
 - `cache_allowed` on the human routes is stricter than the agent guard
   (`human_cache_allowed`): the human reader is served the archive sibling, so a
   thread carrying an unassessed one is not cacheable.

@@ -39,10 +39,12 @@ fn shipment_policy() -> squelch_core::config::ShipmentListPolicy {
 /// The archive depth from the daemon's own config, so `search_mail` reports
 /// the same horizon here as under `squelchd serve`. No poke: this binary runs
 /// no sync engine, so a matched archive row is queued for the daemon's worker
-/// and reported as pending rather than waited on.
+/// and never waited on.
 fn archive_surfacing() -> squelch_core::store::archive_surface::ArchiveSurfacing {
+    let config = squelch_core::config::Config::load();
     squelch_core::store::archive_surface::ArchiveSurfacing {
-        archive_days: squelch_core::config::Config::load().sync.archive_days,
+        archive_days: config.sync.archive_days,
+        caps: (&config.triage.agent).into(),
         ..Default::default()
     }
 }

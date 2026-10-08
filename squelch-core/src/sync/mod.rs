@@ -717,8 +717,10 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// access checks for archive rows and is waiting on them (see
     /// `store::archive_surface`). Its own handle rather than a second use of
     /// `refine_wake`, which stays private to this engine's own ingest; the two
-    /// wake the same lane.
-    refine_poke: Arc<tokio::sync::Notify>,
+    /// wake the same lane. It also carries the lane's answer to "would a poke
+    /// be acted on", which the door reads before it waits (see
+    /// [`Self::refine_lane`]).
+    refine_poke: crate::store::archive_surface::RefinePoke,
     /// Per-cap-kind last-warned UTC day. In-memory only; a restart re-arms them,
     /// and one fresh notice on restart is acceptable.
     ///
@@ -880,7 +882,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             refresh: Arc::new(tokio::sync::Notify::new()),
             refine_wake: tokio::sync::Notify::new(),
             spam_refresh: Arc::new(tokio::sync::Notify::new()),
-            refine_poke: Arc::new(tokio::sync::Notify::new()),
+            refine_poke: Default::default(),
             warn_days: Arc::new(std::sync::Mutex::new(WarnDays::default())),
             notify_lane: std::sync::OnceLock::new(),
             unread_warned: AtomicBool::new(false),
@@ -956,7 +958,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// lane now instead of at its next interval. Wire the same handle into
     /// `ApiState::with_refine_poke` and the agent door; without it that work
     /// still runs, on the lane's own clock.
-    pub fn with_refine_poke(mut self, refine_poke: Arc<tokio::sync::Notify>) -> Self {
+    pub fn with_refine_poke(
+        mut self,
+        refine_poke: crate::store::archive_surface::RefinePoke,
+    ) -> Self {
         self.refine_poke = refine_poke;
         self
     }
@@ -2043,10 +2048,25 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     async fn refine_lane(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) {
         let interval = Duration::from_secs(self.config.triage.agent.worker_poll_secs);
         let mut idle_rounds = 0u32;
+        // Whatever ends this lane (shutdown, or `run_lanes` dropping it when
+        // the poll lane errors), a door must stop waiting on it.
+        struct NotRunnable<'a>(&'a crate::store::archive_surface::RefinePoke);
+        impl Drop for NotRunnable<'_> {
+            fn drop(&mut self) {
+                self.0.set_runnable(false);
+            }
+        }
+        let _withdrawn = NotRunnable(&self.refine_poke);
         loop {
             if *shutdown.borrow() {
                 return;
             }
+            // TELL THE DOORS WHETHER A POKE WOULD BUY ANYTHING, once a round
+            // and from the same three facts that gate the spending below: a
+            // poll has succeeded, a model is configured, the provider circuit
+            // is closed. An agent search waits on its access checks only
+            // while this is true.
+            self.refine_poke.set_runnable(self.refine_can_spend());
             if self.poll_healthy.load(Ordering::Relaxed) {
                 if self.agent_triage_pass().await {
                     idle_rounds = 0;
@@ -2093,13 +2113,22 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // during one long round are one extra round, not twenty.
             tokio::select! {
                 _ = self.refine_wake.notified() => { idle_rounds = 0; }
-                _ = self.refine_poke.notified() => { idle_rounds = 0; }
+                _ = self.refine_poke.poked() => { idle_rounds = 0; }
                 _ = tokio::time::sleep(interval.saturating_mul(1 << idle_rounds).min(Duration::from_secs(30))) => {}
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return; }
                 }
             }
         }
+    }
+
+    /// Whether a refine round started now would run an access check: the gates
+    /// of [`Self::refine_lane`] and [`Self::agent_triage_pass`], read without
+    /// taking any of them.
+    fn refine_can_spend(&self) -> bool {
+        self.poll_healthy.load(Ordering::Relaxed)
+            && self.stage2_llm.is_some()
+            && Utc::now().timestamp() >= self.agent_retry_after.load(Ordering::Relaxed)
     }
 
     /// FETCH THE PROVIDER'S SPAM FOLDER, ONCE, ON REQUEST.
@@ -7917,22 +7946,32 @@ mod tests {
 
         let mut config = Config::default();
         config.triage.agent.worker_poll_secs = 3600;
-        let poke = Arc::new(tokio::sync::Notify::new());
+        let poke = crate::store::archive_surface::RefinePoke::new();
         let mut eng = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config)
             .with_refine_poke(poke.clone());
         eng.stage2_llm = Some(llm);
         eng.poll_healthy.store(true, Ordering::Relaxed);
         let (tx, mut rx) = tokio::sync::watch::channel(false);
+        assert!(!poke.runnable(), "no lane has spoken for it yet");
 
         let ((), surfaced) = tokio::join!(eng.refine_lane(&mut rx), async {
             // Let the lane finish its first, empty round and park.
             tokio::time::sleep(Duration::from_millis(300)).await;
-            let wait = SurfaceWait {
-                deadline: Duration::from_secs(10),
-                interval: Duration::from_millis(20),
+            // THE LANE SAID IT CAN RUN, which is the only reason the door
+            // below waits at all.
+            assert!(poke.runnable());
+            let surfacing = crate::store::archive_surface::ArchiveSurfacing {
+                archive_days: 365,
+                poke: Some(poke.clone()),
+                wait: SurfaceWait {
+                    deadline: Duration::from_secs(10),
+                    idle: Duration::from_secs(10),
+                    interval: Duration::from_millis(20),
+                },
+                caps: Default::default(),
             };
             let started = std::time::Instant::now();
-            let rerun = surface_archive_matches(&store, account, &[id], Some(&poke), wait)
+            let rerun = surface_archive_matches(&store, account, &[id], &surfacing)
                 .await
                 .unwrap();
             let waited = started.elapsed();
@@ -7941,6 +7980,10 @@ mod tests {
         });
         let (rerun, waited) = surfaced;
         assert!(rerun);
+        assert!(
+            !poke.runnable(),
+            "the lane withdrew its word on the way out"
+        );
         assert!(
             waited < Duration::from_secs(8),
             "the check finished inside the wait: {waited:?}"
@@ -7956,6 +7999,53 @@ mod tests {
             "and one job"
         );
         server.abort();
+    }
+
+    /// WHAT THE LANE TELLS THE DOORS. A door waits on its access checks only
+    /// while the lane says a poke would be acted on, and the lane says so from
+    /// the three facts that gate its own spending: a poll has succeeded, a
+    /// model is configured, the provider circuit is closed. Each one missing
+    /// is a lane that would sit on the queue while the caller's wait ran out.
+    #[tokio::test]
+    async fn the_refine_lane_says_whether_a_poke_would_be_acted_on() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let llm = || ResolvedLlm {
+            url: "http://127.0.0.1:1/".into(),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        // (poll healthy, a model, circuit open) -> runnable
+        for (healthy, model, cooling, expected) in [
+            (true, true, false, true),
+            (false, true, false, false),
+            (true, false, false, false),
+            (true, true, true, false),
+        ] {
+            let mut config = Config::default();
+            config.triage.agent.worker_poll_secs = 3600;
+            let poke = crate::store::archive_surface::RefinePoke::new();
+            let mut eng = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config)
+                .with_refine_poke(poke.clone());
+            eng.stage2_llm = model.then(llm);
+            eng.poll_healthy.store(healthy, Ordering::Relaxed);
+            if cooling {
+                eng.agent_retry_after
+                    .store(Utc::now().timestamp() + 600, Ordering::Relaxed);
+            }
+            let (tx, mut rx) = tokio::sync::watch::channel(false);
+            let ((), said) = tokio::join!(eng.refine_lane(&mut rx), async {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let said = poke.runnable();
+                tx.send(true).unwrap();
+                said
+            });
+            assert_eq!(
+                said, expected,
+                "healthy={healthy} model={model} cooling={cooling}"
+            );
+            assert!(!poke.runnable(), "withdrawn when the lane ends");
+        }
     }
 
     /// THE LANE, inside the real `select!`: a Gmail error in the walk is waited

@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 use squelch_core::{
     CoreError,
     store::{
-        ExternalSearch, SearchSort, Store,
+        LeggedHit, SearchSort, Store,
         agent_triage::{AgentListItem, AgentTriageStore},
-        archive_surface::search_with_surfacing,
+        archive_surface::{SurfaceWait, await_thread_access, search_with_surfacing},
         parse_search_query,
     },
     triage::decision::{EmailKind, RecordProposal},
@@ -29,6 +29,16 @@ pub async fn thread(
     State(state): State<ApiState>,
     Path(thread_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The checks this open queues are waited on BEFORE the guard is applied,
+    // so a thread is not served with a sibling missing and then closed a
+    // moment later when that sibling's verdict lands.
+    let surfacing = state
+        .archive_surfacing
+        .clone()
+        .capped(SurfaceWait::HTTP_DEADLINE);
+    await_thread_access(&state.store, state.account_id, &thread_id, &surfacing)
+        .await
+        .map_err(ApiError::from)?;
     let view = store_call(&state, move |store, account| {
         store.thread_view(account, &thread_id)
     })
@@ -107,72 +117,82 @@ pub async fn search(
     .to_owned();
     let response_mode = mode.clone();
     let account = state.account_id;
-    // ASSESS ON SURFACING: archive mail that matched but has never had an
-    // access check gets one now, and the search is run again after a short
-    // wait. See `squelch_core::store::archive_surface`.
+    // ASSESS ON SURFACING: archive mail the KEYWORD leg matched but that has
+    // never had an access check gets one now, and the search is run again
+    // after a short wait. See `squelch_core::store::archive_surface`.
     let search = move |store: &squelch_core::store::SqliteStore| {
-        let mut window = limit as usize;
-        loop {
-            let (candidates, full) = match mode.as_str() {
-                "hybrid" => store.hybrid_search(
+        // Which leg found a row matters here and only here: a vector-only
+        // neighbour is never sent for a check.
+        let legged = |hits: Vec<_>, keyword: bool| -> Vec<LeggedHit> {
+            hits.into_iter()
+                .map(|hit| LeggedHit {
+                    hit,
+                    keyword,
+                    vector: !keyword,
+                })
+                .collect()
+        };
+        // Access is applied before the public result limit, inside the one
+        // recall loop both doors share: a hidden leading window must not hide
+        // a readable result farther down the ranking, and the window stops
+        // growing at the same ceiling in every mode.
+        store.external_recall(account, limit as usize, |window| {
+            Ok(match mode.as_str() {
+                // No snippet windows: every hit is rehydrated by the loop.
+                "hybrid" => store.hybrid_search_legs(
                     account,
                     &text,
                     &filter,
                     SearchSort::default(),
+                    false,
                     false,
                     window,
                 )?,
-                "semantic" => store.semantic_search_hits(
-                    account,
-                    &text,
-                    &filter,
-                    SearchSort::default(),
-                    false,
-                    window.min(4096),
-                )?,
-                _ => {
-                    let candidates = store.search_filtered(
+                "semantic" => {
+                    let (hits, full) = store.semantic_search_hits(
                         account,
                         &text,
                         &filter,
                         SearchSort::default(),
                         false,
-                        window.min(u32::MAX as usize) as u32,
+                        window,
+                    )?;
+                    (legged(hits, false), full)
+                }
+                _ => {
+                    let hits = store.search_filtered(
+                        account,
+                        &text,
+                        &filter,
+                        SearchSort::default(),
+                        false,
+                        window as u32,
                         0,
                     )?;
-                    let full = candidates.len() == window;
-                    (candidates, full)
+                    let full = hits.len() == window;
+                    (legged(hits, true), full)
                 }
-            };
-            // Access is applied before the public result limit. A hidden leading
-            // window must not hide a readable result farther down the ranking.
-            let mut found: ExternalSearch =
-                store.external_search_partition(account, &candidates)?;
-            if found.hits.len() >= limit as usize || !full || (mode == "semantic" && window >= 4096)
-            {
-                found.hits.truncate(limit as usize);
-                return Ok(found);
-            }
-            window = window.saturating_mul(2);
-        }
+            })
+        })
     };
-    let (found, horizon) =
-        search_with_surfacing(&state.store, account, &state.archive_surfacing, search)
-            .await
-            .map_err(ApiError::from)?;
-    let mut body = json!({"items": found.hits, "match_kind": response_mode, "sort": "recent"});
+    let surfacing = state
+        .archive_surfacing
+        .clone()
+        .capped(SurfaceWait::HTTP_DEADLINE);
+    let (hits, horizon) = search_with_surfacing(&state.store, account, &surfacing, search)
+        .await
+        .map_err(ApiError::from)?;
+    let mut body = json!({"items": hits, "match_kind": response_mode, "sort": "recent"});
     // How far back this search can see, so the assistant says "search covers
     // mail since X" instead of "that mail does not exist". Both are absent
     // when there is nothing to say (an empty mailbox; the archive turned off).
+    // NEITHER DEPENDS ON THE QUERY: nothing here says whether older mail
+    // matched, how much, or that any is waiting on a check.
     if let Some(indexed_since) = horizon.indexed_since {
         body["indexed_since"] = json!(indexed_since);
     }
     if let Some(archive) = horizon.archive {
         body["archive"] = json!(archive);
-    }
-    // A COUNT and nothing else: these are rows this caller may not see yet.
-    if !found.pending_archive.is_empty() {
-        body["pending_older_matches"] = found.pending_archive.len().into();
     }
     Ok(no_store(body))
 }

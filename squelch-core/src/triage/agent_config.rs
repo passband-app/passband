@@ -25,6 +25,12 @@ pub struct AgentConfig {
     /// Background investigations share the total cap but cannot consume the
     /// foreground reserve. Zero pauses background work; notification is separate.
     pub background_daily_run_cap: u32,
+    /// Access checks an external caller's search may buy for archive mail per
+    /// UTC day (trigger `archive_access`). Charged IN ADDITION to the total and
+    /// background caps, so surfacing old mail can never spend the budget the
+    /// owner's own sent mail and thread refreshes are assessed from. Zero
+    /// stops surfacing; the mail stays searchable by the human.
+    pub archive_access_daily_cap: u32,
     /// Failed investigations remain inspectable and can be explicitly retried.
     pub max_attempts: u32,
     /// Shared provider-outage circuit cooldown. Outages do not consume attempts.
@@ -43,6 +49,7 @@ impl Default for AgentConfig {
             worker_poll_secs: 1,
             daily_run_cap: 1000,
             background_daily_run_cap: 200,
+            archive_access_daily_cap: 50,
             max_attempts: 6,
             outage_retry_secs: 300,
         }

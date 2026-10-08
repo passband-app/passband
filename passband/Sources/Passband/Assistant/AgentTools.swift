@@ -254,7 +254,18 @@ enum AgentTools {
                 "snippet": hit.snippet,
             ])
         }
-        return ok(["results": rows], summary: "searched \(quoted(query))")
+        // How far back the search could see, passed straight through so the
+        // model says "search covers mail since X" rather than "no such mail".
+        var output: [String: Any] = ["results": rows]
+        if let since = page.indexed_since { output["indexed_since"] = since }
+        if let archive = page.archive {
+            output["archive"] = row([
+                "target": archive.target,
+                "walk_complete": archive.walk_complete,
+                "older_mail": archive.older_mail,
+            ])
+        }
+        return ok(output, summary: "searched \(quoted(query))")
     }
 
     @MainActor
@@ -967,7 +978,14 @@ enum AgentTools {
                 Search the user's mailbox by meaning AND keyword (hybrid recall). \
                 Returns summaries only (sender, subject, date, a snippet, and a \
                 thread_id), never full bodies. Auth/2FA messages are excluded. Reach \
-                for this first when the question is about a specific message.
+                for this first when the question is about a specific message. \
+                Search only covers mail since `indexed_since`: when nothing \
+                matches, say that search covers mail since that date, not that \
+                the mail does not exist. `archive` says how far back older mail \
+                is being added (`target`) and whether that is finished \
+                (`walk_complete`). Older mail is checked the first time a \
+                keyword search matches it, so if old mail you expected is \
+                missing, run the same search once more. Never loop on it.
                 """,
             input_schema: .init(
                 properties: [

@@ -755,12 +755,21 @@ fn investigation_budget_limits(config: &Config, job: &AgentJob) -> Vec<(String, 
     let mut limits = vec![(GLOBAL_BUDGET_KEY.into(), config.triage.agent.daily_run_cap)];
     if !job.foreground || job.kind == "access" {
         limits.push((
-            "__agent_background__".into(),
+            crate::store::BACKGROUND_BUDGET_KEY.into(),
             config.triage.agent.effective_background_daily_run_cap(),
         ));
     }
     if job.trigger.starts_with("revisit:") {
         limits.push(("__agent_revisit__".into(), config.revisit.daily_cap));
+    }
+    // An external caller's search asked for this one. Its own ceiling, on top
+    // of the two above, so a day of searches cannot spend the background
+    // budget that the owner's sent mail is assessed from.
+    if job.trigger == "archive_access" {
+        limits.push((
+            crate::store::ARCHIVE_ACCESS_BUDGET_KEY.into(),
+            config.triage.agent.archive_access_daily_cap,
+        ));
     }
     limits
 }
@@ -938,6 +947,49 @@ mod budget_tests {
                 .unwrap(),
             1000
         );
+    }
+
+    /// An archive access check is charged three times over: the total, the
+    /// background budget, and a sub-cap of its own, so a day of agent searches
+    /// runs out of ITS budget long before it touches the one the owner's sent
+    /// mail is assessed from.
+    #[test]
+    fn an_archive_access_check_is_charged_to_its_own_daily_sub_cap_as_well() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let account = store.ensure_account("cap@example.com").unwrap();
+        let mut config = Config::default();
+        assert_eq!(config.triage.agent.archive_access_daily_cap, 50);
+        config.triage.agent.archive_access_daily_cap = 3;
+        let mut job = read_job(1, 1);
+        job.kind = "access".into();
+        job.trigger = "archive_access".into();
+        let limits = investigation_budget_limits(&config, &job);
+        assert_eq!(
+            limits,
+            vec![
+                (GLOBAL_BUDGET_KEY.into(), 1000),
+                (crate::store::BACKGROUND_BUDGET_KEY.into(), 200),
+                (crate::store::ARCHIVE_ACCESS_BUDGET_KEY.into(), 3),
+            ]
+        );
+        for run in 0..4 {
+            assert_eq!(
+                store
+                    .reserve_agent_budget(account, "today", &limits)
+                    .unwrap(),
+                run < 3
+            );
+        }
+        // The refused fourth charged nothing anywhere.
+        assert_eq!(
+            store
+                .stage2_budget_used(account, crate::store::BACKGROUND_BUDGET_KEY, "today")
+                .unwrap(),
+            3
+        );
+        // Every other access check is as it was: no sub-cap.
+        job.trigger = "source_access".into();
+        assert_eq!(investigation_budget_limits(&config, &job).len(), 2);
     }
 
     #[test]

@@ -357,15 +357,16 @@ pub(super) fn thread_guard_and_subject(
 
 /// Only an explicit external thread-open request may schedule source assessments.
 /// Permission probes for human cache policy, listings and search remain pure.
-fn request_external_thread_access_conn(
+pub(super) fn request_external_thread_access_conn(
     conn: &Connection,
     account_id: AccountId,
     thread_id: &str,
-) -> Result<()> {
+    now: DateTime<Utc>,
+) -> Result<Vec<i64>> {
     // Reading a legacy thread is demand for assessing its unseen sources. Queue
     // a small batch, never every ancestor at arrival. Existing assessments and
     // active or terminal work remain untouched; access stays closed until every source passes.
-    let missing: Vec<i64> = conn
+    let mut missing: Vec<i64> = conn
         .prepare(
             "SELECT m.id FROM messages m
          LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
@@ -379,7 +380,14 @@ fn request_external_thread_access_conn(
         .query_map(params![account_id, thread_id], |row| row.get(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     super::agent_triage::ensure_agent_source_ids_conn(conn, account_id, &missing)?;
-    Ok(())
+    // An archive sibling whose check FAILED would otherwise be omitted from
+    // this thread for good; a day-old failure is asked for again, inside the
+    // same batch of eight.
+    let room = 8usize.saturating_sub(missing.len());
+    missing.extend(super::agent_triage::revive_failed_thread_access_conn(
+        conn, account_id, thread_id, room, now,
+    )?);
+    Ok(missing)
 }
 
 // Shared with the query-plan regression test: LIMIT 1 must seek the thread,
@@ -617,7 +625,7 @@ impl SqliteStore {
 
     pub(super) fn thread_view(&self, account_id: AccountId, thread_id: &str) -> Result<ThreadView> {
         let conn = self.lock()?;
-        request_external_thread_access_conn(&conn, account_id, thread_id)?;
+        request_external_thread_access_conn(&conn, account_id, thread_id, Utc::now())?;
         let subject = thread_guard_and_subject(&conn, account_id, thread_id)?;
 
         // THE AGENT DOOR GETS NO SPAM AT ALL, not spam it is told to distrust.
@@ -959,7 +967,26 @@ impl SqliteStore {
         //    offset: that column IS the timezone observation (`sqlite::zones`
         //    counts it by query), and a year of old mail must not vote on where
         //    a correspondent is now. The flag is set here, inside the insert's
-        //    own transaction, and by nothing else ever.
+        //    own transaction, and nowhere else; the only thing that ever
+        //    clears it is the owner's promotion (`promote_archive_conn`).
+        //
+        //    NOR DOES IT RENAME ITS SENDER. The directory keeps the newest
+        //    sighting's display name, on the understanding that sightings
+        //    arrive oldest first; the walk runs the other way, so every older
+        //    message would overwrite the name the sender uses now with one
+        //    they used a year ago. A name already on file is put back; a
+        //    sender with none yet takes the first (newest) one the walk meets.
+        let kept_name: Option<String> = if archive {
+            tx.query_row(
+                "SELECT display_name FROM senders WHERE account_id = ?1 AND addr = ?2",
+                params![triaged.message.account_id, triaged.message.from_addr],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+        } else {
+            None
+        };
         let id = upsert_message_conn(
             &tx,
             &triaged.message,
@@ -970,6 +997,12 @@ impl SqliteStore {
                 "UPDATE messages SET is_archive = 1 WHERE account_id = ?1 AND id = ?2",
                 params![triaged.message.account_id, id],
             )?;
+            if let Some(name) = kept_name {
+                tx.execute(
+                    "UPDATE senders SET display_name = ?3 WHERE account_id = ?1 AND addr = ?2",
+                    params![triaged.message.account_id, triaged.message.from_addr, name],
+                )?;
+            }
         }
 
         // 1a. HEAL: the vector was computed from the text the row had, which

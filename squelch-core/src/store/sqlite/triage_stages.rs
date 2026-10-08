@@ -384,7 +384,11 @@ impl SqliteStore {
                                 "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2
                                  AND NOT ",
                                 own_mail_sql!(),
-                                " AND m.is_spam=0 ORDER BY m.received_at DESC,m.id DESC LIMIT 1"
+                                // Never into the archive: the redirect is
+                                // ours, not the owner's, and it must not
+                                // promote a message they did not name.
+                                " AND m.is_spam=0 AND m.is_archive=0
+                                 ORDER BY m.received_at DESC,m.id DESC LIMIT 1"
                             ),
                             params![account_id, thread],
                             |row| row.get(0),
@@ -413,6 +417,13 @@ impl SqliteStore {
         // click cannot spend the reserve that new arrivals rely on.
         let foreground = message_id.is_some();
         for id in &ids {
+            // ONE NAMED ARCHIVE MESSAGE IS PROMOTED: the owner asked for this
+            // one to be triaged, so it becomes live mail in this transaction
+            // and the job below is an ordinary triage. A window holds no
+            // archive row (the select above), and must never promote one.
+            if foreground {
+                super::agent_triage::promote_archive_conn(&tx, account_id, *id)?;
+            }
             super::agent_triage::enqueue_agent_triage_lane(
                 &tx,
                 account_id,

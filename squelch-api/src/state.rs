@@ -605,9 +605,11 @@ impl ApiState {
 
     /// Share the sync loop's REFINE POKE. Wire the SAME handle you pass to
     /// `SyncEngine::with_refine_poke`; without it an agent search still queues
-    /// access checks for the archive mail it matched but does not wait for
-    /// them, and reports those matches as pending.
-    pub fn with_refine_poke(mut self, poke: Arc<tokio::sync::Notify>) -> Self {
+    /// access checks for the archive mail it matched but never waits for them.
+    pub fn with_refine_poke(
+        mut self,
+        poke: squelch_core::store::archive_surface::RefinePoke,
+    ) -> Self {
         self.archive_surfacing.poke = Some(poke);
         self
     }
@@ -616,6 +618,16 @@ impl ApiState {
     /// index is meant to reach. 0 (the default here) reports no archive.
     pub fn with_archive_days(mut self, archive_days: u32) -> Self {
         self.archive_surfacing.archive_days = archive_days;
+        self
+    }
+
+    /// What surfacing archive mail may spend (`triage.agent`), so a search
+    /// never queues a check the worker would only park.
+    pub fn with_archive_access_caps(
+        mut self,
+        caps: squelch_core::store::ArchiveAccessCaps,
+    ) -> Self {
+        self.archive_surfacing.caps = caps;
         self
     }
 
@@ -1171,6 +1183,7 @@ impl ApiState {
             .with_stage2_prices(cfg.stage2.price_in_per_mtok, cfg.stage2.price_out_per_mtok)
             .with_agent_triage(cfg.triage.clone())
             .with_archive_days(cfg.sync.archive_days)
+            .with_archive_access_caps((&cfg.triage.agent).into())
             .with_stage2_model(
                 cfg.stage2.model.clone(),
                 cfg.stage2.stage2_provider.map(|p| p.as_str().to_string()),

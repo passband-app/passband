@@ -38,9 +38,21 @@ every sibling. External read guards independently honor human restrictions even
 if an older assessment was incorrectly marked allowed.
 Archive rows (`is_archive = 1`) get no job at ingest. Their access check is queued
 only when an external caller surfaces them: trigger `archive_access` from an agent
-search (kind `access`, background budget, claimed in the `manual:` tier, at most ten
-per search), or `source_access` from an explicit thread open. Until then external
-thread reads omit them rather than close the thread; see SECURITY.md section 4.
+search's keyword matches (kind `access`), or `source_access` from an explicit thread
+open. Until then external thread reads omit them rather than close the thread; see
+SECURITY.md section 4.
+
+`archive_access` is charged to the total and background budgets AND to its own
+`archive_access_daily_cap` (default 50, `SQUELCH_TRIAGE_ARCHIVE_ACCESS_DAILY_CAP`;
+0 stops surfacing). A search queues at most ten, never more than twenty outstanding
+per account, never more than today's sub-cap can still pay for, and nothing once
+today's background budget is spent. The job is claimed in the `manual:` tier only
+while it has never been deferred or retried (`last_error IS NULL`); after that it is
+ordinary background work. These jobs are not in the "triaging N" count, the
+budget-parked count or the queue gauge. A failed one may be asked for again after 24
+hours. Any other trigger that reaches a row still in the archive is also queued as
+kind `access`, never `triage`: only the owner's single-message re-triage or filing
+correction promotes the row to live mail first.
 Only matching sender rules are supplied as preferences and may be overridden with an evidenced
 exception. Memory has a read-only context interface; no memory editor ships.
 
@@ -76,6 +88,7 @@ concurrency = 2
 worker_poll_secs = 1
 daily_run_cap = 1000
 background_daily_run_cap = 200
+archive_access_daily_cap = 50
 max_attempts = 6
 outage_retry_secs = 300
 
@@ -100,6 +113,7 @@ Environment overrides: `SQUELCH_TRIAGE_MODEL`, `SQUELCH_TRIAGE_REVIEW_MODEL`,
 `SQUELCH_TRIAGE_MAX_TURNS`, `SQUELCH_TRIAGE_MAX_TOOL_CALLS`,
 `SQUELCH_TRIAGE_TIMEOUT_SECS`, `SQUELCH_TRIAGE_CONCURRENCY`,
 `SQUELCH_TRIAGE_DAILY_RUN_CAP`, `SQUELCH_TRIAGE_BACKGROUND_DAILY_RUN_CAP`,
+`SQUELCH_TRIAGE_ARCHIVE_ACCESS_DAILY_CAP`,
 `SQUELCH_TRIAGE_MAX_ATTEMPTS`, and
 `SQUELCH_TRIAGE_OUTAGE_RETRY_SECS`. Other agent levers are configured in TOML. Scores order only agent-selected FYE threads;
 no weight or importance threshold can add a thread to FYE. Recency uses relevant

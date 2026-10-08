@@ -587,7 +587,7 @@ actor APIClient {
     /// write (35 seconds, its token refresh, guest reread and write
     /// together), so the daemon's 504 "may have happened" arrives first. If
     /// this wait runs out anyway, the write is still treated as uncertain
-    /// and settled against the page (`CalendarWrite.status`), never as
+    /// and settled against the page (`CalendarWrite.verdict`), never as
     /// "nothing was saved".
     private static let calendarWriteTimeout: TimeInterval = 45
 

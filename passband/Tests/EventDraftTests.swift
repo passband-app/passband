@@ -49,7 +49,7 @@ struct EventDraftTests {
         aTypedPaneSurvivesAPageChange()
         anUncertainSaveFreezesThePane()
         aPaneSendsItsOwnIdAndOnlyWhatItSent()
-        anUncertainCreateFallsBackWhenNoEventHasTheId()
+        anUncertainCreateIsFoundByItsIdAlone()
         anUncertainEditIsJudgedByWhatMoved()
         aResponseThatCameBackMayHaveArrived()
         each409SaysItsOwnThing()
@@ -576,10 +576,21 @@ struct EventDraftTests {
             expect(e.kind == .network && e.mayHaveArrived, "\(code): may have arrived")
             expect(CalendarWrite.verdict(of: e) == .mayHaveHappened(code: nil), "\(code): settled, may have happened")
         }
-        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .notConnectedToInternet] {
+        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .notConnectedToInternet, .dnsLookupFailed,
+                     .secureConnectionFailed] {
             let e = APIError.transport(URLError(code))
             expect(!e.mayHaveArrived && CalendarWrite.verdict(of: e) == .notSent, "\(code): never got there")
         }
+        // verify5 Y2: when in doubt, freeze. Anything not provably before the
+        // send (a cancellation, an unknown code, a decode failure, an error
+        // that is not a URLError) may have arrived.
+        for code in [URLError.Code.cancelled, .unknown, .cannotDecodeContentData, .dataLengthExceedsMaximum,
+                     .resourceUnavailable] {
+            let e = APIError.transport(URLError(code))
+            expect(e.mayHaveArrived && CalendarWrite.verdict(of: e).mayHaveHappened, "\(code): may have arrived")
+        }
+        struct Odd: Error {}
+        expect(APIError.transport(Odd()).mayHaveArrived, "an error that is not a URLError may have arrived")
         expect(CalendarWrite.verdict(of: APIError(.network, 0, "client not configured")) == .notSent,
                "a request never built is unsent")
         expect(CalendarWrite.verdict(of: URLError(.badURL)) == .mayHaveHappened(code: nil),
@@ -889,24 +900,28 @@ struct EventDraftTests {
                "a delete that tells nobody")
     }
 
-    /// verify3 W3: a calendar daemon older than ids ignores the one sent and
-    /// lets Google pick its own, so no event carries it. The title at that
-    /// start, new since the send, is then the event made.
-    static func anUncertainCreateFallsBackWhenNoEventHasTheId() {
+    /// verify5 Y3 (replacing verify3 W3's fallback): a create sent with an
+    /// id is found by that id ALONE. A lookalike new since the send, even
+    /// the user's own from another pane, is not it; an older daemon that
+    /// ignored the id leaves the pane frozen until it is closed by hand.
+    static func anUncertainCreateIsFoundByItsIdAlone() {
         var body = EventWrite(
             calendar_id: "primary", title: "Lunch with Sam", start: "2026-10-08T12:00:00-07:00",
             end: "2026-10-08T13:00:00-07:00", all_day: false, location: nil, description: nil)
         body.id = "abcdef0123456789"
-        let googles = event("g9", title: "Lunch with Sam", start: body.start, end: body.end)
-        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [googles]))?.id == "g9",
-               "no event has the id: the title at that start is it")
-        expect(CalendarWrite.made(body, before: [CalendarWrite.key(googles)], in: TimelineFeed(events: [googles])) == nil,
-               "one already there before the send is not it")
+        let lookalike = event("g9", title: "Lunch with Sam", start: body.start, end: body.end)
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [lookalike])) == nil,
+               "no event has the id: a lookalike is not it")
         let ours = event(body.id!, title: "Lunch with Sam", start: body.start, end: body.end)
-        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [googles, ours]))?.id == body.id,
-               "the id, when an event has it, wins")
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [lookalike, ours]))?.id == body.id,
+               "the event with the id is it")
+        var elsewhere = ours
+        elsewhere.calendar_id = "team"
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [elsewhere])) == nil,
+               "the id on another calendar is not it")
         let sent = SentWrite.create(body, before: [])
-        expect(sent.found(in: TimelineFeed(events: [googles]))?.id == "g9", "a sent create looks the same way")
+        expect(sent.found(in: TimelineFeed(events: [lookalike])) == nil, "a sent create looks the same way")
+        expect(sent.found(in: TimelineFeed(events: [ours]))?.id == body.id, "and finds its own")
     }
 
     /// verify3 W4, W5: an uncertain edit is judged by whether each changed
@@ -1009,13 +1024,13 @@ struct EventDraftTests {
         expect(CalendarWrite.edited(a, both, in: TimelineFeed(events: [half])) != nil, "both as sent")
     }
 
-    /// verify4 X3: when no event carries the create's id, only the user's
-    /// own new event at that calendar, title, start AND end is taken for it.
+    /// verify4 X3: a create body WITHOUT an id (none is sent today; the rule
+    /// stays for one) takes only the user's own new event at that calendar,
+    /// title, start AND end.
     static func aCreateFallbackIsTheUsersOwnNewEvent() {
-        var body = EventWrite(
+        let body = EventWrite(
             calendar_id: "primary", title: "Dinner", start: "2026-10-08T19:00:00-07:00",
             end: "2026-10-08T21:00:00-07:00", all_day: false, location: nil, description: nil)
-        body.id = "ourid0000"
         // Sam's invitation: same calendar, title and start, new since the
         // send, but Sam's (not editable here, Sam the organizer).
         var sams = event("sam1", title: "Dinner", start: body.start, end: body.end, editable: false)
@@ -1038,10 +1053,9 @@ struct EventDraftTests {
                "the user's own, at that start and end: it")
         expect(CalendarWrite.made(body, before: [CalendarWrite.key(mine)], in: TimelineFeed(events: [mine])) == nil,
                "there before the send: not it")
-        var day = EventWrite(
+        let day = EventWrite(
             calendar_id: "primary", title: "Trip", start: "2026-10-08", end: "2026-10-08", all_day: true,
             location: nil, description: nil)
-        day.id = "ourid0001"
         let oneDay = event("g3", title: "Trip", start: "2026-10-08", end: nil, allDay: true)
         expect(CalendarWrite.made(day, before: [], in: TimelineFeed(events: [oneDay]))?.id == "g3",
                "a one-day all-day event is served with no end")

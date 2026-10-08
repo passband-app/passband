@@ -3324,7 +3324,7 @@ async fn an_unknown_event_is_404() {
 async fn a_google_failure_leaves_every_row_as_it_was() {
     let (w, start) = write_world("google-fails").await;
     let before = w.events().await;
-    for status in [503, 403, 429, 404] {
+    for status in [400, 403, 429, 404] {
         w.google().write_fail = Some(status);
         let create = json!({"calendar_id": "primary", "title": "Never", "start": rfc(start),
                             "end": rfc(start + Duration::hours(1)), "all_day": false});
@@ -3381,6 +3381,46 @@ async fn a_google_failure_leaves_every_row_as_it_was() {
     assert_eq!(
         audit(&w)[0].2.as_deref(),
         Some("failed:answer guests=0 notified=false")
+    );
+}
+
+/// verify5 Y1: Google's OWN 5xx on a write is not a refusal. Its error
+/// guide calls a 500 "an unexpected error occurred while processing the
+/// request", so the write may have been applied: the answer is the 504 the
+/// app freezes its pane on, with a sync kicked, never `google_refused`.
+#[tokio::test]
+async fn a_google_5xx_on_a_write_may_have_happened() {
+    let (w, start) = write_world("google-5xx").await;
+    let before = w.events().await;
+    for status in [500, 502, 503, 504] {
+        w.google().write_fail = Some(status);
+        let create = json!({"calendar_id": "primary", "title": "Maybe", "start": rfc(start),
+                            "end": rfc(start + Duration::hours(1)), "all_day": false});
+        for (method, uri, body) in [
+            ("POST", "/client/calendar/events".to_string(), Some(create)),
+            (
+                "PATCH",
+                event_uri("primary", "own"),
+                Some(json!({"title": "Maybe"})),
+            ),
+            ("DELETE", event_uri("primary", "own"), None),
+        ] {
+            let (code, answer, _) = send(&w.app, method, &uri, body).await;
+            assert_eq!(
+                code,
+                StatusCode::GATEWAY_TIMEOUT,
+                "{status} {method}: {answer}"
+            );
+            assert_eq!(answer["code"], json!("uncertain"), "{status} {method}");
+            assert_eq!(w.events().await, before, "{status} {method} changed a row");
+        }
+    }
+    assert!(
+        audit(&w).iter().all(|(_, _, detail)| detail
+            .as_deref()
+            .is_some_and(|d| d.starts_with("failed:uncertain"))),
+        "{:?}",
+        audit(&w)
     );
 }
 
@@ -4426,7 +4466,9 @@ async fn a_google_failure_during_a_guest_edit_changes_nothing_here() {
     {
         let mut g = w.google();
         g.read_fail = None;
-        g.write_fail = Some(503);
+        // A refusal Google answered (a 5xx may have happened: see
+        // `a_google_5xx_on_a_write_may_have_happened`).
+        g.write_fail = Some(400);
     }
     let (status, _, _) = send(&w.app, "PATCH", &event_uri("primary", "party"), Some(edit)).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
@@ -4742,8 +4784,8 @@ async fn a_write_whose_answer_is_lost_is_a_504_that_says_it_may_have_happened() 
     assert_eq!(served(&w, "own").await.unwrap()["title"], "Renamed maybe");
     assert!(served(&w, "colored").await.is_none());
     assert!(served(&w, "new-1").await.is_some());
-    // A refusal Google answered is still a refusal.
-    w.google().write_fail = Some(503);
+    // A refusal Google answered (a 4xx) is still a refusal.
+    w.google().write_fail = Some(400);
     let (status, answer, _) = send(
         &w.app,
         "PATCH",

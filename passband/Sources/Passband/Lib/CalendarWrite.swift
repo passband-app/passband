@@ -331,8 +331,12 @@ enum CalendarWrite {
     /// invitation with the same title at the same time is not it.
     static func made(_ body: EventWrite, before: Set<String>, in feed: TimelineFeed?) -> TimelineEvent? {
         let events = feed?.events ?? []
-        if let id = body.id, let byId = events.first(where: { $0.calendar_id == body.calendar_id && $0.id == id }) {
-            return byId
+        // A body with an id is found by that id alone (verify5 Y3): a
+        // lookalike, even the user's own new event from another pane, is not
+        // this one. An older daemon that ignores the id leaves the pane
+        // frozen until it is closed by hand, which is safe.
+        if let id = body.id {
+            return events.first(where: { $0.calendar_id == body.calendar_id && $0.id == id })
         }
         return events.first {
             $0.calendar_id == body.calendar_id && !before.contains(key($0)) && ownedByUser($0)

@@ -519,6 +519,12 @@ impl CalendarApi {
             409 => CallError::Duplicate,
             410 => CallError::Gone,
             429 => CallError::Kind(CalendarErrorKind::Quota),
+            // GOOGLE'S OWN 5xx IS NOT A REFUSAL. Its error guide says a 500 is
+            // "an unexpected error occurred while processing the request", and
+            // a 502 or 503 from its front end says less still: a write that
+            // got one may have been applied (verify5 Y1). A read reports it as
+            // unavailable, exactly as before ([`CallError::kind`]).
+            500..=599 => CallError::Uncertain,
             _ => unavailable,
         })
     }

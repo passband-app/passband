@@ -586,8 +586,9 @@ Wave 4, from the founder using wave 3 on screen:
   status), which leaves the pane editable with one toast per code; and
   everything else, which MAY have happened and is settled as below: a 504,
   any 500, a 502 without `google_refused` (a proxy's own page), no code or
-  an unknown one, a 2xx that would not decode, a transport failure after
-  the request may have left, and `already_creating` (the same create still
+  an unknown one, a 2xx that would not decode, any transport failure not
+  provably before the send (only no host, no connection, no network and a
+  refused TLS handshake count as unsent), and `already_creating` (the same create still
   out, which may yet make it: "This event is still being sent. Check again
   in a moment."). When in doubt, the pane holds.
 - **When Google's answer is lost.** A save or delete that may have happened
@@ -1091,12 +1092,13 @@ promoting a ghost to a real event is later work.
   every synced event (a link without its query, markup as text).
 - **Google first, then local.** Only Google's success changes a row, and what
   is stored is Google's answer (its id, link, organizer and normalized times),
-  not the request. A refusal Google answered (any HTTP error, or a failure to
+  not the request. A refusal Google answered (a 4xx, or a failure to
   connect at all) is a 502, "Google Calendar did not accept the change",
   code `google_refused`, and leaves every row exactly as it was. A write
   that went out and got NO usable answer (a timeout or a lost connection
-  after sending, a 2xx whose body does not read) is different: Google may
-  have made the change. It is a 504, "Google Calendar may have made this
+  after sending, a 2xx whose body does not read, or Google's own 5xx, which
+  its error guide calls "an unexpected error occurred while processing the
+  request") is different: Google may have made the change. It is a 504, "Google Calendar may have made this
   change; refresh before trying again", code `uncertain`, stores nothing,
   and kicks a sync, so the client reloads and shows what Google holds before
   anything is offered again (above all a second "tell guests"). So is a
@@ -1150,12 +1152,15 @@ promoting a ghost to a real event is later work.
   uncertain create it only ever resends the same body to the same calendar.
 - **Settling an uncertain write (app).** After an answer that may have
   happened the app reloads the page up to three times. A create is found by
-  its id, whatever its title came back as; when no event carries the id (a
-  calendar daemon older than ids ignores it and Google picks its own), only
-  by an event that could be nobody else's: on that calendar, not on the page
-  before the send, the user's own (`editable`, and no guest named as another
-  organizer), with the all-day flag, start AND end, and the title (laundered)
-  that were sent. Someone else's invitation with the same title at the same
+  its id ALONE, on the calendar it was sent to, whatever its title came back
+  as: a lookalike, even the user's own new event from another pane, is not
+  it (verify5 Y3), and a calendar daemon older than ids (which ignores the
+  id) leaves the pane frozen until it is closed by hand. Only a create body
+  without an id (none is sent today) falls back to an event that could be
+  nobody else's: on that calendar, not on the page before the send, the
+  user's own (`editable`, and no guest named as another organizer), with
+  the all-day flag, start AND end, and the title (laundered) that were sent.
+  Someone else's invitation with the same title at the same
   time is not it (verify4 X3). An edit is confirmed only when EVERY field it
   changed reads AS SENT: times, the all-day flag and the guests exactly, and
   a title, place or notes equal to what was typed once whitespace is

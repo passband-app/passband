@@ -58,16 +58,24 @@ struct APIError: Error, Sendable {
     static func transport(_ error: Error) -> APIError {
         var out = APIError(.network, 0, "cannot reach squelch server")
         let code = (error as? URLError)?.code
-        out.mayHaveArrived = code.map(arrivedCodes.contains) ?? false
+        out.mayHaveArrived = !(code.map(notSentCodes.contains) ?? false)
         return out
     }
 }
 
 extension APIError {
-    /// The transport failures that may have followed the request reaching
-    /// the server (`mayHaveArrived`).
-    static let arrivedCodes: Set<URLError.Code> = [
-        .timedOut, .networkConnectionLost, .badServerResponse, .cannotParseResponse, .zeroByteResource,
+    /// The transport failures that provably happen BEFORE a request is sent:
+    /// no host, no connection, no network, a TLS handshake refused. Every
+    /// other failure (a timeout, a dropped connection, an answer that did
+    /// not read, a cancellation, anything unknown, any error that is not a
+    /// URLError) may have followed the request reaching the server, so a
+    /// calendar write that ends there freezes its pane (verify5 Y2: when in
+    /// doubt, freeze).
+    static let notSentCodes: Set<URLError.Code> = [
+        .badURL, .unsupportedURL, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+        .notConnectedToInternet, .appTransportSecurityRequiresSecureConnection, .secureConnectionFailed,
+        .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateNotYetValid,
+        .serverCertificateHasUnknownRoot, .clientCertificateRejected, .clientCertificateRequired,
     ]
 }
 

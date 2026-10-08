@@ -92,6 +92,11 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         guard let route = PushRoute(userInfo: request.content.userInfo) else {
             return deliver(request.content)
         }
+        // This request's own content, for the no-event fallback below. Not
+        // read back from `original`, which a later request on the same
+        // instance would have replaced. Unsafe only to the checker: the
+        // content is an immutable snapshot and nothing here mutates it.
+        nonisolated(unsafe) let fallback = request.content
         let task = Task { [weak self] in
             // BOTH CALLS AT ONCE, because there is one timeout for the pair.
             // Both fetches are STATIC: neither needs the instance, and a child
@@ -107,16 +112,18 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             let (event, count) = await (banner, due)
             guard let self else { return }
             guard let event else {
-                // The push's own content, read back from where it was stored
-                // rather than captured: it is not Sendable, and this task is
-                // not on the thread that received it.
-                guard let fallback = self.lock.withLock({ self.original }) else { return }
                 return self.deliver(Self.badged(fallback, count: count))
             }
             self.deliver(
                 Self.badged(Self.content(for: event, accountId: route.accountId), count: count))
         }
-        lock.withLock { work = task }
+        // Published after launch, so an expiry in between could not cancel
+        // it: if the handler is already spent, cancel the fetch here instead.
+        let spent = lock.withLock { () -> Bool in
+            work = task
+            return handler == nil
+        }
+        if spent { task.cancel() }
     }
 
     /// The app icon's number, stamped onto whatever banner is about to go out.

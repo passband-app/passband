@@ -161,34 +161,35 @@ enum SettingsStore {
 
     /// The protection class of the two connection slots.
     ///
-    /// AFTER FIRST UNLOCK, NOT WHEN UNLOCKED, because the notification
+    /// On iOS, AFTER FIRST UNLOCK, NOT WHEN UNLOCKED, because the notification
     /// extension reads these slots when a push lands — and a push lands on a
     /// locked phone more often than not. Under `WhenUnlocked` every one of those
     /// reads failed, the extension fell back to the relay's content-free alert,
     /// and a locked phone only ever showed "New mail surfaced". This class keeps
-    /// the slots sealed from boot until the first unlock, and never syncs them
-    /// off the device (no `kSecAttrSynchronizable` is set anywhere here). The
-    /// BYOK assistant key does not use it: nothing in the background needs it.
-    static var accessible: CFString { kSecAttrAccessibleAfterFirstUnlock }
+    /// the slots sealed from boot until the first unlock, and THIS DEVICE ONLY
+    /// keeps a bearer token out of backups and off any other phone they are
+    /// restored to. The BYOK assistant key does not use it: nothing in the
+    /// background needs it. The Mac has no extension and keeps its old class.
+    static var accessible: CFString {
+        #if os(iOS)
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        #else
+            kSecAttrAccessibleWhenUnlocked
+        #endif
+    }
 
     /// The safe entry point: runs the (possibly prompting) read on a background
     /// executor so the UI keeps painting.
-    ///
-    /// On iOS a successful read also moves both slots to `accessible`, which is
-    /// how an install that saved its credentials under the old class gets
-    /// upgraded without asking anyone to sign in again. Idempotent and cheap;
-    /// a failure leaves the old class in place and is not worth surfacing.
     static func loadAsync(accountId: UUID) async -> Result<ConnectionSettings?, Error> {
-        await offMain {
-            let result = Result { try load(accountId: accountId) }
-            #if os(iOS)
-                if case .success(.some) = result {
-                    try? Keychain.setAccessible(accessible, account: urlSlot(accountId))
-                    try? Keychain.setAccessible(accessible, account: tokenSlot(accountId))
-                }
-            #endif
-            return result
-        }
+        await offMain { Result { try load(accountId: accountId) } }
+    }
+
+    /// Move one account's slots to `accessible`, for an install that saved
+    /// them under the old class. Throws if either move failed, so the caller
+    /// can try again on a later launch. Off-main callers only.
+    static func adoptAccessible(accountId: UUID) throws {
+        try Keychain.setAccessible(accessible, account: urlSlot(accountId))
+        try Keychain.setAccessible(accessible, account: tokenSlot(accountId))
     }
 
     /// Persist one account's settings into the OS keychain. The token never

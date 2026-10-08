@@ -234,8 +234,15 @@ final class TourController {
     }
 
     func finish() {
+        let firstTime = !Prefs.shared.tourCompleted
         cancel()
         Prefs.shared.tourCompleted = true
+        #if os(macOS)
+            // Whoever just finished the tour for the first time has been shown
+            // this build by the tour itself, and is not owed its release notes
+            // on their second launch.
+            if firstTime { AppStore.shared.whatsNew.meetNewcomer() }
+        #endif
     }
 
     func advancePractice() {

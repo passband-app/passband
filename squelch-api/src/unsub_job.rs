@@ -1144,4 +1144,53 @@ document.getElementById('save').addEventListener('click', async () => {
             .sum();
         assert_eq!(steps, 2, "{usage:?}");
     }
+
+    /// THE PROMPT AGAINST A REAL MODEL, on the awkward preference center the
+    /// driver's own tests use (a hidden native checkbox, an ARIA switch, a
+    /// decoy "Resubscribe", a `confirm()`, a save that is a `fetch`). Spends a
+    /// few small-model calls, so it runs only by hand:
+    /// `ANTHROPIC_API_KEY=... cargo test -p squelch-api live_model -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs a local Chrome and ANTHROPIC_API_KEY; spends real tokens"]
+    async fn live_model_works_a_preference_center_end_to_end() {
+        struct Live(UnsubPageClient);
+        impl Decide for Live {
+            async fn decide(&self, o: &Observation<'_>) -> Option<Step> {
+                eprintln!(
+                    "--- step {} sees ---\n{}\nhistory: {:?}",
+                    o.step, o.page, o.history
+                );
+                let (step, usage) = unsub_agent::next_step(&self.0, o).await;
+                eprintln!("--- model says: {step:?} (usage {usage:?})");
+                Some(step)
+            }
+        }
+        let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY");
+        let model = std::env::var("SQUELCH_NOTIFY_MODEL")
+            .unwrap_or_else(|_| squelch_core::config::Config::default().notify.model);
+        let client = UnsubPageClient::new(
+            reqwest::Client::new(),
+            squelch_core::triage::llm::provider_url(Stage2Provider::Anthropic),
+            key,
+            Stage2Provider::Anthropic,
+            model,
+            squelch_core::config::Config::default().notify.effort,
+        );
+        let chrome = crate::unsub_cdp::tests::chrome().await;
+        let (base, hits) = crate::unsub_cdp::tests::site().await;
+        let mut page = CdpPage::attach(Cdp::connect(&chrome.ws).await.unwrap())
+            .await
+            .unwrap();
+        let url = format!("{base}/prefs");
+        let out = unsub_browser::drive(&mut page, &Live(client), &errand(&url)).await;
+        let hits = hits.lock().unwrap().clone();
+        eprintln!("outcome {out:?}, site saw {hits:?}");
+        assert_eq!(out, Driven::Done);
+        assert_eq!(hits.len(), 1, "one save and no resubscribe: {hits:?}");
+        let sent: serde_json::Value =
+            serde_json::from_str(hits[0].strip_prefix("save ").unwrap()).unwrap();
+        assert_eq!(sent["deals"], false);
+        assert_eq!(sent["news"], false);
+        assert_eq!(sent["partners"], "false");
+    }
 }

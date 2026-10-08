@@ -855,13 +855,13 @@ pub(crate) mod tests {
     use axum::routing::{get, post};
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    type Hits = Arc<Mutex<Vec<String>>>;
+    pub(crate) type Hits = Arc<Mutex<Vec<String>>>;
 
     /// A preference center the way they are actually built: nothing in the
     /// markup but a script, a native checkbox hidden behind a styled label, a
     /// success message present-but-hidden from the start, a `confirm()` on
     /// save, and a save that is a `fetch`, not a form post.
-    const PREFS: &str = r#"<!doctype html><html><head><title>Email [preferences]</title></head><body>
+    pub(crate) const PREFS: &str = r#"<!doctype html><html><head><title>Email [preferences]</title></head><body>
 <div id="app"></div>
 <script>
 setTimeout(() => {
@@ -899,7 +899,7 @@ setTimeout(() => {
     const POPUP: &str = r#"<!doctype html><html><body>
 <a href="/done" target="_blank">Unsubscribe from all</a></body></html>"#;
 
-    async fn site() -> (String, Hits) {
+    pub(crate) async fn site() -> (String, Hits) {
         let hits: Hits = Arc::new(Mutex::new(Vec::new()));
         let app = axum::Router::new()
             .route("/prefs", get(|| async { Html(PREFS) }))

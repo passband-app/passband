@@ -77,8 +77,11 @@ jobs:
     # Two things keep the workspace inside the runner's disk. The hosted
     # ubuntu image ships ~14 GB free on / and something like 25 GB of
     # toolchains this job never touches (.NET, Android, Haskell, CodeQL);
-    # dropping those (in the background, see the first step) is the cheap
-    # half. The other half is debuginfo:
+    # dropping those first is the cheap half. (Not in the background: that was
+    # tried, and an rm competing with the cache restore and clippy for the one
+    # disk freed 5 GB in five minutes where the foreground rm frees it all in
+    # one to two. There is no second disk on this image to build on instead.)
+    # The other half is debuginfo:
     # `cargo test --workspace` links one binary per test target with the whole
     # dependency tree inside it, and at the default `debug = 2` those binaries
     # are several hundred MB each. Line tables keep panic backtraces readable
@@ -88,18 +91,17 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      # The deletion is 40-120 s of pure I/O that nothing before the test
-      # build needs, so it runs in the background behind checkout, toolchain,
-      # cache restore and clippy (two minutes, comfortably longer). Output goes
-      # to a file because the runner holds a step open for as long as anything
-      # still has its stdout. The "disk is free" step below waits for the
-      # marker before the build that actually needs the room.
-      - name: free disk (in the background)
+      # One directory at a time, with the clock and df after each, so the log
+      # says which of these are worth their seconds.
+      - name: free disk
         run: |
-          df -h
-          nohup sh -c 'sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
-            /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; \
-            touch "$RUNNER_TEMP/disk-freed"' > "$RUNNER_TEMP/free-disk.log" 2>&1 &
+          df -h / | tail -1
+          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
+            start=$(date +%s)
+            sudo rm -rf "$d"
+            echo "$d: $(( $(date +%s) - start ))s, $(df -h / | tail -1 | awk '{print $4}') free"
+          done
 
       - uses: actions/checkout@v4
 
@@ -132,15 +134,6 @@ jobs:
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: disk is free
-        run: |
-          for _ in $(seq 180); do
-            [ -e "$RUNNER_TEMP/disk-freed" ] && break
-            sleep 1
-          done
-          [ -e "$RUNNER_TEMP/disk-freed" ] || { cat "$RUNNER_TEMP/free-disk.log"; exit 1; }
-          df -h / | tail -1
 
       # --no-fail-fast so a red PR reports every failing binary, not the first.
       #

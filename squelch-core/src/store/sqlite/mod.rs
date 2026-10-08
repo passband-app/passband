@@ -135,6 +135,14 @@ pub const VEC_DIMS: usize = 384;
 /// error instead of a hang.
 const BUSY_TIMEOUT_MS: u64 = 5_000;
 
+/// Page cache per connection, in SQLite's negative-is-KiB spelling: 32 MB. See
+/// [`SqliteStore::set_pragmas`].
+const CACHE_SIZE_KIB_NEGATED: i64 = -32_000;
+
+/// The WAL is truncated to this after a checkpoint: 64 MB. See
+/// [`SqliteStore::set_pragmas`].
+const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
 static VEC_EXT_INIT: Once = Once::new();
 
 /// Register the statically-linked sqlite-vec (`vec0`) extension on SQLite's
@@ -213,9 +221,45 @@ impl SqliteStore {
     /// file to itself, so it can lose to a process still holding the old mode
     /// open, and a store that quietly stayed on the rollback journal would
     /// reproduce the locking it is here to prevent with nothing to point at.
+    ///
+    /// Two more are per-connection tuning, so they too run on every open:
+    ///
+    /// - `cache_size=-32000` is 32 MB of page cache instead of the 2 MB default,
+    ///   against a file that runs 200 MB to 1 GB on a real mailbox. It is a
+    ///   ceiling, not a reservation: pages are cached as they are read, and an
+    ///   idle connection holds only what it has touched.
+    /// - `journal_size_limit` truncates the WAL back to 64 MB after a
+    ///   checkpoint. Without it the file keeps the high-water mark of the
+    ///   largest transaction ever run (the whole-mailbox FTS rebuild) for the
+    ///   life of the database.
+    ///
+    /// Two that look like they belong here are left at SQLite's defaults ON
+    /// PURPOSE:
+    ///
+    /// - `synchronous` stays FULL. NORMAL is the usual WAL pairing and would
+    ///   save an fsync per commit, but this daemon makes irreversible moves on
+    ///   the strength of its own commits: the scheduled-send claim must be on
+    ///   disk before the Gmail POST (`scheduled_send.rs` re-fires a row that
+    ///   reads `scheduled` after a crash, and only searches for the sent copy
+    ///   when `maybe_sent` says it may exist), and the notify ledger is the
+    ///   dedupe for a push already delivered and a model call already billed.
+    ///   Under NORMAL a power loss inside the OS writeback window could roll
+    ///   either back after the side effect: a mail sent twice. The right shape
+    ///   is NORMAL with those claims synced explicitly, which is a design
+    ///   change, not a pragma.
+    /// - `temp_store` stays FILE. MEMORY would keep the planner's temp b-trees
+    ///   off disk, but in this SQLite it also disables the sorter's spill, so a
+    ///   `CREATE INDEX` over a large table inside `migrate` (the one place a
+    ///   big sort is certain) would hold every key in heap: on a memory-capped
+    ///   tenant pod that is an OOM kill during open, on every restart.
+    ///
+    /// `foreign_keys=ON`, the one other per-connection setting, is applied by
+    /// `schema.sql`'s first line through `execute_batch(SCHEMA)` in `init`.
     fn set_pragmas(conn: &Connection) -> Result<()> {
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+        conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB_NEGATED)?;
+        conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
         Ok(())
     }
 

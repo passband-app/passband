@@ -2537,3 +2537,33 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+/// The per-connection tuning `set_pragmas` applies on every open, asserted on a
+/// FILE-backed store because the journal limit means nothing to `:memory:`.
+/// Each value is read back through the same pragma, so a typo in a name (which
+/// SQLite ignores silently) fails here instead of in production; and the two
+/// settings deliberately left at their defaults are pinned at those defaults,
+/// so adding one back has to argue with the doc on `set_pragmas` first.
+#[test]
+fn open_tunes_the_connection_pragmas() {
+    let dir = std::env::temp_dir().join(format!("squelch-pragmas-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pragmas.db");
+
+    {
+        let store = SqliteStore::open(&path).unwrap();
+        let conn = store.lock().unwrap();
+        let read = |name: &str| -> i64 {
+            conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(read("cache_size"), CACHE_SIZE_KIB_NEGATED);
+        assert_eq!(read("journal_size_limit"), JOURNAL_SIZE_LIMIT_BYTES);
+        // Left alone on purpose: FULL (2) and FILE (0 or 1); see `set_pragmas`.
+        assert_eq!(read("synchronous"), 2, "synchronous must stay FULL");
+        assert_ne!(read("temp_store"), 2, "temp_store must not be MEMORY");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

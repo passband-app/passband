@@ -35,10 +35,12 @@ enum OpenSource: String, Sendable {
     case sitrep, sitrepCard = "sitrep_card", reading, emails, search, browse
     case assistant, deeperSearch = "deeper_search", groups, notification
     case reply, reader, tour
+    /// A ghost's "mail behind it" on the calendar page.
+    case calendar
 }
 
 enum MainView: String, Sendable, Hashable, CaseIterable {
-    case sitrep, emails, auth, rules, groups, usage, settings, process, discovery
+    case sitrep, calendar, emails, auth, rules, groups, usage, settings, process, discovery
 
     /// The TOP rail group — also the 1..N number-key mapping, taken from
     /// POSITION in this array. Usage/Settings are excluded so that adding one
@@ -59,9 +61,34 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// reach a field guide faster than by looking at it.
     static let bottomViews: [MainView] = [.usage, .settings]
 
+    /// THE NUMBER KEYS AS THEY ARE RIGHT NOW: `mainViews`, with Calendar
+    /// second while it is offered (Sitrep 1, Calendar 2, Emails 3 and every
+    /// later page one higher), and exactly `mainViews` while it is not, so
+    /// the gate being closed renumbers nobody. The rule is
+    /// `CalendarGate.numbered`. ⇧C opens the calendar as well, as it did
+    /// before it had a digit.
+    ///
+    /// `calendar` is `AppStore.calendarPageAvailable`, passed in so the rail,
+    /// the menu and the keys ask the gate the same way and move together.
+    static func numberedViews(calendar: Bool) -> [MainView] {
+        CalendarGate.numbered(mainViews, calendar: .calendar, offered: calendar)
+    }
+
+    /// The most digits the keys ever bind: one per numbered page with the
+    /// calendar offered. The last one declines while it is not.
+    static var numberKeyCount: Int { mainViews.count + 1 }
+
+    /// THE TOP RAIL AS DRAWN, each page with the digit that opens it: the
+    /// hint the rail's tooltip prints, in the same order the keys are bound
+    /// in (RootView.globalBindings).
+    static func railViews(calendar: Bool) -> [(view: MainView, key: String)] {
+        numberedViews(calendar: calendar).enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
+    }
+
     var label: String {
         switch self {
         case .sitrep: "Sitrep"
+        case .calendar: "Calendar"
         case .emails: "Emails"
         case .auth: "Auth"
         case .rules: "Rules"
@@ -76,6 +103,7 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     var symbol: String {
         switch self {
         case .sitrep: "gauge.with.dots.needle.33percent"
+        case .calendar: "calendar"
         case .emails: "envelope"
         case .auth: "key"
         case .rules: "slider.horizontal.3"
@@ -312,7 +340,7 @@ struct RefreshError: Equatable, Sendable {
 /// `AppStore.cancelScheduledRow`).
 enum UndoKind: Sendable {
     case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete, schedule,
-        scheduledCancel, skip
+        scheduledCancel, ghostDismiss, skip
 
     /// Whether firing this undo changes anything the sitrep shows, and so
     /// whether `fireUndo` un-hides a resolved id and pulls the poller. The two
@@ -322,7 +350,7 @@ enum UndoKind: Sendable {
     var touchesSitrep: Bool {
         switch self {
         case .archive, .done, .label, .ruleDelete, .groupDelete, .remind: true
-        case .send, .draftDelete, .schedule, .scheduledCancel, .skip: false
+        case .send, .draftDelete, .schedule, .scheduledCancel, .ghostDismiss, .skip: false
         }
     }
 }
@@ -606,7 +634,32 @@ final class AppStore {
     /// The daemon's stats, apart from the bands (see SitrepData): the sync
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
-    var stats: StoreStats?
+    var stats: StoreStats? {
+        didSet {
+            // The calendar gate, out of every poll: written only when it
+            // flips, so its readers (the rail, the Go menu) are not readers
+            // of the stats.
+            let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
+            if open != calendarPageAvailable { calendarPageAvailable = open }
+        }
+    }
+    /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
+    /// number keys, the shortcuts sheet, the assistant's guide and the route
+    /// all read this one property; the rule itself, the daemon's timeline AND
+    /// the `calendar` hidden feature, is `CalendarGate.pageAvailable`.
+    ///
+    /// STORED, and written by `stats`' didSet only when it changes (the
+    /// `statsEpoch` pattern): computed off `stats` it made the rail and the
+    /// Go menu re-evaluate on every poll that changed any count. Off the raw
+    /// `stats`, not `calendarAccess`: it says only whether a page exists,
+    /// never whose calendar is in it.
+    private(set) var calendarPageAvailable = false
+    /// The epoch of the poll that wrote `stats`. `stats` is not wiped on an
+    /// account switch, so until the new mailbox's first poll lands it still
+    /// describes the one just left; anything that must not mix two accounts
+    /// (the calendar grant and its consent link, `calendarAccess`) reads
+    /// `stats` only while this is the live epoch.
+    var statsEpoch: Int?
     var lastRefresh: Date?
     var refreshError: RefreshError?
 
@@ -626,6 +679,70 @@ final class AppStore {
 
     // MARK: sitrep zones — see SitrepZoneCache
     var zones = SitrepZoneCache()
+
+    // MARK: calendar page, see Model/CalendarStore.swift
+    /// The last timeline that landed, held here for the reason the zones are:
+    /// the page is unmounted every time you leave it, and coming back should
+    /// paint the agenda it had rather than a loading line. Replaced only by a
+    /// newer answer; a failed reload keeps it.
+    var calendarFeed: TimelineFeed?
+    /// A load has finished at least once (success or failure) for this
+    /// account, so an empty feed can be told from one still on its way.
+    var calendarLoaded = false
+    /// Agenda or month, and where the month is. Kept here, not in the page,
+    /// for the session: the page is unmounted every time you leave it, and
+    /// coming back should land where you were. `calendarPlace` nil is today.
+    /// The month first (`CalendarViewMode.initial`).
+    var calendarMode: CalendarViewMode = .initial
+    var calendarPlace: MonthPlace?
+    /// The month's levels, deepest last: the selected day's column opened in
+    /// place of the grid (narrow windows only), and the item whose detail is
+    /// showing. Escape closes them in that order (`calendarMonthBack`).
+    var calendarDayOpen = false
+    var calendarMonthItem: String?
+    /// The connect card, while it is up. Its own property, apart from the
+    /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
+    var calendarConnectAsk: CalendarConnectAsk?
+    /// Since Connect was last pressed, and for which account: the page says
+    /// it is waiting for Google until the grant shows up on the stats poll or
+    /// the consent session has certainly died (`CalendarGate.connectWaitWindow`).
+    var calendarConnectWait: CalendarConnectWait?
+    /// A self-host daemon has been asked for a consent link and has not
+    /// answered yet: Connect does nothing meanwhile, so one press is one tab.
+    var calendarConnectStarting = false
+    /// The event pane, while it is open (`CalendarEditorRequest`): which
+    /// event, and what its fields opened with. A PANE beside the page, like
+    /// the composer (Views/CalendarEventPane.swift), so it is NOT in
+    /// `modalOverlayOpen`: nothing blurs and the month beside it stays live.
+    /// Written only on open and close, so the shell may read it
+    /// (`eventPaneOpen`).
+    var calendarEditor: CalendarEditorRequest?
+    /// The pane's fields as they stand, rewritten on every keystroke. Apart
+    /// from the request for the reason `compose` is apart from `composeOpen`:
+    /// the shell must not re-evaluate while somebody types a title. Read by
+    /// the pane, and by the calendar page for the draft's chip on the grid.
+    var calendarDraft: EventDraft?
+    /// A sweep is live on the day column (drag to create): Escape cancels it
+    /// through this before it does anything else. Bookkeeping, never drawn.
+    @ObservationIgnored var calendarSweepCancel: (() -> Void)?
+    /// The one-question card before an event is deleted from Google, raised
+    /// from the detail pane (the editor asks in its own footer instead).
+    var calendarDeleteAsk: CalendarDeleteAsk?
+    /// A write to Google is out: the card's buttons wait, so one Enter is
+    /// one event.
+    var calendarWriting = false
+    /// Bumped by every timeline request and every local write to the feed;
+    /// an answer is applied only if nothing newer has started since it was
+    /// asked for. Not observed: it is bookkeeping, never drawn.
+    @ObservationIgnored var calendarLoadGeneration = 0
+    /// Bumped by `dropCalendarState` (an account switch, the gate closing):
+    /// a write still out when it was bumped answers into nothing
+    /// (`CalendarWriteTicket`). Bookkeeping, never drawn.
+    @ObservationIgnored var calendarSession = 0
+    /// The event pane was left with something typed in it: the request and
+    /// the draft are kept, the pane is not drawn, and coming back to the
+    /// Calendar page brings it back as it was (`parkEventEditor`).
+    var calendarEditorParked = false
     /// When the last full zone refresh COMPLETED. nil = never loaded. OUT of
     /// the observed struct: it is a TTL stamp, and stamping it invalidated
     /// every zone view once per pass whether or not a row had changed.
@@ -1966,6 +2083,12 @@ final class AppStore {
         // never mounted.
         zonesLoadedAt = nil
         zoneRetryOwed = false
+        // The calendar page's state is the account's: the feed, the item
+        // open in the month, the connect card, the editor and the delete
+        // question were about the last mailbox's calendars, and a write still
+        // out answers into nothing. The mode and the month are the user's,
+        // and stay.
+        dropCalendarState()
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
         // silence of — a pass that has already been disowned.
@@ -2113,6 +2236,9 @@ final class AppStore {
     /// the previous one — assigning `activeView` directly would inherit whatever
     /// the last click set and slide the rail for a keyboard route.
     private func route(to view: MainView, viaPointer: Bool = false) {
+        // A route to a calendar page that is not offered (the gate, a history
+        // entry from before it closed) lands on the sitrep instead.
+        let view = view == .calendar && !calendarPageAvailable ? .sitrep : view
         // On change only: the repeat-press no-op in setView re-routes to the
         // same view, and that is not a navigation worth an event.
         if view != activeView { Analytics.screen(view.rawValue) }
@@ -2129,6 +2255,7 @@ final class AppStore {
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
         guard !RehearsalMode.isEnabled || view == .sitrep else { return }
+        guard view != .calendar || calendarPageAvailable else { return }
         // Navigating ANYWHERE dismisses an open thread viewer: the rail is visible
         // beside it, so a click there means "leave this email", not "change the
         // page underneath the overlay". Through closeThread() so the reader's
@@ -2448,8 +2575,8 @@ final class AppStore {
     /// True while a modal owns the screen; the surfaces under it blur so the modal
     /// reads as focus rather than as a new page. Toasts are deliberately absent (a
     /// toast must never defocus the app), as are the side panels, the thread
-    /// viewer, and the compose pane — those are surfaces you work beside, not
-    /// overlays on one. The reader's `inlineReply` is absent for the same reason:
+    /// viewer, the compose pane and the calendar's event pane: those are
+    /// surfaces you work beside, not overlays on one. The reader's `inlineReply` is absent for the same reason:
     /// it is part of the viewer, and blurring the email you are answering would
     /// be absurd.
     /// The tour joins on `wantsBlur` alone: its three talking steps are modals
@@ -2461,7 +2588,8 @@ final class AppStore {
             || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
-            || reconnectAsk != nil || discardAsk != nil
+            || reconnectAsk != nil || discardAsk != nil || calendarCardUp
+            || calendarDeleteAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 
@@ -3583,6 +3711,9 @@ final class AppStore {
     }
 
     func openCompose(_ state: ComposeState) {
+        // ONE PANE AT A TIME: the composer and the calendar's event pane
+        // claim the same half of the window (`yieldEventPaneToCompose`).
+        guard yieldEventPaneToCompose() else { return }
         var next = state
         // Seeded HERE rather than by the caller, so every way into a composer
         // starts at the account's default and none can forget to.
@@ -3649,6 +3780,9 @@ final class AppStore {
             }
             return
         }
+        // Asked here as well as in `openCompose`: a composer the event pane
+        // refused must not go looking for a draft to restore into nothing.
+        guard yieldEventPaneToCompose() else { return }
         let state = ComposeState()
         openCompose(state)
         let opened = state.page

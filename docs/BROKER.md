@@ -199,9 +199,11 @@ domain: scheme `https`, host exactly `accounts.google.com`, path exactly
 `/callback` URL, `state` == `session_id`, `response_type` == `code`,
 `code_challenge` present, `code_challenge_method` == `S256`, `client_id`
 present, and `scope` a non-empty **subset of the scopes squelchd requests**
-(`gmail.readonly`, `gmail.modify`, `gmail.send`, and the optional
-`userinfo.profile` that rides on the read consent: squelch-core's
-`GMAIL_READONLY_SCOPE`, `WRITE_SCOPES` and `GOOGLE_PROFILE_SCOPE`). A broker
+(`gmail.readonly`, `gmail.modify`, `gmail.send`, the calendar pair
+`calendar.events` and `calendar.calendarlist.readonly` that `squelchd auth
+--calendar` asks for, and the optional `userinfo.profile` that rides on the
+read consent: squelch-core's `GMAIL_READONLY_SCOPE`, `WRITE_SCOPES`,
+`CALENDAR_SCOPES` and `GOOGLE_PROFILE_SCOPE`). A broker
 older than the last of those refuses a current daemon's read registration with
 a 400, and the fix is to update the broker. Without that last check a stranger
 registers a consent URL asking for anything Google will grant (full

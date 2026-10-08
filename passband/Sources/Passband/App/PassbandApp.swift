@@ -75,6 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.
         Notifier.shared.install()
+        // Look at the floating code panel without waiting for a login code:
+        // same posture as PASSBAND_FORCE_TOUR, a launch environment only.
+        if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {
+            LoginCodePanel.shared.show(
+                .init(service: "GitHub", code: code), sender: "GitHub <noreply@github.com>",
+                account: nil, onMissed: {})
+        }
         // Attachment bytes staged for Quick Look are torn down when the panel
         // closes; this is the sweep for the ones a crash or a hard quit stranded.
         StagedAttachment.purgeRoot()
@@ -237,8 +244,10 @@ struct PassbandCommands: Commands {
             // RootView.globalBindings do the routing — which they always did,
             // behind the dispatcher's input guard, so nothing was lost but the
             // menu's ability to advertise them.
-            ForEach(Array(MainView.mainViews.enumerated()), id: \.element) { _, view in
-                Button(view.label) { store.setView(view) }
+            // Calendar rides second when it is offered, and takes the 2:
+            // same list as the rail, from the same gate.
+            ForEach(MainView.railViews(calendar: store.calendarPageAvailable), id: \.view) { row in
+                Button(row.view.label) { store.setView(row.view) }
                     .disabled(blocked)
             }
             Divider()

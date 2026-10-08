@@ -1,6 +1,7 @@
 # Google OAuth verification
 
-Passband requests two **restricted** Gmail scopes. Until Google verifies the
+Passband requests two **restricted** Gmail scopes (and, optionally, two
+sensitive Google Calendar scopes; see the table below). Until Google verifies the
 project, consent is capped at 100 Google accounts, forever, and nothing else
 moves that number. This is the record of what the submission says, what it is
 blocked on, and what a reviewer will find if they look.
@@ -88,6 +89,8 @@ finding.
 | `https://www.googleapis.com/auth/userinfo.email` | Sensitive |
 | `https://www.googleapis.com/auth/userinfo.profile` | Non-sensitive |
 | `openid` | — |
+| `https://www.googleapis.com/auth/calendar.events` | Sensitive (confirm at filing). **Optional**: requested only by the calendar grant |
+| `https://www.googleapis.com/auth/calendar.calendarlist.readonly` | Sensitive (confirm at filing). **Optional**: requested only by the calendar grant |
 
 `userinfo.profile` is requested and never required: it feeds the account's name
 and photo in the client (`squelch-core/src/sync/profile.rs`), read through the
@@ -99,6 +102,16 @@ The constants are pinned in `squelch-core/src/config.rs` and re-pinned in
 `squelch-broker/src/validate.rs`; the signup floor is tested in
 `squelch-control/tests/signup_flow.rs`. Keep this table and those constants in
 agreement.
+
+The two calendar scopes are never part of signup and never required. They are
+asked for only when the user chooses to connect a calendar: on hosted by
+`signup.passband.app/reconnect?calendar=1`, which asks for the three Gmail
+scopes again plus these two in one consent, and on self-host by `squelchd auth
+--calendar`. A user who unticks them at Google keeps a working mailbox and
+nothing is installed. Every grant flow sends `include_granted_scopes=true`, so
+a later Gmail reconnect does not drop a calendar grant made earlier. Per
+`docs/CALENDAR.md` §8, calendar is filed as an amendment after the Gmail
+submission, once the feature exists to demonstrate.
 
 ### Justifications
 
@@ -155,6 +168,33 @@ otherwise automatic.
 > the user's drafts, which Passband does not need and does not want. This is the
 > minimal choice, not a fallback from one.
 
+**`calendar.events`** (optional)
+
+> Passband shows the user's own calendar beside what it finds in their mail:
+> the events they already have, next to the flights, reservations and meetings
+> their mail mentions, so they can see a day at a glance and know when they are
+> free. It reads events with `events.list` on the primary calendar and on every
+> calendar the user has chosen to show in Google Calendar.
+>
+> `calendar.events.owned` is not sufficient: it covers only calendars the user
+> owns, and the calendars people actually live by are often ones they subscribe
+> to and do not own (a partner's, a team's, a school's). An event the timeline
+> cannot see on a shared calendar is a double booking it cannot warn about.
+> `calendar.readonly` and `calendar.events.readonly` are not sufficient either:
+> later releases let the user add an event Passband found in their mail to their
+> calendar and answer an invitation from the app, and asking for a read scope
+> now would mean a second consent screen for every user later. Passband
+> deliberately does not request `https://www.googleapis.com/auth/calendar`,
+> which would additionally grant creating, deleting and re-sharing whole
+> calendars and changing their settings.
+
+**`calendar.calendarlist.readonly`** (optional)
+
+> Passband reads the list of calendars the user subscribes to, and which of them
+> they have chosen to show, so it reads the same calendars Google Calendar
+> displays and no others. It never changes the list. Without this scope only the
+> primary calendar is read.
+
 ### Demo video
 
 Unlisted on YouTube. Must be in English, and must show all four of: the consent
@@ -186,7 +226,10 @@ reviewer needs one continuous frame proving that client ID granted that consent.
    reviewer sees the change actually landed on Google's side.
 6. **`gmail.send` in use.** Compose a message, send it, and show it arrive in
    the recipient's mailbox and in the sender's Gmail Sent folder.
-7. **Revocation.** `myaccount.google.com/permissions`, showing Passband listed
+7. **Calendar (amendment only).** Once filed: the connect card in the app, the
+   consent screen showing the calendar permissions beside Gmail's, and the
+   calendar page showing real events next to ones found in mail.
+8. **Revocation.** `myaccount.google.com/permissions`, showing Passband listed
    and revocable. Not required, but it answers the question a reviewer is paid
    to ask.
 

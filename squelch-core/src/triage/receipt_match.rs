@@ -22,18 +22,100 @@ pub const MERCHANT_ONLY_WINDOW_DAYS: i64 = 30;
 
 /// Freemail domains that never establish MERCHANT identity by domain alone (two
 /// strangers share `gmail.com`); for these only full from-address equality does.
+/// Calling a domain freemail only ever makes a match stricter, so the list
+/// errs long.
 const FREEMAIL_DOMAINS: &[&str] = &[
     "gmail.com",
     "googlemail.com",
     "yahoo.com",
+    "ymail.com",
+    "rocketmail.com",
     "hotmail.com",
     "outlook.com",
     "live.com",
+    "msn.com",
     "icloud.com",
     "me.com",
+    "mac.com",
     "aol.com",
     "proton.me",
     "protonmail.com",
+    "protonmail.ch",
+    "pm.me",
+    "web.de",
+    "mail.ru",
+    "inbox.ru",
+    "list.ru",
+    "bk.ru",
+    "ya.ru",
+    "qq.com",
+    "163.com",
+    "126.com",
+    "naver.com",
+    "zoho.com",
+    "zohomail.com",
+    "fastmail.com",
+    "fastmail.fm",
+    "hey.com",
+    "tuta.io",
+    "tutamail.com",
+    // Consumer ISPs: every customer mails From the ISP's own domain.
+    "comcast.net",
+    "verizon.net",
+    "att.net",
+    "sbcglobal.net",
+    "bellsouth.net",
+    "cox.net",
+    "charter.net",
+    "spectrum.net",
+    "earthlink.net",
+    "optonline.net",
+    "frontier.com",
+    "windstream.net",
+    "centurylink.net",
+    "shaw.ca",
+    "rogers.com",
+    "telus.net",
+    "sympatico.ca",
+    "btinternet.com",
+    "sky.com",
+    "virginmedia.com",
+    "talktalk.net",
+    "orange.fr",
+    "wanadoo.fr",
+    "free.fr",
+    "sfr.fr",
+    "laposte.net",
+    "t-online.de",
+    "freenet.de",
+    "libero.it",
+    "bigpond.com",
+    "optusnet.com.au",
+    "aim.com",
+    // The mail.com family: free sign-up under each of these.
+    "mail.com",
+    "email.com",
+    "usa.com",
+    "post.com",
+    "consultant.com",
+    "europe.com",
+    "asia.com",
+    "dr.com",
+    "engineer.com",
+    "duck.com",
+];
+
+/// Freemail HOSTS whose registrable domain is not itself freemail: Sign in
+/// with Apple's relay (`privaterelay.appleid.com`) gives every user of every
+/// app an address there, while `appleid.com` alone is Apple's own mail. A
+/// host matches itself and any host under it.
+const FREEMAIL_HOSTS: &[&str] = &["privaterelay.appleid.com"];
+
+/// Freemail brands registered under many country suffixes (`hotmail.co.uk`,
+/// `gmx.de`, `yandex.ru`): a registrable domain whose first label is one of
+/// these is freemail whatever follows it.
+const FREEMAIL_BRANDS: &[&str] = &[
+    "hotmail", "live", "outlook", "yahoo", "gmx", "yandex", "tutanota",
 ];
 
 /// Two-label PUBLIC (registry) suffixes, not registrable domains: `bar.co.uk`
@@ -106,6 +188,28 @@ pub fn registrable_domain(addr: &str) -> Option<String> {
     }
 }
 
+/// Is this registrable domain (from [`registrable_domain`]) a freemail
+/// provider, where the domain says nothing about who sent the mail and only
+/// the full address identifies a sender? Shared with the calendar's sender
+/// scope (`triage::ghost::sender_scope`) so the two never disagree.
+pub(crate) fn is_freemail_domain(registrable: &str) -> bool {
+    FREEMAIL_DOMAINS.contains(&registrable)
+        || registrable
+            .split_once('.')
+            .is_some_and(|(brand, _)| FREEMAIL_BRANDS.contains(&brand))
+}
+
+/// Is the HOST of this address (or this bare host) a freemail host that
+/// [`is_freemail_domain`] cannot see, because its registrable domain is a
+/// real organisation's (`x@privaterelay.appleid.com`)?
+pub(crate) fn is_freemail_host(address: &str) -> bool {
+    let host = address.rsplit('@').next().unwrap_or(address);
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    FREEMAIL_HOSTS
+        .iter()
+        .any(|h| host == *h || host.strip_suffix(h).is_some_and(|rest| rest.ends_with('.')))
+}
+
 /// Minimum normalized-name length for a NAME-ONLY match; shorter keys ("GE")
 /// are too collision-prone to establish identity alone.
 const MIN_NAME_KEY_LEN: usize = 3;
@@ -126,7 +230,8 @@ pub fn merchant_matches(
         registrable_domain(bill_addr),
     ) && rd == bd
     {
-        if FREEMAIL_DOMAINS.contains(&rd.as_str()) {
+        if is_freemail_domain(&rd) || is_freemail_host(receipt_addr) || is_freemail_host(bill_addr)
+        {
             if receipt_addr.eq_ignore_ascii_case(bill_addr) {
                 return true;
             }
@@ -235,6 +340,35 @@ mod tests {
             "landlord@gmail.com",
             None,
             "Landlord@Gmail.com",
+            None
+        ));
+    }
+
+    /// Round 3 (N4): consumer ISPs, the mail.com family and Apple's relay
+    /// are freemail too, so only the identical address is one merchant. The
+    /// relay is matched by host: Apple's own `appleid.com` mail is still one
+    /// organisation.
+    #[test]
+    fn isp_and_relay_addresses_match_only_themselves() {
+        for (a, b) in [
+            ("alice@comcast.net", "bob@comcast.net"),
+            ("alice@verizon.net", "bob@verizon.net"),
+            ("alice@aim.com", "bob@aim.com"),
+            ("alice@mail.com", "bob@mail.com"),
+            ("alice@optusnet.com.au", "bob@optusnet.com.au"),
+            ("x1@privaterelay.appleid.com", "x2@privaterelay.appleid.com"),
+            ("x1@privaterelay.appleid.com", "no_reply@appleid.com"),
+        ] {
+            assert!(!merchant_matches(a, None, b, None), "{a} {b}");
+            assert!(merchant_matches(a, None, &a.to_uppercase(), None), "{a}");
+        }
+        assert!(is_freemail_host("x@PrivateRelay.AppleID.com."));
+        assert!(!is_freemail_host("no_reply@appleid.com"));
+        assert!(!is_freemail_host("x@notprivaterelay.appleid.com"));
+        assert!(merchant_matches(
+            "no_reply@appleid.com",
+            None,
+            "billing@id.appleid.com",
             None
         ));
     }

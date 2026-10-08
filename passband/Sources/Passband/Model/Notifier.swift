@@ -110,6 +110,56 @@ final class Notifier {
         // (`EventBanner.routing`) and a future caller that forgets to consult it
         // must fail closed rather than leak an auth arrival into the thread lane.
         guard case .threadBanner = EventBanner.routing(for: event) else { return }
+        // A fresh login code floats over whatever app is in front instead of
+        // sitting in a corner as a banner (see App/LoginCodePanel.swift). The
+        // banner is what it falls back to when nobody answers the panel, so a
+        // code is never in both places at once and never in neither.
+        #if os(macOS)
+            if let login = EventBanner.loginCode(for: event),
+                EventBanner.floatsLoginCode(
+                    enabled: Prefs.shared.floatLoginCodes,
+                    respectFocus: Prefs.shared.loginCodesRespectFocus,
+                    // Asked only when the setting wants it: the answer is the
+                    // system's to give and nothing else here needs it.
+                    focused: Prefs.shared.loginCodesRespectFocus ? FocusGate.focused : nil)
+            {
+                let accounts = AccountManager.shared.accounts
+                LoginCodePanel.shared.show(
+                    login, sender: event.sender,
+                    account: accounts.count > 1
+                        ? accounts.first { $0.id == accountId }?.displayName : nil,
+                    // Silent: the panel already chimed for this code.
+                    onMissed: { [weak self] in
+                        self?.banner(event, accountId: accountId, silent: true)
+                    })
+                playChime()
+                return
+            }
+        #endif
+        banner(event, accountId: accountId)
+    }
+
+    #if os(macOS)
+        /// Held for the duration of playback: the sound stops when deallocated.
+        private var chime: NSSound?
+
+        /// The chime the banner would have played. A panel that appears over
+        /// another screen's work in silence is one nobody looks up for.
+        private func playChime() {
+            let choice = Prefs.shared.notificationSound
+            if let resource = choice.resourceName,
+                let url = Bundle.main.url(
+                    forResource: resource, withExtension: "caf", subdirectory: "Sounds")
+            {
+                chime = NSSound(contentsOf: url, byReference: true)
+                chime?.play()
+            } else {
+                NSSound.beep()
+            }
+        }
+    #endif
+
+    private func banner(_ event: Event, accountId: UUID, silent: Bool = false) {
         let account = accountId.uuidString
         let copy = EventBanner.copy(for: event)
         let content = UNMutableNotificationContent()
@@ -128,7 +178,7 @@ final class Notifier {
             EventBanner.authKey: event.isAuth,
             EventBanner.accountKey: account,
         ]
-        if copy.sound { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
+        if copy.sound, !silent { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
 
         // The event id as the REQUEST id makes a re-delivered frame (a replay
         // overlapping the live seam after a reconnect) replace its own banner

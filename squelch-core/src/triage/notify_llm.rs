@@ -7,7 +7,7 @@ use crate::triage::llm::{self, ClassifyError, LlmOutcome, LlmRequest};
 use crate::triage::text::{Untrusted, neutralize, truncate_flagged};
 use serde::{Deserialize, Serialize};
 
-pub const PROMPT_VERSION: &str = "notification-v4";
+pub const PROMPT_VERSION: &str = "notification-v5";
 
 const ONE_LINE_RULES: &str =
     "ONE_LINE: one clear sentence, at most 120 characters. No leading label, em dash, or en dash.";
@@ -21,7 +21,10 @@ You are the fast notification assessor for a personal inbox. Read this arrival a
 return the schema object. This decision is independent of filing or full triage. \
 Identify whether the message concerns authentication or account security in is_auth. \
 This includes codes, password resets, sign-in links, verification requests, login \
-alerts, and account security alerts. An invitation to join a workspace, team, group, \
+alerts, and account security alerts. A short-lived code the recipient types in to sign in \
+or to verify their identity is auth whatever the sender calls it (code, PIN, passcode, \
+OTP, security number) and whoever sends it, including a carrier, a store, or a bank. An \
+invitation to join a workspace, team, group, \
 shared document, event, or product is not auth, even when it carries a join link or an \
 invite code: a code is auth only when it verifies an identity or account the recipient \
 already holds. ALL auth qualifies for a notification regardless of \
@@ -444,5 +447,9 @@ mod tests {
         // verification. A code is auth only for an account already held.
         assert!(a.contains("invite code"));
         assert!(a.contains("invite or referral or promo codes"));
+        // A UPS identity-verification PIN went out as ordinary mail: the word
+        // on the page was PIN, and the sender was a carrier.
+        assert!(a.contains("PIN, passcode"));
+        assert!(a.contains("including a carrier"));
     }
 }

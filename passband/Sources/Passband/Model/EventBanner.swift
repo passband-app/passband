@@ -93,6 +93,63 @@ enum EventBanner {
         isTest || isAuth || !(appActive && windowVisible)
     }
 
+    // MARK: - login code
+
+    /// A login code the daemon formatted into an auth event's `one_line`.
+    struct LoginCode: Equatable, Sendable {
+        var service: String
+        /// Exactly as the sender printed it: zeros, case, spaces and hyphens.
+        var code: String
+
+        /// What goes on the pasteboard. "123 456" is how a sender DISPLAYS six
+        /// digits and a verification field takes them without the gap, so an
+        /// all-digit code loses its separators. Anything with a letter in it
+        /// is copied as printed: "ABC-DEF" may well want its hyphen.
+        var pasteable: String {
+            let bare = code.filter { $0 != " " && $0 != "-" }
+            return bare.allSatisfy(\.isNumber) ? bare : code
+        }
+    }
+
+    /// How long after the event a code is still worth putting in front of
+    /// somebody. The daemon only formats a code for mail under ten minutes
+    /// old, but the feed REPLAYS from its cursor after a reconnect, and a lid
+    /// opened in the morning must not be greeted by last night's code.
+    static let loginCodeWindow: TimeInterval = 10 * 60
+
+    private static let loginCodeMarker = " login code is "
+
+    /// The code an auth event carries, or nil. The daemon writes exactly
+    /// "Your <service> login code is <code>" (`LoginCode::notification` in
+    /// squelch-core) and only after checking the code against the mail, so
+    /// this is a parse of our own format and not a guess at somebody's prose.
+    /// The shape checks mirror the daemon's: anything else is a descriptive
+    /// sentence that merely reads like one, and that stays a banner.
+    static func loginCode(for event: Event, now: Date = Date()) -> LoginCode? {
+        guard event.isAuth, event.sealed_kind == nil, event.one_line.hasPrefix("Your "),
+            let marker = event.one_line.range(of: loginCodeMarker),
+            let created = Fmt.date(event.created_at),
+            abs(now.timeIntervalSince(created)) <= loginCodeWindow
+        else { return nil }
+        let service = event.one_line[event.one_line.index(event.one_line.startIndex, offsetBy: 5)..<marker.lowerBound]
+            .trimmingCharacters(in: .whitespaces)
+        let code = String(event.one_line[marker.upperBound...])
+        let symbols = code.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }.count
+        guard !service.isEmpty, service.count <= 32, (4...12).contains(symbols), code.count <= 24,
+            code == code.trimmingCharacters(in: .whitespaces),
+            code.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == " " || $0 == "-") })
+        else { return nil }
+        return LoginCode(service: service, code: code)
+    }
+
+    /// Whether a parsed code floats or stays a banner. `focused` is nil when
+    /// the system will not say (permission never granted, or taken away), and
+    /// that reads as NOT focused: somebody who asked for a code and got
+    /// nothing is worse off than somebody who got a panel during a Focus.
+    static func floatsLoginCode(enabled: Bool, respectFocus: Bool, focused: Bool?) -> Bool {
+        enabled && !(respectFocus && focused == true)
+    }
+
     // MARK: - content mapping
 
     /// The display copy for one event. Pure: same event in, same banner out.

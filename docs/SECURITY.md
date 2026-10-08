@@ -990,3 +990,224 @@ counted per category and written as at most one summary line per minute
 - Do not let the agent door accept a human door credential, or the human door an
   agent JWT.
 - Do not log anything from a token, including on the 401 path.
+
+## 9. Google Calendar
+
+**Invariant.** Calendar data (event titles, places, descriptions, organizers,
+guests' addresses, names and answers, links, calendar names) is human-door data: served on `GET /client/timeline` (and
+in the answer to the user's own write) and nowhere else, never in a log line,
+never in a triage prompt. Nothing calendar-related is on `/mcp` or
+`/client/agent/*`. The daemon writes to a calendar only when the user creates,
+edits or deletes one event from the human door; nothing writes on its own. Google
+emails an event's guests only when such a write says `notify: true`; no other
+input, default or code path can ask for it.
+
+**Enforcement.**
+- **Three tables, human door only.** `calendar_calendars`, `calendar_events` and
+  `calendar_event_guests` (an event's attendees, deleted with it by a trigger)
+  (`squelch-core/src/store/sqlite/calendar.rs`) are written by the sync loop
+  (`squelch-core/src/gcal/sync.rs`) and, one row at a time after Google accepted
+  it, by the user's own write (`squelch-api/src/calendar_write.rs`); they are read
+  only by `handlers.rs:get_timeline` and those write handlers.
+  Every query is scoped by `account_id`. A log line names a calendar by its
+  position in the pass, never its id, which is usually an address.
+- **Laundered and capped** (`gcal/mod.rs:read_event`). A shared calendar is written
+  by other people, so its text is treated like mail: titles and places lose control,
+  bidi and invisible characters and stop at 200 characters, a meeting link loses
+  its query, an organizer is kept only when it is an address, ids are bounded. At
+  most 25 calendars, 5000 events per calendar (the nearest to now kept), 40 pages of
+  250 per calendar per pass, 8 MB per response, one listing of 5000. Google is asked
+  for less in the first place: a `fields` mask names only what is read, and
+  `maxAttendees=100` bounds the guest list, so an invitation anyone can send never
+  delivers attachments, conference data, a guest's comment or more than 100 guests
+  to the daemon. Of each guest only the address (kept only when it is one), the
+  name (laundered like a title), the answer and two flags are stored; past 100,
+  Google sends the user's entry alone and the event is marked truncated.
+  Its description is read (the app shows it): markup becomes text, each line is
+  laundered like a place, and it stops at 2000 characters.
+- **`html_link` is an allow-list** (`gcal/mod.rs:google_link`): https, a host that is
+  `google.com` or ends in `.google.com`, no userinfo, at most 2048 characters.
+  Anything else is dropped, because the client opens it.
+- **No redirects, no bodies in errors** (`gcal/client.rs`). The client refuses
+  redirects (every request carries a bearer token) and reduces a failure to its
+  kind (`auth`, `quota`, `unavailable`).
+- **Calendar failures stay out of Gmail.** The loop is its own task; no failure of
+  it touches Gmail health or sync.
+- **Sealed mail feeds no ghost** (`store/sqlite/ghosts.rs:ELIGIBLE`, `may_feed`).
+  A calendar ghost is built only from a message that is not sent, not spam and
+  not sealed, where sealed is what the Auth page's `sealed_messages` reads today:
+  a stored decision naming an auth kind (a sign-in alert, a login code), or an
+  access review that is not `allowed` (`restricted`, or still `pending` after the
+  message changed). The retired `triage.sensitivity` column is NOT the test: the
+  agent pipeline no longer writes it. The same predicate runs at reconcile, at
+  rebuild and in SQL at listing time, so a message that becomes sealed after its
+  ghost was built stops serving it at once; a decision that does not parse feeds
+  nothing.
+
+**The user's own writes** (`squelch-api/src/calendar_write.rs`). `POST
+/client/calendar/events`, `PATCH` and `DELETE /client/calendar/events/{calendar_id}/{id}`,
+on the human door only, bearer authed, `no-store`. The order is fixed: the grant,
+the body (title 1 to 200 characters, refused rather than cut; one precision; the
+end after the start; place and description cut to 200 and 2000; all three lose
+control and invisible characters but are otherwise sent as typed, so a link keeps
+its query at Google, while the stored copy is Google's answer laundered by
+`read_event`),
+the calendar (one being read, on which the user is `owner` or `writer`), the
+stored event and the edit guard (`gcal/mod.rs:SyncedEvent::editable`: the user's
+own event, by `organizer.self`, no organizer named at all, or the mailbox's own
+address; it FAILS CLOSED, so an organizer Google names whose address does not
+read, stored as `organizer_unreadable`, and an event whose stored guest list
+marks someone other than this calendar as organizer, are somebody else's), and
+only then Google, through the same `CalendarCredentials` resolver the sync uses,
+with `sendUpdates=none` unless the request asked otherwise (below). Only Google's success
+changes a row, and what is stored is Google's answer read by the sync's own
+`read_event`. A write is never retried. A refusal Google answered is a 502; a
+write that went out and got no usable answer (a timeout or a lost connection after
+sending, a 2xx body that does not read: `CallError::Uncertain`) is a 504 saying
+Google may have made the change, kicks a sync and stores nothing, so the client
+refreshes before offering to send again (a "tell guests" is not repeated on a
+guess). A delete Google answers 404 or 410 found the event gone and removes the
+local row. Event and calendar ids of `.` or `..` (or empty) are refused at read
+and again when the URL is built, because a URL path would read them as "here"
+and "up one". Error bodies are fixed strings that never
+echo the request; logs carry the action and an error kind, never an id. Every
+attempt writes one audit row (`calendar_event_create` / `_edit` / `_delete`,
+actor `client-api`, target `calendar:<calendar_id>/<event_id>`, detail `ok` or the
+reason), never a title, place, description or guest's address. The target DOES
+carry the calendar id, and a calendar id can be an address: the primary calendar
+is stored as `primary`, but a personal calendar someone shared with the user is
+named by its owner's address. Audit rows are human-door data like the rest. The
+row is written even when the client disconnects mid-request: each write's checks,
+Google call and audit run in a task of their own that the handler awaits, so
+dropping the request does not cancel them. The `calendar:` prefix keeps the
+audit listing's join to `messages` (a numeric target) from matching a calendar id
+that starts with digits. The in-app assistant has no tool for any of it.
+
+**Guests: a human-door route can make Google email third parties**
+(docs/CALENDAR.md §8, "Guests, invited by Google"). Since wave 5 the three write
+routes can carry guests, and with `notify: true` Google Calendar sends each guest
+its own invitation, update or cancellation. Passband writes none of that mail and
+sends none through Gmail, but the effect is the same class as sending mail: it
+reaches people outside the account and cannot be undone. What gates it:
+
+- **One switch, default off.** `sendUpdates` is `all` only when the request's
+  `notify` is the JSON value `true` (`?notify=true` on a delete, given once).
+  Absent or `false` is `none`; any other value is a 400, not a guess
+  (`gcal/write.rs:notify`, `notify_query`). The client type that reaches the URL
+  (`gcal/client.rs:Notify`) has two values and defaults to the silent one, and
+  `sendUpdates` is always named, never left to Google's default.
+- **The human door alone.** The three routes are bearer authed on `/client`; no
+  agent route, MCP tool or assistant tool can name a guest or set `notify`, and
+  nothing the daemon does on its own (the sync, triage, ghosts) calls a write.
+- **Whose calendar.** Guests only on the user's own calendar (the primary one, or
+  one they are `owner` of): `gcal/mod.rs:may_invite`. A shared calendar the user
+  can write to cannot be made to invite anyone, nor to mail an update or a
+  cancellation: `notify: true` on an edit or a delete there is a 400
+  (`calendar_write.rs:refuse_notify_unless_own`, "guests can only be told about
+  changes on your own calendar"), refused before Google hears anything. The
+  client offers only the silent controls on such a calendar, with one line
+  saying why.
+- **Whose event.** An existing event's guest list changes only when the event is
+  the user's own, the user organizes it, and the stored list is whole
+  (`SyncedEvent::guest_editable`). Google replaces the attendee array on a patch,
+  so the daemon never sends a list built from a truncated one: it rereads the
+  event's attendees from Google inside the request, refuses if that read is
+  truncated or holds a guest with no address, and hands every kept guest back
+  exactly as read. An edit that names no `guests` sends no `attendees` key.
+- **What a guest can be.** At most 50 per request, each one plain ASCII
+  `local@domain` (no display name, quoting, comment, whitespace or control
+  character), no duplicates, never the owner. The daemon sets no other attendee
+  field and no invitation text; the title, place and description Google puts in
+  its mail are the event's own, typed by the user.
+- **What is audited.** Every attempt's row carries ` guests=<n>
+  notified=<true|false>` after its outcome, on failures too (a write that timed
+  out may have gone through, and is audited `failed:uncertain`), even when the
+  app disconnects mid-request, and never a guest's address. Guests' addresses are in no
+  log line and no error body.
+
+What this does NOT cover: a client that sends `notify: true` when the user did
+not mean it (the client's controls must say what they send, and offer it only
+where the daemon would accept it; the daemon cannot tell intent), and Google's own behaviour with `sendUpdates=none`, which the reference
+hedges ("some emails might still be sent") and which has not been tested against
+a real account.
+
+**What the event pane sends to Apple (client).** The location line of the
+client's event pane suggests places from Apple's MapKit
+(`MKLocalSearchCompleter`, then `MKLocalSearch` for the one picked). The text
+typed into that one field leaves the device for Apple, from the client and
+only once it is two characters long; the title, the times, the notes, the
+calendar and the account do not, the daemon is not involved, and no location
+permission is requested. Google's Places API is not used.
+
+**The token is the union; the slot is the boundary.** Self-host
+`squelchd auth --calendar` stores its token in its own credential slot
+(`CredentialKind::Calendar`). Google unions grants per Cloud project and the consent
+asks with `include_granted_scopes`, so that token carries EVERYTHING this OAuth
+client was granted for the account, Gmail scopes included (`gmail.modify` and
+`gmail.send` if `squelchd auth --write` was ever run). Asking for less cannot
+narrow it; only a separate Cloud project could. What keeps calendar code away from
+mail is the slot and the code paths: the calendar loop loads only the Calendar slot
+(or, without one, the Read slot when it records `calendar.events`) and only calls
+the Calendar API, and no mail path loads the Calendar slot. Hosted is unchanged: the
+control plane seals ONE token into the Read and Write slots, as before, and a
+calendar grant adds `calendar.events` and `calendarlist.readonly` to that one token.
+
+**The loopback consent endpoint (self-host only).** `POST /client/calendar/connect`
+(human door, bearer authed) lets the app's Connect button grant calendar on a
+daemon with no control plane. A daemon that knows a console origin answers 409
+and starts nothing; one with no OAuth client answers 409 too. Otherwise it mints a
+fresh `state` and PKCE pair through `squelch_core::auth::LoopbackConsent`, the
+builder `squelchd auth --calendar` uses, so the URL is the CLI's (calendar scopes,
+`access_type=offline`, `prompt=consent`, `include_granted_scopes=true`,
+`login_hint` set to the configured mailbox). The redirect lands on a listener bound
+to `127.0.0.1` only (port 8847, or `SQUELCH_AUTH_PORT`), which refuses non-loopback
+peers and serves one route, `/`. One consent is pending per daemon: a new call
+replaces it, a matching redirect consumes it, it expires after ten minutes, and
+the listener stops when nothing is pending. A redirect is redeemed only when its
+`state` matches the pending one in constant time; a wrong or stale `state` gets a
+plain page and changes nothing. The code then goes through the same guarded
+exchange as every other consent: the grant must include `calendar.events`, and
+Google's profile must name the configured mailbox (case-insensitive). Any refusal
+stores nothing and shows a page that names no address. A good consent is stored
+in the Calendar slot through the configured backend (keyring on macOS, file
+elsewhere) by the same call the CLI makes, the `granted` cache is dropped, and the
+calendar sync is kicked. Pages carry no scripts and no links, under
+`default-src 'none'`. Logs name the event kind only, never the code, the `state`,
+a token or an address. Anything on this machine can reach the listener while it is
+up, but a code it delivers is useless without the PKCE verifier held in the
+daemon, and only the redirect carrying the pending `state` is redeemed.
+
+**Credentials file writes.** The calendar resolver is a third writer of the
+credentials file beside the Gmail Read and Write stores, so every write goes
+through one read-modify-write (`credentials.rs:update_credentials_file`) under a
+process-wide mutex and an advisory lock on `<credentials file>.lock` (owner-only),
+which also covers `squelchd auth` run beside a running daemon. A writer waits at
+most 10 seconds for the lock and then fails like any other credential write. Each
+write has its own temp name; temp files a crashed writer left are removed after a
+minute.
+
+**What a maintainer must not break.**
+- Do not add a calendar route to the agent door or MCP, or put calendar text in a
+  triage prompt, without a decision recorded in docs/CALENDAR.md §10.
+- Do not log an event's title, place, description, organizer, attendee, link or a
+  calendar id.
+- Do not change a local calendar row before Google accepted the write, retry a
+  write, or audit a write's text or a guest's address.
+- Do not send `sendUpdates=all` from anything but a request whose `notify` is
+  literally `true`, give `Notify` another default or a third value, or let a write
+  leave `sendUpdates` off the URL.
+- Do not build an `attendees` array from stored rows, from a truncated list, or for
+  an edit that did not name `guests`; do not widen `may_invite` past the user's own
+  calendars, or accept `notify: true` on a calendar it refuses; do not let
+  anything derived from mail set guests or `notify`.
+- Do not read an organizer that is present but unreadable as "no organizer"; the
+  edit guard fails closed.
+- Do not report a write whose answer was lost as refused (it may have happened),
+  or run a write's Google call and audit inside the request future alone.
+- Do not gate ghosts on `triage.sensitivity`; use the sealed test
+  `sealed_messages` uses.
+- Do not let a mail path load the Calendar slot, or the calendar loop load the
+  Write slot: the token in either can do more than its job.
+- Do not loosen `google_link`, drop the `fields` mask or `maxAttendees`, or ask
+  for more of an attendee than the mask names in a request whose answer is stored.
+- Do not write the credentials file except through `update_credentials_file`.

@@ -748,6 +748,8 @@ struct NotificationsSection: View {
     /// What the last test banner did, shown until the next one. nil before the
     /// first press — no verdict to report yet.
     @State private var delivered: Bool?
+    /// The system said no when "Respect Do Not Disturb" asked to read the Focus.
+    @State private var focusRefused = false
 
     var body: some View {
         @Bindable var prefs = prefs
@@ -760,6 +762,35 @@ struct NotificationsSection: View {
                     options: NotificationSound.allCases.map { ($0, $0.label) },
                     selection: $prefs.notificationSound)
             }
+            // The panel is an AppKit window over other apps. The phone has
+            // no such place, and its code banners are the system's to draw.
+            #if os(macOS)
+                RowDivider()
+                SettingsRow(
+                    title: "Float login codes",
+                    detail:
+                        "A fresh code appears over whatever app you are in, with a Copy button. It does not take the keyboard. Off, it arrives as a banner."
+                ) {
+                    Toggle("", isOn: $prefs.floatLoginCodes)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                if prefs.floatLoginCodes {
+                    RowDivider()
+                    SettingsRow(
+                        title: "Respect Do Not Disturb",
+                        detail: focusRefused
+                            ? "Passband is not allowed to see your Focus. Allow it in System Settings, Privacy & Security, Focus, then turn this on again."
+                            : "While a Focus is on, codes do not float. They arrive as banners, which your Focus handles like any other."
+                    ) {
+                        Toggle("", isOn: $prefs.loginCodesRespectFocus)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                }
+            #endif
             RowDivider()
             // Three states, because two of them look identical from the outside:
             // a banner that never came because the grant is off, and one that
@@ -774,6 +805,18 @@ struct NotificationsSection: View {
             }
         }
         .onChange(of: prefs.notificationSound) { _, choice in preview(choice) }
+        #if os(macOS)
+            // Turning it on is the moment to ask: a switch that reads on while
+            // the system refuses to say whether a Focus is up would be a lie.
+            .onChange(of: prefs.loginCodesRespectFocus) { _, on in
+                guard on else { return }
+                Task {
+                    let allowed = await FocusGate.request()
+                    focusRefused = !allowed
+                    if !allowed { prefs.loginCodesRespectFocus = false }
+                }
+            }
+        #endif
     }
 
     private var hint: String {

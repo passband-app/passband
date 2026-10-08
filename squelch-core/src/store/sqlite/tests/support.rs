@@ -51,6 +51,10 @@ pub(super) struct TriagedBuilder {
     confident: bool,
     /// Applied through the Stage-1 categorizer by `ingest`, after the row lands.
     category: Option<String>,
+    /// The Date header's offset and the invitation, as ingest captures them.
+    /// Only `ingest` carries them: `upsert` writes the message row alone.
+    date_offset_minutes: Option<i32>,
+    invite_zone: Option<crate::timezone::InviteZone>,
 }
 
 /// A plain inbound message with a neutral triage shape — the base every other
@@ -91,6 +95,8 @@ pub(super) fn triaged(account_id: AccountId, gmail: &str, thread: &str) -> Triag
         ship_extract: false,
         confident: true,
         category: None,
+        date_offset_minutes: None,
+        invite_zone: None,
     }
 }
 
@@ -219,6 +225,19 @@ impl TriagedBuilder {
         self.category = Some(category.to_string());
         self
     }
+    /// The Date header's UTC offset in minutes (ingest only).
+    pub(super) fn date_offset(mut self, minutes: Option<i32>) -> Self {
+        self.date_offset_minutes = minutes;
+        self
+    }
+    /// An invitation organized by `organizer` in `zone` (ingest only).
+    pub(super) fn invite(mut self, organizer: &str, zone: &str) -> Self {
+        self.invite_zone = Some(crate::timezone::InviteZone {
+            organizer: organizer.to_string(),
+            zone: zone.to_string(),
+        });
+        self
+    }
 
     // -- terminals --
     pub(super) fn msg(&self) -> NewMessage {
@@ -259,6 +278,8 @@ impl TriagedBuilder {
             // an ingest was on; the engine's own tests own that decision. NULL
             // is also the shape every pre-existing row has after the migration.
             notify_eligible_at: None,
+            date_offset_minutes: self.date_offset_minutes,
+            invite_zone: self.invite_zone.clone(),
         }
     }
 

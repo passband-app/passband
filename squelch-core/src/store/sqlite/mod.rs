@@ -57,11 +57,13 @@ mod agent_deliveries;
 mod agent_triage;
 mod attention;
 mod audit;
+mod calendar;
 mod contacts;
 pub mod device_tokens;
 mod drafts;
 mod events;
 mod feedback;
+mod ghosts;
 pub mod groups;
 mod messages;
 mod migrate;
@@ -77,6 +79,7 @@ mod specialists;
 mod tests;
 mod tracking;
 mod triage_stages;
+mod zones;
 
 use self::migrate::migrate;
 
@@ -644,6 +647,26 @@ impl Store for SqliteStore {
         self.clear_shipment(account_id, shipment_id, at, policy)
     }
 
+    fn list_ghost_events(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>> {
+        self.list_ghost_events(account_id, from, to)
+    }
+
+    fn patch_ghost_user(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        end: Option<Option<crate::triage::ghost::EventTime>>,
+        state: Option<Option<crate::types::GhostUserState>>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.patch_ghost_user(account_id, ghost_id, end, state, at)
+    }
+
     fn shipments_redetect_cleanup(&self, account_id: AccountId) -> Result<u64> {
         self.shipments_redetect_cleanup(account_id)
     }
@@ -913,6 +936,20 @@ impl Store for SqliteStore {
 
     fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>> {
         self.inbox_unread(account_id)
+    }
+
+    fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT created_at FROM accounts WHERE id = ?1",
+                params![account_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(stamp
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc)))
     }
 
     fn set_inbox_unread(&self, account_id: AccountId, messages: i64, threads: i64) -> Result<()> {

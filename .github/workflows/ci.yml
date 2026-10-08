@@ -96,7 +96,7 @@ jobs:
       # marker before the build that actually needs the room.
       - name: free disk (in the background)
         run: |
-          df -h / | tail -1
+          df -h
           nohup sh -c 'sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
             /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; \
             touch "$RUNNER_TEMP/disk-freed"' > "$RUNNER_TEMP/free-disk.log" 2>&1 &
@@ -123,17 +123,6 @@ jobs:
       # stays what it was.
       - uses: rui314/setup-mold@v1
 
-      # cargo-nextest runs every test target's tests through one scheduler,
-      # process per test, so the slow suites (the 40 s squelch-core unit
-      # binary, the auth flows that sit through real timeouts) overlap instead
-      # of queueing behind each other the way `cargo test` runs them, one
-      # binary at a time. Prebuilt binary, a few seconds; a cargo install
-      # would be minutes. nextest does not run doctests; the workspace has none
-      # that assert anything (every Doc-tests section reports 0 passed).
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-
       # BEFORE clippy on purpose: a formatting diff is the cheapest possible
       # failure and there is no reason to spend a compile discovering it. The
       # toolchain install above carries rustfmt from rust-toolchain.toml, so
@@ -153,8 +142,21 @@ jobs:
           [ -e "$RUNNER_TEMP/disk-freed" ] || { cat "$RUNNER_TEMP/free-disk.log"; exit 1; }
           df -h / | tail -1
 
-      # --no-fail-fast so a red PR reports every failing test, not the first.
+      # --no-fail-fast so a red PR reports every failing binary, not the first.
+      #
+      # Eight test threads on a four-core runner: the slow tests here mostly
+      # sit on a clock (a 30 s token expiry, eight 5 s relay retries, a 7 s
+      # backoff) rather than a core, and libtest runs a binary's tests on
+      # cores-many threads by default, so those waits queued behind each other.
+      # Not cargo-nextest: it was tried (process per test) and the spawn cost
+      # of 3,650 tests on binaries this large doubled the work instead.
       - name: test
-        run: cargo nextest run --workspace --no-fail-fast
+        run: cargo test --workspace --no-fail-fast -- --test-threads=8
         env:
           SQUELCH_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+      - name: disk after
+        if: always()
+        run: |
+          df -h / | tail -1
+          du -sh target

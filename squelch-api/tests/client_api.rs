@@ -14,7 +14,9 @@ use squelch_core::types::{SealedKind, Sensitivity, Tier};
 use tower::ServiceExt;
 
 mod common;
-use common::{Harness, TOKEN, authed, authed_json, body_json, harness, msg, sent_msg, state_with};
+use common::{
+    Harness, TOKEN, authed, authed_json, body_json, calendar_on, harness, msg, sent_msg, state_with,
+};
 
 #[tokio::test]
 async fn missing_token_is_401() {
@@ -5614,6 +5616,74 @@ async fn stats_name_the_mailbox_this_daemon_serves() {
 }
 
 #[tokio::test]
+async fn stats_name_the_person_and_the_photo_door_serves_their_picture() {
+    // Never fetched (a grant without the profile scope): every key is ABSENT
+    // and the photo door is a 404, so the client keeps its initial.
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    for key in ["account_name", "account_given_name", "account_photo"] {
+        assert!(json.get(key).is_none(), "{key} invented");
+    }
+    let resp = app
+        .oneshot(authed("GET", "/client/account/photo"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Fetched: the name rides on stats, and the tag there is the photo's.
+    let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+    let Harness { app, .. } = harness(|store, acct| {
+        let photo = squelch_core::store::AccountPhoto {
+            bytes: vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
+            mime: "image/jpeg".into(),
+            tag: "abc123".into(),
+        };
+        store
+            .set_account_profile(acct, Some("Ada Lovelace"), Some("Ada"), Some(&photo))
+            .unwrap();
+    });
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["account_name"], Value::String("Ada Lovelace".into()));
+    assert_eq!(json["account_given_name"], Value::String("Ada".into()));
+    assert_eq!(json["account_photo"], Value::String("abc123".into()));
+
+    // The photo door is the human door: no token, no picture.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/client/account/photo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = app
+        .oneshot(authed("GET", "/client/account/photo"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/jpeg");
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    // Unversioned URL, so it must never be served stale past a tag change.
+    assert_eq!(resp.headers()["cache-control"], "private, no-cache");
+    assert_eq!(resp.headers()["etag"], "\"abc123\"");
+    assert_eq!(body_bytes(resp).await, jpeg);
+}
+
+#[tokio::test]
 async fn stats_carry_gmail_inbox_unread_only_once_the_sync_loop_has_fetched_it() {
     // Never fetched (old DB, or every fetch so far failed): the key is ABSENT.
     // A zeroed object would read as "your inbox is clear", which is a claim this
@@ -6613,9 +6683,9 @@ async fn triage_config_get_default_shape() {
     assert_eq!(json["thread_daily_cap"], 3);
     assert_eq!(json["sender_daily_cap"], 5);
     assert_eq!(json["global_daily_cap"], 120);
-    assert_eq!(json["agent"]["effective_daily_run_cap"], 1000);
+    assert_eq!(json["agent"]["effective_daily_run_cap"], 10_000);
     assert_eq!(json["agent"]["effective_background_daily_run_cap"], 200);
-    assert_eq!(json["agent"]["reserved_arrival_runs"], 800);
+    assert_eq!(json["agent"]["reserved_arrival_runs"], 9_800);
     assert_eq!(
         json["agent"]["legacy_stage_caps_are_active_ceilings"],
         false
@@ -9188,9 +9258,11 @@ async fn stats_report_a_dead_credential_with_the_link_that_repairs_it() {
     let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
     let json = body_json(resp).await;
     assert_eq!(json["gmail"]["connected"], serde_json::json!(false));
+    // The mailbox rides along as `hint`, URL-encoded, so the control plane
+    // pre-selects it at Google and refuses a consent from any other account.
     assert_eq!(
         json["gmail"]["reconnect_url"],
-        serde_json::json!("https://signup.example/reconnect")
+        serde_json::json!("https://signup.example/reconnect?hint=me%40example.com")
     );
     assert!(
         json["gmail"]["disconnected_since"].as_str().is_some(),
@@ -9213,6 +9285,168 @@ async fn a_self_host_mailbox_is_told_it_is_disconnected_and_offered_no_link() {
     let json = body_json(resp).await;
     assert_eq!(json["gmail"]["connected"], serde_json::json!(false));
     assert!(json["gmail"].get("reconnect_url").is_none());
+}
+
+// --- calendar access on /client/stats ---------------------------------------
+
+/// A credentials file in the daemon's own on-disk shape with one Read token
+/// whose recorded scopes are `scopes`, and the resolver over it.
+fn calendar_resolver(
+    tag: &str,
+    account_id: i64,
+    scopes: Option<&[&str]>,
+) -> (
+    squelch_core::credentials::CalendarCredentials,
+    std::path::PathBuf,
+) {
+    use squelch_core::credentials::{CalendarCredentials, CredentialKind, StoredToken};
+    let path = std::env::temp_dir().join(format!(
+        "squelch-api-calendar-{tag}-{}-{}.json",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let token = StoredToken {
+        access_token: "a".into(),
+        refresh_token: Some("r".into()),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        scopes: scopes.map(|s| s.iter().map(|s| s.to_string()).collect()),
+    };
+    squelch_core::credentials::store_tokens_backend(
+        squelch_core::config::CredentialBackend::File,
+        &path,
+        "me@example.com",
+        &[
+            (CredentialKind::Read, token.clone()),
+            (CredentialKind::Write, token),
+        ],
+    )
+    .unwrap();
+    let resolver = CalendarCredentials::new(
+        account_id,
+        "me@example.com".into(),
+        squelch_core::config::CredentialBackend::File,
+        path.clone(),
+        squelch_core::config::OAuthClientConfig {
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+        },
+    );
+    (resolver, path)
+}
+
+const CAL_EVENTS: &str = squelch_core::config::CALENDAR_EVENTS_SCOPE;
+const READONLY_SCOPE: &str = squelch_core::config::GMAIL_READONLY_SCOPE;
+
+/// HOSTED, NOT GRANTED: the hosted tenant's one token carries only Gmail, so
+/// `granted` is false and the link that grants it names this mailbox.
+#[tokio::test]
+async fn stats_offer_a_hosted_mailbox_the_calendar_link() {
+    let (state, _store, acct) = state_with(|_, _| {});
+    let (resolver, path) = calendar_resolver("hosted-off", acct, Some(&[READONLY_SCOPE]));
+    let app = router(
+        state
+            .with_calendar_credentials(resolver)
+            .with_console_sso_url(Some("https://signup.example/".into()))
+            .with_features(calendar_on()),
+    );
+    let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
+    eprintln!("hosted, not granted: {}", json["calendar"]);
+    assert_eq!(
+        json["calendar"],
+        serde_json::json!({
+            "granted": false,
+            "connect_url": "https://signup.example/reconnect?calendar=1&hint=me%40example.com",
+            "connect_command": null,
+            "self_connect": false,
+        })
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// HOSTED, GRANTED: the same token with calendar on its recorded scopes.
+#[tokio::test]
+async fn stats_report_a_hosted_calendar_grant() {
+    let (state, _store, acct) = state_with(|_, _| {});
+    let (resolver, path) =
+        calendar_resolver("hosted-on", acct, Some(&[READONLY_SCOPE, CAL_EVENTS]));
+    let app = router(
+        state
+            .with_calendar_credentials(resolver)
+            .with_console_sso_url(Some("https://signup.example".into()))
+            .with_features(calendar_on()),
+    );
+    let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
+    eprintln!("hosted, granted: {}", json["calendar"]);
+    assert_eq!(
+        json["calendar"],
+        serde_json::json!({
+            "granted": true,
+            "connect_url": "https://signup.example/reconnect?calendar=1&hint=me%40example.com",
+            "connect_command": null,
+            "self_connect": false,
+        })
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// SELF-HOST: no console origin, so the answer is the command, never a link.
+/// A token stored before scopes were recorded reads as not granted.
+#[tokio::test]
+async fn stats_tell_a_self_host_the_calendar_command() {
+    let (state, _store, acct) = state_with(|_, _| {});
+    let (resolver, path) = calendar_resolver("selfhost", acct, None);
+    let app = router(
+        state
+            .with_calendar_credentials(resolver)
+            .with_features(calendar_on()),
+    );
+    let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
+    eprintln!("self-host: {}", json["calendar"]);
+    assert_eq!(
+        json["calendar"],
+        serde_json::json!({
+            "granted": false,
+            "connect_url": null,
+            "connect_command": "squelchd auth --calendar",
+            "self_connect": true,
+        })
+    );
+    std::fs::remove_file(&path).ok();
+
+    // And a door with no resolver at all answers the same shape, not absence.
+    let Harness { app, .. } = common::calendar_harness(|_, _| {});
+    let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
+    assert_eq!(json["calendar"]["granted"], serde_json::json!(false));
+    assert_eq!(
+        json["calendar"]["connect_command"],
+        serde_json::json!("squelchd auth --calendar")
+    );
+    // With no OAuth client there is nothing to run a consent with.
+    assert_eq!(json["calendar"]["self_connect"], serde_json::json!(false));
+}
+
+/// An address with characters a query string would misread is encoded, and
+/// so cannot add a parameter to the link.
+#[tokio::test]
+async fn the_calendar_link_encodes_the_address() {
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("a+b&calendar=0@example.com").unwrap();
+    let state = ApiState::new(store, acct, TOKEN)
+        .with_console_sso_url(Some("https://signup.example".into()))
+        .with_features(calendar_on());
+    let json = body_json(
+        router(state)
+            .oneshot(authed("GET", "/client/stats"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        json["calendar"]["connect_url"],
+        serde_json::json!(
+            "https://signup.example/reconnect?calendar=1&hint=a%2Bb%26calendar%3D0%40example.com"
+        )
+    );
 }
 
 /// SYNC AND TRIAGE HEALTH ARE ABSENT FROM A DOOR THAT CANNOT SEE THEM, like
@@ -9967,6 +10201,270 @@ async fn person_card_reports_one_address_without_its_sealed_mail() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Ingest one inbound message from `from` dated `days_ago`, stamped with a
+/// `Date` offset of `offset` (`+0530` and so on), through the real pipeline.
+/// Delivered the way Gmail delivers authenticated mail (its own `Received`
+/// above a passing verdict for the From's domain): only authenticated mail
+/// teaches a correspondent's timezone.
+fn ingest_dated(
+    store: &SqliteStore,
+    acct: i64,
+    gmail: &str,
+    from: &str,
+    days_ago: i64,
+    offset: &str,
+) {
+    use squelch_core::config::Stage1Config;
+    use squelch_core::sync::ingest::{RawFetched, ingest};
+    let when = chrono::Utc::now() - chrono::Duration::days(days_ago);
+    let domain = from
+        .rsplit_once('@')
+        .map(|(_, d)| d.trim_end_matches('>'))
+        .unwrap_or_default();
+    let eml = format!(
+        "Received: from mail.{domain} (mail.{domain}. [192.0.2.1]) by mx.google.com with SMTPS id a1\r\n\
+         Authentication-Results: mx.google.com; dkim=pass header.i=@{domain}; dmarc=pass header.from={domain}\r\n\
+         From: {from}\r\nTo: me@example.com\r\nSubject: hi\r\nDate: {} {offset}\r\n\r\nhello\r\n",
+        when.format("%a, %d %b %Y %H:%M:%S")
+    );
+    let fetched = RawFetched {
+        account_id: acct,
+        gmail_msg_id: gmail.to_string(),
+        gmail_thread_id: Some(gmail.to_string()),
+        raw: eml.into_bytes(),
+        internal_date: Some(when),
+        is_sent: false,
+        is_spam: false,
+        account_addr: "me@example.com".to_string(),
+    };
+    let triaged = ingest(
+        &fetched,
+        &Stage1Config::default(),
+        chrono::Utc::now(),
+        |_| false,
+    );
+    store.ingest_message(&triaged).unwrap();
+}
+
+#[tokio::test]
+async fn person_card_carries_the_inferred_timezone_and_put_overrides_it() {
+    // WIRE CONTRACT: the card gains `timezone: {zone, source, confidence,
+    // utc_offset_minutes}`, ABSENT (like the card's other optional parts) when
+    // nothing is known. PUT /client/person/timezone {addr, zone} sets the
+    // user's override, `zone: null` clears it, and both answer
+    // {"timezone": ...|null}: what the card now shows. Both are part of the
+    // `calendar` hidden feature (the flag-off half is the next test).
+    let Harness { app, .. } = common::calendar_harness(|store, acct| {
+        for (i, gmail) in ["g1", "g2", "g3"].into_iter().enumerate() {
+            ingest_dated(
+                store,
+                acct,
+                gmail,
+                "Priya <priya@example.in>",
+                i as i64 + 1,
+                "+0530",
+            );
+        }
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let card = body_json(resp).await;
+    assert_eq!(
+        card["timezone"],
+        serde_json::json!({
+            "zone": "Asia/Kolkata",
+            "source": "offsets",
+            "confidence": "high",
+            "utc_offset_minutes": 330
+        }),
+        "{card}"
+    );
+    // Somebody nothing is known about: absent, not null.
+    let resp = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            "/client/person?addr=nobody%40nowhere.example",
+        ))
+        .await
+        .unwrap();
+    let card = body_json(resp).await;
+    assert!(
+        !card.as_object().unwrap().contains_key("timezone"),
+        "{card}"
+    );
+
+    // The override outranks the inference.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "Priya@Example.in", "zone": "America/Chicago"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let put = body_json(resp).await;
+    assert_eq!(put["timezone"]["zone"], "America/Chicago");
+    assert_eq!(put["timezone"]["source"], "user");
+    assert_eq!(put["timezone"]["confidence"], "high");
+    let chicago = put["timezone"]["utc_offset_minutes"].as_i64().unwrap();
+    assert!(chicago == -300 || chicago == -360, "{put}");
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["timezone"]["source"], "user");
+
+    // Clearing hands the card back to inference.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "priya@example.in", "zone": null}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cleared = body_json(resp).await;
+    assert_eq!(cleared["timezone"]["zone"], "Asia/Kolkata", "{cleared}");
+    assert_eq!(cleared["timezone"]["source"], "offsets");
+    // Clearing for somebody with nothing inferred answers null.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "ann@example.com", "zone": null}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await, serde_json::json!({"timezone": null}));
+
+    // An unknown zone, a non-address, and the account's own address are 400s;
+    // a body without the zone key is not read as "clear".
+    for body in [
+        serde_json::json!({"addr": "priya@example.in", "zone": "Eastern Standard Time"}),
+        serde_json::json!({"addr": "priya@example.in", "zone": "PDT"}),
+        serde_json::json!({"addr": "priya@example.in", "zone": ""}),
+        serde_json::json!({"addr": "priya", "zone": "Asia/Tokyo"}),
+        serde_json::json!({"addr": "Me@Example.com", "zone": "Asia/Tokyo"}),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json("PUT", "/client/person/timezone", body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "priya@example.in"}),
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error(), "{}", resp.status());
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(resp).await["timezone"]["source"],
+        "offsets",
+        "no rejected PUT changed anything"
+    );
+
+    // No token, no write.
+    let resp = app
+        .oneshot(common::json_request(
+            "PUT",
+            "/client/person/timezone",
+            &serde_json::json!({"addr": "priya@example.in", "zone": "Asia/Tokyo"}),
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// THE TIMEZONE IS BEHIND THE `calendar` FLAG. Off, the card carries no
+/// `timezone` key and the override route is 404 (as on main: no such route),
+/// while the inference behind them keeps running at ingest, so turning the
+/// flag on shows a zone at once.
+#[tokio::test]
+async fn the_person_timezone_is_served_and_set_only_with_the_calendar_feature() {
+    let seed = |store: &SqliteStore, acct| {
+        for (i, gmail) in ["g1", "g2", "g3"].into_iter().enumerate() {
+            ingest_dated(
+                store,
+                acct,
+                gmail,
+                "Priya <priya@example.in>",
+                i as i64 + 1,
+                "+0530",
+            );
+        }
+    };
+    let (state, store, acct) = common::state_with(seed);
+    let features = squelch_core::features::Features::none();
+    let app = squelch_api::router(state.with_features(features.clone()));
+    let card = |app: axum::Router| async move {
+        let resp = app
+            .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    };
+    let off = card(app.clone()).await;
+    assert!(
+        !off.as_object().unwrap().contains_key("timezone"),
+        "flag off: no timezone key: {off}"
+    );
+    let put = || {
+        authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "priya@example.in", "zone": "America/Chicago"}),
+        )
+    };
+    let resp = app.clone().oneshot(put()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "flag off: no route");
+    // Inference ran regardless, and nothing was overridden.
+    let zone = store
+        .person_record(acct, "priya@example.in")
+        .unwrap()
+        .timezone;
+    assert_eq!(
+        zone.as_ref().map(|z| (z.zone.as_str(), z.source)),
+        Some(("Asia/Kolkata", squelch_core::timezone::ZoneSource::Offsets)),
+        "{zone:?}"
+    );
+    // On, the same daemon serves and sets it.
+    features.replace_granted([squelch_core::features::CALENDAR]);
+    assert_eq!(card(app.clone()).await["timezone"]["zone"], "Asia/Kolkata");
+    let resp = app.clone().oneshot(put()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(card(app).await["timezone"]["source"], "user");
 }
 
 // --- search: diagnostics, legs and the as-you-type prefix -------------------

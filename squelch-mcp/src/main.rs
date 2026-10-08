@@ -121,6 +121,9 @@ async fn serve_http(addr: SocketAddr) -> anyhow::Result<()> {
         squelch_core::config::Config::load().triage.ranking,
         shutdown.child_token(),
         &auth,
+        // No send pipeline in this binary: it serves the read tools only.
+        // Drafts and sending are offered by `squelchd serve`.
+        None,
     )?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr().unwrap_or(addr);
@@ -151,36 +154,39 @@ async fn serve_http(addr: SocketAddr) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Smoke test: the server constructs and exposes exactly 7 tools, no transport.
+    /// Smoke test: the server constructs with its 10 tools registered, and with
+    /// no send pipeline behind it (this binary) offers only the 7 that do not
+    /// write mail.
     #[test]
-    fn constructs_server_with_seven_tools() {
+    fn constructs_server_and_offers_no_mail_writing_tool() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
         let server = SquelchServer::new(store, "me@localhost").expect("server");
-        assert_eq!(server.tool_count(), 7, "expected exactly 7 MCP tools");
+        assert_eq!(server.tool_count(), 10, "expected exactly 10 MCP tools");
+        let offered = server.offered_tool_names();
+        assert_eq!(offered.len(), 7, "{offered:?}");
+        assert!(
+            !offered
+                .iter()
+                .any(|n| n == "create_draft" || n == "open_draft" || n == "send_email")
+        );
     }
 
-    /// Drafts are human-door only (docs/SECURITY.md §4): the agent door must
-    /// never grow a tool that names them, however many kinds of draft exist.
+    /// The agent door never reaches the draft store, the staged uploads or the
+    /// outbox DIRECTLY (docs/SECURITY.md §4). It may leave a draft or send
+    /// mail when the owner allows it (issue #394), but only by handing a
+    /// composition to the host's `AgentMailer`; it cannot list, read, edit or
+    /// delete a draft, and it holds no way to build or queue a message itself.
     ///
-    /// A NAME CHECK ALONE IS WEAK: a tool called `search` or `get_email` could
-    /// quietly fold drafts (or their staged files) into what it returns, and
-    /// the tool list would look exactly as clean. So the crate's own source is
-    /// read too and must not reach the draft or staged-upload store surface at
-    /// all. The scan matches the store's IDENTIFIERS, case-sensitively, with
-    /// `//` comments (doc comments included) stripped first, so prose that
-    /// merely mentions drafts never trips it. The tool count is `tool_count`'s
-    /// job, not this test's. This test module is cut off before the scan,
-    /// since it has to spell the needles.
+    /// THE TOOL LIST CANNOT SHOW THIS: a tool called `search` or `get_email`
+    /// could quietly fold drafts (or their staged files) into what it returns
+    /// and the list would look exactly as clean. So the crate's own source is
+    /// read and must not name the draft or staged-upload store surface at all.
+    /// The scan matches the store's IDENTIFIERS, case-sensitively, with `//`
+    /// comments (doc comments included) stripped first, so prose that merely
+    /// mentions drafts never trips it. This test module is cut off before the
+    /// scan, since it has to spell the needles.
     #[test]
-    fn no_mcp_tool_touches_drafts() {
-        let store = Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
-        let server = SquelchServer::new(store, "me@localhost").expect("server");
-        let names = server.tool_names();
-        assert!(
-            names.iter().all(|n| !n.to_lowercase().contains("draft")),
-            "an MCP tool names drafts: {names:?}"
-        );
-
+    fn the_mcp_crate_never_reaches_the_draft_store_itself() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut scanned = 0;
         for entry in std::fs::read_dir(&src).expect("read squelch-mcp/src") {
@@ -202,6 +208,7 @@ mod tests {
                 "list_drafts",
                 "draft_by_id",
                 "upsert_draft",
+                "create_agent_draft",
                 "delete_draft",
                 "DraftKey",
                 "outbound_attachment",
@@ -214,7 +221,7 @@ mod tests {
             ] {
                 assert!(
                     !code.contains(needle),
-                    "{} references `{needle}`: the agent door must not reach drafts or the outbox",
+                    "{} references `{needle}`: the agent door reaches drafts and the outbox only through AgentMailer",
                     path.display()
                 );
             }

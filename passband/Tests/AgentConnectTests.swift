@@ -28,6 +28,10 @@ struct AgentConnectTests {
         noEmDashesInCopy()
         hostedMailboxes()
         accessAndTeamCopy()
+        chipOrder()
+        installLinks()
+        newAgentSnippets()
+        brandAssets()
         print("ok: \(checks) agent connect checks passed")
     }
 
@@ -89,9 +93,6 @@ struct AgentConnectTests {
         expect(kinds.contains(.claude), "the sign-in door offers the Claude connector")
         expect(!kinds.contains(.claudeDesktop), "the sign-in door drops the mcp-remote bridge")
         expect(!AgentKind.shown(for: .none).contains(.claude), "the open door does not offer a connector")
-        expect(
-            AgentKind.shown(for: .none) == [.openClaw, .claudeCode, .codex, .cursor, .claudeDesktop, .other],
-            "the open door's list is the one it always had")
 
         let forbidden = ["token", "bearer", "authorization", "api_key", "apikey", "secret", "<", ">", "your-", "xxx", "..."]
         for kind in AgentKind.allCases {
@@ -121,6 +122,9 @@ struct AgentConnectTests {
         expect(AgentKind.openClaw.signIn(for: .signIn) == "openclaw mcp login passband", "OpenClaw login")
         expect(AgentKind.claude.snippet(endpoint: url, auth: .signIn) == url, "a connector takes the address alone")
         expect(AgentKind.cursor.signIn(for: .signIn) == nil, "Cursor signs in from its own UI")
+        expect(AgentKind.chatGPT.snippet(endpoint: url, auth: .signIn) == url, "ChatGPT takes the address alone")
+        expect(AgentKind.hermes.signIn(for: .signIn) == "hermes mcp login passband", "Hermes login")
+        expect(AgentKind.vsCode.signIn(for: .signIn) == nil, "VS Code signs in from its own UI")
     }
 
     /// The self-hosted door's text, pinned to what it was before the sign-in
@@ -264,5 +268,205 @@ struct AgentConnectTests {
         expect(claude.contains("Team or Enterprise"), "the connector covers team plans")
         expect(claude.contains("Organization settings"), "and names where an owner adds it")
         expect(AgentKind.claude.instruction(for: .signIn) == AgentKind.claude.instruction, "one connector instruction")
+    }
+
+    /// The chips each door offers, in order, and the one it opens on. The web
+    /// agents (Claude, ChatGPT) cannot reach a loopback or tailnet address, so
+    /// the self-hosted door never lists them.
+    static func chipOrder() {
+        expect(
+            AgentKind.shown(for: .signIn)
+                == [.claude, .openClaw, .hermes, .muse, .chatGPT, .claudeCode, .codex, .cursor, .vsCode, .other],
+            "sign-in door leads with Claude, OpenClaw and Hermes Agent")
+        expect(
+            AgentKind.shown(for: .none)
+                == [.openClaw, .hermes, .claudeCode, .codex, .cursor, .vsCode, .claudeDesktop, .other],
+            "self-hosted door leads with OpenClaw and Hermes Agent, keeps Claude Desktop")
+        expect(AgentKind.defaultChoice(for: .signIn) == .claude, "the sign-in door opens on Claude")
+        expect(AgentKind.defaultChoice(for: .none) == .openClaw, "the self-hosted door opens on OpenClaw")
+        for web in [AgentKind.claude, .muse, .chatGPT] {
+            expect(!AgentKind.shown(for: .none).contains(web), "\(web) is not offered at the self-hosted door")
+            expect(AgentKind.shown(for: .signIn).contains(web), "\(web) is offered at the sign-in door")
+        }
+        for auth in [AgentDoorAuth.none, .signIn] {
+            let shown = AgentKind.shown(for: auth)
+            expect(Set(shown).count == shown.count, "no chip twice")
+            expect(shown.last == .other, "Other stays last")
+        }
+        expect(Set(AgentKind.shown(for: .none) + AgentKind.shown(for: .signIn)) == Set(AgentKind.allCases), "every agent is offered somewhere")
+    }
+
+    static func installLinks() {
+        // An address with characters that must be encoded: a port, a path,
+        // a query and a space.
+        let odd = "https://alice.passband.email:8443/mcp?x=a b&y=1"
+        let claude = AgentKind.claudeInstallLink(endpoint: odd).absoluteString
+        expect(
+            claude
+                == "https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Passband&connectorUrl=https%3A%2F%2Falice.passband.email%3A8443%2Fmcp%3Fx%3Da%20b%26y%3D1",
+            "Claude link is the documented form, address percent-encoded: \(claude)")
+        let plain = "https://mcp.example.com/"
+        expect(
+            AgentKind.claudeInstallLink(endpoint: plain).absoluteString
+                == "https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Example&connectorUrl=https%3A%2F%2Fmcp.example.com%2F"
+                .replacingOccurrences(of: "Example", with: "Passband"),
+            "Claude link matches the docs' own example")
+        let claudeQuery = URLComponents(url: AgentKind.claudeInstallLink(endpoint: odd), resolvingAgainstBaseURL: false)?
+            .queryItems ?? []
+        expect(claudeQuery.first { $0.name == "connectorUrl" }?.value == odd, "the connector URL decodes to the address")
+
+        let url = "https://alice.passband.email/mcp"
+        expect(
+            AgentKind.claude.action(endpoint: url, auth: .signIn)
+                == AgentAction(label: "Add to Claude", note: nil, kind: .open(AgentKind.claudeInstallLink(endpoint: url))),
+            "Claude's button opens the install link")
+
+        for address in [url, odd, "http://box.tailnet.ts.net:8848/mcp", "http://127.0.0.1:8848/mcp"] {
+            let cursor = AgentKind.cursorInstallLink(endpoint: address).absoluteString
+            let prefix = "cursor://anysphere.cursor-deeplink/mcp/install?name=passband&config="
+            expect(cursor.hasPrefix(prefix), "Cursor link is the documented form: \(cursor)")
+            // Undo exactly what Cursor's generator does: URI-decode, then %2B.
+            let encoded = String(cursor.dropFirst(prefix.count))
+            let base64 = (encoded.removingPercentEncoding ?? "").replacingOccurrences(of: "%2B", with: "+")
+            let json = Data(base64Encoded: base64).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
+            expect(json == ["url": address], "Cursor config decodes to {url: address} for \(address): \(base64)")
+            expect(!encoded.contains("+") && !encoded.contains("/") && !encoded.contains("="), "Cursor config is URI-safe")
+
+            let vscode = AgentKind.vsCodeInstallLink(endpoint: address).absoluteString
+            expect(vscode.hasPrefix("vscode:mcp/install?"), "VS Code link is the documented form")
+            let vsJSON = String(vscode.dropFirst("vscode:mcp/install?".count)).removingPercentEncoding
+                .flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: String] }
+            expect(vsJSON == ["name": "passband", "type": "http", "url": address], "VS Code config decodes for \(address)")
+            for auth in [AgentDoorAuth.none, .signIn] {
+                expect(
+                    AgentKind.cursor.action(endpoint: address, auth: auth).kind
+                        == .open(AgentKind.cursorInstallLink(endpoint: address)),
+                    "Cursor's button opens its link at either door")
+                expect(
+                    AgentKind.vsCode.action(endpoint: address, auth: auth).kind
+                        == .open(AgentKind.vsCodeInstallLink(endpoint: address)),
+                    "VS Code's button opens its link at either door")
+            }
+        }
+        // A '+' in the base64 must survive the round trip Cursor expects.
+        let plusy = "https://a.example/mcp?q=>>>"
+        let plusBase64 = Data(AgentKind.compactJSON(["url": plusy]).utf8).base64EncodedString()
+        expect(plusBase64.contains("+"), "the fixture does produce a '+' in base64")
+        expect(
+            AgentKind.cursorInstallLink(endpoint: plusy).absoluteString.contains("%252B"),
+            "'+' is %2B, then encoded again, as Cursor's generator does")
+
+        let chat = AgentKind.chatGPT.action(endpoint: url, auth: .signIn)
+        expect(chat.kind == .copyAndOpen(URL(string: "https://chatgpt.com/plugins")!), "ChatGPT copies, then opens Plugins")
+        expect(chat.label == "Copy and open ChatGPT", "ChatGPT button label")
+
+        let copies: [(AgentKind, AgentDoorAuth, String)] = [
+            (.openClaw, .signIn, "Copy command"), (.openClaw, .none, "Copy command"),
+            (.claudeCode, .signIn, "Copy command"), (.codex, .none, "Copy command"),
+            (.hermes, .signIn, "Copy config"), (.hermes, .none, "Copy config"),
+            (.claudeDesktop, .none, "Copy config"), (.other, .signIn, "Copy config"),
+            (.cursor, .none, "Copy config"), (.vsCode, .signIn, "Copy config"),
+            (.muse, .signIn, "Copy prompt"),
+        ]
+        for (kind, auth, label) in copies {
+            expect(kind.copyAction(auth: auth) == AgentAction(label: label, note: nil, kind: .copy), "\(kind) copy fallback is \(label)")
+        }
+        for kind in [AgentKind.openClaw, .hermes, .muse, .claudeCode, .codex, .claudeDesktop, .other] {
+            for auth in [AgentDoorAuth.none, .signIn] {
+                expect(kind.action(endpoint: url, auth: auth).kind == .copy, "\(kind) has no link scheme, so it copies")
+            }
+        }
+        expect(AgentKind.cursor.installOpensDesktopApp && AgentKind.vsCode.installOpensDesktopApp, "desktop links")
+        expect(!AgentKind.claude.installOpensDesktopApp, "Claude's link is a web page, fine on a phone")
+    }
+
+    static func newAgentSnippets() {
+        let hosted = "https://alice.passband.email/mcp"
+        expect(
+            AgentKind.hermes.snippet(endpoint: hosted, auth: .signIn) == """
+                mcp_servers:
+                  passband:
+                    url: "\(hosted)"
+                    auth: oauth
+                """, "Hermes sign-in config")
+        let selfHost = "http://box.tailnet.ts.net:8848/mcp"
+        expect(
+            AgentKind.hermes.snippet(endpoint: selfHost, auth: .none) == """
+                mcp_servers:
+                  passband:
+                    url: "\(selfHost)"
+                """, "Hermes open config has no auth line")
+        expect(AgentKind.hermes.check == "hermes mcp test passband", "Hermes check")
+        let ask = AgentKind.muse.snippet(endpoint: hosted, auth: .signIn)
+        expect(ask.contains("URL: \(hosted)\n"), "Muse is told the address on its own line")
+        expect(ask.contains("OAuth"), "Muse is told to sign in, since it asks otherwise")
+        expect(AgentKind.muse.snippetIsPrompt && !AgentKind.muse.isCommand, "Muse's snippet is a message, not a command")
+        expect(AgentKind.muse.signIn(for: .signIn) == nil && AgentKind.muse.check == nil, "Muse has no CLI to name")
+        expect(AgentKind.hermes.signIn(for: .none) == nil, "no Hermes login at the open door")
+        for auth in [AgentDoorAuth.none, .signIn] {
+            expect(
+                AgentKind.vsCode.snippet(endpoint: selfHost, auth: auth) == """
+                    {
+                      "servers": {
+                        "passband": { "type": "http", "url": "\(selfHost)" }
+                      }
+                    }
+                    """, "VS Code config")
+        }
+        let forbidden = ["token", "bearer", "authorization", "api_key", "apikey", "secret", "<", ">", "your-", "xxx", "..."]
+        for kind in [AgentKind.hermes, .muse, .chatGPT, .vsCode] {
+            for auth in [AgentDoorAuth.none, .signIn] {
+                for url in [hosted, selfHost] {
+                    let text = kind.snippet(endpoint: url, auth: auth)
+                    expect(text.contains(url), "\(kind) snippet carries the real address")
+                    for word in forbidden {
+                        expect(!text.lowercased().contains(word), "\(kind) snippet has no placeholder (\(word)): \(text)")
+                    }
+                }
+            }
+        }
+        for kind in AgentKind.allCases {
+            for auth in [AgentDoorAuth.none, .signIn] {
+                let action = kind.action(endpoint: hosted, auth: auth)
+                let copy = [action.label, action.note ?? "", kind.instruction(for: auth)].joined()
+                expect(!copy.contains("\u{2014}"), "no em dash in \(kind) button copy")
+                expect(!action.label.isEmpty, "\(kind) has a button")
+            }
+        }
+    }
+
+    /// Every mark the pane names is in the asset catalog, as a vector file the
+    /// maker published, so a renamed imageset cannot silently drop a logo back
+    /// to its SF Symbol.
+    static func brandAssets() {
+        guard let pane = try? String(contentsOfFile: "Sources/Passband/Views/AgentsSection.swift", encoding: .utf8) else {
+            expect(false, "read the pane")
+            return
+        }
+        let named = try! NSRegularExpression(pattern: #""AgentLogo/([a-z-]+)""#)
+        let names = Set(
+            named.matches(in: pane, range: NSRange(pane.startIndex..., in: pane)).map {
+                String(pane[Range($0.range(at: 1), in: pane)!])
+            })
+        expect(names.count >= 7, "the pane names its marks: \(names.sorted())")
+        let root = "Sources/Passband/AgentLogos.xcassets/AgentLogo"
+        for name in names {
+            let set = "\(root)/\(name).imageset"
+            guard let data = FileManager.default.contents(atPath: "\(set)/Contents.json"),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                expect(false, "\(name) has an imageset")
+                continue
+            }
+            let props = json["properties"] as? [String: Any]
+            expect(props?["preserves-vector-representation"] as? Bool == true, "\(name) stays vector")
+            let images = json["images"] as? [[String: Any]] ?? []
+            expect(!images.isEmpty, "\(name) has a file")
+            for image in images {
+                let file = image["filename"] as? String ?? ""
+                expect(file.hasSuffix(".svg"), "\(name) is an SVG: \(file)")
+                expect(FileManager.default.fileExists(atPath: "\(set)/\(file)"), "\(name)'s \(file) is there")
+            }
+        }
     }
 }

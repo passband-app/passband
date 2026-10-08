@@ -6,6 +6,7 @@ use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2C
 use squelch_core::credentials::{
     CredentialKind, CredentialStore, FileCredentialStore, KeyringCredentialStore,
 };
+use squelch_core::features::Features;
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
 use squelch_core::triage::rule_infer::RuleInferClient;
@@ -108,6 +109,20 @@ pub struct ApiState {
     ///
     /// [`SqliteStore::attach_event_notifier`]: squelch_core::store::SqliteStore::attach_event_notifier
     pub(crate) event_notifier: Option<tokio::sync::broadcast::Sender<i64>>,
+    /// "Show this draft" requests from the agent door (`open_draft`), carried
+    /// to every connected Mac app that asked for them on its event stream
+    /// (`GET /client/events?opens=1`). The payload is a draft id.
+    ///
+    /// DELIBERATELY NOT THE EVENTS LOG. Nothing is persisted and nothing is
+    /// replayed: a request to put something on screen is about now, and a Mac
+    /// that connects an hour later must not have a window thrown at it. Its
+    /// `receiver_count` is also how the agent learns whether anything was
+    /// listening.
+    pub(crate) draft_opens: tokio::sync::broadcast::Sender<i64>,
+    /// When the last open request was let through. HERE, shared by every
+    /// clone of the state, rather than on the mailer: it rations the owner's
+    /// screen, of which there is one per mailbox however many mailers exist.
+    pub(crate) draft_open_clock: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
@@ -144,12 +159,58 @@ pub struct ApiState {
     /// a LINK TARGET and nothing more: no trust flows from here, because whatever
     /// comes back is a pairing code the store adjudicates on its own terms.
     pub(crate) console_sso_url: Option<Arc<str>>,
+    /// The calendar token resolver, which is also how `/client/stats` learns
+    /// whether calendar is granted. `None` when no OAuth client is configured
+    /// (no refresh is possible, so nothing could call the Calendar API) and in
+    /// every test harness that did not attach one; `None` reports
+    /// `calendar.granted: false`. HUMAN DOOR ONLY: nothing on `/mcp` or
+    /// `/client/agent/*` reads it.
+    pub(crate) calendar: Option<Arc<squelch_core::credentials::CalendarCredentials>>,
+    /// The calendar sync loop's kick, behind `POST /client/timeline/refresh`,
+    /// and when each account last kicked it. The stamps live here, shared by
+    /// every clone of the state, so the 30 second floor holds across requests
+    /// and clients: the calendar page opening must not become a way to hammer
+    /// Google. `kick` is `None` when no loop runs (no OAuth client), and the
+    /// endpoint then answers `kicked: false`. HUMAN DOOR ONLY.
+    pub(crate) calendar_refresh: CalendarRefresh,
+    /// Where the user's own calendar writes go: `None` is Google's Calendar
+    /// API ([`squelch_core::gcal::client::API_BASE`]); a test's local fake
+    /// otherwise. Never read from the environment or a config file.
+    pub(crate) calendar_api_base: Option<Arc<str>>,
+    /// How long one calendar write may take in all, Google's token refresh,
+    /// the guest list's reread and the write itself together
+    /// ([`crate::calendar_write::WRITE_DEADLINE`]). Past it the write is
+    /// answered 504, "may have happened". Shorter only in tests.
+    pub(crate) calendar_write_deadline: std::time::Duration,
+    /// The creates naming their own event id that are in flight, as
+    /// (account, calendar, id), shared by every clone: a second create with
+    /// the same key while the first is still running is refused at once
+    /// rather than racing it to Google
+    /// ([`crate::calendar_write::InFlight`]).
+    pub(crate) calendar_creates_in_flight:
+        Arc<std::sync::Mutex<std::collections::HashSet<(AccountId, String, String)>>>,
+    /// The one Google Calendar consent this daemon may have in flight for the
+    /// app's Connect button (`POST /client/calendar/connect`, self-host only),
+    /// and the loopback listener that waits for its redirect. Shared by every
+    /// clone, so a second Connect replaces the first. HUMAN DOOR ONLY.
+    pub(crate) calendar_consent: Arc<crate::calendar_connect::CalendarConsent>,
+    /// The loopback port that consent's listener binds: the headless CLI's
+    /// fixed port, or `SQUELCH_AUTH_PORT`.
+    pub(crate) calendar_consent_port: u16,
+    /// Where that consent's exchange talks to Google. Google's pinned pair in
+    /// production; see [`squelch_core::auth::GoogleEndpoints`].
+    pub(crate) calendar_consent_endpoints: Arc<squelch_core::auth::GoogleEndpoints>,
     /// What the console tells the owner about the agent door (`/mcp`). Set by
     /// squelchd from the mode it resolved at startup; the default, Open, is
     /// the self-host posture and what every test that does not care gets.
     /// Display only: the door's actual auth lives in squelch-mcp, and nothing
     /// here can loosen it.
     pub(crate) agent_door: AgentDoorStatus,
+    /// Who the audit log says performed this state's write actions.
+    /// `client-api` for every request on the human door; `agent` on the copy
+    /// handed to the agent door's mailer ([`ApiState::agent_mailer`]), so the
+    /// shared send pipeline attributes an agent's send to the agent.
+    pub(crate) audit_actor: &'static str,
     /// The process's metrics registry, read by `/client/stats` to answer
     /// whether this mailbox's Gmail credential is currently working.
     ///
@@ -227,6 +288,11 @@ pub struct ApiState {
     /// offers a button that could only fail. HUMAN DOOR ONLY: it spends a quota
     /// and sends mail as the user.
     pub(crate) sharing: Option<Arc<crate::sharing::Sharing>>,
+    /// The hidden features this mailbox has been let into; see
+    /// [`squelch_core::features`]. Nothing is on by default. `/client/stats`
+    /// lists it for the apps, and a handler that gates on one asks
+    /// `state.features().enabled(..)` at the moment it decides.
+    pub(crate) features: Features,
     /// The carrier poller's kick handle plus the carriers it was built over,
     /// behind `POST /client/shipments/poll`. `None` when no poller runs — which
     /// is the resting state of every daemon with no carrier credentials — and
@@ -244,6 +310,49 @@ pub struct ApiState {
     /// and the small model that reads an unsubscribe page. See
     /// [`crate::unsub_job`]. HUMAN DOOR ONLY.
     pub(crate) unsub: crate::unsub_job::UnsubJobs,
+}
+
+/// The loopback port for the self-host calendar consent: `SQUELCH_AUTH_PORT`
+/// when it is a port number, else the headless CLI's fixed port, so one SSH
+/// tunnel serves both.
+fn auth_port_from_env() -> u16 {
+    let default = squelch_core::auth::DEFAULT_HEADLESS_PORT;
+    match std::env::var("SQUELCH_AUTH_PORT") {
+        Ok(raw) if !raw.trim().is_empty() => raw.trim().parse().unwrap_or_else(|_| {
+            eprintln!(
+                "squelch-api: SQUELCH_AUTH_PORT is not a port number; the calendar consent \
+                 listener uses {default}."
+            );
+            default
+        }),
+        _ => default,
+    }
+}
+
+/// The calendar sync kick and its per-account throttle. See
+/// [`ApiState::calendar_refresh`].
+#[derive(Clone, Default)]
+pub(crate) struct CalendarRefresh {
+    pub(crate) kick: Option<Arc<tokio::sync::Notify>>,
+    pub(crate) last_kick:
+        Arc<std::sync::Mutex<std::collections::HashMap<AccountId, std::time::Instant>>>,
+}
+
+impl CalendarRefresh {
+    /// Start a calendar sync now, past the 30 second floor, and restart that
+    /// floor. For a grant that just landed, which is worth a sync whenever the
+    /// page last asked for one. `false` when no sync loop runs.
+    pub(crate) fn kick_now(&self, account: AccountId) -> bool {
+        let Some(kick) = &self.kick else {
+            return false;
+        };
+        self.last_kick
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(account, std::time::Instant::now());
+        kick.notify_one();
+        true
+    }
 }
 
 /// What the human door needs to force a carrier pass: the poller's
@@ -426,6 +535,8 @@ impl ApiState {
             refresh: None,
             spam_refresh: None,
             event_notifier: None,
+            draft_opens: tokio::sync::broadcast::channel(16).0,
+            draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
             shutdown: None,
             worker_clock_skew: chrono::Duration::zero(),
             tracking_base_url: None,
@@ -437,7 +548,16 @@ impl ApiState {
                 crate::auth::DEVICE_AUTH_CONCURRENCY,
             )),
             console_sso_url: None,
+            calendar: None,
+            calendar_refresh: CalendarRefresh::default(),
+            calendar_api_base: None,
+            calendar_write_deadline: crate::calendar_write::WRITE_DEADLINE,
+            calendar_creates_in_flight: Default::default(),
+            calendar_consent: Default::default(),
+            calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
+            calendar_consent_endpoints: Default::default(),
             agent_door: AgentDoorStatus::Open,
+            audit_actor: crate::handlers::ACTION_ACTOR,
             sync_metrics: None,
             gmail_budget: None,
             console_allow_insecure_cookie: false,
@@ -451,6 +571,7 @@ impl ApiState {
             fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
             assistant: None,
             sharing: None,
+            features: Features::none(),
             shipment_poll: None,
             shipment_policy: squelch_core::config::ShipmentListPolicy::default(),
             unsub: crate::unsub_job::UnsubJobs::default(),
@@ -641,6 +762,12 @@ impl ApiState {
         &self.agent_door
     }
 
+    /// A copy of this state whose audit rows are written by `actor`.
+    pub(crate) fn with_audit_actor(mut self, actor: &'static str) -> Self {
+        self.audit_actor = actor;
+        self
+    }
+
     /// The control plane's origin, if console SSO is configured. `None` => the
     /// console renders the pasted-code form only, which is the self-host posture.
     pub(crate) fn sync_metrics(&self) -> Option<&Arc<squelch_core::metrics::SyncMetrics>> {
@@ -649,6 +776,65 @@ impl ApiState {
 
     pub(crate) fn console_sso_url(&self) -> Option<&str> {
         self.console_sso_url.as_deref()
+    }
+
+    /// Attach the calendar token resolver. See [`ApiState::calendar`].
+    pub fn with_calendar_credentials(
+        mut self,
+        calendar: squelch_core::credentials::CalendarCredentials,
+    ) -> Self {
+        self.calendar = Some(Arc::new(calendar));
+        self
+    }
+
+    /// Attach the calendar sync loop's kick handle
+    /// ([`CalendarSync::kick_handle`]), for `POST /client/timeline/refresh`.
+    ///
+    /// [`CalendarSync::kick_handle`]: squelch_core::gcal::sync::CalendarSync::kick_handle
+    pub fn with_calendar_sync_kick(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
+        self.calendar_refresh.kick = Some(kick);
+        self
+    }
+
+    /// Send the user's calendar writes to `base` instead of Google. TESTS
+    /// ONLY, like [`Self::with_calendar_consent_endpoints`].
+    #[doc(hidden)]
+    pub fn with_calendar_api_base(mut self, base: impl Into<Arc<str>>) -> Self {
+        self.calendar_api_base = Some(base.into());
+        self
+    }
+
+    /// A shorter overall deadline on a calendar write. TESTS ONLY.
+    #[doc(hidden)]
+    pub fn with_calendar_write_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.calendar_write_deadline = deadline;
+        self
+    }
+
+    /// The loopback port the self-host calendar consent's listener binds.
+    /// `0` binds an ephemeral port (tests), and the consent URL then carries
+    /// the port that was bound.
+    pub fn with_calendar_consent_port(mut self, port: u16) -> Self {
+        self.calendar_consent_port = port;
+        self
+    }
+
+    /// Point the self-host calendar consent's exchange at `endpoints`. TESTS
+    /// ONLY: production keeps Google's pinned pair, and nothing reads this
+    /// from the environment or a config file.
+    #[doc(hidden)]
+    pub fn with_calendar_consent_endpoints(
+        mut self,
+        endpoints: squelch_core::auth::GoogleEndpoints,
+    ) -> Self {
+        self.calendar_consent_endpoints = Arc::new(endpoints);
+        self
+    }
+
+    /// The calendar token resolver, if one is attached. Slice B's sync and
+    /// `/client/stats` read the grant through this one object.
+    pub fn calendar(&self) -> Option<&Arc<squelch_core::credentials::CalendarCredentials>> {
+        self.calendar.as_ref()
     }
 
     /// Declare that this console is served over plain http, the LAN escape
@@ -710,6 +896,16 @@ impl ApiState {
         self
     }
 
+    /// Where the automatic unsubscribe's browser rung rents its browser
+    /// (`crate::unsub_browser`). `None` and that rung does not exist here.
+    pub(crate) fn with_unsub_browser(
+        mut self,
+        browser: Option<crate::unsub_browser::Browserbase>,
+    ) -> Self {
+        self.unsub.browser = browser.map(Arc::new);
+        self
+    }
+
     /// TEST HOOK: let the automatic unsubscribe's fetcher reach loopback and
     /// any port, so a test can serve the sender's pages itself. Production
     /// never calls this; the SSRF guard in `unsub_fetch` is otherwise absolute.
@@ -740,6 +936,29 @@ impl ApiState {
     pub fn with_sharing(mut self, sharing: Option<crate::sharing::Sharing>) -> Self {
         self.sharing = sharing.map(Arc::new);
         self
+    }
+
+    /// Use `features` as this daemon's hidden-feature set. The handle is
+    /// shared, not copied: whatever refreshes it is seen here.
+    pub fn with_features(mut self, features: Features) -> Self {
+        self.features = features;
+        self
+    }
+
+    /// The hidden features that are on. Clone it to hand a subsystem outside
+    /// this crate the same live set.
+    pub fn features(&self) -> &Features {
+        &self.features
+    }
+
+    /// The loop that keeps [`Self::features`] in step with the control plane,
+    /// or `None` when there is no control plane to ask (every self-host, where
+    /// the only features on are the ones `SQUELCH_FEATURES` pins).
+    pub fn feature_refresher(&self) -> Option<crate::sharing::FeatureRefresher> {
+        Some(crate::sharing::FeatureRefresher {
+            sharing: self.sharing.clone()?,
+            features: self.features.clone(),
+        })
     }
 
     /// The invite minter, if this daemon has one.
@@ -917,7 +1136,11 @@ impl ApiState {
         );
         Ok(Self::new(store, account_id, token)
             .with_console_sso_url(std::env::var("SQUELCH_CONSOLE_SSO_URL").ok())
-            .with_sharing(sharing))
+            .with_calendar_consent_port(auth_port_from_env())
+            .with_sharing(sharing)
+            // Pinned from `SQUELCH_FEATURES`, which no hosted pod sets; what
+            // the control plane grants arrives later, through the refresher.
+            .with_features(Features::from_env()))
     }
 
     /// THE one way a binary turns a loaded [`Config`] into serving state:
@@ -984,6 +1207,9 @@ impl ApiState {
             // The unsubscribe page reader rides the same key and the notify
             // model, billed under its own ledger category.
             .with_unsub_page_reader(UnsubPageClient::from_config(cfg))
+            // The browser rung, for a daemon that was given a Browserbase key.
+            // The key is the whole switch: no key, no rung.
+            .with_unsub_browser(crate::unsub_browser::Browserbase::from_env())
             // The assistant relay resolves only when BOTH the gateway base URL
             // and the assistant key are present; anything less is `None` and
             // the route 404s (see `Stage2Config::resolve_assistant`).
@@ -1022,12 +1248,23 @@ impl ApiState {
         }
 
         Ok(match cfg.oauth_client() {
-            Ok(client) => state.with_write_credentials(
-                cfg.credential_backend,
-                account_email.to_string(),
-                cfg.resolve_credentials_path(),
-                client,
-            ),
+            Ok(client) => {
+                let account_id = state.account_id;
+                state
+                    .with_calendar_credentials(squelch_core::credentials::CalendarCredentials::new(
+                        account_id,
+                        account_email.to_string(),
+                        cfg.credential_backend,
+                        cfg.resolve_credentials_path(),
+                        client.clone(),
+                    ))
+                    .with_write_credentials(
+                        cfg.credential_backend,
+                        account_email.to_string(),
+                        cfg.resolve_credentials_path(),
+                        client,
+                    )
+            }
             Err(_) => {
                 eprintln!(
                     "squelch-api: no OAuth client configured; action endpoints will return 403 \

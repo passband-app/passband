@@ -39,6 +39,78 @@ run_suite calendar-visibility \
   Sources/Passband/Lib/CalendarVisibility.swift \
   Tests/CalendarVisibilityTests.swift
 
+# The calendar page's arithmetic against the wire it reads: which rows are
+# drawn, which day they land on in the user's zone, their order, how solid
+# each is, what folds away, every time string, and the gate. Each is only ever
+# wrong on somebody's screen at the wrong hour, so it is pinned to a fixture
+# week rather than reasoned about.
+run_suite agenda \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Tests/AgendaTests.swift
+
+# The month view's arithmetic: the grid's days in the user's calendar, what
+# each cell lists and what folds into "+N more", spans and their lanes, the
+# unlikely counts, the day column's hours (the night cap, 7am, past midnight,
+# the DST Sundays), the keys' moves, the range the page asks for, the
+# month-first default, and the calendar colours brought into the palette.
+run_suite month-grid \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/MonthGrid.swift \
+  Sources/Passband/Lib/CalendarColor.swift \
+  Tests/MonthGridTests.swift
+
+# The event editor: typed dates and times, what blocks a save, the exact
+# body sent (timed with offsets, all-day with the INCLUSIVE last day), an
+# edit's patch carrying only what moved, the route's path, the daemon's
+# answer laid into the feed, and the wave-3 wire decoding.
+run_suite event-draft \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/EventDraftTests.swift
+
+# Guests on an event (wave 5), the first write that makes Google email other
+# people: how the guests line is read (bare addresses, one per person, the
+# cap), which calendars may invite and when the line is closed, which save
+# controls a draft shows and in what words, that Enter never saves a draft
+# whose save would tell anyone, that `notify` is true only from a control
+# that says so, the bodies on the wire (the whole list on a patch, nothing
+# from a closed line), the delete question by count, a guest's local time,
+# and the wave-5 wire decoding.
+run_suite event-guests \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/EventGuestsTests.swift
+
+# Drag to create on the day column: a press and a drag become a span of time.
+# The snap to the quarter hour, the quarter-hour minimum, dragging upward, the
+# clamp at the day's ends, the folded night's own scale, and what counts as a
+# click rather than a sweep.
+run_suite day-sweep \
+  Sources/Passband/Lib/DaySweep.swift \
+  Tests/DaySweepTests.swift
+
+# The location field's lookup, with a fake where MapKit goes: what is asked
+# and when (debounce, two characters), stale answers dropped, arrows and
+# Enter, Escape closing the list and not the pane, and the rule that typed
+# text is replaced only by a pick.
+run_suite place-lookup \
+  Sources/Passband/Lib/PlaceLookup.swift \
+  Tests/PlaceLookupTests.swift
+
 # The real poller against a cancellation-oblivious transport: mailbox switches
 # must detach old requests before the next mailbox starts warming.
 run_suite sitrep-poller \
@@ -71,6 +143,7 @@ run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Model/APIClient.swift \
   Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \
@@ -104,9 +177,11 @@ run_suite pairing \
 # One file, no dependencies: ReleaseNotes.swift is kept free of SwiftUI and
 # Bundle precisely so this suite and make-changelog.sh can both compile it
 # alone, and so the running version arrives as an argument rather than as
-# whatever bundle the binary happens to sit in.
+# whatever bundle the binary happens to sit in. The iPhone's own table rides
+# along: it is keyed by the phone's version and asks the same rules.
 run_suite release-notes \
   Sources/Passband/Lib/ReleaseNotes.swift \
+  Sources/Passband/Lib/PhoneReleaseNotes.swift \
   Tests/ReleaseNotesTests.swift
 
 # One file, no dependencies at all — SubjectText is kept that way on purpose.
@@ -238,6 +313,13 @@ run_suite share-nudge \
   Sources/Passband/Lib/Platform.swift \
   Sources/Passband/Lib/ShareNudge.swift \
   Tests/ShareNudgeTests.swift
+
+# The discovery ledger: found on the first move, kept on the third distinct
+# day, never regressing, and a blob from another build costing nobody their
+# ring. Foundation only; the UserDefaults shell around it is Discovery.swift.
+run_suite discovery-ledger \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
+  Tests/DiscoveryLedgerTests.swift
 
 # When the iPhone ask fires: two days in, never to somebody whose mailbox has
 # seen the phone app, never on a daemon that has not said, and once.
@@ -380,8 +462,10 @@ run_suite sender-identity \
 # exact binding in another set. That failure abandons a draft, so it is asserted
 # rather than remembered. KeyDispatch.swift is the whole suite: the registry and
 # the algorithm are pure, and only the NSEvent bridge below them is AppKit.
+# PageKeys.swift rides along: the digits and ⇧C exactly as RootView binds them.
 run_suite key-dispatch \
   Sources/Passband/Keys/KeyDispatch.swift \
+  Sources/Passband/Keys/PageKeys.swift \
   Tests/KeyDispatchTests.swift
 
 # The ledger between the live event feed, the 10s poll and the person reading
@@ -446,6 +530,7 @@ run_suite product-guide \
   Sources/Passband/Lib/ShortcutCatalog.swift \
   Sources/Passband/Lib/SettingsSearch.swift \
   Sources/Passband/Lib/ReleaseNotes.swift \
+  Sources/Passband/Lib/PhoneReleaseNotes.swift \
   Sources/Passband/Lib/ProductGuide.swift \
   Tests/ProductGuideTests.swift
 
@@ -474,6 +559,7 @@ run_suite rule-pattern-suggest \
 # The actual onboarding controller with in-memory collaborators: the store
 # stub flips the real RehearsalMode flag the way the real one does.
 run_suite tour-controller \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
   Sources/Passband/Model/PracticeTourStep.swift \
   Sources/Passband/Model/TourController.swift \
   Tests/TourControllerTests.swift
@@ -518,6 +604,19 @@ run_suite apns-environment \
 run_suite capability-probe \
   Sources/Passband/Model/APIError.swift \
   Tests/CapabilityProbeTests.swift
+
+# An agent's draft asked onto the screen: the passband://draft link (untrusted,
+# from whatever opened the URL) and the event-stream frame that carries
+# open_draft. Neither may read as the other, or as a pair link.
+run_suite agent-draft-link \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Tests/AgentDraftLinkTests.swift
+
+# Which hidden features this mailbox has been let into. Off for every doubt:
+# no stats, an old daemon, an empty list.
+run_suite hidden-features \
+  Sources/Passband/Lib/HiddenFeatures.swift \
+  Tests/HiddenFeaturesTests.swift
 
 # Reading groups canonical membership without reconstructing triage from copy.
 run_suite reading \

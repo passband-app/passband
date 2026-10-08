@@ -23,6 +23,7 @@ struct SitrepPollerTests {
         expect(store.stats == nil, "stale response must not populate practice")
         expect(Badge.refreshes == 0, "stale response must not update badge")
         expect(store.lastRefresh == nil, "stale response must not mark a refresh")
+        expect(store.statsEpoch == nil, "stale response must not claim the stats for any epoch")
 
         let joined = Task { await poller.pull() }
         for _ in 0..<100 { await Task.yield() }
@@ -30,6 +31,7 @@ struct SitrepPollerTests {
         api.finish(2)
         _ = await (fresh.value, joined.value)
         expect(store.stats?.total == 2, "fresh fixture response reaches the board")
+        expect(store.statsEpoch == store.epoch, "the stats are stamped with the epoch they were asked under")
         expect(Badge.refreshes == 1, "only the current request has side effects")
 
         // stop() itself protects the store, even without an epoch bump.
@@ -85,6 +87,8 @@ struct Stats: Equatable, Sendable {
     /// Optional, as on the wire: a daemon too old to name its mailbox sends
     /// nothing, and the seed below must compile against that shape.
     var account_email: String? = "practice@example.test"
+    var account_given_name: String?
+    var account_photo: String?
     var sealed = 0
     var bands = Bands()
     var tier_counts: [String: Int] = [:]
@@ -110,6 +114,7 @@ struct APIError: Error { var message: String; var kind: ErrorKind }
 struct RefreshError { var message: String; var kind: ErrorKind }
 @MainActor final class AppStore {
     var stats: Stats?
+    var statsEpoch: Int?
     static let shared = AppStore()
     var connStatus = ConnectionStatus.connected
     var epoch = 0
@@ -148,6 +153,11 @@ struct RefreshError { var message: String; var kind: ErrorKind }
 @MainActor final class Prefs {
     static let shared = Prefs()
     func seedUserName(fromEmail: String?) {}
+    func seedUserName(fromGivenName: String?, email: String?) {}
+}
+@MainActor final class AccountPhotos {
+    static let shared = AccountPhotos()
+    func noteActive(tag: String?) {}
 }
 enum Analytics {
     static func capture(_ event: String) {}

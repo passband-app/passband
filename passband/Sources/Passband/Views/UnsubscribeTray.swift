@@ -56,7 +56,13 @@ private struct UnsubscribeCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: Typo.measure(230), alignment: .leading)
+            #if os(macOS)
+                .frame(maxWidth: Typo.measure(230), alignment: .leading)
+            #else
+                // The phone's card is as wide as the screen lets it be, and the
+                // sentence takes what the trailing control leaves.
+                .frame(maxWidth: .infinity, alignment: .leading)
+            #endif
             trailing
         }
         .padding(.vertical, Space.scaled(9))
@@ -105,8 +111,15 @@ private struct UnsubscribeCard: View {
                     Button {
                         UnsubscribeJobs.shared.finish(item)
                     } label: {
-                        Label("Finish on their site", systemImage: "arrow.up.right")
-                            .labelStyle(.titleAndIcon)
+                        #if os(macOS)
+                            Label("Finish on their site", systemImage: "arrow.up.right")
+                                .labelStyle(.titleAndIcon)
+                        #else
+                            // The sentence beside it already says what needs
+                            // finishing; five words here would leave it none.
+                            Label("Finish", systemImage: "arrow.up.right")
+                                .labelStyle(.titleAndIcon)
+                        #endif
                     }
                     .buttonStyle(.glassProminent)
                     .controlSize(.small)
@@ -143,6 +156,10 @@ private struct UnsubscribeCard: View {
         case "choose_topics": "Their page asks which emails to stop."
         case "needs_browser": "Their page only works in a browser."
         case "link_error": "Their link didn't work from here."
+        case "sign_in": "Their page wants you to sign in first."
+        case "captcha": "Their page wants to check you're human."
+        case "check_email": "They emailed you a link to confirm."
+        case "your_call": "Their page asks something only you can answer."
         default: "We couldn't confirm it went through."
         }
     }

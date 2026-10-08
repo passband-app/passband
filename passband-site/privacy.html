@@ -139,6 +139,16 @@
         </td>
       </tr>
       <tr>
+        <td><code>userinfo.profile</code></td>
+        <td>
+          Read the name and profile photo on your Google account, to greet you
+          by name and show your photo on the account switcher. Optional: you can
+          untick it on Google's consent screen and everything else works. The
+          photo is copied once to your daemon and served to your own devices
+          from there.
+        </td>
+      </tr>
+      <tr>
         <td><code>userinfo.email</code>, <code>openid</code></td>
         <td>
           Confirm which mailbox a token belongs to, and identify your account at
@@ -329,7 +339,9 @@
     <h2>Subprocessors</h2>
     <p>
       These third parties process data on our behalf for the hosted tier. Only
-      Anthropic and our own hosting providers ever handle Google user data.
+      Anthropic and our own hosting providers ever handle the content of your
+      mail. Browserbase receives one thing taken from a message, the sender's
+      unsubscribe link, and only when you ask to unsubscribe from that sender.
     </p>
     <table>
       <tr><th>Provider</th><th>Purpose</th><th>Handles mail content</th></tr>
@@ -339,6 +351,7 @@
       <tr><td>Railway</td><td>Signup, control plane, relays, gateway hosting</td><td>Gateway transit only</td></tr>
       <tr><td>Resend</td><td>Sending invite email</td><td>No</td></tr>
       <tr><td>PostHog</td><td>Product analytics (see below)</td><td>No</td></tr>
+      <tr><td>Browserbase</td><td>A remote browser that finishes an unsubscribe on the sender's page, when you ask to unsubscribe and that page needs one</td><td>No message text. The sender's unsubscribe link, the page it opens, and your email address if the form asks for it. Not recorded</td></tr>
       <tr><td>Apple</td><td>Push notification delivery</td><td>No</td></tr>
     </table>
 

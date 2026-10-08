@@ -110,6 +110,56 @@ final class Notifier {
         // (`EventBanner.routing`) and a future caller that forgets to consult it
         // must fail closed rather than leak an auth arrival into the thread lane.
         guard case .threadBanner = EventBanner.routing(for: event) else { return }
+        // A fresh login code floats over whatever app is in front instead of
+        // sitting in a corner as a banner (see App/LoginCodePanel.swift). The
+        // banner is what it falls back to when nobody answers the panel, so a
+        // code is never in both places at once and never in neither.
+        #if os(macOS)
+            if let login = EventBanner.loginCode(for: event),
+                EventBanner.floatsLoginCode(
+                    enabled: Prefs.shared.floatLoginCodes,
+                    respectFocus: Prefs.shared.loginCodesRespectFocus,
+                    // Asked only when the setting wants it: the answer is the
+                    // system's to give and nothing else here needs it.
+                    focused: Prefs.shared.loginCodesRespectFocus ? FocusGate.focused : nil)
+            {
+                let accounts = AccountManager.shared.accounts
+                LoginCodePanel.shared.show(
+                    login, sender: event.sender,
+                    account: accounts.count > 1
+                        ? accounts.first { $0.id == accountId }?.displayName : nil,
+                    // Silent: the panel already chimed for this code.
+                    onMissed: { [weak self] in
+                        self?.banner(event, accountId: accountId, silent: true)
+                    })
+                playChime()
+                return
+            }
+        #endif
+        banner(event, accountId: accountId)
+    }
+
+    #if os(macOS)
+        /// Held for the duration of playback: the sound stops when deallocated.
+        private var chime: NSSound?
+
+        /// The chime the banner would have played. A panel that appears over
+        /// another screen's work in silence is one nobody looks up for.
+        private func playChime() {
+            let choice = Prefs.shared.notificationSound
+            if let resource = choice.resourceName,
+                let url = Bundle.main.url(
+                    forResource: resource, withExtension: "caf", subdirectory: "Sounds")
+            {
+                chime = NSSound(contentsOf: url, byReference: true)
+                chime?.play()
+            } else {
+                NSSound.beep()
+            }
+        }
+    #endif
+
+    private func banner(_ event: Event, accountId: UUID, silent: Bool = false) {
         let account = accountId.uuidString
         let copy = EventBanner.copy(for: event)
         let content = UNMutableNotificationContent()
@@ -128,7 +178,7 @@ final class Notifier {
             EventBanner.authKey: event.isAuth,
             EventBanner.accountKey: account,
         ]
-        if copy.sound { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
+        if copy.sound, !silent { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
 
         // The event id as the REQUEST id makes a re-delivered frame (a replay
         // overlapping the live seam after a reconnect) replace its own banner
@@ -385,32 +435,55 @@ final class Notifier {
 
 /// The center's delegate, retained by `Notifier.shared`.
 ///
-/// Deliberately NOT main-actor isolated: these callbacks are protocol
-/// requirements with no isolation of their own, so each method hops to the main
-/// actor carrying a plain `String?` — `[AnyHashable: Any]` is not Sendable and
-/// must be read on this side.
+/// COMPLETION-HANDLER METHODS, NOT THE ASYNC OVERLOADS. The async forms of
+/// these two requirements are nonisolated, so Swift runs them on the global
+/// executor and calls the system's completion handler from a background
+/// thread. AppKit tolerates that; UIKit does not — it raises "Call must be
+/// made on main thread" and a tapped banner killed the phone app on launch.
+/// The completion forms are delivered on the main queue, so each method reads
+/// the payload, does its main-actor work, and answers, all on that queue.
+///
+/// Not main-actor isolated as a class: the protocol has no isolation of its
+/// own, and an isolated conformance would trap rather than recover if a
+/// callback ever arrived elsewhere. `onMain` hops instead.
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter, willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        let route = notification.request.content.userInfo[EventBanner.routeKey] as? String
-        let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
-        let (active, visible) = await MainActor.run {
-            #if os(macOS)
-                (NSApp.isActive, MainWindow.find()?.isVisible == true)
-            #else
-                // Off macOS the banner always wins until there is a real
-                // foreground check: a suppressed notification is a lost one.
-                (false, false)
-            #endif
+    /// Run `work` on the main actor: inline when already on the main thread
+    /// (the documented case), otherwise queued there rather than trapping.
+    private func onMain(_ work: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(work)
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated(work) }
         }
-        return Notifier.presentation(
-            appActive: active, windowVisible: visible, isTest: route == EventBanner.testRoute, isAuth: isAuth)
     }
 
     func userNotificationCenter(
-        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
-    ) async {
+        _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+        withCompletionHandler completionHandler:
+            @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        let route = notification.request.content.userInfo[EventBanner.routeKey] as? String
+        let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
+        nonisolated(unsafe) let done = completionHandler
+        onMain {
+            #if os(macOS)
+                let (active, visible) = (NSApp.isActive, MainWindow.find()?.isVisible == true)
+            #else
+                // Off macOS the banner always wins until there is a real
+                // foreground check: a suppressed notification is a lost one.
+                let (active, visible) = (false, false)
+            #endif
+            done(
+                Notifier.presentation(
+                    appActive: active, windowVisible: visible,
+                    isTest: route == EventBanner.testRoute, isAuth: isAuth))
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
         let userInfo = response.notification.request.content.userInfo
         let threadId = userInfo[EventBanner.threadKey] as? String
         let messageId = (userInfo[EventBanner.messageKey] as? Int)
@@ -424,7 +497,10 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         // one would front the app and then do nothing.
         let route = userInfo[EventBanner.routeKey] as? String
         let unresolved = EventBanner.unresolvedPush(userInfo["event_id"] as? String)
-        await MainActor.run {
+        nonisolated(unsafe) let done = completionHandler
+        onMain {
+            // Answered once the tap is routed, whichever branch returns.
+            defer { done() }
             if route == EventBanner.updateRoute {
                 Notifier.shared.front()
                 // A banner from before a quit: this launch has no card yet, and

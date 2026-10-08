@@ -47,6 +47,7 @@ fn door(auth: &AgentDoorAuth) -> axum::Router {
         Default::default(),
         CancellationToken::new(),
         auth,
+        None,
     )
     .expect("router builds")
 }
@@ -827,6 +828,7 @@ async fn oauth_without_a_real_account_email_is_misconfigured() {
             Default::default(),
             CancellationToken::new(),
             &auth,
+            None,
         )
         .unwrap();
         let mut c = good_claims();

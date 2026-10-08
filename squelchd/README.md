@@ -131,4 +131,10 @@ cargo run --bin squelchd -- auth
 cargo run --bin squelchd -- serve
 ```
 
+On macOS `cargo run` signs the binary with your Developer ID first (the runner
+in `.cargo/config.toml`), so the keychain asks for "Always Allow" once per
+credential and then stays quiet across rebuilds. A binary started straight from
+`target/` skips the runner and is a stranger to the keychain again; start it
+with `scripts/sign-run.sh target/debug/squelchd serve` instead.
+
 See the [root README](../README.md) for the full setup walkthrough and [deploy/DEPLOY.md](../deploy/DEPLOY.md) for the Linux server deployment.

@@ -227,6 +227,46 @@ monthly dollar budget and installed through the warden as that tenant's
 `<label>-llm` Secret. Bifrost swaps in the real key, meters the spend on its
 volume, and refuses a tenant that has blown its budget.
 
+**A tenant that runs out mid-month** shows up on the dashboard's "LLM config
+failures" panel and stops getting verdicts; its mail queues and nothing is
+lost. Unblock it with
+
+```sh
+squelch-control llm topup <label>            # a full month's allowance again
+squelch-control llm topup <label> --usd 25   # or a specific amount
+squelch-control llm topup <label> --clear
+```
+
+That adds to this month's limit on the key the tenant already holds: no new
+key, no warden install, no pod restart, and the spend ledger stays intact. It
+expires by itself at the budget's next reset. `llm mint <label>` also
+unblocks a tenant, but it rotates the key and starts the ledger from zero, so
+keep it for a key that is actually wrong.
+
+**A tenant that hits its daily triage cap** is a different limit: a count of
+model jobs per UTC day (10,000 in total, 200 of them for background work), held
+by the daemon rather than the gateway. The total is a runaway breaker set far
+above any real mailbox, so the limit a tenant actually meets is the background
+one. The dashboard's "Triage held by the daily cap" panel shows it. A `new mail`
+line means today's arrivals are going untriaged, which should not happen short
+of a runaway and is worth a look before you lift it; a `background` line is a
+backlog draining at 200 a day, which is the design; `revisits` wait on
+`[revisit].daily_cap`, which no grant raises. To lift a cap for the rest of the
+day:
+
+```sh
+kubectl -n tenants exec deploy/<label> -- squelchd triage status
+kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500
+kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500 --background
+```
+
+No restart: the worker reads the grant on its next job, and the grant lapses at
+midnight UTC. It is spend, about 3 cents a run against the tenant's monthly LLM
+budget, so 500 runs is roughly $15 and a large grant can turn a daily-cap
+problem into the budget problem above. Needs daemon >= 0.0.13, which is also
+the release that raised the total from 1000 to 10,000; an older daemon holds
+new mail at 1000 runs a day.
+
 **Content logging stays OFF.** Every request through this gateway is the text
 of somebody's mail, and Bifrost's defaults are to log it: `enable_logging` on,
 `disable_content_logging` off, `log_retention_days` 365, all into
@@ -1437,6 +1477,19 @@ all.
 Signup's mint is gated on the invite policy being configured, the same condition
 `POST /tenant/invite` itself answers 503 without: a deployment with no invite
 feature installs no credential for a door that cannot open.
+
+### Letting a tenant see a hidden feature
+
+`https://signup.passband.app/admin/features`, behind the same admin token as the
+waitlist: a grid of active tenants against the features this build still hides,
+plus an "Everyone" row. Tick, Save, and the tenant's daemon picks it up within
+about five minutes, with no pod roll.
+
+It rides the control token above, so a tenant with no share token has no hidden
+features either, and `share revoke` takes both away. The whole mechanism, how to
+add a flag, and how to pin one on a development daemon are in
+[docs/FEATURES.md](../../docs/FEATURES.md).
+
 
 ## Backups
 

@@ -8,10 +8,22 @@
 // right bit: it says the app has already introduced itself to whoever is
 // sitting here. A fresh install has not been introduced, so it gets the tour
 // and no changelog, and the two overlays can never stack, because one runs only
-// where the other has finished. It also settles the transition INTO this
+// where the other has finished. Finishing the tour for the first time stamps
+// the install current (`meetNewcomer`), or the launch after it would look like
+// the next case and announce the build they installed. It also settles the transition INTO this
 // feature, which has no other honest signal: an install that predates the stamp
 // but has finished the tour is an established install, owed the release it just
 // took and nothing older (see ReleaseNotes.unseen).
+//
+// THE IPHONE IS THE SAME SENTENCE OVER A DIFFERENT TABLE. It ships on its own
+// version line and reads its own notes (Lib/PhoneReleaseNotes.swift), keeps its
+// own stamp (Prefs.lastSeenPhoneNotes), and shows them full screen
+// (PassbandiOS/Views/WhatsNewWalk.swift) rather than as this card. It is still
+// THIS object, `store.whatsNew`, and still `active`, `replay` and `dismiss`:
+// everything that asks "is the changelog up" (the blur, the ads that wait their
+// turn, Settings' button) asks one thing on both platforms. Only the trigger
+// is spelled twice, because the phone has no tour to gate on; see
+// `maybeShowOnPhone`.
 
 import Foundation
 import Observation
@@ -42,7 +54,18 @@ final class WhatsNew {
     /// so, and names the version this install was last on.
     private(set) var catchUp: ReleaseCatchUp?
 
-    var active: Bool { !notes.isEmpty }
+    #if os(iOS)
+        /// What the phone's walk draws, newest release first. The Mac's `notes`
+        /// stays empty here: nothing on a phone reads the Mac's table.
+        private(set) var phoneNotes: [PhoneReleaseNote] = []
+
+        /// Which page the walk opens on. 0 outside a staged screenshot.
+        private(set) var phoneOpeningPage = 0
+
+        var active: Bool { !phoneNotes.isEmpty }
+    #else
+        var active: Bool { !notes.isEmpty }
+    #endif
 
     /// Set by closing the card, so a reconnect (which resets `lastRefresh`, the
     /// trigger) cannot raise the same notes again in one session. The stamp
@@ -53,9 +76,13 @@ final class WhatsNew {
     /// rather than passband/VERSION so it cannot drift from what shipped, and
     /// nil where there is no bundled version (a test binary), for which the
     /// honest answer is to show nothing.
-    private var runningVersion: String? {
+    private var runningVersion: String? { Self.runningVersion }
+
+    private static var runningVersion: String? {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
     }
+
+    #if os(macOS)
 
     /// The trigger, called when the first sync of the session lands. Every
     /// clause is a reason NOT to interrupt: already up, already answered, a new
@@ -77,6 +104,17 @@ final class WhatsNew {
         Analytics.capture("whats_new_shown", ["releases": unseen.count])
     }
 
+    /// The tour has just been finished for the first time: stamp this install
+    /// current, so the next launch does not read "tour done, no stamp" as an
+    /// install older than this feature and announce the only version this
+    /// person has ever run. The phone does the same at its Connect gate. An
+    /// install that already carries a stamp keeps it.
+    func meetNewcomer() {
+        guard !Self.forced, Prefs.shared.lastSeenReleaseNotes == nil else { return }
+        guard let running = runningVersion else { return }
+        stamp(ReleaseNotes.newest(atOrBelow: running)?.version)
+    }
+
     /// Settings' "what's new in this version": on demand, ignoring the stamp.
     /// ONE release, because that is the question the button asks. The back
     /// catalogue belongs in the changelog, not behind a button labelled with
@@ -96,7 +134,10 @@ final class WhatsNew {
     /// it on the reader's behalf.
     func dismiss() {
         guard active else { return }
-        stamp(ReleaseNotes.newestShown(notes))
+        // A forced card is a preview. Stamping from one told this Mac it had
+        // read a release it had not taken yet, and the real update then
+        // announced nothing.
+        if !Self.forced { stamp(ReleaseNotes.newestShown(notes)) }
         notes = []
         catchUp = nil
         dismissedThisSession = true
@@ -114,4 +155,110 @@ final class WhatsNew {
         }
         Prefs.shared.lastSeenReleaseNotes = version
     }
+
+    #else
+
+    // MARK: - the iPhone
+
+    /// THE PHONE'S TRIGGER, called by the shell when the first sync of a
+    /// session lands. The Mac's clauses, less the tour and plus what a phone
+    /// can be doing instead of looking at its board: the shell says whether
+    /// the Sitrep TAB is the one showing (`activeView` cannot, since Quick
+    /// Look and search are tabs the store has no page for), and a reader or a
+    /// sheet opened by a notification tap is somebody in the middle of
+    /// something.
+    ///
+    /// Who is new is settled before this runs, at the Connect gate
+    /// (`meetNewcomer`), so by here a missing stamp means what it means on the
+    /// Mac: an install older than the feature.
+    func maybeShowOnPhone(sitrepShowing: Bool) {
+        guard !RehearsalMode.isEnabled else { return }
+        let store = AppStore.shared
+        guard !active, !dismissedThisSession else { return }
+        guard sitrepShowing, !store.daemonDown else { return }
+        guard store.threadId == nil, store.compose == nil, !store.modalOverlayOpen else { return }
+        guard let running = runningVersion else { return }
+
+        let arrival = PhoneReleaseNotes.arrival(
+            lastSeen: Prefs.shared.lastSeenPhoneNotes, running: running, newcomer: false)
+        guard case .show(let owed) = arrival else { return }
+        phoneOpeningPage = 0
+        phoneNotes = owed
+        Analytics.capture("whats_new_shown", ["releases": owed.count])
+    }
+
+    /// The Connect gate is on screen and this install knows no mailbox:
+    /// whoever is holding the phone is being introduced to Passband right now.
+    /// They are stamped current HERE, before they connect, and not at their
+    /// first sync: a phone killed between the two would come back as an
+    /// install with a mailbox and no stamp, which is exactly what somebody who
+    /// just updated looks like, and the cold open would be followed by release
+    /// notes for the only version they have ever run.
+    func meetNewcomer() {
+        guard !RehearsalMode.isEnabled, let running = runningVersion else { return }
+        let arrival = PhoneReleaseNotes.arrival(
+            lastSeen: Prefs.shared.lastSeenPhoneNotes, running: running, newcomer: true)
+        if case .stamp(let version) = arrival { Prefs.shared.lastSeenPhoneNotes = version }
+    }
+
+    /// What Settings' "What's new" would show, or nil when it has nothing and
+    /// should not offer. A shipped build answers as the Mac does: the newest
+    /// note at or below itself.
+    ///
+    /// A DEBUG build answers with the newest note there is, whatever it is
+    /// running. An untagged local build wears the LAST release's number (see
+    /// project.yml), so the note being written for the next one is always
+    /// ahead of it, and the one person who needs to look at that note on a
+    /// device is the one writing it.
+    static var replayable: PhoneReleaseNote? {
+        #if DEBUG
+            PhoneReleaseNotes.all.first
+        #else
+            runningVersion.flatMap { PhoneReleaseNotes.newest(atOrBelow: $0) }
+        #endif
+    }
+
+    /// Settings' "What's new": on demand, ignoring the stamp, one release.
+    func replay() {
+        guard let current = Self.replayable else { return }
+        dismissedThisSession = false
+        phoneOpeningPage = 0
+        phoneNotes = [current]
+    }
+
+    #if DEBUG
+        /// A screenshot's way in (FixtureStage): the newest note, opened on
+        /// `page`. Past the end is the closing page.
+        func stage(page: Int) {
+            guard let current = Self.replayable else { return }
+            phoneOpeningPage = max(0, page)
+            phoneNotes = [current]
+        }
+    #endif
+
+    /// Closing the walk, from its x or off its last page. The stamp is the
+    /// newest note SHOWN, as on the Mac, and never past the build: a debug
+    /// replay of a note for a release that is not out yet must not mark that
+    /// release read before it ships.
+    func dismiss() {
+        guard active else { return }
+        if let shown = PhoneReleaseNotes.newestShown(phoneNotes).flatMap(ReleaseVersion.init),
+            let running = runningVersion.flatMap(ReleaseVersion.init), shown <= running
+        {
+            stamp(shown.text)
+        }
+        phoneNotes = []
+        dismissedThisSession = true
+    }
+
+    /// Advance the stamp, never walk it back; see the Mac's.
+    private func stamp(_ version: String) {
+        guard let seen = ReleaseVersion(version) else { return }
+        if let current = Prefs.shared.lastSeenPhoneNotes.flatMap(ReleaseVersion.init), seen <= current {
+            return
+        }
+        Prefs.shared.lastSeenPhoneNotes = version
+    }
+
+    #endif
 }

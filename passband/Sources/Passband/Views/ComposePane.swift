@@ -128,6 +128,11 @@ struct ComposePane: View {
                     refocus()
                 }
             }
+            // The delete confirm took the caret away so nothing typed at it
+            // could land in the mail; "keep writing" hands it back.
+            .onChange(of: store.discardAsk) { old, new in
+                if old != nil, new == nil, store.compose?.page == .compose { refocus() }
+            }
             // ANYWHERE ON THE PANE: a file let go over the subject line or
             // the tray still lands.
             .composeDropTarget(.compose, targeted: $dropTargeted)
@@ -175,6 +180,10 @@ struct ComposePane: View {
     @ViewBuilder
     private func composerPage(_ compose: ComposeState) -> some View {
         VStack(alignment: .leading, spacing: Space.s12) {
+            // ABOVE the fields it is about: who this goes to and what it says
+            // are the two things to check, and the notice belongs where the
+            // eye starts, not under the last line of the body.
+            if compose.fromAgent { AgentDraftNotice() }
             editPane(compose)
             // A held send came back blocked: the verdict, and with it
             // the override in the footer.
@@ -223,13 +232,15 @@ struct ComposePane: View {
                     .foregroundStyle(Palette.ink)
                 draftsToggle(compose)
             #else
-                Text(onList ? "drafts" : "compose")
-                    .font(Typo.serif(24, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                if !onList {
-                    Text(kindLabel(compose))
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
+                // NO TITLE OVER A MESSAGE BEING WRITTEN. A sheet with a To
+                // line, a subject and a send button does not need to be told
+                // it is the composer, and "compose / new message" spent the
+                // bar's widest stretch saying so. The drafts page still names
+                // itself, because a list of drafts is not self-evident.
+                if onList {
+                    Text("drafts")
+                        .font(Typo.serif(24, weight: .medium))
+                        .foregroundStyle(Palette.ink)
                 }
                 draftsToggle(compose)
             #endif
@@ -238,6 +249,10 @@ struct ComposePane: View {
             // Esc closes this pane like every other panel in the app; saying
             // so in a chip or a button was the pane promising one key twice.
             #if os(macOS)
+                // THE OTHER DOOR OUT, up here with the pane's own controls and
+                // a pane's width from send: Esc keeps the mail, this does not.
+                // Not on the drafts page, where each row has its own delete.
+                if !onList { discardButton }
                 expandButton
             #else
                 // THE PHONE'S PRIMARY ACTION, IN THE CORNER IT LIVES IN. On a
@@ -259,9 +274,8 @@ struct ComposePane: View {
                 // its own: sending through the guard stays a wide, deliberate
                 // target rather than a chip in the corner.
                 //
-                // ATTACH RIDES BESIDE IT, because the footer it has on the Mac
-                // is not here. The inline reply already offers it on a phone;
-                // a new message that could not take a file was the odd one out.
+                // ATTACH IS NOT UP HERE: it is a paperclip on the keyboard's
+                // bar, with the formatting verbs (`MarkdownTextView.attaching`).
                 //
                 // NEITHER ON THE DRAFTS PAGE: a list has nothing to send.
                 //
@@ -269,7 +283,6 @@ struct ComposePane: View {
                 // verb's modifier, and "send" flips to "schedule" once a time
                 // is set.
                 if !onList {
-                    AttachButton(slot: .compose)
                     ScheduleClock(slot: .compose)
                     Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send(override: false) }
                         .buttonStyle(.glassProminent)
@@ -283,6 +296,25 @@ struct ComposePane: View {
     }
 
     #if os(macOS)
+        /// Delete this message outright, after a confirm (`DiscardConfirm`).
+        /// Inked like the expand button beside it rather than in danger red:
+        /// the card it opens is where the warning lives.
+        private var discardButton: some View {
+            Button {
+                store.askDiscardCompose()
+            } label: {
+                Image(systemName: "trash")
+                    .font(Typo.ui(11, weight: .semibold))
+                    .frame(width: Space.scaled(22), height: Space.scaled(22))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Palette.inkFaint)
+            .pointingHand()
+            .help("delete this message")
+            .accessibilityLabel("Delete message")
+        }
+
         /// Open the pane out to a centred column over the page, or back.
         private var expandButton: some View {
             Button {
@@ -552,6 +584,7 @@ struct ComposePane: View {
                         } : nil,
                     onDropHover: { dropTargeted = $0 }
                 )
+                .attaching(store.composeAttachmentsAvailable ? .compose : nil)
                 .frame(maxHeight: .infinity)
                 // The text view's own inset plus its line-fragment padding make
                 // up the rest, so the body's left edge is the labels' edge.
@@ -715,6 +748,13 @@ struct ComposePane: View {
 
     // MARK: - keymap
 
+    /// A modal is up over this pane, in the same key context: the ask bar, or
+    /// the delete confirm. Each binds only its own keys, so a chord typed at
+    /// it falls through to the bindings below, and none of them may act on
+    /// the mail underneath. Least of all send it while it is asking to be
+    /// deleted.
+    private var modalAbove: Bool { store.askBarOpen || store.discardAsk != nil }
+
     /// ⌘Enter sends from anywhere in the pane, the body included. Plain Enter
     /// is left alone everywhere: it used to open review from the to/subject
     /// lines, and with review gone an Enter that SENDS from the subject line
@@ -735,7 +775,13 @@ struct ComposePane: View {
             KeyBinding(declining: "Enter", "send", meta: true, allowInInput: true) {
                 // Not from the drafts page: the mail being sent is not on
                 // screen, and a send should never be of something unseen.
-                guard !store.askBarOpen, store.compose?.page != .drafts else { return false }
+                guard !modalAbove, store.compose?.page != .drafts else { return false }
+                // A draft an agent put on screen is sent with the button,
+                // never this chord: see `ComposeState.keyboardSendLocked`.
+                guard store.compose?.keyboardSendLocked != true else {
+                    store.noteKeyboardSendLocked()
+                    return true
+                }
                 send(override: false)
                 return true
             },
@@ -745,7 +791,7 @@ struct ComposePane: View {
                 // THE ASK BAR IS A MODAL ON TOP OF THIS PANE, and KeyMonitor
                 // walks the sets newest-first; a chord typed into its field
                 // must not send THROUGH the outbound guard from under it.
-                guard !store.askBarOpen, guarded, store.compose?.page != .drafts else {
+                guard !modalAbove, guarded, store.compose?.page != .drafts else {
                     return false
                 }
                 send(override: true)
@@ -759,7 +805,7 @@ struct ComposePane: View {
                 declining: ScheduleClock.chordKey, "send later", meta: true, allowInInput: true,
                 exactCase: true
             ) {
-                guard !store.askBarOpen, store.scheduledSendAvailable,
+                guard !modalAbove, store.scheduledSendAvailable,
                     store.compose?.page != .drafts
                 else { return false }
                 store.schedulePicker = .compose
@@ -871,11 +917,80 @@ enum ComposeLabels {
     #endif
 }
 
+// MARK: - the delete confirm
+
+/// THE QUESTION BEHIND THE TRASH CAN. Everything else that removes something
+/// in this app is undone from a chip; this is the one that asks instead,
+/// because the composer's whole promise is that closing it loses nothing
+/// ("kept in drafts"), and the button that breaks the promise sits a few
+/// points from the one that only resizes the pane.
+///
+/// Drawn by `ActionLayer` off `AppStore.discardAsk`. Enter deletes, Esc and
+/// the scrim keep writing.
+struct DiscardConfirm: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        OverlayScrim(onDismiss: { store.cancelDiscardAsk() }) {
+            ModalCard(width: 380) {
+                Text("Delete this message?")
+                    .font(Typo.ui(14, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                Text("It will not be kept in drafts, and this cannot be undone.")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: Space.s8) {
+                    Spacer(minLength: 0)
+                    Button("Cancel") { store.cancelDiscardAsk() }
+                        .buttonStyle(.glass)
+                    Button("Delete") { store.confirmDiscard() }
+                        .buttonStyle(.glassProminent)
+                        .tint(Palette.danger)
+                }
+            }
+        }
+        .keyContext(.modal)
+        .keyBindings(.modal, [
+            KeyBinding("Escape", "keep writing", allowInInput: true) { store.cancelDiscardAsk() },
+            KeyBinding("Enter", "delete message", allowInInput: true) { store.confirmDiscard() },
+        ])
+    }
+}
+
 // MARK: - shared chrome
 
 /// THE outbound-guard verdict, rendered identically wherever a reply started.
 /// The one screen whose job is talking a reader out of a mistake must not read
 /// differently in the pane composer and in the reader's inline one.
+/// Says, inside the composer, that an agent wrote what is in it. The drafts
+/// list marks such a draft too, but a reply draft is restored straight into
+/// the reply box when the owner presses `r`, without the list ever being
+/// seen; this is the mark that travels with the words. Stays until the
+/// composer is sent or closed, whatever the owner edits.
+struct AgentDraftNotice: View {
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
+            Image(systemName: "sparkles")
+                .font(Typo.ui(10, weight: .medium))
+            Text("Your agent drafted this. Check who it goes to and what it says before you send.")
+                .font(Typo.micro)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(Palette.accent)
+        .padding(Space.s10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.accentSoft)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Palette.accent.opacity(0.4), lineWidth: 1))
+    }
+}
+
 struct GuardVerdictBox: View {
     /// The redacted kinds the guard matched. Never rendered as markup — they are
     /// server strings.

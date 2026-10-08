@@ -1,4 +1,6 @@
-//! The operator's door: the waitlist dashboard and the two buttons on it.
+//! The operator's door: the waitlist dashboard and the two buttons on it, and
+//! the features page beside it ([`features_page`]), which decides which tenants
+//! see what this build still hides.
 //!
 //! ONE CREDENTIAL, AND IT IS NOT MOUNTED WITHOUT ONE. These routes exist only
 //! when the waitlist trio is configured (see [`crate::config::WaitlistConfig`]),
@@ -35,7 +37,7 @@
 
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{RawQuery, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -605,6 +607,146 @@ async fn invite_is_spent(state: &ControlState, invite_id: i64) -> bool {
         Err(e) => {
             tracing::error!(invite_id, error = %e, "listing invites failed");
             true
+        }
+    }
+}
+
+/// Ceiling on a posted features page. It carries one field per ticked box, so
+/// unlike every other form here it grows with the fleet: a few hundred tenants
+/// with a handful of features each is tens of kilobytes. Still a bound on work
+/// done for a request, and far below anything that is not this form.
+pub const MAX_FEATURES_BODY: usize = 512 * 1024;
+
+/// How long a daemon may go before it hears about a change made here, in
+/// minutes, for the sentence on the page. The daemon's own poll interval is
+/// `squelch_api::FEATURE_REFRESH`; this is that number plus a minute for
+/// the round trip and the app's own next stats read, and it is copy rather
+/// than a contract.
+const FEATURE_REFRESH_MINUTES: u64 = 6;
+
+/// `GET /admin/features` — who has been let into what.
+pub async fn features_page(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    if !is_admin(&state, &headers) {
+        return pages::admin_login(None);
+    }
+    // The acknowledgement a save redirects to. It names nothing and changes
+    // nothing, so it is read off the URL rather than kept in a session.
+    let saved = query.as_deref() == Some("saved");
+    features_board(&state, None, saved).await
+}
+
+/// `POST /admin/features` — make the grants match the page that was submitted.
+///
+/// THE WHOLE PAGE IS ONE FORM, because there is no JavaScript here and a form
+/// per checkbox would be a page reload per click. What that costs is that a
+/// save speaks for every box at once, and the store method this calls is
+/// written around making that safe: it changes only the tenants and features
+/// the page actually listed. See [`crate::store::ControlStore::save_features`].
+///
+/// NOTHING IS PUSHED. Each daemon asks for its own list every few minutes, so
+/// this writes rows and is done; there is no pod to roll and no warden call to
+/// half-fail.
+pub async fn features_save(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_admin(&state, &headers) {
+        return signed_out(&state);
+    }
+    if !same_origin(&state, &headers) {
+        return cross_origin(&state, &headers);
+    }
+
+    let mut posted_keys: Vec<String> = Vec::new();
+    let mut tenants: Vec<i64> = Vec::new();
+    let mut grants: Vec<(i64, String)> = Vec::new();
+    let mut everyone: Vec<String> = Vec::new();
+    for (name, value) in url::form_urlencoded::parse(&body) {
+        match name.as_ref() {
+            pages::FEATURE_KEY_FIELD => posted_keys.push(value.into_owned()),
+            pages::FEATURE_TENANT_FIELD => {
+                if let Ok(id) = value.parse() {
+                    tenants.push(id);
+                }
+            }
+            pages::FEATURE_GRANT_FIELD => {
+                if let Some((id, key)) = value.split_once('.')
+                    && let Ok(id) = id.parse()
+                {
+                    grants.push((id, key.to_string()));
+                }
+            }
+            pages::FEATURE_EVERYONE_FIELD => everyone.push(value.into_owned()),
+            _ => {}
+        }
+    }
+
+    // THE COLUMNS ARE THE ONES THE PAGE DREW, NARROWED TO THIS BUILD'S LIST.
+    // Narrowed, because a posted key that is not in the registry is not a
+    // feature anybody can be granted. The page's, because a tab rendered before
+    // a deploy added a feature has no boxes for it and must not untick it. A
+    // body that names no columns (cut short, or hand-built) changes nothing.
+    let keys: Vec<String> = state
+        .feature_registry()
+        .iter()
+        .map(|f| f.key.to_string())
+        .filter(|key| posted_keys.contains(key))
+        .collect();
+
+    match state
+        .store()
+        .save_features(&tenants, &keys, &grants, &everyone, Utc::now())
+        .await
+    {
+        Ok(()) => {
+            // Counts only. Which tenant has which feature is on the page for
+            // whoever holds the token, and nowhere else.
+            tracing::info!(
+                tenants = tenants.len(),
+                grants = grants.len(),
+                everyone = everyone.len(),
+                "features saved"
+            );
+            (
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, "/admin/features?saved")],
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "saving features failed");
+            features_board(&state, Some(STORE_TROUBLE), false).await
+        }
+    }
+}
+
+/// The features page, read fresh. A store that does not answer gets the banner
+/// and NO form; see [`pages::admin_features`] for why that matters here more
+/// than on the dashboard.
+async fn features_board(state: &ControlState, error: Option<&str>, saved: bool) -> Response {
+    let registry = state.feature_registry();
+    match state.store().feature_board().await {
+        Ok(board) => pages::admin_features(
+            registry,
+            Some(&board),
+            error,
+            saved,
+            FEATURE_REFRESH_MINUTES,
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "reading the features board failed");
+            pages::admin_features(
+                registry,
+                None,
+                Some(STORE_TROUBLE),
+                false,
+                FEATURE_REFRESH_MINUTES,
+            )
         }
     }
 }

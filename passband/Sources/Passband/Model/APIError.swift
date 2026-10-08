@@ -31,13 +31,52 @@ struct APIError: Error, Sendable {
     var message: String
     /// Redacted guard kinds parsed from a 422 send response, if any.
     var guardKinds: [String]?
+    /// A transport failure after which the server may still have received
+    /// the request and acted on it: the wait timed out, the connection
+    /// dropped mid-request, or an answer came back that could not be read
+    /// (a bad or empty response: the server got the request). False for one
+    /// that never got there (refused, no route, bad address). Only ever true
+    /// with `kind == .network`.
+    var mayHaveArrived = false
+    /// The daemon's machine-readable name for the refusal, the body's
+    /// `code`, where the route serves one (the calendar writes:
+    /// `CalendarRefusal`). Nil when the body had none, or was not JSON.
+    var code: String?
 
-    init(_ kind: APIErrorKind, _ status: Int, _ message: String, guardKinds: [String]? = nil) {
+    init(
+        _ kind: APIErrorKind, _ status: Int, _ message: String, guardKinds: [String]? = nil, code: String? = nil
+    ) {
         self.kind = kind
         self.status = status
         self.message = message
         self.guardKinds = guardKinds
+        self.code = code
     }
+
+    /// A transport failure as the client reports it: never the URL or the
+    /// token, and whether the request may have reached the server.
+    static func transport(_ error: Error) -> APIError {
+        var out = APIError(.network, 0, "cannot reach squelch server")
+        let code = (error as? URLError)?.code
+        out.mayHaveArrived = !(code.map(notSentCodes.contains) ?? false)
+        return out
+    }
+}
+
+extension APIError {
+    /// The transport failures that provably happen BEFORE a request is sent:
+    /// no host, no connection, no network, a TLS handshake refused. Every
+    /// other failure (a timeout, a dropped connection, an answer that did
+    /// not read, a cancellation, anything unknown, any error that is not a
+    /// URLError) may have followed the request reaching the server, so a
+    /// calendar write that ends there freezes its pane (verify5 Y2: when in
+    /// doubt, freeze).
+    static let notSentCodes: Set<URLError.Code> = [
+        .badURL, .unsupportedURL, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+        .notConnectedToInternet, .appTransportSecurityRequiresSecureConnection, .secureConnectionFailed,
+        .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateNotYetValid,
+        .serverCertificateHasUnknownRoot, .clientCertificateRejected, .clientCertificateRequired,
+    ]
 }
 
 extension APIError: LocalizedError {

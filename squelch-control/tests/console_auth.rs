@@ -867,6 +867,8 @@ async fn the_signup_surface_is_unchanged() {
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/gmail.send",
+            // Asked for on the same screen and optional: name and photo.
+            "https://www.googleapis.com/auth/userinfo.profile",
         ],
         "{consent}"
     );

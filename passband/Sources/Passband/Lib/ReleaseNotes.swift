@@ -77,6 +77,9 @@ enum ReleaseSurface: String, CaseIterable, Sendable {
 /// its scene (Views/Vignette/ReleaseVignettes.swift). The markdown ignores it.
 enum ReleaseVignette: String, CaseIterable, Sendable {
     case mailList, flow, unsubscribe, clearStack
+    case smartBlock
+    /// Not a drawn scene: the agent ad's own conversation, live.
+    case agentSession
 }
 
 /// One bullet in a release.
@@ -108,11 +111,16 @@ struct ReleaseItem: Sendable {
 
 /// One shipped version, keyed by the MAC APP's version. Daemon and phone work
 /// ride in the release they shipped alongside rather than being keyed on their
-/// own: the daemon has no screen to read notes on, the phone reads its notes
-/// from the store, and a second key here would be a second thing to get wrong
-/// for a difference nobody can see. Both still carry their own version and tag
-/// (daemon-X, passband-ios-X); those are numbered on their own cadence, and the
-/// phone's is expected to drift as its UX does.
+/// own: the daemon has no screen to read notes on, and a second key here would
+/// be a second thing to get wrong for a difference nobody can see. Both still
+/// carry their own version and tag (daemon-X, passband-ios-X); those are
+/// numbered on their own cadence, and the phone's is expected to drift as its
+/// UX does.
+///
+/// THE PHONE'S OWN WHAT'S NEW IS NOT READ FROM HERE. It has a table of its own,
+/// keyed by the phone's version and written for a thumb
+/// (Lib/PhoneReleaseNotes.swift). The `.ios` items below stay: this is the
+/// changelog, and the changelog still says what the iPhone got.
 struct ReleaseNote: Identifiable, Sendable {
     /// Marketing version, matching passband/VERSION for that tag.
     let version: String
@@ -260,11 +268,11 @@ enum ReleaseNotes {
                 ReleaseItem(
                     .app, "Connect your agents",
                     detail: "Hosted accounts can sign Claude or ChatGPT in to their mailbox from Settings, under Agents",
-                    symbol: "link"),
+                    symbol: "link", vignette: .agentSession),
                 ReleaseItem(
                     .app, "Smart block",
                     detail: "When a sender ignores your unsubscribe, block just the mail you did not want",
-                    symbol: "hand.raised"),
+                    symbol: "hand.raised", vignette: .smartBlock),
                 ReleaseItem(.app, "Ask ⌘K how Passband works"),
                 ReleaseItem(.app, "`⌘F` to find text in an email"),
                 ReleaseItem(.app, "E and S walk Reading from one sender to the next"),
@@ -775,15 +783,7 @@ enum ReleaseNotes {
     /// the release BEFORE the running one so this build announces itself and
     /// nothing older.
     static func unseen(lastSeen: String?, running: String) -> [ReleaseNote] {
-        guard let ceiling = ReleaseVersion(running) else { return [] }
-        let floor = lastSeen.flatMap(ReleaseVersion.init) ?? previous(before: ceiling)
-        return ordered
-            .filter { $0.version <= ceiling }
-            .filter { pair in
-                guard let floor else { return true }
-                return pair.version > floor
-            }
-            .map(\.note)
+        ReleaseLedger.unseen(all, lastSeen: lastSeen, running: running)
     }
 
     /// The greeting owed with `shown`, or nil for the ordinary one-release
@@ -799,14 +799,13 @@ enum ReleaseNotes {
     /// release must leave that release unstamped so a later build can still
     /// announce it, rather than swallowing it on the reader's behalf.
     static func newestShown(_ notes: [ReleaseNote]) -> String? {
-        notes.compactMap { note in note.semver.map { ($0, note.version) } }
-            .max { $0.0 < $1.0 }?.1
+        ReleaseLedger.newestShown(notes)
     }
 
     /// The newest release strictly older than `version`, or nil when this is
     /// the oldest one on record.
     static func previous(before version: ReleaseVersion) -> ReleaseVersion? {
-        ordered.first { $0.version < version }?.version
+        ReleaseLedger.previous(all, before: version)
     }
 
     /// The newest note this build is at or past, for "what's new in this
@@ -815,14 +814,55 @@ enum ReleaseNotes {
     /// writing) should answer with the last thing that actually shipped rather
     /// than with nothing.
     static func newest(atOrBelow running: String) -> ReleaseNote? {
-        guard let ceiling = ReleaseVersion(running) else { return nil }
-        return ordered.first { $0.version <= ceiling }?.note
+        ReleaseLedger.newest(all, atOrBelow: running)
+    }
+}
+
+/// A note keyed by the version of whatever shipped it.
+protocol VersionedNote {
+    var version: String { get }
+}
+
+extension ReleaseNote: VersionedNote {}
+
+/// THE SELECTION RULES, over any table of versioned notes. There are two
+/// tables: the one above, keyed by the Mac app's version, and the iPhone's own
+/// (Lib/PhoneReleaseNotes.swift), keyed by the phone's. They are numbered on
+/// different lines and say different things, but which notes an install is
+/// owed, what closing them stamps and what Settings shows again are the same
+/// questions with the same wrong answers, so both tables ask them here. What
+/// each rule is FOR is written on `ReleaseNotes`' wrapper of it.
+enum ReleaseLedger {
+    static func unseen<Note: VersionedNote>(_ all: [Note], lastSeen: String?, running: String) -> [Note] {
+        guard let ceiling = ReleaseVersion(running) else { return [] }
+        let floor = lastSeen.flatMap(ReleaseVersion.init) ?? previous(all, before: ceiling)
+        return ordered(all)
+            .filter { $0.version <= ceiling }
+            .filter { pair in
+                guard let floor else { return true }
+                return pair.version > floor
+            }
+            .map(\.note)
     }
 
-    /// The table with unparseable rows dropped and the order enforced rather
-    /// than trusted. `all` is authored newest first; this is what guarantees it.
-    private static var ordered: [(note: ReleaseNote, version: ReleaseVersion)] {
-        all.compactMap { note in note.semver.map { (note: note, version: $0) } }
+    static func newestShown<Note: VersionedNote>(_ notes: [Note]) -> String? {
+        ordered(notes).first?.note.version
+    }
+
+    static func previous<Note: VersionedNote>(_ all: [Note], before version: ReleaseVersion) -> ReleaseVersion? {
+        ordered(all).first { $0.version < version }?.version
+    }
+
+    static func newest<Note: VersionedNote>(_ all: [Note], atOrBelow running: String) -> Note? {
+        guard let ceiling = ReleaseVersion(running) else { return nil }
+        return ordered(all).first { $0.version <= ceiling }?.note
+    }
+
+    /// A table with unparseable rows dropped and the order enforced rather
+    /// than trusted. Both are authored newest first; this is what guarantees
+    /// it.
+    private static func ordered<Note: VersionedNote>(_ all: [Note]) -> [(note: Note, version: ReleaseVersion)] {
+        all.compactMap { note in ReleaseVersion(note.version).map { (note: note, version: $0) } }
             .sorted { $0.version > $1.version }
     }
 }

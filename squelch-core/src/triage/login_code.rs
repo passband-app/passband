@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-pub const PROMPT: &str = "Extract login_code only for a single unambiguous current one-time login or verification code in this arrival. Return null for missing or conflicting codes, quoted older messages, password-reset tokens, recovery codes, passwords, URLs, invite or referral or promo codes that unlock a new signup, and informational security alerts. The object contains service (the short recognizable service name, at most 32 characters, copied from the sender, subject, or body) and code (copy exactly, preserving zeros, case, spaces and hyphens). Never invent either field. Keep codes out of descriptive notification text and reasons; the application formats the extracted code.";
+pub const PROMPT: &str = "Extract login_code only for a single unambiguous current one-time login or verification code in this arrival, whatever the sender calls it (code, PIN, passcode, OTP). Return null for missing or conflicting codes, quoted older messages, password-reset tokens, recovery codes, passwords, URLs, invite or referral or promo codes that unlock a new signup, and informational security alerts. The object contains service (the short recognizable service name, at most 32 characters, copied from the sender, subject, or body) and code (copy exactly, preserving zeros, case, spaces and hyphens). Never invent either field. Keep codes out of descriptive notification text and reasons; the application formats the extracted code.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoginCode {

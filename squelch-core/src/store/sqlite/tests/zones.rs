@@ -1,0 +1,975 @@
+//! A correspondent's timezone (`zones`): what ingest records, whom it is
+//! credited to, what never counts, and how the card serves it.
+
+use super::super::*;
+use super::support::*;
+use crate::timezone::{ZoneConfidence, ZoneSource};
+use chrono::Duration;
+
+/// `days` ago at noon UTC, so every fixture sits inside the twelve-month
+/// window whatever day the suite runs.
+fn ago(days: i64) -> DateTime<Utc> {
+    Utc::now() - Duration::days(days)
+}
+
+fn zone_row(
+    store: &SqliteStore,
+    acct: AccountId,
+    addr: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT zone, user_zone FROM sender_zones WHERE account_id = ?1 AND addr = ?2",
+            params![acct, addr],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap()
+}
+
+fn count(store: &SqliteStore, sql: &str) -> i64 {
+    store
+        .lock()
+        .unwrap()
+        .query_row(sql, [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Three authenticated messages from `from` a week apart, all stamped
+/// `offset`.
+fn three_from(store: &SqliteStore, acct: AccountId, from: &str, prefix: &str, offset: i32) {
+    for i in 0..3 {
+        triaged(acct, &format!("{prefix}{i}"), &format!("t-{prefix}{i}"))
+            .from(from)
+            .auth_pass(Some(true))
+            .received_at(ago(7 * i + 1))
+            .date_offset(Some(offset))
+            .ingest(store);
+    }
+}
+
+#[test]
+fn offsets_on_a_senders_mail_become_their_zone_on_the_card() {
+    let (store, acct) = store();
+    // India: +5:30, which no other listed zone shares.
+    three_from(&store, acct, "Priya@Example.in", "g", 330);
+    let offsets: Vec<Option<i32>> = {
+        let conn = store.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT date_offset_minutes FROM messages ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(offsets, [Some(330); 3]);
+
+    let tz = store
+        .person_record(acct, "priya@example.in")
+        .unwrap()
+        .timezone
+        .expect("three matching offsets");
+    assert_eq!(tz.zone, "Asia/Kolkata");
+    assert_eq!(tz.source, ZoneSource::Offsets);
+    assert_eq!(tz.confidence, ZoneConfidence::High);
+}
+
+#[test]
+fn a_re_ingest_does_not_count_a_message_twice() {
+    let (store, acct) = store();
+    // Two New York messages and one Tokyo one: no zone has 90%.
+    for (gmail, offset) in [("g1", -240), ("g2", -240), ("g3", 540)] {
+        triaged(acct, gmail, gmail)
+            .from("dan@example.com")
+            .auth_pass(Some(true))
+            .received_at(ago(3))
+            .date_offset(Some(offset))
+            .ingest(&store);
+    }
+    assert_eq!(zone_row(&store, acct, "dan@example.com"), None);
+    // Re-sighting the New York mail ten times changes nothing: the
+    // observation is the row, and the row is one.
+    for _ in 0..10 {
+        triaged(acct, "g1", "g1")
+            .from("dan@example.com")
+            .auth_pass(Some(true))
+            .received_at(ago(3))
+            .date_offset(Some(-240))
+            .ingest(&store);
+    }
+    assert_eq!(zone_row(&store, acct, "dan@example.com"), None);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM messages WHERE date_offset_minutes = -240"
+        ),
+        2
+    );
+    // A re-fetch with no opinion (no Date header parsed) keeps the offset.
+    triaged(acct, "g1", "g1")
+        .from("dan@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(3))
+        .date_offset(None)
+        .ingest(&store);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM messages WHERE date_offset_minutes = -240"
+        ),
+        2
+    );
+}
+
+/// Round 3 renamed this from `..._credited_to_its_organizer_not_the_from`
+/// and changed its sender: a company calendar address sending for one of its
+/// people is no observation any more (see
+/// `an_authenticated_invitation_counts_only_from_the_organizer_themselves`),
+/// so the organizer sends it, From in another case.
+#[test]
+fn an_invitation_is_credited_to_its_organizer_and_a_reingest_replaces_it() {
+    let (store, acct) = store();
+    triaged(acct, "g1", "t1")
+        .from("SAM@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(2))
+        .date_offset(Some(0))
+        .invite("Sam@Example.com", "America/Chicago")
+        .ingest(&store);
+    let tz = store
+        .person_record(acct, "sam@example.com")
+        .unwrap()
+        .timezone
+        .expect("one invitation is a majority of one");
+    assert_eq!(tz.zone, "America/Chicago");
+    assert_eq!(tz.source, ZoneSource::Invite);
+    assert_eq!(tz.confidence, ZoneConfidence::High);
+    // Re-ingesting the same invitation replaces its row, never adds one.
+    triaged(acct, "g1", "t1")
+        .from("sam@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(2))
+        .invite("sam@example.com", "America/Chicago")
+        .ingest(&store);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 1);
+}
+
+#[test]
+fn sent_and_spam_mail_are_never_observations_until_rescued() {
+    let (store, acct) = store();
+    for i in 0..3 {
+        triaged(acct, &format!("s{i}"), "t")
+            .from("dan@example.com")
+            .auth_pass(Some(true))
+            .is_sent(true)
+            .received_at(ago(i + 1))
+            .date_offset(Some(540))
+            .ingest(&store);
+    }
+    // Round 3: the invitations come from their organizer herself (they came
+    // from eve@ before; an invitation now binds only to its own sender).
+    let mut spam: Vec<i64> = (0..3)
+        .map(|i| {
+            triaged(acct, &format!("p{i}"), "t")
+                .from("eve@example.com")
+                .auth_pass(Some(true))
+                .is_spam(true)
+                .received_at(ago(i + 1))
+                .date_offset(Some(540))
+                .ingest(&store)
+        })
+        .collect();
+    spam.extend((0..3).map(|i| {
+        triaged(acct, &format!("q{i}"), "t")
+            .from("mallory@example.com")
+            .auth_pass(Some(true))
+            .is_spam(true)
+            .received_at(ago(i + 2))
+            .invite("mallory@example.com", "Asia/Tokyo")
+            .ingest(&store)
+    }));
+    for addr in ["dan@example.com", "eve@example.com", "mallory@example.com"] {
+        assert_eq!(zone_row(&store, acct, addr), None, "{addr}");
+    }
+    // An ordinary message from each recomputes them, and still the sent and
+    // spam mail does not vote: one offset is not three, and one invitation
+    // outvotes three that do not count.
+    for (gmail, from) in [("i1", "dan@example.com"), ("i2", "eve@example.com")] {
+        triaged(acct, gmail, "t")
+            .from(from)
+            .auth_pass(Some(true))
+            .received_at(ago(1))
+            .date_offset(Some(540))
+            .ingest(&store);
+    }
+    triaged(acct, "i3", "t")
+        .from("mallory@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(1))
+        .invite("mallory@example.com", "Europe/Berlin")
+        .ingest(&store);
+    assert_eq!(zone_row(&store, acct, "dan@example.com"), None);
+    assert_eq!(zone_row(&store, acct, "eve@example.com"), None);
+    assert_eq!(
+        zone_row(&store, acct, "mallory@example.com"),
+        Some((Some("Europe/Berlin".into()), None))
+    );
+    // The user's "not spam" makes the mail count, offsets and invitation
+    // alike, without a re-fetch.
+    for id in &spam {
+        assert!(store.clear_spam(acct, *id).unwrap());
+    }
+    assert_eq!(
+        zone_row(&store, acct, "eve@example.com"),
+        Some((Some("Asia/Tokyo".into()), None))
+    );
+    assert_eq!(
+        zone_row(&store, acct, "mallory@example.com"),
+        Some((Some("Asia/Tokyo".into()), None))
+    );
+}
+
+#[test]
+fn utc_stamped_mail_writes_no_row_and_never_reads_the_history() {
+    let (store, acct) = store();
+    for i in 0..5 {
+        triaged(acct, &format!("n{i}"), "t")
+            .from("news@shop.example")
+            .auth_pass(Some(true))
+            .received_at(ago(i + 1))
+            .date_offset(Some(0))
+            .ingest(&store);
+    }
+    assert_eq!(zone_row(&store, acct, "news@shop.example"), None);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zones"), 0);
+}
+
+#[test]
+fn the_accounts_own_address_never_gets_a_row() {
+    let (store, acct) = store();
+    // A note to self arriving in the inbox, and an invitation the user sent
+    // that echoed back, under another spelling of the address.
+    three_from(&store, acct, "Me@Example.com", "self", 540);
+    // From the account's own address, so the binding passes and the own
+    // address rule is what refuses it (round 3: was calendar@example.com).
+    triaged(acct, "inv", "t")
+        .from("me@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(1))
+        .invite("ME@example.com", "Asia/Tokyo")
+        .ingest(&store);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zones"), 0);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 0);
+    let card = store.person_record(acct, "me@example.com").unwrap();
+    assert!(card.is_self && card.timezone.is_none());
+    // And the user cannot set one either.
+    assert!(matches!(
+        store.set_person_timezone(acct, "Me@example.com", Some("Asia/Tokyo")),
+        Err(CoreError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn zones_are_kept_per_account() {
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    three_from(&store, acct, "dan@example.com", "a", 330);
+    three_from(&store, other, "dan@example.com", "b", 540);
+    store
+        .set_person_timezone(other, "dan@example.com", Some("Europe/Berlin"))
+        .unwrap();
+    let mine = store.person_record(acct, "dan@example.com").unwrap();
+    let theirs = store.person_record(other, "dan@example.com").unwrap();
+    assert_eq!(mine.timezone.unwrap().zone, "Asia/Kolkata");
+    assert_eq!(theirs.timezone.unwrap().zone, "Europe/Berlin");
+    // Another account's invitation does not vote here either (round 3: sent
+    // by its organizer, as an invitation now must be to count anywhere).
+    triaged(other, "inv", "t")
+        .from("ann@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(1))
+        .invite("ann@example.com", "Asia/Tokyo")
+        .ingest(&store);
+    assert!(
+        store
+            .person_record(acct, "ann@example.com")
+            .unwrap()
+            .timezone
+            .is_none()
+    );
+}
+
+#[test]
+fn deleting_a_message_removes_its_invitation_observation() {
+    let (store, acct) = store();
+    // Round 3: sent by the organizer (was x@example.com), so it is recorded.
+    let id = triaged(acct, "inv", "t")
+        .from("ann@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(1))
+        .invite("ann@example.com", "Asia/Tokyo")
+        .ingest(&store);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 1);
+    store
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM messages WHERE id = ?1", params![id])
+        .unwrap();
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 0);
+}
+
+#[test]
+fn the_override_wins_and_clearing_it_hands_back_to_inference() {
+    let (store, acct) = store();
+    three_from(&store, acct, "dan@example.com", "g", 330);
+    let set = store
+        .set_person_timezone(acct, "Dan@Example.com", Some("America/Chicago"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (set.zone.as_str(), set.source, set.confidence),
+        ("America/Chicago", ZoneSource::User, ZoneConfidence::High)
+    );
+    // New mail keeps feeding inference underneath; the card still says Chicago.
+    triaged(acct, "g9", "t")
+        .from("dan@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(1))
+        .date_offset(Some(330))
+        .ingest(&store);
+    assert_eq!(
+        zone_row(&store, acct, "dan@example.com"),
+        Some((Some("Asia/Kolkata".into()), Some("America/Chicago".into())))
+    );
+    assert_eq!(
+        store
+            .person_record(acct, "dan@example.com")
+            .unwrap()
+            .timezone
+            .unwrap()
+            .source,
+        ZoneSource::User
+    );
+    let cleared = store
+        .set_person_timezone(acct, "dan@example.com", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (cleared.zone.as_str(), cleared.source),
+        ("Asia/Kolkata", ZoneSource::Offsets)
+    );
+    // An override for someone inference knows nothing about is a row of its
+    // own, and clearing it leaves nothing behind.
+    store
+        .set_person_timezone(acct, "ann@example.com", Some("Europe/Berlin"))
+        .unwrap();
+    assert_eq!(
+        store
+            .set_person_timezone(acct, "ann@example.com", None)
+            .unwrap(),
+        None
+    );
+    assert_eq!(zone_row(&store, acct, "ann@example.com"), None);
+    assert!(matches!(
+        store.set_person_timezone(acct, "ann@example.com", Some("Eastern Standard Time")),
+        Err(CoreError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn a_failing_recompute_does_not_fail_ingest() {
+    let (store, acct) = store();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER zones_fail BEFORE INSERT ON sender_zones
+             BEGIN SELECT RAISE(ABORT, 'forced'); END;",
+        )
+        .unwrap();
+    three_from(&store, acct, "dan@example.com", "g", 330);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM messages"), 3);
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM triage"),
+        3,
+        "the whole ingest committed"
+    );
+    // The first two inferred nothing and so inserted nothing; the third's
+    // savepoint took its observation's other writes with it. The offsets are
+    // all kept: the message upsert wrote them, outside the savepoint.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM messages WHERE date_offset_minutes IS NOT NULL"
+        ),
+        3
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zones"), 0);
+    // The control: without the trigger the same mail does infer.
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER zones_fail;")
+        .unwrap();
+    three_from(&store, acct, "dan@example.com", "g", 330);
+    assert!(zone_row(&store, acct, "dan@example.com").is_some());
+}
+
+/// THE ROW IS WRITTEN ONCE. The Date offset goes in with the message's
+/// INSERT; nothing UPDATEs the column afterwards (which made SQLite rewrite
+/// the whole record, bodies and overflow pages, a second time). A re-ingest
+/// writes it in the same upsert, and one with no offset keeps the old value.
+#[test]
+fn the_date_offset_is_written_by_the_message_upsert_itself() {
+    let (store, acct) = store();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE offset_updates(gmail_msg_id TEXT);
+             CREATE TRIGGER offset_updated AFTER UPDATE OF date_offset_minutes ON messages
+             BEGIN INSERT INTO offset_updates VALUES (NEW.gmail_msg_id); END;",
+        )
+        .unwrap();
+    let mail = |offset| {
+        triaged(acct, "g1", "t")
+            .from("dan@example.com")
+            .auth_pass(Some(true))
+            .received_at(ago(1))
+            .date_offset(offset)
+    };
+    mail(Some(330)).ingest(&store);
+    assert_eq!(
+        count(&store, "SELECT date_offset_minutes FROM messages"),
+        330
+    );
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM offset_updates"),
+        0,
+        "a first ingest writes the offset in its INSERT, with no second write"
+    );
+    mail(None).ingest(&store);
+    assert_eq!(
+        count(&store, "SELECT date_offset_minutes FROM messages"),
+        330,
+        "no offset keeps the stored one"
+    );
+    mail(Some(-240)).ingest(&store);
+    assert_eq!(
+        count(&store, "SELECT date_offset_minutes FROM messages"),
+        -240
+    );
+    // Each re-ingest is one upsert: one write of the row apiece.
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM offset_updates"), 2);
+}
+
+#[test]
+fn a_failure_that_ends_the_transaction_fails_ingest() {
+    // RAISE(ROLLBACK) stands in for SQLITE_FULL and friends: SQLite has
+    // already rolled the message write back, so swallowing would let the
+    // rest of ingest commit without it.
+    let (store, acct) = store();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER zones_kill BEFORE INSERT ON sender_zones
+             BEGIN SELECT RAISE(ROLLBACK, 'forced'); END;",
+        )
+        .unwrap();
+    // Two first, which infer nothing and so insert nothing; the third is the
+    // one whose recompute inserts.
+    for g in ["g2", "g3"] {
+        triaged(acct, g, "t")
+            .from("dan@example.com")
+            .auth_pass(Some(true))
+            .received_at(ago(2))
+            .date_offset(Some(330))
+            .ingest(&store);
+    }
+    let b = triaged(acct, "g1", "t")
+        .from("dan@example.com")
+        .auth_pass(Some(true))
+        .received_at(ago(1))
+        .date_offset(Some(330));
+    assert!(store.ingest_message(&b.build()).is_err());
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM messages WHERE gmail_msg_id = 'g1'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM triage"),
+        count(&store, "SELECT COUNT(*) FROM messages"),
+        "nothing committed half a message"
+    );
+}
+
+/// The per-ingest recompute for a sender with 5,000 stored messages, every
+/// one an authenticated observation inside the window (the worst case:
+/// UTC-stamped mail is never read at all). Each carries a 4 KiB body, as
+/// real mail does, so the row's later columns sit on overflow pages and a
+/// read that has to visit the row pays for it. Printed, and bounded loosely
+/// so a debug build on a loaded machine does not flake.
+#[test]
+fn the_recompute_for_a_five_thousand_message_sender_stays_cheap() {
+    let (store, acct) = store();
+    {
+        let mut conn = store.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        let tz: chrono_tz::Tz = "America/New_York".parse().unwrap();
+        let body = "Notes from the call, and what we agreed to do next. ".repeat(80);
+        assert!(body.len() > 4000);
+        for i in 0..5000i64 {
+            let at = Utc::now() - Duration::minutes(i * 100);
+            let offset = {
+                use chrono::{Offset, TimeZone};
+                tz.offset_from_utc_datetime(&at.naive_utc())
+                    .fix()
+                    .local_minus_utc()
+                    / 60
+            };
+            tx.execute(
+                "INSERT INTO messages(account_id, gmail_msg_id, thread_id, from_addr, subject,
+                     received_at, snippet, body, auth_pass, date_offset_minutes)
+                 VALUES(?1, ?2, ?2, 'bulk@example.com', 's', ?3, '', ?4, 1, ?5)",
+                params![acct, format!("b{i}"), at.to_rfc3339(), body, offset],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let mut samples = Vec::new();
+    for _ in 0..20 {
+        let conn = store.lock().unwrap();
+        let start = std::time::Instant::now();
+        super::super::zones::refresh_sender_zone_conn(&conn, acct, "bulk@example.com", Utc::now())
+            .unwrap();
+        samples.push(start.elapsed());
+        drop(conn);
+    }
+    samples.sort();
+    let median = samples[samples.len() / 2];
+    eprintln!(
+        "sender_zone recompute, 5000 observations: median {median:?}, max {:?}",
+        samples.last().unwrap()
+    );
+    assert!(median < std::time::Duration::from_millis(50), "{median:?}");
+    assert_eq!(
+        zone_row(&store, acct, "bulk@example.com")
+            .unwrap()
+            .0
+            .as_deref(),
+        Some("America/New_York")
+    );
+}
+
+#[test]
+fn the_offsets_read_is_a_covering_index_probe_that_stops_at_the_cap() {
+    let (store, _) = store();
+    let conn = store.lock().unwrap();
+    let plan: Vec<String> = {
+        let mut stmt = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                super::super::zones::OFFSETS_SQL
+            ))
+            .unwrap();
+        stmt.query_map(params![1, "a@b.co", "2026-01-01", "2026-12-01", 500], |r| {
+            r.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap()
+    };
+    let plan = plan.join(" | ");
+    // COVERING: the message row, and the body pages before its later
+    // columns, are never visited.
+    assert!(
+        plan.contains("USING COVERING INDEX idx_messages_zone_offsets"),
+        "{plan}"
+    );
+    // The flags are part of the seek, not a filter over the sender's rows.
+    assert!(plan.contains("auth_pass=?"), "{plan}");
+    // Newest-first straight off the index: no sort of the sender's history.
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+}
+
+/// Round 3 (N8): the invitations half of the recompute seeks the person's
+/// newest rows on `idx_sender_zone_invites_recent` (address, then the future
+/// bound as a range), in order, so it never sorts their history; only the
+/// window's rows are then looked up in `messages`, by primary key.
+#[test]
+fn the_invitations_read_takes_the_newest_rows_off_its_index_before_any_message() {
+    let (store, _) = store();
+    let conn = store.lock().unwrap();
+    let plan = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> String {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows: Vec<String> = stmt
+            .query_map(args, |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        rows.join(" | ")
+    };
+    let window = plan(
+        super::super::zones::INVITES_SQL,
+        &[&1, &"a@b.co", &"2026-12-01", &20],
+    );
+    // One seek, the address then the future bound, in the order asked for:
+    // no sort of the person's history, and no message row read.
+    assert_eq!(
+        window,
+        "SEARCH sender_zone_invites USING INDEX idx_sender_zone_invites_recent \
+         (account_id=? AND addr=? AND observed_at<?)",
+        "{window}"
+    );
+    let counts = plan(super::super::zones::INVITE_COUNTS_SQL, &[&1, &7]);
+    assert!(
+        counts.contains("SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
+        "{counts}"
+    );
+    assert!(!counts.contains("SCAN messages"), "{counts}");
+}
+
+/// Round 3 (N8): the window is taken first and the flags checked after, so
+/// the newest twenty rows decide even when some of them are spam.
+#[test]
+fn the_newest_invitations_are_the_window_and_spam_among_them_does_not_vote() {
+    let (store, acct) = store();
+    for i in 0..3 {
+        invitation(
+            acct,
+            &format!("old{i}"),
+            "sam@corp.example",
+            Some(true),
+            "sam@corp.example",
+            "Asia/Tokyo",
+        )
+        .received_at(ago(40 + i))
+        .ingest(&store);
+    }
+    for i in 0..20 {
+        invitation(
+            acct,
+            &format!("new{i}"),
+            "sam@corp.example",
+            Some(true),
+            "sam@corp.example",
+            "Europe/Berlin",
+        )
+        .received_at(ago(1 + i))
+        .ingest(&store);
+    }
+    assert_eq!(
+        zone_row(&store, acct, "sam@corp.example"),
+        Some((Some("Europe/Berlin".into()), None))
+    );
+    // All twenty newest are now spam: the older Tokyo rows are outside the
+    // window, so nothing votes and the invitation answer goes.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET is_spam = 1 WHERE gmail_msg_id LIKE 'new%'",
+            [],
+        )
+        .unwrap();
+    super::super::zones::refresh_sender_zone_conn(
+        &store.lock().unwrap(),
+        acct,
+        "sam@corp.example",
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(zone_row(&store, acct, "sam@corp.example"), None);
+}
+
+/// One invitation, bound or not, from `from` naming `organizer`.
+fn invitation(
+    acct: AccountId,
+    gmail: &str,
+    from: &str,
+    auth_pass: Option<bool>,
+    organizer: &str,
+    zone: &str,
+) -> TriagedBuilder {
+    triaged(acct, gmail, &format!("t-{gmail}"))
+        .from(from)
+        .auth_pass(auth_pass)
+        .received_at(ago(2))
+        .invite(organizer, zone)
+}
+
+fn invites_for(store: &SqliteStore, addr: &str) -> Vec<String> {
+    let conn = store.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT zone FROM sender_zone_invites WHERE addr = ?1 ORDER BY message_id")
+        .unwrap();
+    stmt.query_map(params![addr], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_forged_invitation_records_nothing() {
+    let (store, acct) = store();
+    // The organizer's own address, but unauthenticated (never evaluated, or
+    // evaluated and failed): anyone can write that From.
+    invitation(
+        acct,
+        "a",
+        "sam@corp.example",
+        None,
+        "sam@corp.example",
+        "Asia/Tokyo",
+    )
+    .ingest(&store);
+    invitation(
+        acct,
+        "b",
+        "sam@corp.example",
+        Some(false),
+        "sam@corp.example",
+        "Asia/Tokyo",
+    )
+    .ingest(&store);
+    // Authenticated, but as somebody else: a real domain's mail naming
+    // another organisation's person as organizer.
+    invitation(
+        acct,
+        "c",
+        "mallory@evil.example",
+        Some(true),
+        "sam@corp.example",
+        "Asia/Tokyo",
+    )
+    .ingest(&store);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 0);
+    assert_eq!(zone_row(&store, acct, "sam@corp.example"), None);
+}
+
+/// Round 3 (N4) renamed this from
+/// `an_authenticated_invitation_from_the_organizer_or_their_organisation_counts`
+/// and inverted its delegate cases: a same-organisation delegate or calendar
+/// address used to count and now records nothing, because authentication
+/// vouches for a domain and some domains are shared by strangers that no
+/// list names (`isp.example` here).
+#[test]
+fn an_authenticated_invitation_counts_only_from_the_organizer_themselves() {
+    let (store, acct) = store();
+    // The organizer themselves, in another case.
+    invitation(
+        acct,
+        "a",
+        "Sam@Corp.Example",
+        Some(true),
+        "sam@corp.example",
+        "Asia/Tokyo",
+    )
+    .ingest(&store);
+    // A delegate, a calendar address on a subdomain, and a stranger on a
+    // shared domain no list knows: none is the organizer.
+    for (gmail, from, organizer) in [
+        ("b", "assistant@corp.example", "ann@corp.example"),
+        ("c", "calendar@mail.corp.example", "bo@corp.example"),
+        ("d", "mallory@isp.example", "victim@isp.example"),
+    ] {
+        invitation(acct, gmail, from, Some(true), organizer, "Europe/Berlin").ingest(&store);
+    }
+    assert_eq!(invites_for(&store, "sam@corp.example"), ["Asia/Tokyo"]);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 1);
+    for person in ["ann@corp.example", "bo@corp.example", "victim@isp.example"] {
+        assert_eq!(zone_row(&store, acct, person), None, "{person}");
+    }
+    assert_eq!(
+        store
+            .person_record(acct, "sam@corp.example")
+            .unwrap()
+            .timezone
+            .unwrap()
+            .source,
+        ZoneSource::Invite
+    );
+}
+
+#[test]
+fn a_freemail_or_shared_tenant_delegate_does_not_vouch_for_another_address() {
+    let (store, acct) = store();
+    // gmail.com authenticates the domain, not the person: any account there
+    // could name any other as organizer. Likewise one Microsoft 365 default
+    // domain for another tenant, and a newly listed freemail provider.
+    for (gmail, from, organizer) in [
+        ("a", "assistant@gmail.com", "boss@gmail.com"),
+        (
+            "b",
+            "x@fabrikam.onmicrosoft.com",
+            "y@contoso.onmicrosoft.com",
+        ),
+        ("c", "x@yahoo.co.uk", "y@yahoo.co.uk"),
+    ] {
+        invitation(acct, gmail, from, Some(true), organizer, "Asia/Tokyo").ingest(&store);
+    }
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 0);
+    // A freemail address is still its own organizer.
+    invitation(
+        acct,
+        "d",
+        "boss@gmail.com",
+        Some(true),
+        "Boss@Gmail.com",
+        "Asia/Tokyo",
+    )
+    .ingest(&store);
+    assert_eq!(invites_for(&store, "boss@gmail.com"), ["Asia/Tokyo"]);
+}
+
+#[test]
+fn unauthenticated_offsets_do_not_count() {
+    let (store, acct) = store();
+    for (from, auth_pass) in [("dan@example.com", None), ("eve@example.com", Some(false))] {
+        for i in 0..5 {
+            triaged(acct, &format!("{from}{i}"), "t")
+                .from(from)
+                .auth_pass(auth_pass)
+                .received_at(ago(i + 1))
+                .date_offset(Some(330))
+                .ingest(&store);
+        }
+    }
+    // Recorded on the row (the observation is the header's), never counted.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM messages WHERE date_offset_minutes = 330"
+        ),
+        10
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zones"), 0);
+}
+
+#[test]
+fn future_dated_offsets_do_not_count() {
+    let (store, acct) = store();
+    for days in [3, 4, 5] {
+        triaged(acct, &format!("f{days}"), "t")
+            .from("dan@example.com")
+            .auth_pass(Some(true))
+            .received_at(Utc::now() + Duration::days(days))
+            .date_offset(Some(330))
+            .ingest(&store);
+    }
+    assert_eq!(zone_row(&store, acct, "dan@example.com"), None);
+    // A clock a few hours fast is ordinary, and counts.
+    for hours in [2, 3, 4] {
+        triaged(acct, &format!("h{hours}"), "t")
+            .from("ann@example.com")
+            .auth_pass(Some(true))
+            .received_at(Utc::now() + Duration::hours(hours))
+            .date_offset(Some(330))
+            .ingest(&store);
+    }
+    assert_eq!(
+        zone_row(&store, acct, "ann@example.com"),
+        Some((Some("Asia/Kolkata".into()), None))
+    );
+}
+
+#[test]
+fn a_future_dated_invitation_does_not_count() {
+    let (store, acct) = store();
+    invitation(
+        acct,
+        "old",
+        "sam@corp.example",
+        Some(true),
+        "sam@corp.example",
+        "Europe/Berlin",
+    )
+    .ingest(&store);
+    // Newest first, a tie goes to the newer: dated next month, this one
+    // would outvote every honest invitation for as long as it stayed ahead.
+    invitation(
+        acct,
+        "new",
+        "sam@corp.example",
+        Some(true),
+        "sam@corp.example",
+        "Asia/Tokyo",
+    )
+    .received_at(Utc::now() + Duration::days(30))
+    .ingest(&store);
+    assert_eq!(
+        zone_row(&store, acct, "sam@corp.example"),
+        Some((Some("Europe/Berlin".into()), None))
+    );
+}
+
+#[test]
+fn us_pacific_and_los_angeles_are_stored_and_counted_as_one_zone() {
+    let (store, acct) = store();
+    for (gmail, zone) in [
+        ("a", "US/Pacific"),
+        ("b", "America/Los_Angeles"),
+        ("c", "America/New_York"),
+    ] {
+        invitation(
+            acct,
+            gmail,
+            "sam@corp.example",
+            Some(true),
+            "sam@corp.example",
+            zone,
+        )
+        .ingest(&store);
+    }
+    assert_eq!(
+        invites_for(&store, "sam@corp.example"),
+        [
+            "America/Los_Angeles",
+            "America/Los_Angeles",
+            "America/New_York"
+        ]
+    );
+    assert_eq!(
+        zone_row(&store, acct, "sam@corp.example"),
+        Some((Some("America/Los_Angeles".into()), None))
+    );
+}
+
+#[test]
+fn an_est_invitation_is_no_observation() {
+    let (store, acct) = store();
+    // "EST" is New York's winter offset all year round: wrong all summer.
+    invitation(
+        acct,
+        "a",
+        "sam@corp.example",
+        Some(true),
+        "sam@corp.example",
+        "EST",
+    )
+    .ingest(&store);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 0);
+}
+
+#[test]
+fn an_organizer_longer_than_an_address_can_be_is_no_observation() {
+    let (store, acct) = store();
+    let domain = "@corp.example";
+    let at_cap = format!("{}{domain}", "a".repeat(320 - domain.len()));
+    let over = format!("{}{domain}", "b".repeat(321 - domain.len()));
+    assert_eq!((at_cap.len(), over.len()), (320, 321));
+    // Each sent by the organizer: round 3 binds an invitation to the
+    // organizer's own address (these were sent by x@corp.example before).
+    invitation(acct, "a", &at_cap, Some(true), &at_cap, "Asia/Tokyo").ingest(&store);
+    invitation(acct, "b", &over, Some(true), &over, "Asia/Tokyo").ingest(&store);
+    assert_eq!(invites_for(&store, &at_cap), ["Asia/Tokyo"]);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zone_invites"), 1);
+}

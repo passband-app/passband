@@ -128,6 +128,7 @@ final class Prefs {
         static let developerMode = "passband.pref.developerMode"
         static let tourCompleted = "passband.pref.tourCompleted"
         static let lastSeenReleaseNotes = "passband.pref.lastSeenReleaseNotes"
+        static let lastSeenPhoneNotes = "passband.pref.lastSeenPhoneNotes"
         static let theme = "passband.pref.theme"
         static let zoom = "passband.pref.zoom"
         static let density = "passband.pref.density"
@@ -135,6 +136,8 @@ final class Prefs {
         static let searchIncludeRelated = "passband.pref.searchIncludeRelated"
         static let searchSort = "passband.pref.searchSort"
         static let notificationSound = "passband.pref.notificationSound"
+        static let floatLoginCodes = "passband.pref.floatLoginCodes"
+        static let loginCodesRespectFocus = "passband.pref.loginCodesRespectFocus"
         static let userName = "passband.name"
         static let nameChosen = "passband.name.chosen"
         static let signature = "passband.pref.signature"
@@ -161,6 +164,8 @@ final class Prefs {
             Key.searchIncludeRelated: false,
             Key.searchSort: SearchSortChoice.recent.rawValue,
             Key.notificationSound: NotificationSound.system.rawValue,
+            Key.floatLoginCodes: true,
+            Key.loginCodesRespectFocus: false,
             Key.telemetry: TelemetryLevel.full.rawValue,
             Key.deeperSearch: DeeperSearchChoice.automatic.rawValue,
         ])
@@ -171,6 +176,7 @@ final class Prefs {
         _developerMode = defaults.bool(forKey: Key.developerMode)
         _tourCompleted = defaults.bool(forKey: Key.tourCompleted)
         _lastSeenReleaseNotes = defaults.string(forKey: Key.lastSeenReleaseNotes)
+        _lastSeenPhoneNotes = defaults.string(forKey: Key.lastSeenPhoneNotes)
         _theme = ThemeChoice(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .dark
         _zoom = Zoom.clamp(defaults.double(forKey: Key.zoom))
         _density =
@@ -184,6 +190,8 @@ final class Prefs {
         _notificationSound =
             NotificationSound(rawValue: defaults.string(forKey: Key.notificationSound) ?? "")
             ?? .system
+        _floatLoginCodes = defaults.bool(forKey: Key.floatLoginCodes)
+        _loginCodesRespectFocus = defaults.bool(forKey: Key.loginCodesRespectFocus)
         _telemetry =
             TelemetryLevel(rawValue: defaults.string(forKey: Key.telemetry) ?? "") ?? .full
         let storedName = defaults.string(forKey: Key.userName) ?? ""
@@ -298,6 +306,23 @@ final class Prefs {
         }
     }
 
+    /// The iPhone's stamp: the newest PHONE release whose notes this install
+    /// has been shown (or been stamped past, as a newcomer). Its own key and
+    /// not `lastSeenReleaseNotes`, because the two are versions on different
+    /// lines read against different tables. The phone's numbers trail the
+    /// Mac's, so one field holding either, depending on which app wrote it, is
+    /// a Mac stamp that silences several phone releases the day a backup, a
+    /// shared suite or a careless read brings it across. Unregistered, for the
+    /// reason the Mac's is: absence is a real state.
+    private var _lastSeenPhoneNotes: String?
+    var lastSeenPhoneNotes: String? {
+        get { _lastSeenPhoneNotes }
+        set {
+            _lastSeenPhoneNotes = newValue
+            defaults.set(newValue, forKey: Key.lastSeenPhoneNotes)
+        }
+    }
+
     /// Developer telemetry level. Analytics gates on the UserDefaults value
     /// this writes, so a change here takes effect on the very next event.
     private var _telemetry: TelemetryLevel
@@ -377,6 +402,30 @@ final class Prefs {
         }
     }
 
+    /// Whether an arriving login code floats over whatever app is in front
+    /// (see App/LoginCodePanel.swift). Off, the code is an ordinary banner.
+    private var _floatLoginCodes: Bool
+    var floatLoginCodes: Bool {
+        get { _floatLoginCodes }
+        set {
+            _floatLoginCodes = newValue
+            defaults.set(newValue, forKey: Key.floatLoginCodes)
+        }
+    }
+
+    /// Whether a Focus (Do Not Disturb included) holds the floating panel
+    /// back, leaving the code to the banner the system then filters itself.
+    /// Off by default: reading the Focus takes a permission, and nobody is
+    /// asked for one until they turn this on.
+    private var _loginCodesRespectFocus: Bool
+    var loginCodesRespectFocus: Bool {
+        get { _loginCodesRespectFocus }
+        set {
+            _loginCodesRespectFocus = newValue
+            defaults.set(newValue, forKey: Key.loginCodesRespectFocus)
+        }
+    }
+
     /// The human's display name, for the Sitrep greeting only. Client-side —
     /// the human door has no such field.
     ///
@@ -429,11 +478,42 @@ final class Prefs {
     /// this takes the text before the first "@" and insists there was one.
     func seedUserName(fromEmail email: String?) {
         guard !_nameChosen, defaults.object(forKey: Key.userName) == nil else { return }
-        guard let email, let at = email.firstIndex(of: "@") else { return }
-        let local = String(email[..<at])
-        guard !local.isEmpty else { return }
+        guard let local = Self.localPart(of: email) else { return }
         _userName = local
         defaults.set(local, forKey: Key.userName)
+    }
+
+    /// Text before the first "@", or nil when the string is not address-shaped
+    /// or has nothing there. See `seedUserName(fromEmail:)` for why not `split`.
+    private static func localPart(of email: String?) -> String? {
+        guard let email, let at = email.firstIndex(of: "@") else { return nil }
+        let local = String(email[..<at])
+        return local.isEmpty ? nil : local
+    }
+
+    /// The better seed: the given name on the mailbox's Google profile, when
+    /// the daemon has imported one. Greets "Ada" where the address could only
+    /// offer "alovelace97".
+    ///
+    /// STILL A SEED, so it writes the stored value directly and leaves
+    /// `nameChosen` alone: the pencil stays, and a name the human typed is
+    /// never touched. It fires in exactly two states:
+    ///
+    /// - nothing has ever been stored (a first run against a daemon that
+    ///   already knows the name), and
+    /// - what is stored is OUR OWN earlier guess, the local part of this same
+    ///   mailbox. That is the upgrade for every install that seeded before the
+    ///   daemon could say a name, and matching the guess exactly is what keeps
+    ///   it from overwriting anything else: a name cleared in Settings is the
+    ///   empty string, not the local part, and stays cleared.
+    func seedUserName(fromGivenName given: String?, email: String?) {
+        guard !_nameChosen else { return }
+        guard let name = given?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty
+        else { return }
+        let stored = defaults.object(forKey: Key.userName) as? String
+        guard stored == nil || (stored == Self.localPart(of: email) && stored != name) else { return }
+        _userName = name
+        defaults.set(name, forKey: Key.userName)
     }
 
     /// What every install signs with until its human says otherwise. Markdown,

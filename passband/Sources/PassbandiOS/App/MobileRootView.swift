@@ -31,6 +31,10 @@
 // the triage palette are all state on AppStore, and this shell mounts the same
 // views off the same flags. Nothing below owns a flag of its own — every one of
 // them is written by the verbs in Model/Actions.swift.
+//
+// WHAT'S NEW IS MOUNTED HERE TOO, and is the one piece that is not the Mac's
+// view: the Mac's is a card over a window, the phone's takes the screen
+// (Views/WhatsNewWalk.swift). The state is still the store's `whatsNew`.
 
 import SwiftUI
 
@@ -91,6 +95,9 @@ struct MobileRootView: View {
             // email the reader opens — the reader is here now, so this is worth
             // the same as it is on the Mac.
             EmailWebView.warmProcess()
+            #if DEBUG
+                if FixtureStage.on { return await FixtureStage.boot(store) }
+            #endif
             await store.loadSettings()
         }
         .onChange(of: store.accountActionsBlocked) { _, blocked in
@@ -115,6 +122,21 @@ struct MobileRootView: View {
                 // offer two ways to connect at once, the front one adding an
                 // account to an install that no longer has any.
                 store.addAccountSheetOpen = false
+                // And the account panes, for the shell they are drawn over is
+                // gone. The door is a singleton and outlives it: left open, the
+                // next connect (after a sign out, or the last mailbox removed
+                // from the Account page) would mount the shell with the Account
+                // page already covering the sitrep, and What's New would never
+                // be asked, since it only raises over a bare board.
+                AccountDoor.shared.close()
+                // The gate, on an install that knows no mailbox: whoever is
+                // here is new, and is owed the cold open rather than release
+                // notes. Not every `.disconnected` is that: a keychain that
+                // would not unlock lands here too, with its mailbox still on
+                // the list, and that person has been here before.
+                if status == .disconnected, AccountManager.shared.accounts.isEmpty {
+                    store.whatsNew.meetNewcomer()
+                }
             }
         }
     }
@@ -128,6 +150,7 @@ private struct MobileLoadingGate: View {
                 .foregroundStyle(Palette.ink)
             ProgressView()
                 .controlSize(.small)
+            SavedConnectionWait()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -137,20 +160,46 @@ private struct MobileLoadingGate: View {
 
 private struct MobileShell: View {
     @Environment(AppStore.self) private var store
-    @State private var tab: MobileTab = .sitrep
+    @State private var tab: MobileTab = MobileShell.openingTab
     @State private var showAuth = false
+    /// One per tab's stack: whether that tab is frontmost, and how many pages
+    /// pushed onto it are able to hold the reader themselves. See `ReaderTab`.
+    /// The Account page's own stack, which is no tab's.
+    @State private var accountReader = ReaderTab()
+    @State private var readers: [MobileTab: ReaderTab] = [
+        .sitrep: ReaderTab(), .records: ReaderTab(), .mail: ReaderTab(), .search: ReaderTab(),
+    ]
+
+    /// Sitrep, always, outside a debug build staged for a screenshot.
+    private static var openingTab: MobileTab {
+        #if DEBUG
+            switch FixtureStage.tab {
+            case "records": return .records
+            case "mail": return .mail
+            case "search": return .search
+            default: break
+            }
+        #endif
+        return .sitrep
+    }
 
     // No `@Bindable` shadow here: every modal below is presented off a derived
     // Binding that funnels dismissal through the store's own close verb, so
     // nothing needs to write a store flag directly.
-    var body: some View {
+    var body: some View { layered }
+
+    /// The tabs, and everything that follows where the human and the store
+    /// say they are. Split from `layered` only because one chain holding both
+    /// is more than the type checker will solve in a sitting.
+    private var routed: some View {
         TabView(selection: $tab) {
             Tab("Sitrep", systemImage: MainView.sitrep.symbol, value: MobileTab.sitrep) {
                 NavigationStack {
                     MobileSitrepView()
-                        .threadDestination(active: tab == .sitrep)
+                        .threadDestination(root: true)
                 }
                 .tabSlide(.sitrep, selection: tab)
+                .environment(readers[.sitrep])
             }
             // `square.grid.2x2` and not a box: the tab is a grid of glanceable
             // cards, one per zone, and the icon should say the shape of what is
@@ -159,9 +208,10 @@ private struct MobileShell: View {
             Tab("Quick Look", systemImage: "square.grid.2x2", value: MobileTab.records) {
                 NavigationStack {
                     MobileRecordsView(showAuth: $showAuth)
-                        .threadDestination(active: tab == .records)
+                        .threadDestination(root: true)
                 }
                 .tabSlide(.records, selection: tab)
+                .environment(readers[.records])
             }
             Tab("Mail", systemImage: MainView.emails.symbol, value: MobileTab.mail) {
                 NavigationStack {
@@ -184,9 +234,10 @@ private struct MobileShell: View {
                                 .accessibilityLabel("New message")
                             }
                         }
-                        .threadDestination(active: tab == .mail)
+                        .threadDestination(root: true)
                 }
                 .tabSlide(.mail, selection: tab)
+                .environment(readers[.mail])
             }
             // The search role parks this tab apart from the others in iOS 26's
             // tab bar, next to the minimize affordance, which is where a phone
@@ -203,15 +254,21 @@ private struct MobileShell: View {
             Tab(value: MobileTab.search, role: .search) {
                 NavigationStack {
                     MobileSearchView()
-                        .threadDestination(active: tab == .search)
+                        .threadDestination(root: true)
                 }
                 .tabSlide(.search, selection: tab)
+                .environment(readers[.search])
             }
         }
         // Scrolling down surrenders the bar to the content and brings it back on
         // the way up: a mail list is a reading surface first. Every tab here is a
         // real ScrollView or List, so all of them drive it.
         .tabBarMinimizeBehavior(.onScrollDown)
+        // Picking the search tab IS reaching for the field, so the tap that
+        // selects it also focuses it and raises the keyboard. The default
+        // lands on the tab and waits for a second tap on the field, which is
+        // one tap spent saying the same thing twice.
+        .tabViewSearchActivation(.searchTabSelection)
         // An auth notification tap: the Mac's routed Auth page is, here, the
         // login-codes page behind the Quick Look key. `initial` because a tap
         // that launched the app set the flag before this view existed.
@@ -221,6 +278,76 @@ private struct MobileShell: View {
             showAuth = true
             store.consumeAuthPage()
         }
+        // THE STORE'S ROUTING, FOLLOWED. Shared views ask for a place by
+        // calling the store (`openMail` from the clear board's link,
+        // `openSearch` from a row's "search this sender"), and on the Mac the
+        // rail and the side panel answer. Here the answer is a tab, and until
+        // this watched for it those calls changed state no screen was showing.
+        .onChange(of: store.routeAsks) { _, _ in
+            // The ASK, not the value: this shell only keeps `activeView` true
+            // for the two tabs that have one, so on Quick Look or Search a
+            // route to the view it already names would change nothing.
+            switch store.activeView {
+            case .sitrep: tab = .sitrep
+            case .emails: tab = .mail
+            default: break
+            }
+        }
+        .onChange(of: tab, initial: true) { _, _ in syncReaders() }
+        .onChange(of: door.pane) { _, _ in syncReaders() }
+        // Mail opened from somewhere else (a banner) while the drawer is out:
+        // the drawer is in front of the stack that mail is about to push on.
+        .onChange(of: store.threadId) { _, thread in
+            if thread != nil, door.pane == .picker { door.close() }
+        }
+        #if DEBUG
+            // A screenshot's way onto the Account page; see FixtureRoute.
+            .onChange(of: FixtureRoute.shared.account, initial: true) { _, staged in
+                if staged { door.pane = .page }
+            }
+        #endif
+        // And the other way, so the store's idea of where the human is stays
+        // true for the next request. Written directly rather than through
+        // `setView`, which closes the reader: a tab switch here parks it.
+        .onChange(of: tab) { _, tab in
+            let view: MainView? =
+                switch tab {
+                case .sitrep: .sitrep
+                case .mail: .emails
+                default: nil
+                }
+            if let view, store.activeView != view { store.activeView = view }
+        }
+        // WHAT'S NEW, after an update: asked when the first sync of a
+        // session lands, and only over the Sitrep. The Mac asks from the same
+        // moment (RootView); the rule itself is the model's.
+        //
+        // AND ASKED AGAIN WHENEVER THE BOARD COMES BACK INTO VIEW, which the
+        // Mac does not need: a phone is often opened by a banner, straight
+        // into a reader, and a session here lasts days. Once at first sync
+        // would mean an update whose notes never came. The model still shows
+        // them once (its stamp, and its own once-a-session flag).
+        .onChange(of: store.lastRefresh) { old, new in
+            if old == nil, new != nil { askWhatsNew() }
+        }
+        .onChange(of: bareSitrep) { _, bare in
+            if bare, store.lastRefresh != nil { askWhatsNew() }
+        }
+        // A request to be shown the search. The ASK, not the query: "search
+        // this sender" twice for one sender seeds the term the field already
+        // holds, and a watch on the term would hear nothing the second time.
+        .onChange(of: store.searchAsks) { _, _ in
+            if tab != .search { tab = .search }
+        }
+    }
+
+    /// Everything drawn OVER the tabs: panes, toasts, modals, sheets.
+    private var layered: some View {
+        routed
+        // THE ACCOUNT PANES, from the left, over the tab bar and under every
+        // toast and modal below: a rule editor raised from the Account page's
+        // Rules has to land on top of the pane it was raised from.
+        .overlay { accountPanes }
         // Toasts ride ABOVE the tab bar, where the Mac's stack rides above the
         // rail. The offset clears the bar at rest; when the bar minimizes on
         // scroll the stack simply sits a little higher than it needs to, which is
@@ -235,11 +362,36 @@ private struct MobileShell: View {
         // put a second card shape around a card.
         .overlay {
             if let request = store.ruleEditor {
-                RuleEditor(request: request) { store.closeRuleEditor() }
+                // The draft and the identity the Mac's action layer passes:
+                // without the first a half-written rule is lost to a tap off
+                // the card, and without the second a request swapped under an
+                // open card inherits the last one's fields.
+                RuleEditor(
+                    request: request,
+                    draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
+                ) { store.closeRuleEditor() }
+                .id(request.id)
+            }
+        }
+        // The group editor, off the same `store.groupEditor` the Mac's action
+        // layer mounts it on. Until this was here the phone had no Groups page
+        // to raise it from; now it has one (under Account), and a flag set with
+        // nothing watching it is a button that does nothing. `.id` for the
+        // reason the rule editor has one: a request swapped under an open card
+        // must not inherit the last one's fields.
+        .overlay {
+            if let request = store.groupEditor {
+                GroupEditor(request: request) { store.closeGroupEditor() }
+                    .id(request.id)
             }
         }
         .overlay {
             if !store.authQueue.isEmpty { AuthCodeModal() }
+        }
+        // Which Google account to pick, said before the browser opens: the
+        // sitrep's disconnected banner raises it.
+        .overlay {
+            if let ask = store.reconnectAsk { ReconnectAccountPrompt(ask: ask) }
         }
         // `v`. A SHEET here and a top-anchored command bar there, for one reason:
         // the palette autofocuses a text field, and a phone answers that by
@@ -248,6 +400,14 @@ private struct MobileShell: View {
         .sheet(isPresented: triageFixOpen) {
             if let target = store.triageFix {
                 TriageFixPalette(target: target) { store.closeTriageFix() }
+            }
+        }
+        // `h`. The same palette and the same `store.remindTarget`, as a sheet
+        // for the reason the triage palette is one: it autofocuses a field.
+        .sheet(isPresented: remindOpen) {
+            if let target = store.remindTarget {
+                RemindPalette(target: target) { store.closeRemind() }
+                    .presentationDragIndicator(.visible)
             }
         }
         // SHARE PASSBAND, off the same `store.shareSheetOpen` the Mac's shell
@@ -291,6 +451,20 @@ private struct MobileShell: View {
         }
         // THE TWO-WEEK ASK, over the shell on both platforms.
         .overlay { ShareNudgeModal() }
+        // WHAT'S NEW, off the same `store.whatsNew` the Mac's action layer
+        // mounts its card on, and above everything else here: it takes the
+        // whole screen, tab bar included, which is why it is an overlay on the
+        // shell and not a page on one tab's stack. Settings' row raises it
+        // from three pushes deep and it still covers the lot.
+        .overlay {
+            if store.whatsNew.active {
+                WhatsNewWalk(
+                    notes: store.whatsNew.phoneNotes, openingPage: store.whatsNew.phoneOpeningPage
+                )
+                .transition(.opacity)
+            }
+        }
+        .animation(.smooth(duration: 0.35), value: store.whatsNew.active)
         .onChange(of: store.shareAvailable) { _, canShare in
             ShareNudge.shared.askIfEarned(canShare: canShare)
         }
@@ -310,6 +484,60 @@ private struct MobileShell: View {
                 .interactiveDismissDisabled(store.compose?.sending == true)
                 .scrollDismissesKeyboard(.interactively)
         }
+    }
+
+    private var door: AccountDoor { .shared }
+
+    /// The Sitrep with nothing over it, which is the only place What's New is
+    /// raised. The model checks the modals itself; this is the shell's half.
+    private var bareSitrep: Bool {
+        tab == .sitrep && door.pane == nil && store.threadId == nil && store.compose == nil
+    }
+
+    private func askWhatsNew() {
+        store.whatsNew.maybeShowOnPhone(sitrepShowing: tab == .sitrep && door.pane == nil)
+    }
+
+    /// Exactly one stack may take a thread the store opens. While the Account
+    /// page is up that is ITS stack, not the tab under it.
+    private func syncReaders() {
+        let onPage = door.pane == .page
+        for (key, reader) in readers { reader.active = key == tab && !onPage }
+        accountReader.active = onPage
+    }
+
+    /// The drawer and the page (Views/AccountDoor.swift). The page gets a
+    /// stack of its own, so its panes push the ordinary way inside a pane that
+    /// itself came from the left, and that stack hosts the reader for mail
+    /// opened from in there (a group's history).
+    private var accountPanes: some View {
+        ZStack(alignment: .leading) {
+            if door.pane == .picker {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+                    .onTapGesture { door.close() }
+                    .transition(.opacity)
+                    .accessibilityLabel("Close accounts")
+                    .accessibilityAddTraits(.isButton)
+                GeometryReader { screen in
+                    LeadingPane(width: min(340, screen.size.width * 0.84), onClose: door.close) {
+                        AccountPicker()
+                    }
+                }
+                .transition(.move(edge: .leading))
+            }
+            if door.pane == .page {
+                LeadingPane(width: nil, dragCloses: false, onClose: door.close) {
+                    NavigationStack {
+                        AccountPage()
+                            .threadDestination(root: true)
+                    }
+                    .environment(accountReader)
+                }
+                .transition(.move(edge: .leading))
+            }
+        }
+        .animation(Motion.pane, value: door.pane)
     }
 
     /// The share sheet's flag, as a Binding, so this file keeps its rule: no
@@ -338,6 +566,12 @@ private struct MobileShell: View {
         Binding(
             get: { store.triageFix != nil },
             set: { if !$0 { store.closeTriageFix() } })
+    }
+
+    private var remindOpen: Binding<Bool> {
+        Binding(
+            get: { store.remindTarget != nil },
+            set: { if !$0 { store.closeRemind() } })
     }
 
     /// Same contract for the composer: the store owns whether it is open, and a
@@ -438,16 +672,57 @@ extension View {
 /// closing the thread the visible tab is showing.
 private struct ThreadDestination: ViewModifier {
     @Environment(AppStore.self) private var store
-    let active: Bool
+    @Environment(ReaderTab.self) private var reader
+    /// The tab's own first page, as against a page pushed onto it.
+    let root: Bool
 
-    /// The thread THIS tab's stack owns. Captured from `store.threadId` only
-    /// while the tab is frontmost, so a store-level thread never leaks onto a
-    /// stack that didn't open it.
+    /// The thread THIS page's stack position owns. Captured from
+    /// `store.threadId` only while it is the page on screen, so a store-level
+    /// thread never leaks onto a stack, or a level of one, that didn't open it.
     @State private var mine: String?
     /// The SCHEDULED MAIL this tab's stack shows read-only (ScheduledPreview),
     /// pushed the way a thread is and owned by the same rule: captured from
     /// `store.scheduledPreviewId` only while this tab is frontmost.
     @State private var minePreview: Int?
+    /// On screen, uncovered. A page under the reader it pushed is not.
+    @State private var visible = false
+
+    private var active: Bool { reader.active }
+
+    /// WHO PUSHES THE READER: THE PAGE YOU ARE LOOKING AT. SwiftUI pops an
+    /// item destination back to the view that DECLARED it, so a reader
+    /// declared on the tab's root and opened from three pages deep (a group's
+    /// history, the agent's citations) closed all the way back to the root:
+    /// finish a thread from a group and you were on the sitrep. So a pushed
+    /// page that opens mail declares the destination too (`readerHost`), and
+    /// exactly one of them takes any given thread:
+    ///
+    ///   - the page already holding the reader keeps it (a stack walk swaps
+    ///     the thread under a page that is, by then, covered);
+    ///   - otherwise the page on screen takes it;
+    ///   - and the root takes it when no page that could is on screen, which
+    ///     is a thread opened over a settings pane by a notification.
+    private var takes: Bool {
+        guard active else { return false }
+        if mine != nil || visible { return true }
+        // Not while a pushed page HOLDS a reader either: that page is covered
+        // by it, so it is not "on screen", and without this the root would
+        // push a second reader under the first whenever the thread changed.
+        return root && reader.hostsOnScreen == 0 && reader.holders == 0
+    }
+
+    /// The one writer of `mine`, so a pushed page's hold on the reader is
+    /// counted exactly when it starts and when it ends.
+    private func hold(_ thread: String?) {
+        if !root {
+            if mine == nil, thread != nil {
+                reader.holders += 1
+            } else if mine != nil, thread == nil {
+                reader.holders = max(0, reader.holders - 1)
+            }
+        }
+        mine = thread
+    }
 
     func body(content: Content) -> some View {
         content
@@ -472,22 +747,38 @@ private struct ThreadDestination: ViewModifier {
             .navigationDestination(item: openThread) { threadId in
                 ThreadViewer(threadId: threadId)
                     .id(threadId)
+                    .modifier(LeavesWithThread(threadId: threadId, on: !root))
                     // The subject is the first thing under the bar already; a
                     // second copy of it up here, truncated to a phrase, is
                     // noise. The bar stays for its back chevron.
                     .navigationTitle("")
                     .navigationBarTitleDisplayMode(.inline)
             }
+            .onAppear {
+                visible = true
+                if root {
+                    // The first page is on screen, so nothing above it holds a
+                    // reader. Heals a count left behind by a host torn down
+                    // with its reader still up (the Account pane closing).
+                    reader.holders = 0
+                } else {
+                    reader.hostsOnScreen += 1
+                }
+            }
+            .onDisappear {
+                visible = false
+                if !root { reader.hostsOnScreen -= 1 }
+            }
             .onChange(of: store.threadId) { _, newValue in
-                if active {
+                if takes {
                     // Frontmost: this tab drives. Opening claims the thread,
                     // closing (from anywhere: pop, account teardown) releases it.
-                    mine = newValue
+                    hold(newValue)
                 } else if newValue != mine {
                     // Another tab opened a different thread, or the thread was
                     // closed while this tab held it off-screen: this stack's
                     // reader describes state that is gone, so it pops silently.
-                    mine = nil
+                    hold(nil)
                 }
             }
     }
@@ -508,17 +799,71 @@ private struct ThreadDestination: ViewModifier {
             get: { mine },
             set: { newValue in
                 guard newValue == nil, let owned = mine else { return }
-                mine = nil
+                hold(nil)
                 // A user-driven pop closes the store's thread only when it is
                 // still the one this stack owned; a stack releasing a stale
                 // reader must not close what another tab is showing.
-                if active, store.threadId == owned { store.closeThread() }
+                if active, store.threadId == owned {
+                    store.closeThread()
+                } else if !root, active, let next = store.threadId {
+                    // A DIFFERENT THREAD ARRIVED OVER A PUSHED PAGE'S READER
+                    // (a banner tapped while reading mail opened from a group).
+                    // That reader has just dismissed itself, which is this
+                    // call, and the page under it never heard the change; so
+                    // it takes the new thread here, one turn later, once the
+                    // pop that called this has finished.
+                    Task { @MainActor in
+                        if mine == nil, active, store.threadId == next { hold(next) }
+                    }
+                }
             })
     }
 }
 
+/// A reader pushed by a page that is itself pushed has to leave on its own.
+///
+/// SwiftUI stops updating a pushed page once something covers it: its
+/// `onChange` never hears the store's thread close, so the binding that would
+/// pop the reader never moves, and done left the finished mail on screen. (The
+/// tab's first page is kept live under whatever covers it, which is why the
+/// root's binding has always worked.) The reader is the one view certain to be
+/// awake, so it watches for its own thread going away and dismisses itself,
+/// which pops exactly one level: back to the page that opened it.
+private struct LeavesWithThread: ViewModifier {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let threadId: String
+    let on: Bool
+
+    func body(content: Content) -> some View {
+        content.onChange(of: store.threadId) { _, now in
+            if on, now != threadId { dismiss() }
+        }
+    }
+}
+
+/// One tab's stack, as the pages on it need to know it. Handed down the
+/// stack's environment so a pushed page can host the reader without being
+/// told which tab it was pushed onto.
+@MainActor
+@Observable
+final class ReaderTab {
+    /// This tab is the one on screen.
+    var active = false
+    /// Pushed pages on screen right now that can hold the reader themselves.
+    var hostsOnScreen = 0
+    /// Pushed pages that have a reader up right now, and so are covered by it.
+    var holders = 0
+}
+
 extension View {
-    fileprivate func threadDestination(active: Bool) -> some View {
-        modifier(ThreadDestination(active: active))
+    fileprivate func threadDestination(root: Bool) -> some View {
+        modifier(ThreadDestination(root: root))
+    }
+
+    /// For a page PUSHED onto a tab's stack that opens mail: the reader it
+    /// opens comes back to it, not to the tab's first page.
+    func readerHost() -> some View {
+        modifier(ThreadDestination(root: false))
     }
 }

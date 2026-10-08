@@ -32,7 +32,9 @@
 //    instead. See ComposePane.bodyHasFocus.
 
 import SwiftUI
+import PhotosUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct MarkdownTextView: UIViewRepresentable {
     @Binding var text: String
@@ -44,12 +46,34 @@ struct MarkdownTextView: UIViewRepresentable {
     /// caret again after mount (`EditorRefocus.take`).
     var refocus = 0
     var disabled = false
+    /// GROW WITH THE TEXT instead of scrolling it. For an editor that already
+    /// sits in something that scrolls: the reader's reply lives at the end of
+    /// the email chain, in the chain's own scroll view, and a second scroller
+    /// nested in the first is two surfaces answering one thumb. The caller
+    /// gives it a floor with `.frame(minHeight:)` and no ceiling. Phone only;
+    /// the Mac's editor has no such switch.
+    var grows = false
     /// The Mac editor's drop and paste hooks, accepted here so the composers
     /// pass them without forking on platform. A phone has nothing to drop
     /// with; its files come in through the paperclip's document picker.
     var onDropFiles: (([URL], Int?) -> Void)? = nil
     var onPasteImage: ((Data, Int?) -> Void)? = nil
     var onDropHover: ((Bool) -> Void)? = nil
+    /// The draft the bar's paperclip adds files to; nil leaves the paperclip
+    /// off the bar (a daemon that cannot stage files, or an editor that is not
+    /// a mail body). Set through `attaching`.
+    var attachSlot: DraftSaver.Slot? = nil
+
+    /// THE PAPERCLIP LIVES ON THE KEYBOARD'S BAR, with the formatting verbs.
+    /// It was a labelled chip in each composer's own chrome, which on a phone
+    /// is the scarcest strip there is; the bar above the keys is where the
+    /// thumb already is while writing, and where every other verb that acts
+    /// on the body sits.
+    func attaching(_ slot: DraftSaver.Slot?) -> MarkdownTextView {
+        var copy = self
+        copy.attachSlot = slot
+        return copy
+    }
 
     func makeUIView(context: Context) -> HighlightingTextView {
         let view = HighlightingTextView()
@@ -68,7 +92,10 @@ struct MarkdownTextView: UIViewRepresentable {
         // The editor scrolls ITSELF. Its callers give it a fixed height (the
         // inline reply) or the rest of a sheet (the pane), and a text view that
         // grew instead would push the send buttons under the keyboard.
-        view.isScrollEnabled = true
+        //
+        // UNLESS IT GROWS (`grows`), where the enclosing scroll view is the
+        // scroller and this view is as tall as its text: see `sizeThatFits`.
+        view.isScrollEnabled = !grows
         view.alwaysBounceVertical = false
         // Curly quotes and en-dashes break markers, exactly as on the Mac.
         view.smartQuotesType = .no
@@ -105,12 +132,90 @@ struct MarkdownTextView: UIViewRepresentable {
             // starts reading — and typing — from the top.
             view.selectedRange = NSRange(location: 0, length: 0)
             view.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            // A restored draft is a different number of lines.
+            if grows { view.invalidateIntrinsicContentSize() }
         }
+    }
+
+    /// THE GROWING EDITOR'S HEIGHT IS ITS TEXT'S, at the width it is offered.
+    /// Answered by hand because a UITextView that does not scroll reports an
+    /// intrinsic size for ONE UNWRAPPED LINE, and SwiftUI believes it: the
+    /// editor comes out as wide as its longest paragraph and one line tall.
+    /// nil hands a scrolling editor back to the default, which takes whatever
+    /// frame its caller gives it.
+    func sizeThatFits(
+        _ proposal: ProposedViewSize, uiView: HighlightingTextView, context: Context
+    ) -> CGSize? {
+        guard grows, let width = proposal.width, width > 0, width.isFinite else { return nil }
+        let fitted = uiView.sizeThatFits(
+            CGSize(width: width, height: .greatestFiniteMagnitude))
+        return CGSize(width: width, height: ceil(fitted.height))
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    final class Coordinator: NSObject, UITextViewDelegate {
+    final class Coordinator: NSObject, UITextViewDelegate, UIDocumentPickerDelegate,
+        PHPickerViewControllerDelegate
+    {
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            picker.dismiss(animated: true)
+            guard !results.isEmpty else {
+                view?.becomeFirstResponder()
+                return
+            }
+            Task { @MainActor in
+                // In the order they were picked, which is the order they go
+                // into the mail.
+                for result in results {
+                    guard let url = await Self.copyOut(result.itemProvider) else {
+                        AppStore.shared.pushToast("could not read that photo", .error)
+                        continue
+                    }
+                    if let slot = parent.attachSlot { ComposeAttach.add(urls: [url], to: slot) }
+                    // The copy and the folder that kept its name.
+                    try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                }
+                view?.becomeFirstResponder()
+            }
+        }
+
+        /// One picked item as a file this app owns. The provider's file exists
+        /// only inside its callback, so it is copied out before that returns;
+        /// `ComposeAttach` reads the copy, and the caller deletes it.
+        private static func copyOut(_ provider: NSItemProvider) async -> URL? {
+            let type = [UTType.image, .movie].first {
+                provider.hasItemConformingToTypeIdentifier($0.identifier)
+            }
+            guard let type else { return nil }
+            return await withCheckedContinuation { done in
+                provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, _ in
+                    guard let url else { return done.resume(returning: nil) }
+                    let dir = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                    let copy = dir.appendingPathComponent(url.lastPathComponent)
+                    do {
+                        try FileManager.default.createDirectory(
+                            at: dir, withIntermediateDirectories: true)
+                        try FileManager.default.copyItem(at: url, to: copy)
+                        done.resume(returning: copy)
+                    } catch {
+                        done.resume(returning: nil)
+                    }
+                }
+            }
+        }
+
+        func documentPicker(
+            _ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]
+        ) {
+            // The slot is read NOW, not when the picker opened: it names a
+            // draft, and the draft is whatever this editor is still editing.
+            guard let slot = parent.attachSlot else { return }
+            ComposeAttach.add(urls: urls, to: slot)
+            // Back to the body the files were for.
+            view?.becomeFirstResponder()
+        }
+
         var parent: MarkdownTextView
         weak var view: HighlightingTextView?
         /// The last `refocus` answered; starts at the mount's.
@@ -126,10 +231,19 @@ struct MarkdownTextView: UIViewRepresentable {
             parent.text = view.text
             view.rehighlight()
             view.syncInputTraits()
+            if parent.grows {
+                // A line was added or taken away: SwiftUI has to ask for the
+                // height again, and the caret has to still be on screen once
+                // it has.
+                view.invalidateIntrinsicContentSize()
+                view.revealCaret()
+            }
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
-            (textView as? HighlightingTextView)?.syncInputTraits()
+            guard let view = textView as? HighlightingTextView else { return }
+            view.syncInputTraits()
+            if parent.grows { view.revealCaret() }
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -161,11 +275,34 @@ struct MarkdownTextView: UIViewRepresentable {
             bar.tintColor = PlatformColor(Palette.accent)
             let flexible = UIBarButtonItem(
                 barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
-            bar.items = [
+            var verbs = [
                 item("bold", #selector(tapBold), "Bold"),
                 item("italic", #selector(tapItalic), "Italic"),
                 item("curlybraces", #selector(tapCode), "Code"),
                 item("link", #selector(tapLink), "Link"),
+            ]
+            // Decided once, when the editor is made: whether a daemon can
+            // stage files does not change under an open composer.
+            //
+            // A MENU, NOT A PICKER: what people attach from a phone is a
+            // picture at least as often as a document, and the two live
+            // behind different system pickers. Photos leads because it is the
+            // commoner of the two.
+            if parent.attachSlot != nil {
+                let clip = UIBarButtonItem(
+                    image: UIImage(systemName: "paperclip"),
+                    menu: UIMenu(children: [
+                        UIAction(
+                            title: "Photos", image: UIImage(systemName: "photo.on.rectangle")
+                        ) { [weak self] _ in self?.pickPhotos() },
+                        UIAction(title: "Files", image: UIImage(systemName: "folder")) {
+                            [weak self] _ in self?.pickFiles()
+                        },
+                    ]))
+                clip.accessibilityLabel = "Attach"
+                verbs.append(clip)
+            }
+            bar.items = verbs + [
                 flexible,
                 item("keyboard.chevron.compact.down", #selector(tapDismiss), "Hide keyboard"),
             ]
@@ -195,6 +332,42 @@ struct MarkdownTextView: UIViewRepresentable {
         @objc private func tapItalic() { wrap("*") }
         @objc private func tapCode() { wrap("`") }
         @objc private func tapDismiss() { view?.resignFirstResponder() }
+
+        /// Whatever is frontmost over the editor's window: the composer is a
+        /// sheet, and a picker presented from under a sheet does not appear.
+        private var presenter: UIViewController? {
+            guard var top = view?.window?.rootViewController else { return nil }
+            while let presented = top.presentedViewController { top = presented }
+            return top
+        }
+
+        /// The system's document picker. `asCopy` hands back files this app
+        /// already owns, so there is no scoped access to hold open while
+        /// `ComposeAttach` reads them.
+        private func pickFiles() {
+            guard parent.attachSlot != nil, let presenter else { return }
+            let picker = UIDocumentPickerViewController(
+                forOpeningContentTypes: [.item], asCopy: true)
+            picker.allowsMultipleSelection = true
+            picker.delegate = self
+            presenter.present(picker, animated: true)
+        }
+
+        /// The system's photo picker, which runs out of process and so needs
+        /// no library permission: the app sees only what was picked.
+        ///
+        /// `.compatible` asks for JPEG and H.264 in place of HEIC and HEVC. The
+        /// person on the other end may be reading on anything.
+        private func pickPhotos() {
+            guard parent.attachSlot != nil, let presenter else { return }
+            var config = PHPickerConfiguration()
+            config.selectionLimit = 0
+            config.selection = .ordered
+            config.preferredAssetRepresentationMode = .compatible
+            let picker = PHPickerViewController(configuration: config)
+            picker.delegate = self
+            presenter.present(picker, animated: true)
+        }
 
         /// `[selection](url)`, with `url` left selected so the next keystrokes
         /// replace it. An empty selection gets the same skeleton with the link
@@ -266,6 +439,32 @@ final class HighlightingTextView: UITextView {
         // with, and UIKit resets typing attributes to the view's font on some
         // edits; restating them keeps a fresh keystroke from landing unstyled.
         typingAttributes = MarkdownStyle.base
+    }
+
+    /// KEEP THE CARET IN THE WINDOW, by asking the scroll view this editor sits
+    /// in. Only a growing editor calls it: a scrolling one is its own scroll
+    /// view and UIKit already follows the caret inside it. A growing one has
+    /// handed the scrolling to an ancestor, which knows nothing about carets,
+    /// so a reply typed past the keyboard's top edge would carry on being
+    /// typed underneath it.
+    ///
+    /// One hop later, because the line the caret just moved to is not laid
+    /// out (and the editor is not yet its new height) inside the delegate call
+    /// that reports it. The margin under the caret is the room the composer's
+    /// own buttons take, so the verb you are typing toward stays in view.
+    func revealCaret() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isFirstResponder, let end = self.selectedTextRange?.end
+            else { return }
+            var ancestor = self.superview
+            while let view = ancestor, !(view is UIScrollView) { ancestor = view.superview }
+            guard let scroller = ancestor as? UIScrollView else { return }
+            let caret = self.convert(self.caretRect(for: end), to: scroller)
+            guard !caret.isNull, !caret.isInfinite else { return }
+            scroller.scrollRectToVisible(
+                caret.inset(by: UIEdgeInsets(top: -12, left: 0, bottom: -64, right: 0)),
+                animated: true)
+        }
     }
 
     /// Autocapitalize and autocorrect prose; do neither inside a code span. See

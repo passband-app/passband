@@ -12,8 +12,9 @@
 // the conversation you are.
 //
 // It is also where you REPLY: `r` (or an `r` pressed on a list row, handed over
-// as `pendingReplyMessageId`) pins InlineReply under the stack, still inside this
-// surface.
+// as `pendingReplyMessageId`) opens InlineReply under the stack. On the Mac that
+// is INSIDE the scroll, as the conversation's next row (`ReplyFoot`); on a phone
+// it is a bar pinned over the keyboard.
 
 import SwiftUI
 
@@ -109,6 +110,9 @@ struct ThreadViewer: View {
     /// issue competing `scrollTo`s at two targets, which is a column that
     /// judders rather than lands. See `settle`.
     @State private var settleTask: Task<Void, Never>?
+    /// The opening landing, kept until the reader takes the scroll. See
+    /// `LandingHold`.
+    @State private var hold = LandingHold()
     /// HOW MUCH MAIL LANDED BELOW THE READER while they were reading, and it is
     /// only ever non-zero for somebody who is NOT at the end of the thread:
     /// `refreshInPlace` carries a reader who was parked on the newest onto the
@@ -133,6 +137,11 @@ struct ThreadViewer: View {
     /// there is one to move on to.
     @State private var holdAdvancing = false
     @State private var holdOnward = false
+    #if !os(macOS)
+        /// True while the bar's checkmark has a done with the daemon; see
+        /// `doneFromBar`.
+        @State private var barResolving = false
+    #endif
 
     enum ConfirmMode: Equatable { case ask, noLink }
 
@@ -290,6 +299,15 @@ struct ThreadViewer: View {
                         count: stackRemaining.count,
                         key: holdAdvancing ? "E" : "e", onward: holdOnward)
                 }
+            #else
+                // The phone's hold is on the bar's checkmark, so the ring
+                // carries that glyph where the Mac's carries the key.
+                if let holdStartedAt {
+                    StackDoneHold(
+                        startedAt: holdStartedAt, duration: Self.holdDuration,
+                        count: stackRemaining.count, symbol: "checkmark",
+                        pinned: Self.pinnedHold)
+                }
             #endif
         }
         .keyContext(.thread)
@@ -322,20 +340,35 @@ struct ThreadViewer: View {
         // `sharedBackgroundVisibility(.hidden)` here, unlike the dashboard's
         // bare door glyphs): this one COMMITS something, and it should look like
         // the back button it sits opposite rather than like a label.
+        //
+        // AND IT IS THE PHONE'S HELD `e` TOO. On a Reading stack a tap walks to
+        // the sender's next email and holding it through the ring clears the
+        // lot, which is `beginStackHold` / `endStackHold` with a thumb where
+        // the key was. See `DoneBarButton` for why it is not a `Button`.
         #if !os(macOS)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { Task { await doneFromBar() } } label: {
-                        Image(systemName: "checkmark")
-                            .foregroundStyle(Palette.accent)
-                    }
-                    // Every path through it needs the thread: the queue row is
-                    // looked up by id and the fallback resolves the newest
-                    // message, and there is no newest message until it loads.
-                    .disabled(thread == nil)
-                    .accessibilityLabel("Mark done")
+                    DoneBarButton(
+                        // Every path through it needs the thread: the queue row
+                        // is looked up by id and the fallback resolves the newest
+                        // message, and there is no newest message until it loads.
+                        enabled: thread != nil,
+                        pressed: holdToken != nil,
+                        clears: barHoldClears ? stackRemaining.count : nil,
+                        onPress: { beginStackHold(advancing: false) },
+                        onRelease: { cancelled in
+                            endStackHold(cancelled: cancelled, advancing: false)
+                        },
+                        // VoiceOver has no hold to give, so both verbs are
+                        // actions it can name, and neither waits on a ring
+                        // nobody is watching close.
+                        onDone: { Task { await doneFromBar() } },
+                        onClear: { Task { await clearStackFromBar() } })
                 }
             }
+            #if DEBUG
+                .task { await rehearseBar() }
+            #endif
         #endif
         .task(id: threadId) {
             await load()
@@ -376,7 +409,10 @@ struct ThreadViewer: View {
         // The pass outlives nothing: a reader that has left owns no thread to
         // measure. Scoped by token because a thread SWITCH starts the next
         // pass before this fires.
-        .onDisappear { FrameMeasurer.shared.cancel(token: threadId) }
+        .onDisappear {
+            FrameMeasurer.shared.cancel(token: threadId)
+            hold.end()
+        }
         // The default changed in Settings while this thread is open. A thread
         // that has been switched by hand keeps what it was told — that is the
         // whole point of an override — so only the ones following the default
@@ -438,15 +474,18 @@ struct ThreadViewer: View {
     /// Header, mail, composer — and WHERE the composer attaches is the one thing
     /// the two platforms disagree about.
     ///
-    /// The Mac stacks it: a third row of the VStack, under the mail, never over
-    /// it, so the message you are answering stays readable while you answer it.
+    /// The Mac puts it IN the mail: the last row of the scroll, under the
+    /// newest message, growing with what is written in it (`ReplyFoot`, mounted
+    /// by `content`). A reply pinned under the reader took its height out of the
+    /// mail it was answering and then scrolled its own text in a box.
     ///
-    /// A phone cannot stack it, because a keyboard is about to take half the
-    /// screen. In a VStack SwiftUI lifts the WHOLE stack clear of the keyboard,
-    /// which shoves the header off the top and leaves the reader scrolled to
-    /// nowhere. As a bottom safe-area inset the composer rides the keyboard on
-    /// its own while the mail behind it merely gains bottom inset — it stays
-    /// where it was, and scrolls under a bar that is now a bar.
+    /// A phone does not attach it here at all. Stacked like the Mac's it was
+    /// lifted with the WHOLE stack clear of the keyboard, which shoved the
+    /// header off the top; pinned as a bottom safe-area inset it rode the
+    /// keyboard well enough and covered the mail it was answering, on a screen
+    /// with none to spare. So on a phone the composer is the last thing IN the
+    /// mail's own scroll, after the newest message, where the reply and reply
+    /// all buttons sit until one is pressed (`ChainFoot`, mounted in `content`).
     @ViewBuilder
     private var column: some View {
         #if os(macOS)
@@ -473,7 +512,6 @@ struct ThreadViewer: View {
                 header
                 content
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         #endif
     }
 
@@ -498,10 +536,7 @@ struct ThreadViewer: View {
                 let cardWidth = stacked ? max(0, reader.size.width - Self.stackPeekWidth) : reader.size.width
                 // Constrain the scroll viewport to the window. The full-height
                 // preview is decoration and must never size the scroll container.
-                VStack(spacing: 0) {
-                    content
-                    composer
-                }
+                content
                 .frame(width: cardWidth, height: reader.size.height)
                 .clipShape(RoundedRectangle(cornerRadius: stacked ? Self.stackRadius : 0, style: .continuous))
                 // The card's own opaque floor, so it covers the peek as it
@@ -544,21 +579,6 @@ struct ThreadViewer: View {
         private static var stackGap: CGFloat { Space.s12 }
         private static let stackRadius: CGFloat = 12
     #endif
-
-    /// MOUNTED UNCONDITIONALLY, and gated on `store.inlineReply` INSIDE. Reading
-    /// the draft from this body instead would make every keystroke in the reply
-    /// invalidate the entire reader — every message card, every sandboxed web
-    /// frame, a full relayout of the column — for a change that only ever
-    /// touches the bar at the bottom. (`@Observable` tracks the property, not the
-    /// field, so there is no way to read the draft's target here cheaply.)
-    ///
-    /// With no draft open it renders nothing, which as a safe-area inset means
-    /// no inset at all: the reader gets its full height back the moment the
-    /// composer closes.
-    private var composer: some View {
-        InlineReply(
-            messages: thread?.messages ?? [], threadSubject: thread?.subject ?? "")
-    }
 
     // MARK: - chrome
 
@@ -681,25 +701,20 @@ struct ThreadViewer: View {
     @ViewBuilder
     private var actions: some View {
         if thread != nil {
-            // REPLY NEEDS A TARGET ON A PHONE. On the Mac `r` is the door and it
-            // is always open; here the only other way in is a leading swipe from
-            // a list, which lands you in this reader with the composer already
-            // up. Without this, a thread opened by tapping it could be read and
-            // never answered. Hidden while a composer IS open — it would be a
-            // button that does nothing (`openInlineReply` refuses to reset a live
-            // draft, and rightly).
+            // REMIND ME, first, on the phone: `h` on the Mac, and the one verb
+            // about this mail that is neither answering it nor finishing it.
+            // Reply is not here any more; it is at the end of the chain, where
+            // you are when you have read enough to answer.
             #if !os(macOS)
-                if store.inlineReply == nil {
-                    Button { openReply() } label: {
-                        HStack(spacing: Space.s4) {
-                            Image(systemName: "arrowshape.turn.up.left")
-                                .font(Typo.ui(10, weight: .semibold))
-                            Text("reply").font(Typo.micro)
-                        }
+                Button { remindFromBar() } label: {
+                    HStack(spacing: Space.s4) {
+                        Image(systemName: "bell")
+                            .font(Typo.ui(10, weight: .semibold))
+                        Text("remind me").font(Typo.micro)
                     }
-                    .buttonStyle(.textAction)
-                    .foregroundStyle(Palette.accent)
                 }
+                .buttonStyle(.textAction)
+                .foregroundStyle(Palette.accent)
             #endif
             // JUMP TO WHAT SURFACED THE THREAD: shown only while the
             // attention-bearing message is not the selected one — a
@@ -846,6 +861,16 @@ struct ThreadViewer: View {
                                 // and re-ran every web frame's update, none of
                                 // which had changed. See MessageCard's `==`.
                                 .equatable()
+                                // A THUMB'S `r`, Enter AND `f`, ON THIS CARD:
+                                // drag it left and the three are there. Over
+                                // the diffed card, so a rail moving does not
+                                // rebuild the web frame it is moving.
+                                #if !os(macOS)
+                                    .modifier(
+                                        CardRail(
+                                            verbs: cardVerbs(m, proxy: proxy),
+                                            staged: stagedRail(i)))
+                                #endif
                                 .id(i)
                                 // WHERE THIS MESSAGE IS IN THE WINDOW, which is
                                 // the minimap's whole input — measured against
@@ -857,15 +882,22 @@ struct ThreadViewer: View {
                                 .onGeometryChange(for: CGRect.self) {
                                     $0.frame(in: .scrollView)
                                 } action: { frame in
+                                    let mounting = map.frames[i] == nil
                                     map.note(i, frame: frame)
+                                    holdNewest(proxy)
+                                    // A card arriving is the window moving.
+                                    if mounting { renderAhead() }
                                     if i == index { acknowledgeDisplayedMessage(id: m.id, frame: frame) }
                                     if i == newestIndex { newestHeight = frame.height }
                                 }
                                 .onDisappear { map.drop(i) }
                             }
-
-                            Color.clear.frame(height: tailSpace)
                         }
+                        #if os(macOS)
+                            .replyFoot(
+                                messages: messages, threadSubject: thread?.subject ?? "",
+                                tailSpace: tailSpace, proxy: proxy)
+                        #endif
                         // THE WIDTH THE MAIL LAYS OUT AT, taken from the column
                         // rather than derived from the constants around it: it
                         // is what every measured height is an answer FOR, and a
@@ -883,10 +915,27 @@ struct ThreadViewer: View {
                             FrameHeights.shared.using(width: width)
                         }
                         .readerColumn()
+                        // The column itself, as a scroll target: see `holdNewest`.
+                        .id(Self.columnId)
                         // INSIDE the scroll content deliberately: an overlay on the
                         // ScrollView itself would sit above it and eat the wheel
                         // wherever it covers, and the pointer parks in the gutter.
                         .overlay { gutterDismiss }
+                        // THE END OF THE CHAIN on a phone: reply and reply
+                        // all, or the reply itself, and then the tail room.
+                        #if !os(macOS)
+                            .modifier(
+                                ChainEnd(tail: tailSpace) {
+                                    ChainFoot(
+                                        messages: messages, threadSubject: thread?.subject ?? "",
+                                        proxy: proxy, onReply: openReply, onReplyAll: openReplyAll
+                                    )
+                                    .padding(.horizontal, Self.columnPadding)
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                                        chainFootHeight = $0
+                                    }
+                                })
+                        #endif
                     }
                     // THE READER OPENS AT THE END: the newest message is the one
                     // you came for, and with `tailSpace` under it the end of the
@@ -903,6 +952,16 @@ struct ThreadViewer: View {
                     // scroll bar would be a second, worse answer to the same
                     // question sitting right beside it.
                     .scrollIndicators(.hidden)
+                    // THE KEYBOARD GOES WHERE THE THUMB PUSHES IT. A reply is
+                    // written in this scroll, under the mail it answers, and
+                    // the reason it is there is so the mail can be read while
+                    // it is written; half a screen of keyboard over the mail
+                    // is the one thing in the way. Dragging down through it
+                    // puts it away, the composer stays where it is with every
+                    // word in it, and a tap in it brings the keyboard back.
+                    #if !os(macOS)
+                        .scrollDismissesKeyboard(.interactively)
+                    #endif
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
                         viewportHeight = $0
                     }
@@ -912,6 +971,11 @@ struct ThreadViewer: View {
                     // hands off. It fires twice a gesture, not per tick.
                     .onScrollPhaseChange { _, phase in
                         handScrolling = phase != .idle
+                        // A hand on the scroll ends the opening hold for good.
+                        // `.animating` is ours (a `j`, the pill), not theirs.
+                        if phase == .tracking || phase == .interacting || phase == .decelerating {
+                            hold.end()
+                        }
                         // A WHEEL NEVER TOUCHES THE SELECTION, so somebody who
                         // scrolled down to the arrival themselves would still be
                         // looking at a pill telling them it is below. Asked of
@@ -982,7 +1046,7 @@ struct ThreadViewer: View {
                 .onChange(of: index) { was, now in
                     // Reaching the end of the thread IS reading what arrived —
                     // whether that took the pill, a press of `j`, or the rail.
-                    if now == newestIndex { arrivals = 0 }
+                    if now == newestIndex { arrivals = 0 } else { hold.end() }
                     // The find moved the selection and has aimed the column
                     // itself, at a line rather than at this card's top.
                     if find.steering {
@@ -1017,6 +1081,21 @@ struct ThreadViewer: View {
                 // it never fires. The two numbers it is made of do change.
                 .onChange(of: [newestHeight, viewportHeight]) { was, now in
                     guard newestHeight > 0, index == newestIndex else { return }
+                    // A REPLY IS OPEN, and on a phone it is in this scroll,
+                    // below the message this would park at the top: landing
+                    // now takes the composer out from under the thumb typing
+                    // in it. That includes the reply that ARRIVES with the
+                    // thread (a list row's Reply), which is why the landing is
+                    // marked taken rather than merely skipped; otherwise it
+                    // would be owed, and paid the moment the reply closed.
+                    // Read in the action, not the body: the draft changes on
+                    // every keystroke.
+                    #if !os(macOS)
+                        if store.inlineReply != nil {
+                            landed = true
+                            return
+                        }
+                    #endif
                     // Land once per thread, then only while the reader is still
                     // parked on the newest — a resize, or the card growing as its
                     // images arrive. Somebody who has scrolled back into the
@@ -1029,10 +1108,33 @@ struct ThreadViewer: View {
                     // and yanking the reader back to where they started. A
                     // gesture in progress owns the scroll; the window resizing
                     // (the third arm) is not a gesture and still lands.
-                    guard !landed || (parkedOnNewest && !handScrolling) || was.last != now.last
+                    //
+                    // AND THE THIRD ARM IS THE MAC'S ALONE. A phone's window
+                    // changes height every time a keyboard comes or goes, and
+                    // that is not somebody resizing anything: dismissing a
+                    // reply at the foot of a long message would be answered by
+                    // a jump back to the top of it.
+                    #if os(macOS)
+                        let resized = was.last != now.last
+                    #else
+                        let resized = false
+                    #endif
+                    guard !landed || (parkedOnNewest && !handScrolling) || resized
                     else { return }
                     proxy.scrollTo(newestIndex, anchor: .top)
+                    // The first landing is the one that gets held: every card
+                    // above is still at a guess, and the one that measures
+                    // next takes the newest out of the window with it.
+                    if !landed { hold.begin() }
                     landed = true
+                    // A reply already open (an `r` from a list row opens the
+                    // reader and the composer together) is what the reader
+                    // came for; the top of a long message would leave it
+                    // below the window. Read in a closure, not in the body:
+                    // see `ReplyFoot`.
+                    #if os(macOS)
+                        if store.inlineReply != nil { ReplyFoot.reveal(proxy) }
+                    #endif
                 }
                 .onChange(of: messages.last?.id) { _, _ in
                     proxy.scrollTo(index, anchor: .top)
@@ -1243,6 +1345,69 @@ struct ThreadViewer: View {
         }
     }
 
+    /// PUT THE NEWEST BACK when layout, not the reader, took it away. Asked by
+    /// every card whose frame moves, because the newest cannot ask for itself:
+    /// shoved far enough it is recycled by the stack and stops reporting.
+    ///
+    /// A RECYCLED CARD CANNOT BE SCROLLED TO: its `.id` is gone with it, and a
+    /// `scrollTo` naming it does nothing at all. The column is always there,
+    /// and its end is where the newest lives, so that is the first step: it
+    /// brings the card back, and the next pass can aim at the card itself.
+    ///
+    /// THE FIND AND THE REPLY COMPOSER AIM THE COLUMN THEMSELVES, at a line
+    /// inside a message and at the foot of one. Either being up means the
+    /// reader has asked to be somewhere other than the newest message's top,
+    /// which ends the hold as surely as a wheel does.
+    private func holdNewest(_ proxy: ScrollViewProxy) {
+        if find.open || store.inlineReply != nil {
+            hold.end()
+            return
+        }
+        hold.aim {
+            index == newestIndex && !handScrolling && !parkedOnNewest
+        } scroll: { attempt in
+            if map.frames[newestIndex] == nil {
+                // Every other try is aimed a little short of the end.
+                // Arriving at the end can leave the stack with NO card laid
+                // out, and asking for the end again is then asking for where
+                // the scroll already is: nothing moves, so nothing is laid
+                // out. A different offset is what makes it look again.
+                let short = attempt.isMultiple(of: 2)
+                proxy.scrollTo(
+                    Self.columnId, anchor: short ? UnitPoint(x: 0.5, y: 0.99) : .bottom)
+            } else {
+                proxy.scrollTo(newestIndex, anchor: .top)
+            }
+        }
+    }
+
+    private static let columnId = "reader-column"
+
+    /// HAVE THE NEXT MESSAGES DRAWN BEFORE THE SCROLL REACHES THEM (see
+    /// `FramePrewarmer.ahead`). Asked each time a card mounts, which is as
+    /// often as the answer changes.
+    ///
+    /// MORE ABOVE THAN BELOW, and above first: the reader opens at the end of
+    /// the thread, so up is the way nearly every scroll goes. Five in all,
+    /// inside the six the pool keeps for mail that has been read.
+    ///
+    /// Only mail the pool may hold at all (`cache_allowed`), and only what is
+    /// not already drawn. "Drawn" is judged within a few windows of here: the
+    /// map can keep a frame for a card the stack laid out once, far away, and
+    /// let go of without saying so.
+    private func renderAhead() {
+        guard thread?.cache_allowed == true, styleReady, viewportHeight > 0 else { return }
+        let near = map.frames.filter {
+            $0.value.maxY > -2 * viewportHeight && $0.value.minY < 3 * viewportHeight
+        }
+        let visible = near.filter { $0.value.maxY > 0 && $0.value.minY < viewportHeight }.keys
+        guard let top = visible.min(), let bottom = visible.max() else { return }
+        let wanted = [top - 1, bottom + 1, top - 2, bottom + 2, top - 3].filter {
+            messages.indices.contains($0) && near[$0] == nil
+        }
+        FramePrewarmer.shared.ahead(wanted.map { messages[$0] }, style: style, width: bodyWidth)
+    }
+
     /// Whether the newest message's top edge is still sitting at the top of the
     /// window — that is, whether the reader is where the landing put them. Read
     /// off the card's own live frame rather than from a visibility fraction: a
@@ -1255,8 +1420,16 @@ struct ThreadViewer: View {
 
     private var tailSpace: CGFloat {
         guard messages.count > 1, viewportHeight > 0, newestHeight > 0 else { return 0 }
-        return max(0, viewportHeight - newestHeight - 24)
+        // The phone's chain foot sits between the newest message and this
+        // room, and is part of what the window already holds. Zero on a Mac.
+        return max(0, viewportHeight - newestHeight - chainFootHeight - 24)
     }
+
+    /// How tall the phone's chain foot is right now: two buttons, or a
+    /// composer as tall as what has been typed into it. State on the reader,
+    /// so a reply growing by a line re-renders it; the cards diff themselves
+    /// out of that (`MessageCard.==`), and a line is not a keystroke.
+    @State private var chainFootHeight: CGFloat = 0
 
     /// One mark per message for the rail LEFT of the mail: WHO WROTE IT, which is
     /// the whole colour code and the same colour their avatar carries in the
@@ -1358,9 +1531,12 @@ struct ThreadViewer: View {
     }
 
     /// The mail's measure. The dismissible gutter is defined as the complement
-    /// of it, so the two can never drift apart — and the inline composer pins
-    /// itself to the same measure, so the reply sits under the column it answers.
+    /// of it, so the two can never drift apart.
     static let columnWidth: CGFloat = 900
+
+    /// Where a card's body starts inside the column, for the inline composer,
+    /// which is laid out as the next card and has to start on the same line.
+    static var replyInset: CGFloat { MessageCard.bodyInset }
 
     /// The widest a chat bubble is ever drawn. Narrower than the column on
     /// purpose: what makes a conversation readable as one is the empty margin
@@ -2005,6 +2181,16 @@ struct ThreadViewer: View {
     /// How long the ring takes to close, counted from when it appears.
     static let holdDuration: Duration = .milliseconds(750)
 
+    /// The ring's stopped clock, for the fixture stage's screenshot. Nil in
+    /// anything that ships, and on the Mac.
+    private static var pinnedHold: Double? {
+        #if DEBUG && !os(macOS)
+            FixtureStage.pinnedHold
+        #else
+            nil
+        #endif
+    }
+
     /// What a held `e` or `E` would clear: the stack's rows not already done.
     private var stackRemaining: [AttentionUpdate] {
         store.threadQueue.filter { !store.resolvedIds.contains($0.id) }
@@ -2020,6 +2206,14 @@ struct ThreadViewer: View {
         Task {
             try? await Task.sleep(for: Self.holdGrace)
             guard holdToken == token else { return }
+            #if !os(macOS)
+                // The checkmark is one control for every reader, and most of
+                // them have no stack to clear. The press stays live with no
+                // ring over it, so lifting the thumb is still the tap, however
+                // long it rested there first.
+                guard barHoldClears else { return }
+                Haptics.tick()
+            #endif
             holdAdvancing = advancing
             holdOnward = advancing && store.nextReadingSender != nil
             withAnimation(Motion.disclose) { holdStartedAt = .now }
@@ -2029,7 +2223,11 @@ struct ThreadViewer: View {
             guard holdToken == token, store.threadId == threadId else { return }
             holdToken = nil
             withAnimation(Motion.disclose) { holdStartedAt = nil }
-            await doneWholeStack(advancing: advancing)
+            #if os(macOS)
+                await doneWholeStack(advancing: advancing)
+            #else
+                await clearStackFromBar()
+            #endif
         }
     }
 
@@ -2045,9 +2243,13 @@ struct ThreadViewer: View {
         // inside the grace). A tap then belongs to nothing: done on the closed
         // thread would mark mail the reader just walked away from.
         guard wasTap, !cancelled, store.threadId == threadId else { return }
-        Task {
-            if advancing { await doneAndNext(acrossSenders: true) } else { await doneAndClose() }
-        }
+        #if os(macOS)
+            Task {
+                if advancing { await doneAndNext(acrossSenders: true) } else { await doneAndClose() }
+            }
+        #else
+            Task { await doneFromBar() }
+        #endif
     }
 
     /// The ring closed: every email left in this sender's stack is done, in one
@@ -2063,6 +2265,7 @@ struct ThreadViewer: View {
         store.flightContinues = onward != nil
         let liftedAt = liftOff(leavingSender: onward != nil)
         await store.markReadingDone(items, sender: first.sender)
+        Discovery.note(.stackCleared)
         await flightOut(since: liftedAt)
         guard store.threadId == threadId else { return }
         guard let onward else {
@@ -2126,14 +2329,163 @@ struct ThreadViewer: View {
         ///
         /// The haptic stands in for it. It is the same confirmation a committed
         /// swipe gets on a list row, which is the other way this app says done.
+        ///
+        /// ON A READING STACK IT WALKS, as the Mac's `e` does: the sender's
+        /// next email takes this one's place and the reader only leaves off
+        /// the end of the pile. Still no flight, for the reason above; the
+        /// next email is simply there, which is what a thumb working down a
+        /// stack of newsletters wants from it.
         private func doneFromBar() async {
+            // One done per email. A second tap landing while the first is
+            // still with the daemon would resolve the same row twice and then
+            // open the same next email twice.
+            guard thread != nil, !barResolving else { return }
+            barResolving = true
+            defer { barResolving = false }
             Haptics.commit()
+            // Asked BEFORE the resolve, like `doneAndNext`: what comes next is
+            // a fact about the stack as the thumb saw it.
+            let queue = store.threadQueue
+            let next = store.readingStack ? store.nextQueuedThread : nil
             await resolveOpenThread(via: .click)
             // Same outlived-its-reader guard the other two verbs take: a resolve
             // that finished after the reader moved on must not close the thread
             // that moved in.
             guard store.threadId == threadId else { return }
+            guard let next else {
+                store.closeThread()
+                return
+            }
+            store.openThread(
+                next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
+        }
+
+        /// Whether holding the checkmark has anything to offer over tapping it:
+        /// a Reading stack with more than this one email left. On the last one
+        /// the hold and the tap would do the same thing, and a ring that closed
+        /// over "mark it done" would be a second's wait for a tap.
+        private var barHoldClears: Bool {
+            store.readingStack && stackRemaining.count > 1
+        }
+
+        /// The ring closed under a thumb: `doneWholeStack` without the flight,
+        /// for the reason `doneFromBar` has none. Every email left in the
+        /// stack through the store's one bulk call (one toast, no undo, as on
+        /// the Mac), and the reader pops with them.
+        ///
+        /// The hold only ever closes the reader. The Mac's `E` goes on to the
+        /// next sender, and that is a second verb; a checkmark has one.
+        private func clearStackFromBar() async {
+            let items = stackRemaining
+            guard let first = items.first, !barResolving else { return }
+            barResolving = true
+            defer { barResolving = false }
+            Haptics.cleared()
+            await store.markReadingDone(items, sender: first.sender)
+            guard store.threadId == threadId else { return }
             store.closeThread()
+        }
+
+        #if DEBUG
+            /// The checkmark, pressed by the fixture stage instead of a thumb:
+            /// the simulator cannot be touched, so this is how a tap, a hold
+            /// let go of and a hold seen through are run and looked at. It
+            /// drives the same two functions the gesture calls. See
+            /// `FixtureStage.takeBarScript`.
+            private func rehearseBar() async {
+                guard let script = FixtureStage.takeBarScript() else { return }
+                // The thread has to be here: the button is dead until it is.
+                while thread == nil {
+                    // A cancelled sleep returns at once; without this a reader
+                    // popped before its thread loads spins here for good.
+                    if Task.isCancelled { return }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                try? await Task.sleep(for: .milliseconds(600))
+                switch script {
+                case .pinned:
+                    // The ring alone, stopped where a screenshot can find it.
+                    holdStartedAt = .now
+                case .press(let held):
+                    beginStackHold(advancing: false)
+                    guard let held else { return }
+                    try? await Task.sleep(for: held)
+                    endStackHold(cancelled: false, advancing: false)
+                }
+            }
+        #endif
+    #endif
+
+    #if !os(macOS)
+        /// Forward: `f`, on one message of the chain.
+        private func forward(_ m: ClientMessage) {
+            store.openComposeForward(message: m, fallbackSubject: thread?.subject ?? "")
+        }
+
+        /// A CARD'S RAIL: `r`, Enter and `f` for a thumb, about the message
+        /// the thumb is on. That last part is the one difference from the
+        /// keys and from the buttons at the end of the chain, which answer
+        /// the newest: a key has no way to point, and a swipe is nothing but
+        /// pointing. The store calls are the keys' own.
+        ///
+        /// The two replies share the accent, one a step back from the other,
+        /// because they are one verb at two widths; forward is the quiet tint
+        /// because it is the one that leaves the conversation.
+        private func cardVerbs(_ m: ClientMessage, proxy: ScrollViewProxy) -> [SwipeVerb] {
+            // REPLY ALL LEADS, so it is what a full swipe commits: answering
+            // one person out of a thread of five is the choice worth a second
+            // tap, and dropping four of them by flicking is the mistake.
+            [
+                SwipeVerb(
+                    title: "Reply all", symbol: "arrowshape.turn.up.left.2", tint: Palette.accent
+                ) { reply(to: m, all: true, proxy: proxy) },
+                SwipeVerb(
+                    title: "Reply", symbol: "arrowshape.turn.up.left",
+                    tint: Palette.accent.opacity(0.72)
+                ) { reply(to: m, all: false, proxy: proxy) },
+                SwipeVerb(
+                    title: "Forward", symbol: "arrowshape.turn.up.right", tint: Palette.inkFaint
+                ) { forward(m) },
+            ]
+        }
+
+        /// AN OPEN DRAFT IS NEVER REPLACED, here as under the keys: the store
+        /// refuses a second reply while one is open, because there is no undo
+        /// for a lost one. Under a key that refusal is invisible and fine (the
+        /// caret is in the draft, so `r` types an r). A rail button that did
+        /// nothing would just look broken, so the refusal is shown instead:
+        /// the reader is taken to the reply that is already being written.
+        private func reply(to m: ClientMessage, all: Bool, proxy: ScrollViewProxy) {
+            guard store.inlineReply == nil else {
+                ChainFoot.reveal(proxy, after: .zero)
+                return
+            }
+            store.openInlineReply(replyTo: m.id, replyAll: all)
+        }
+
+        /// The newest card's rail, out for a screenshot. Debug builds only;
+        /// see FixtureStage.
+        private func stagedRail(_ position: Int) -> Bool {
+            #if DEBUG
+                FixtureStage.railOut && position == newestIndex
+            #else
+                false
+            #endif
+        }
+
+        /// The header's Remind: `h`, on the same message the key aims at. Once
+        /// the reminder lands the mail is dealt with, so the reader leaves the
+        /// way the checkmark leaves.
+        private func remindFromBar() {
+            guard let thread, let m = remindable else { return }
+            store.openRemind(
+                RemindTarget(
+                    messageId: m.id, sender: m.from_addr, subject: thread.subject,
+                    remindAt: store.update(id: m.id)?.remind_at,
+                    onScheduled: {
+                        guard store.threadId == threadId else { return }
+                        store.closeThread()
+                    }))
         }
     #endif
 
@@ -2417,9 +2769,22 @@ struct ThreadViewer: View {
         // A fresh thread mounts fresh rows; where the LAST one's cards were
         // must not anchor this one, and its shape must not be what the minimap
         // draws for a thread this one knows nothing about yet.
-        map.forget()
-        newestHeight = 0
-        landed = false
+        //
+        // NOT A SEEDED READER'S, though. A reopen mounts this thread's rows in
+        // `init` (see AppStore.ReaderSeed), and a message whose height is on
+        // file reports its final frame before this task has run. Forgetting
+        // that here forgets the only report there will ever be: geometry
+        // speaks when it changes, the height never changes again, and the
+        // landing waits on a number that stays zero while the reader sits
+        // where the initial offset left it, at the END of the mail. The hold
+        // is left alone for the same reason: that landing has already begun
+        // one, for this thread.
+        if thread?.thread_id != threadId {
+            map.forget()
+            newestHeight = 0
+            landed = false
+            hold.end()
+        }
         // Another thread's arrivals are not this one's, and a REOPEN of the
         // same thread re-fetches from the top — either way the pill is
         // pointing at nothing by the time this runs.
@@ -2570,6 +2935,7 @@ struct ThreadViewer: View {
                 Opener.open(result.url)
                 store.pushToast(Self.browserToast(result), .success)
             }
+            Discovery.note(.unsubscribed)
             // Drop the resolved rows NOW rather than one poll later.
             store.noteSenderResolved(result.sender)
             confirmMode = nil
@@ -2705,6 +3071,98 @@ private struct ReaderColumn: ViewModifier {
 extension View {
     fileprivate func readerColumn() -> some View { modifier(ReaderColumn()) }
 }
+
+#if os(macOS)
+    /// THE FOOT OF THE CONVERSATION: the reply composer, then the tail space.
+    ///
+    /// The composer is a row of the scroll rather than a bar under it, so the
+    /// mail keeps the whole window while a reply is open and a long reply
+    /// scrolls with the thread it answers. It goes under the newest message
+    /// whichever message it answers, because that is where the sent reply
+    /// will appear.
+    ///
+    /// OUTSIDE THE LAZY STACK, in a plain one beside it. A lazy row is torn
+    /// down once it is far enough off screen, and this row holds a text view
+    /// with the caret, its undo history and the composer's key bindings:
+    /// scrolling up to reread the mail being answered would have dropped all
+    /// three, and Escape would then have closed the email instead of the reply.
+    ///
+    /// ITS OWN VIEW, MOUNTED UNCONDITIONALLY, and gated on
+    /// `store.inlineReply` INSIDE. Reading the draft from the reader's body
+    /// instead would make every keystroke in the reply invalidate the entire
+    /// reader — every message card, every sandboxed web frame, a full
+    /// relayout of the column — for a change that only ever touches the
+    /// composer. (`@Observable` tracks the property, not the field, so there
+    /// is no way to read the draft's target there cheaply.) The phone mounts
+    /// the same view, under the same rule, from `ChainFoot`.
+    private struct ReplyFoot: View {
+        let messages: [ClientMessage]
+        let threadSubject: String
+        /// The room the reader keeps under the newest message
+        /// (`ThreadViewer.tailSpace`).
+        let tailSpace: CGFloat
+        let proxy: ScrollViewProxy
+
+        @Environment(AppStore.self) private var store
+        @State private var replyHeight: CGFloat = 0
+
+        static let anchor = "reply"
+
+        var body: some View {
+            VStack(spacing: 0) {
+                InlineReply(messages: messages, threadSubject: threadSubject)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        replyHeight = $0
+                    }
+                    .id(Self.anchor)
+                // THE COMPOSER COMES OUT OF THE TAIL. The tail is the empty
+                // room that lets the newest message rest at the top of the
+                // window, and a composer under that message is already filling
+                // some of it. Left whole, opening a reply would lengthen the
+                // page and let it scroll past its own end into nothing.
+                Color.clear.frame(
+                    height: max(0, tailSpace - (store.inlineReply == nil ? 0 : replyHeight)))
+            }
+            // `initial`, because a reply can be open before this row first
+            // renders: the hand-off from a list row sets it in the same turn
+            // the thread lands.
+            .onChange(of: store.inlineReply?.id, initial: true) { _, open in
+                if open != nil { Self.reveal(proxy) }
+            }
+        }
+
+        /// Bring the whole composer into the window, moving the mail as little
+        /// as that takes: a reply that already fits under the newest message
+        /// moves nothing. A beat late so the composer has a frame to aim at,
+        /// and aimed twice, because the first is animated and an animated
+        /// scroll across rows the lazy stack has never laid out can stop
+        /// short (see the `index` watcher in `content`). The second is a no-op
+        /// when the first arrived.
+        static func reveal(_ proxy: ScrollViewProxy) {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(60))
+                withAnimation(Motion.scrollFollow) { proxy.scrollTo(anchor) }
+                try? await Task.sleep(for: .milliseconds(220))
+                proxy.scrollTo(anchor)
+            }
+        }
+    }
+
+    extension View {
+        /// The message stack with the reply composer and the tail under it.
+        fileprivate func replyFoot(
+            messages: [ClientMessage], threadSubject: String, tailSpace: CGFloat,
+            proxy: ScrollViewProxy
+        ) -> some View {
+            VStack(alignment: .leading, spacing: 0) {
+                self
+                ReplyFoot(
+                    messages: messages, threadSubject: threadSubject, tailSpace: tailSpace,
+                    proxy: proxy)
+            }
+        }
+    }
+#endif
 
 #if os(macOS)
     /// Passive mail preview: no reader shortcuts, read acknowledgement, or
@@ -3400,7 +3858,7 @@ struct PlainBody: View {
         let found = search(shown: shown, quoted: split.quoted)
         VStack(alignment: .leading, spacing: Space.s8) {
             painted(shown, found?.visible ?? [], active: found?.active)
-                .font(Typo.ui(13.5))
+                .font(Typo.ui(ReaderMetrics.plainBase))
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
                 .frame(maxWidth: fills ? .infinity : nil, alignment: .leading)
@@ -3515,6 +3973,12 @@ private struct UnsubConfirm: View {
 ///
 /// The ring is drawn from the clock rather than animated to a value, so it is
 /// the same second the reader is waiting on and cannot finish early or late.
+///
+/// ON A PHONE THE KEY IS A CHECKMARK, the one in the navigation bar that the
+/// thumb is resting on, and the thumb is why the ring is not up there with it:
+/// a hand holding the top corner covers the top corner. So the same ring, at
+/// the same size and the same second, sits in the middle of the screen where
+/// the hand is not, with the glyph being held drawn inside it.
 private struct StackDoneHold: View {
     let startedAt: Date
     let duration: Duration
@@ -3523,6 +3987,11 @@ private struct StackDoneHold: View {
     var key = "e"
     /// True when a next sender is waiting, and the caption says so.
     var onward = false
+    /// The phone's centre: an SF Symbol in place of the key.
+    var symbol: String?
+    /// The fixture stage's stopped clock, 0...1. Only ever set by a debug
+    /// scene, which has a ring to photograph and no way to hold anything.
+    var pinned: Double?
 
     private var caption: String {
         let what = count == 1 ? "hold to mark it done" : "hold to mark all \(count) done"
@@ -3540,7 +4009,7 @@ private struct StackDoneHold: View {
                 .ignoresSafeArea()
             VStack(spacing: Space.s14) {
                 TimelineView(.animation) { ctx in
-                    let p = min(1, max(0, ctx.date.timeIntervalSince(startedAt) / seconds))
+                    let p = pinned ?? min(1, max(0, ctx.date.timeIntervalSince(startedAt) / seconds))
                     ZStack {
                         Circle()
                             .stroke(Palette.hairlineStrong, lineWidth: 5)
@@ -3548,32 +4017,142 @@ private struct StackDoneHold: View {
                             .trim(from: 0, to: p)
                             .stroke(Palette.accent, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                             .rotationEffect(.degrees(-90))
-                        Text(key)
-                            .font(.system(size: 72, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Palette.ink)
-                            // A lowercase letter sits low in its line box;
-                            // a capital is already centred.
-                            .offset(y: key == key.lowercased() ? -4 : 0)
+                        if let symbol {
+                            // Bold and rounded, to sit with the ring's round
+                            // caps the way the key's rounded face does.
+                            Image(systemName: symbol)
+                                .font(.system(size: 50, weight: .bold, design: .rounded))
+                                .foregroundStyle(Palette.ink)
+                        } else {
+                            Text(key)
+                                .font(.system(size: 72, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Palette.ink)
+                                // A lowercase letter sits low in its line box;
+                                // a capital is already centred.
+                                .offset(y: key == key.lowercased() ? -4 : 0)
+                        }
                     }
                     .frame(width: 128, height: 128)
                 }
                 Text(caption)
-                    .font(Typo.micro)
+                    .font(symbol == nil ? Typo.micro : Typo.ui(13, weight: .medium))
                     .foregroundStyle(Palette.inkDim)
             }
             .padding(.horizontal, Space.scaled(28))
             .padding(.vertical, Space.s24)
             .passbandGlass(.pane, cornerRadius: 24, tint: Palette.glassTint)
             .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
+            #if !os(macOS)
+                // THE MIDDLE OF THE SCREEN, not of what the bars leave: the
+                // navigation bar is taller than the home indicator's strip,
+                // and centred between them the ring hangs visibly low. The
+                // keyboard is still respected, so over an open reply it
+                // centres in the mail that is showing.
+                .ignoresSafeArea(.container)
+            #endif
         }
         .allowsHitTesting(false)
         .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .center)))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            (count == 1 ? "Hold \(key) to mark done" : "Hold \(key) to mark all \(count) done")
+            (symbol != nil
+                ? (count == 1 ? "Keep holding to mark done" : "Keep holding to mark all \(count) done")
+                : count == 1 ? "Hold \(key) to mark done" : "Hold \(key) to mark all \(count) done")
                 + (onward ? ", then open the next sender" : ""))
     }
 }
+
+#if !os(macOS)
+    /// The navigation bar's checkmark: tap for done, hold for the whole stack.
+    ///
+    /// NOT A `Button`, because a Button answers one question and this control
+    /// asks two. A Button fires on touch-up and tells nobody about touch-down,
+    /// and a long-press gesture laid over one either never sees the touch or
+    /// takes the tap away with it. The hold needs exactly what the Mac's key
+    /// registry gives `e`: the moment it went down and the moment it came up,
+    /// with the reader deciding in between which of the two verbs that was.
+    /// So this is the glyph with one zero-distance drag on it, reporting both
+    /// edges, and the toolbar still wraps it in the same glass capsule it
+    /// gives the back button.
+    ///
+    /// TWO REPORTS OF THE END, for two different endings. `onEnded` is a thumb
+    /// that lifted, and is the only thing that may count as a tap. The gesture
+    /// state falling back to false is everything else (the system took the
+    /// touch: a call, an alert, a swipe from the screen's edge), and that one
+    /// only ever cancels. A hold that the system interrupted must not go on to
+    /// clear a stack with nobody holding it. When a thumb simply lifts both
+    /// arrive, `onEnded` first, and the second finds no press left to end.
+    private struct DoneBarButton: View {
+        let enabled: Bool
+        /// A press is down and undecided, or the ring is up.
+        let pressed: Bool
+        /// How many emails a hold would clear; nil when it would clear nothing
+        /// a tap would not.
+        let clears: Int?
+        let onPress: () -> Void
+        let onRelease: (_ cancelled: Bool) -> Void
+        let onDone: () -> Void
+        let onClear: () -> Void
+
+        /// True only while the system still says a finger is on it.
+        @GestureState private var down = false
+        /// This touch has been reported down and not yet reported up. It is
+        /// what keeps a thumb still resting there after the ring closed from
+        /// starting a second press as it moves.
+        @State private var began = false
+
+        /// How far a thumb may wander and still mean the button. Generous: a
+        /// thumb held for a second at the top corner of a phone rolls.
+        private static let slop: CGFloat = 48
+
+        var body: some View {
+            Image(systemName: "checkmark")
+                .foregroundStyle(Palette.accent)
+                .opacity(!enabled ? 0.35 : pressed ? 0.45 : 1)
+                .animation(.easeOut(duration: 0.12), value: pressed)
+                // The bar sizes a Button's glyph to its own 44pt target; a bare
+                // image gets the image's bounds, which is a checkmark-sized
+                // place to rest a thumb.
+                .frame(width: 36, height: 36)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .updating($down) { _, state, _ in state = true }
+                        // The first change IS touch-down. Taken here, in the
+                        // gesture's own callback, not from `down` changing:
+                        // that is heard a render later, and a quick tap on a
+                        // busy main thread can be down and up inside one.
+                        .onChanged { _ in
+                            guard enabled, !began else { return }
+                            began = true
+                            onPress()
+                        }
+                        .onEnded { value in
+                            guard began else { return }
+                            began = false
+                            let t = value.translation
+                            onRelease(hypot(t.width, t.height) > Self.slop)
+                        }
+                )
+                .onChange(of: down) { _, isDown in
+                    guard !isDown, began else { return }
+                    began = false
+                    onRelease(true)
+                }
+                .accessibilityElement()
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Mark done")
+                .accessibilityHint(
+                    clears.map { "Hold to mark all \($0) from this sender done" } ?? "")
+                .accessibilityAction { if enabled { onDone() } }
+                .accessibilityActions {
+                    if enabled, clears != nil {
+                        Button("Clear stack") { onClear() }
+                    }
+                }
+        }
+    }
+#endif
 
 private struct MessageRetriageConfirm: View {
     let busy: Bool
@@ -3700,6 +4279,76 @@ private final class WheelYield {
             if let monitor { NSEvent.removeMonitor(monitor) }
         #endif
         monitor = nil
+    }
+}
+
+/// THE OPENING LANDING, HELD UNTIL THE READER TAKES THE SCROLL. Landing once is
+/// not landing: the reader opens on the newest message while every card above
+/// it is still a guess, and the first of those to measure itself (a reply
+/// carrying a whole chain inline is several thousand points) pushes the newest
+/// out of the window. The landing's own guard cannot answer that. It re-lands
+/// only for a reader still parked on the newest, and being pushed off is the
+/// one thing that guard reads as having left; pushed far enough, the stack
+/// recycles the card and its height never changes again, so nothing fires at
+/// all. The reader then opens a long thread on the middle of some other
+/// message, and stays there until somebody scrolls.
+///
+/// So the position is HELD: while nobody has touched the scroll or moved the
+/// selection, a card moving with the newest off its mark is layout's doing and
+/// is put right. The wheel, a touch or a step off the newest ends it for the
+/// thread; after that the reader owns the scroll and the landing's guard is
+/// the only thing left, as before.
+///
+/// BOUNDED, like `settle`: a thread whose heights never agree with where the
+/// scroll puts them spends the budget and is left alone. Coming to rest pays
+/// it back, so late images can each move the column and each be answered.
+@MainActor
+private final class LandingHold {
+    private var wheel: WheelYield?
+    private var aiming: Task<Void, Never>?
+    private var spent = 0
+    private static let budget = 60
+
+    private var live: Bool {
+        if wheel?.tripped == true { end() }
+        return wheel != nil
+    }
+
+    func begin() {
+        end()
+        spent = 0
+        let wheel = WheelYield()
+        wheel.watch()
+        self.wheel = wheel
+    }
+
+    func end() {
+        aiming?.cancel()
+        aiming = nil
+        wheel?.end()
+        wheel = nil
+    }
+
+    /// Scroll until `off` stops being true. One loop at a time: every card
+    /// that moves asks, and they all move at once.
+    func aim(
+        while off: @escaping @MainActor () -> Bool, scroll: @escaping @MainActor (Int) -> Void
+    ) {
+        guard live, aiming == nil else { return }
+        aiming = Task { @MainActor in
+            // Next turn, not inside the layout pass that reported the frame.
+            await Task.yield()
+            while !Task.isCancelled, live, off(), spent < Self.budget {
+                spent += 1
+                scroll(spent)
+                do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
+            }
+            // A cancelled loop was ended by `end`, which may already have
+            // been followed by a `begin`: the slot is no longer this loop's.
+            guard !Task.isCancelled else { return }
+            if !off() { spent = 0 }
+            aiming = nil
+        }
     }
 }
 

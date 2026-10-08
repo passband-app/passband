@@ -60,10 +60,19 @@ CREATE TABLE IF NOT EXISTS messages (
     -- neither held, NULL = never evaluated (no Gmail header, or the row was
     -- ingested before this column existed).
     --
-    -- NULL MUST READ AS "NO". Its only consumer is the human door's PERMISSIVE
-    -- known-sender tracking-pixel bypass, so absence of proof withholds the
-    -- bypass rather than granting it. Nothing is backfilled: any re-sync refills
-    -- the column through the message upsert.
+    -- NULL MUST READ AS "NO": every consumer tests `= 1` (or `Some(true)`),
+    -- so absence of proof withholds what the verdict would grant. It gates:
+    --   * the human door's PERMISSIVE known-sender tracking-pixel bypass;
+    --   * calendar ghosts (docs/CALENDAR.md §3.2): only an authenticated
+    --     record has a sender scope, so only it can carry identity keys, join
+    --     or edit a ghost, or mark one committed;
+    --   * correspondent timezones (§7): only authenticated mail's Date offset
+    --     counts, and an invitation is recorded only from authenticated mail
+    --     bound to its organizer.
+    -- So the residual gap `sync::ingest::extract_auth_pass` describes (a
+    -- verdict forged on an ingestion path where Gmail prepends nothing)
+    -- reaches all three, not only the pixel. Nothing is backfilled: any
+    -- re-sync refills the column through the message upsert.
     auth_pass   INTEGER,
     -- THE PROVIDER'S SPAM VERDICT, not ours: 1 when this message was fetched
     -- from Gmail's SPAM label, 0 otherwise. Gmail sorted it; nothing in squelch
@@ -81,6 +90,16 @@ CREATE TABLE IF NOT EXISTS messages (
     -- spam sighting. Nothing moves a row the other way except the user's own
     -- "not spam", which clears it here and in Gmail together.
     is_spam     INTEGER NOT NULL DEFAULT 0,
+    -- THE `Date` HEADER'S UTC OFFSET in minutes, east positive (-240 for New
+    -- York in summer, 330 for India), as the sender's clock stamped it.
+    -- `received_at` is normalized to UTC, so this is the only place the offset
+    -- survives. NULL when the header did not parse, and on every row ingested
+    -- before the column existed (the raw mail is not kept, so nothing can
+    -- backfill it locally). Zero is stored as zero; the timezone inference is
+    -- what ignores it. The observation lives ON THE ROW so a re-ingest cannot
+    -- count it twice: the per-sender histogram is always a query
+    -- (`sqlite::zones`).
+    date_offset_minutes INTEGER,
     UNIQUE(account_id, gmail_msg_id)
 );
 
@@ -770,6 +789,26 @@ CREATE TABLE IF NOT EXISTS inbox_unread (
     fetched_at TEXT NOT NULL
 );
 
+-- THE ACCOUNT'S GOOGLE PROFILE: display name and profile photo, fetched by the
+-- sync loop from the People API when the grant carries the optional
+-- userinfo.profile scope. One row per account, overwritten whole on each
+-- successful fetch, so a photo the person removed goes away here too.
+--
+-- NO ROW MEANS NEVER FETCHED (an older grant without the scope, or a People
+-- API that has never answered), and readers serve that as absence. A row with
+-- a NULL photo is a real answer: the account has a name and no picture of its
+-- own. `photo_tag` is a short hash of the bytes, which is all a client needs to
+-- know whether the copy it holds is current.
+CREATE TABLE IF NOT EXISTS account_profile (
+    account_id INTEGER NOT NULL PRIMARY KEY,
+    name       TEXT,
+    given_name TEXT,
+    photo      BLOB,
+    photo_mime TEXT,
+    photo_tag  TEXT,
+    fetched_at TEXT NOT NULL
+);
+
 -- STAGE-2 BUDGET (circuit breaker). model_calls counts API attempts, incremented
 -- BEFORE the call so retry storms cannot exceed the cap. Two scopes share the
 -- table, keyed by thread_id:
@@ -1103,6 +1142,11 @@ CREATE TABLE IF NOT EXISTS drafts (
     bcc_addr            TEXT NOT NULL DEFAULT '',
     subject             TEXT NOT NULL DEFAULT '',
     body                TEXT NOT NULL DEFAULT '',
+    -- 1 = an agent on the agent door wrote this row (issue #394), 0 = the
+    -- owner did. Set once at insert and never cleared by an edit: the owner
+    -- finishing an agent's draft does not make its first words theirs, and
+    -- the composer says so until it is sent or discarded.
+    from_agent          INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
@@ -1589,6 +1633,306 @@ CREATE TABLE IF NOT EXISTS agent_delivery_projections (
 -- `shipment_order_links` (which orders each package carries) is created in
 -- migrate.rs, NOT here: its creation triggers a one-shot backfill, which only
 -- works if this file cannot have created it first.
+
+-- CALENDAR GHOSTS: placeholders for what mail says will or might happen, a
+-- projection of the agent's `event` records (sqlite/ghosts.rs). HUMAN-DOOR
+-- ONLY. New tables with no backfill, so they live here and need no migrate
+-- seam: an older DB gets them on its next open.
+--
+-- Columns are projection-owned and rebuilt from the assigned records' stored
+-- decisions on every reconcile, EXCEPT the user_* columns, which only the user
+-- writes. `ends_at` is a STATED end and `est_minutes`/`est_basis` the MODEL's
+-- guess: an estimate is never stored as a fact.
+--
+-- `start_sort` is `starts_at` as a sortable UTC string (`YYYY-MM-DDTHH:MM:SSZ`,
+-- a date-only start at 00:00Z of its date), for the listing's coarse SQL
+-- range only: `starts_at` keeps the mail's own offset, so it cannot be
+-- compared as text, and the exact order is decided in Rust. `venue_key` is
+-- `triage::ghost::venue_key(location)`, so the duration prior joins in SQL.
+--
+-- `owner_scope` is the sender scope (`triage::ghost::sender_scope`) of the
+-- record that created the ghost; NULL for a ghost made from unauthenticated
+-- mail. `owner_addr` is that record's From address, lowercased (NULL when
+-- `owner_scope` is): matching by thread needs the identical address, because
+-- no list of domains strangers share is ever complete; matching by ref needs
+-- only the scope. Only a record of the owner's scope is ever assigned to the
+-- ghost, so another sender replying in its thread makes a ghost of its own,
+-- and a NULL-owner ghost takes nothing from other mail. The two are set at
+-- creation and change in one case only: a re-decision of the one message
+-- that alone feeds the ghost re-owns it to that message's current scope and
+-- address (its authentication result can arrive or go on a re-sync).
+--
+-- `supplier_message_id` is the message whose record supplied the served facts.
+-- The listing serves a ghost only while THAT message is eligible (not sent,
+-- spam, restricted or sealed), so a status change no rebuild has seen yet
+-- cannot serve facts from mail that may no longer feed a ghost. NULL when no
+-- assigned record is eligible, or when the supplier was deleted: the facts
+-- are kept, the ghost is hidden until a rebuild.
+--
+-- The user's end correction is a SPAN from the start (`user_end_minutes` for a
+-- timed ghost, `user_end_days` for an all-day one), so mail that moves the
+-- start moves the end with it. When mail changes the start's precision the
+-- rebuild CLEARS the span at the other precision (the one projection write to
+-- a user column), so a correction cannot come back after a second change.
+--
+-- No CHECK on kind, commitment or user_state: those vocabularies are expected
+-- to grow (held, materialized), and SQLite cannot alter a CHECK.
+CREATE TABLE IF NOT EXISTS ghost_events (
+    id                  INTEGER PRIMARY KEY,
+    account_id          INTEGER NOT NULL,
+    kind                TEXT NOT NULL,
+    title               TEXT NOT NULL,
+    starts_at           TEXT,
+    start_sort          TEXT,
+    start_timezone      TEXT,
+    ends_at             TEXT,
+    est_minutes         INTEGER,
+    est_basis           TEXT,
+    location            TEXT,
+    venue_key           TEXT,
+    commitment          TEXT NOT NULL,
+    owner_scope         TEXT,
+    owner_addr          TEXT,
+    mail_state         TEXT NOT NULL DEFAULT 'live' CHECK(mail_state IN ('live','cancelled')),
+    likelihood_band     TEXT,
+    likelihood_reason   TEXT,
+    supplier_message_id INTEGER,
+    last_message_id     INTEGER,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    user_state          TEXT,
+    user_state_at       TEXT,
+    user_end_minutes    INTEGER,
+    user_end_days       INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ghost_events_start ON ghost_events(account_id, start_sort);
+-- How later mail finds a ghost: `ref:<sender scope>:<ref>` for every identity
+-- ref of the ghost's currently assigned records whose decision is readable and
+-- whose message is still of the owner's scope, eligible or not (keys are never
+-- served, and a record coming back from a seal must find its own ghost),
+-- recomputed on each rebuild, so a key leaves with its record. NOT unique: two
+-- ghosts may hold one key (a flight number on two dates), and matching picks
+-- between them.
+CREATE TABLE IF NOT EXISTS ghost_event_keys (
+    account_id INTEGER NOT NULL,
+    ghost_id   INTEGER NOT NULL,
+    key        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ghost_event_keys_key ON ghost_event_keys(account_id, key);
+CREATE INDEX IF NOT EXISTS idx_ghost_event_keys_ghost ON ghost_event_keys(account_id, ghost_id);
+-- The ASSIGNMENT of one record to one ghost: record `position` (its index
+-- among the message's laundered event records, `triage::ghost::launder_events`)
+-- of `message_id`. A record belongs to exactly one ghost; ghosts are never
+-- merged. `role` is the record's `change`. Every record had the ghost's
+-- `owner_scope` when it was assigned; a rebuild re-reads its message's scope
+-- and a record whose message no longer has it contributes nothing.
+CREATE TABLE IF NOT EXISTS ghost_event_sources (
+    account_id INTEGER NOT NULL,
+    ghost_id   INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    position   INTEGER NOT NULL,
+    role       TEXT NOT NULL,
+    PRIMARY KEY(account_id, message_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_ghost_event_sources_ghost ON ghost_event_sources(account_id, ghost_id);
+-- The user's own corrections of how long things at a venue run, by kind:
+-- tier 2 of the estimated end. Never for a kind with no default duration
+-- (travel). `ghost_id` is the ghost whose correction wrote the current value,
+-- so clearing that correction can take back what it taught.
+CREATE TABLE IF NOT EXISTS event_duration_priors (
+    account_id INTEGER NOT NULL,
+    venue_key  TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    minutes    INTEGER NOT NULL,
+    ghost_id   INTEGER,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, venue_key, kind)
+);
+-- Keys and sources go with their ghost, and a source row with its message,
+-- whoever deletes it, as `shipment_order_links` follows `shipments`. A ghost
+-- the deleted message alone fed goes too: nothing is left to say it exists.
+CREATE TRIGGER IF NOT EXISTS ghost_event_rows_follow_ghost
+AFTER DELETE ON ghost_events BEGIN
+    DELETE FROM ghost_event_keys WHERE account_id = OLD.account_id AND ghost_id = OLD.id;
+    DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND ghost_id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS ghost_event_sources_follow_message
+AFTER DELETE ON messages BEGIN
+    DELETE FROM ghost_events
+    WHERE account_id = OLD.account_id
+      AND id IN (SELECT ghost_id FROM ghost_event_sources
+                 WHERE account_id = OLD.account_id AND message_id = OLD.id)
+      AND NOT EXISTS (SELECT 1 FROM ghost_event_sources s
+                      WHERE s.account_id = OLD.account_id AND s.ghost_id = ghost_events.id
+                        AND s.message_id <> OLD.id);
+    -- A surviving ghost whose supplier was this message still carries that
+    -- message's facts, and no SQL can rebuild them from another source. So
+    -- it is HIDDEN (no supplier) until the next reconcile of a message that
+    -- feeds it, rather than served under another message's name.
+    UPDATE ghost_events SET supplier_message_id = NULL
+    WHERE account_id = OLD.account_id AND supplier_message_id = OLD.id;
+    DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND message_id = OLD.id;
+END;
+
+-- GOOGLE CALENDAR, READ ONLY (docs/CALENDAR.md §8, "Calendar sync"). Written
+-- only by the calendar sync loop, read only by the human door's timeline:
+-- HUMAN-DOOR ONLY, never on an agent route, never in a triage prompt.
+--
+-- One row per calendar the account has read. `calendar_id` is `primary` for
+-- the primary calendar (Google's alias for it, and all the daemon knows
+-- without the list scope), Google's id otherwise. `selected` is whether the
+-- latest pass reads it; a calendar that stops being read keeps its row with
+-- `selected = 0` and loses its events and sync state. `sync_token` carries
+-- incremental sync; `full_synced_at` is the last full read of the window, which
+-- is repeated daily because a sync token never carries an event that moved
+-- INTO the window as it slides. `last_error_kind` is `auth` / `quota` /
+-- `unavailable`, cleared by the next good read. `failures` counts reads that
+-- failed in a row and `retry_at` is when a SECONDARY calendar is tried again,
+-- so one broken shared calendar backs off on its own. `truncated` says the
+-- per-calendar event cap dropped events (the farthest from now). `color` is
+-- `#rrggbb` (Google's `backgroundColor`), `access_role` Google's `accessRole`
+-- (`owner` and `writer` are the calendars the app may write events to); the
+-- primary calendar read without the list scope is `owner` with no colour.
+CREATE TABLE IF NOT EXISTS calendar_calendars (
+    account_id      INTEGER NOT NULL,
+    calendar_id     TEXT NOT NULL,
+    summary         TEXT,
+    is_primary      INTEGER NOT NULL DEFAULT 0,
+    selected        INTEGER NOT NULL DEFAULT 1,
+    time_zone       TEXT,
+    sync_token      TEXT,
+    synced_at       TEXT,
+    full_synced_at  TEXT,
+    last_error_kind TEXT,
+    failures        INTEGER NOT NULL DEFAULT 0,
+    retry_at        TEXT,
+    truncated       INTEGER NOT NULL DEFAULT 0,
+    color           TEXT,
+    access_role     TEXT,
+    PRIMARY KEY(account_id, calendar_id)
+);
+-- The events of the synced window (a month back, 400 days ahead), recurring
+-- events as their instances. `starts_at` / `ends_at` use the ghosts' text form
+-- and convention (`YYYY-MM-DD` for all-day, RFC3339 with Google's offset
+-- otherwise; an all-day end is the INCLUSIVE last day, converted from
+-- Google's exclusive `end.date`, and NULL for a one-day event) and
+-- `start_sort` the ghosts' UTC sort key. `status` is `confirmed` or `tentative`: a cancelled event is
+-- deleted, never stored. `transparent` is "free" on the user's calendar.
+-- `color_id` is the event's own colour (an id into Google's event palette),
+-- `organizer_self` Google's `organizer.self` (this calendar organizes it),
+-- `description` laundered text of at most 2000 characters. Also written,
+-- one row at a time, after Google accepts the user's own create or edit.
+-- `guests_truncated` says Google holds more attendees than
+-- `calendar_event_guests` does for this event (Google's `attendeesOmitted`,
+-- set past 100): its guest list is then read-only. `organizer_unreadable`
+-- says Google named an organizer that is not this calendar and whose address
+-- could not be read: somebody else's event, never the user's own to edit.
+CREATE TABLE IF NOT EXISTS calendar_events (
+    account_id      INTEGER NOT NULL,
+    calendar_id     TEXT NOT NULL,
+    event_id        TEXT NOT NULL,
+    ical_uid        TEXT,
+    status          TEXT NOT NULL,
+    summary         TEXT,
+    location        TEXT,
+    starts_at       TEXT NOT NULL,
+    start_sort      TEXT NOT NULL,
+    ends_at         TEXT,
+    all_day         INTEGER NOT NULL,
+    start_timezone  TEXT,
+    organizer_email TEXT,
+    self_response   TEXT,
+    transparent     INTEGER NOT NULL DEFAULT 0,
+    html_link       TEXT,
+    updated_at      TEXT,
+    color_id        TEXT,
+    organizer_self  INTEGER NOT NULL DEFAULT 0,
+    description     TEXT,
+    guests_truncated INTEGER NOT NULL DEFAULT 0,
+    organizer_unreadable INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(account_id, calendar_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);
+-- An event's attendees as Google lists them, at most 100, in Google's order
+-- (`position`). OTHER PEOPLE'S ADDRESSES: HUMAN-DOOR ONLY like the event
+-- itself, never logged, never in the audit log (which carries a count).
+-- `response` is `accepted` / `declined` / `tentative` / `pending`;
+-- `is_organizer` and `is_self` are Google's `organizer` and `self` flags.
+-- Replaced whole each time the event is written, and gone with it, whoever
+-- deletes it (the trigger), so no path can leave a guest list behind.
+CREATE TABLE IF NOT EXISTS calendar_event_guests (
+    account_id   INTEGER NOT NULL,
+    calendar_id  TEXT NOT NULL,
+    event_id     TEXT NOT NULL,
+    position     INTEGER NOT NULL,
+    email        TEXT NOT NULL,
+    name         TEXT,
+    response     TEXT NOT NULL,
+    is_organizer INTEGER NOT NULL DEFAULT 0,
+    is_self      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(account_id, calendar_id, event_id, position)
+);
+CREATE TRIGGER IF NOT EXISTS calendar_event_guests_follow_event
+AFTER DELETE ON calendar_events BEGIN
+    DELETE FROM calendar_event_guests
+    WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+      AND event_id = OLD.event_id;
+END;
+
+-- A CORRESPONDENT'S TIMEZONE (docs/CALENDAR.md §7), inferred at ingest and
+-- served on the contact card. HUMAN-DOOR ONLY. `addr` is COLLATE NOCASE in
+-- the column itself, so the key, the index and every comparison agree that
+-- `Dan@X.com` and `dan@x.com` are one person without each query having to
+-- remember (see `idx_contacts_addr_nocase` for what forgetting cost).
+--
+-- One row per invitation that named a zone: the iCalendar ORGANIZER, credited
+-- with the TZID of the first DTSTART under its canonical name
+-- (`timezone::canonical_zone`). Written ONLY for authenticated mail whose From
+-- is the organizer's own address (`zones::invitation_is_bound`), so a forged
+-- invitation leaves no row. Keyed by message, so a re-ingest
+-- replaces its own row instead of adding one, and the row goes with its
+-- message (trigger below). Rows are written for spam and sent mail too (never
+-- for an invitation the account itself organized); the inference takes the
+-- newest 20 not dated more than a day ahead and counts those whose message is
+-- inbound and not spam, so a message rescued from spam starts counting
+-- without a rewrite.
+CREATE TABLE IF NOT EXISTS sender_zone_invites (
+    account_id  INTEGER NOT NULL,
+    addr        TEXT NOT NULL COLLATE NOCASE,
+    zone        TEXT NOT NULL,
+    message_id  INTEGER NOT NULL,
+    -- The message's received_at, RFC3339 UTC: "newest invitations" order.
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, addr, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sender_zone_invites_message
+    ON sender_zone_invites(account_id, message_id);
+-- The recompute's read: one person's newest invitations up to the future
+-- bound, straight off this index in order (`message_id` is the tie-break),
+-- so only the newest few are ever looked up in `messages`.
+CREATE INDEX IF NOT EXISTS idx_sender_zone_invites_recent
+    ON sender_zone_invites(account_id, addr, observed_at, message_id);
+CREATE TRIGGER IF NOT EXISTS sender_zone_invites_follow_message
+AFTER DELETE ON messages BEGIN
+    DELETE FROM sender_zone_invites
+    WHERE account_id = OLD.account_id AND message_id = OLD.id;
+END;
+-- The result, one row per person. `zone`/`source`/`confidence` are the
+-- INFERENCE's (source 'invite' or 'offsets'; all three NULL when it has no
+-- answer) and are rewritten whenever a message that carries an observation
+-- from this person is ingested. `user_zone` is the user's override, written
+-- only by `PUT /client/person/timezone` and never by inference; the read
+-- side serves it first. Never a row for the account's own address.
+CREATE TABLE IF NOT EXISTS sender_zones (
+    account_id  INTEGER NOT NULL,
+    addr        TEXT NOT NULL COLLATE NOCASE,
+    zone        TEXT,
+    source      TEXT,
+    confidence  TEXT,
+    updated_at  TEXT NOT NULL,
+    user_zone   TEXT,
+    PRIMARY KEY(account_id, addr)
+);
 
 -- Independent model assessments for human notification diagnostics. Multiple
 -- attempts remain inspectable; the notification ledger still records delivery.

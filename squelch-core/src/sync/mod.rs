@@ -9,6 +9,7 @@
 pub mod html;
 pub mod ingest;
 pub mod notify_lane;
+mod profile;
 mod triage_worker;
 
 use std::sync::Arc;
@@ -101,7 +102,7 @@ const BLANK_BODY_HEAL_MAX_FETCHES: usize = 400;
 
 /// `wake_budget.thread_id` sentinel for the per-account-per-day Stage-2 budget.
 /// Gmail thread ids are hex, so no real thread can collide with it.
-const GLOBAL_BUDGET_KEY: &str = "__global__";
+const GLOBAL_BUDGET_KEY: &str = crate::triage::agent_config::TOTAL_BUDGET_KEY;
 
 /// The `wake_budget` sentinel for the NOTIFY FAST LANE (docs/NOTIFY.md §11.5).
 /// Its own key beside the other three, and for the sharpest version of the same
@@ -735,6 +736,13 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// (revoked scope, Gmail outage) says so ONCE instead of once per poll. The
     /// next success re-arms it.
     unread_warned: AtomicBool,
+    /// Unix seconds before which the Google profile (name and photo) is not
+    /// re-fetched. Zero at start, so the first poll tick of a process tries.
+    /// In memory on purpose: a restart costs one extra pair of small requests,
+    /// which is cheaper than a column whose only job is to save them.
+    profile_due: AtomicI64,
+    /// The profile fetch's once-per-failing-streak latch, as `unread_warned`.
+    profile_warned: AtomicBool,
     /// HAS GMAIL ANSWERED IN THIS PROCESS, and has it answered since the last
     /// failure. Set by [`SyncEngine::poll_lane`] the moment `poll_once` returns
     /// `Ok`, and by [`SyncEngine::backfill_inner`] the moment the first run's
@@ -797,6 +805,10 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`GMAIL_API_BASE`] in production; the tests point it at a loopback mock so
     /// the walk/cursor rules are asserted on the wire rather than on a struct.
     api_base: String,
+    /// Where [`Self::refresh_profile`] asks who the account is. Always
+    /// [`profile::PEOPLE_ME_URL`] in production; only the tests in that module
+    /// assign it, for the same reason `api_base` has no public setter.
+    profile_url: String,
 }
 
 impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C> {
@@ -855,6 +867,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             warn_days: Arc::new(std::sync::Mutex::new(WarnDays::default())),
             notify_lane: std::sync::OnceLock::new(),
             unread_warned: AtomicBool::new(false),
+            profile_due: AtomicI64::new(0),
+            profile_warned: AtomicBool::new(false),
             // Nothing has polled yet, so nothing may spend yet.
             poll_healthy: AtomicBool::new(false),
             polled_ok: AtomicBool::new(false),
@@ -862,6 +876,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             agent_retry_after: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
+            profile_url: profile::PEOPLE_ME_URL.to_string(),
         }
     }
 
@@ -891,6 +906,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// exfiltration primitive.
     #[cfg(test)]
     fn with_api_base(mut self, base: String) -> Self {
+        // The profile fetch goes wherever Gmail goes: a mocked engine must not
+        // be one poll tick away from a real request to Google. The mock has no
+        // such route, which reads as "no profile", exactly like an old grant.
+        self.profile_url = format!("{base}/people/me");
         self.api_base = base;
         self
     }
@@ -1351,6 +1370,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // bounce the whole lifecycle, and a mailbox stuck in that retry loop
             // should still have a fresh unread count for the human door.
             self.refresh_inbox_unread().await;
+            // The account's Google name and photo. Due once a day, so nearly
+            // every tick this is a single atomic load; it sits here because a
+            // mailbox whose walk keeps failing should still have a face.
+            self.refresh_profile().await;
             // BEFORE the walk too, and for the same reason: the sweep is purely
             // local — one indexed UPDATE, no Gmail, no model spend — so hanging
             // it off a call that can Err would let a bad credential or a Gmail

@@ -52,6 +52,8 @@
 //! no line in this crate may carry both, and it is deliberately NOT on
 //! [`UserRow`], which is the shape the page that renders addresses is handed.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use deadpool_postgres::{Client, Manager, ManagerConfig, Pool, RecyclingMethod};
 use tokio_postgres::error::SqlState;
@@ -148,7 +150,11 @@ CREATE TABLE IF NOT EXISTS reconnect_jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     retry_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     lease_until TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- What the consent behind this job was for. A late column: see
+    -- RECONNECT_ADDED_COLUMNS, which adds it to a database that predates it.
+    purpose TEXT NOT NULL DEFAULT 'reconnect'
+        CHECK (purpose IN ('reconnect', 'calendar'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS reconnect_pending_label
     ON reconnect_jobs(label) WHERE status = 'pending';
@@ -289,6 +295,30 @@ CREATE TABLE IF NOT EXISTS users (
     -- than two people merging into one.
     analytics_id    TEXT NOT NULL UNIQUE
 );
+
+-- HIDDEN FEATURES, one row per (tenant, feature) that an operator has turned
+-- on. A row existing IS the grant: there is no `enabled` column to read, so
+-- there is no way for a row to be present and mean no. The key is whatever
+-- `squelch_core::features` calls the feature; nothing here constrains it to a
+-- list, because the list lives in code and a row for a feature that has since
+-- launched (and left the list) is harmless and not worth a migration.
+--
+-- CASCADE, so a tenant row deleted by hand takes its grants with it. A
+-- CANCELLED tenant keeps its rows and they mean nothing: every read below
+-- joins on `status = 'active'`.
+CREATE TABLE IF NOT EXISTS tenant_features (
+    tenant_id  BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    feature    TEXT NOT NULL,
+    enabled_at TEXT COLLATE \"C\" NOT NULL,
+    PRIMARY KEY (tenant_id, feature)
+);
+-- The same, for EVERYONE: a feature listed here is on for every tenant, the
+-- ones who sign up tomorrow included. It is the step between three testers
+-- and deleting the flag from the code.
+CREATE TABLE IF NOT EXISTS feature_defaults (
+    feature    TEXT PRIMARY KEY,
+    enabled_at TEXT COLLATE \"C\" NOT NULL
+);
 ";
 
 /// Columns added to `invite_codes` after the first deployment, with the type
@@ -328,6 +358,16 @@ const TENANT_ADDED_COLUMNS: [(&str, &str); 6] = [
     ("share_token_hash", "TEXT"),
     ("share_token_minted_at", "TEXT COLLATE \"C\""),
 ];
+
+/// Columns `reconnect_jobs` gained after it shipped. Same shape as
+/// [`TENANT_ADDED_COLUMNS`]: `ADD COLUMN IF NOT EXISTS`, and a DEFAULT so every
+/// row written before the column existed reads as the plain reconnect it was.
+/// The definition is the SCHEMA's word for word, so a fresh database and a
+/// migrated one cannot disagree about the constraint.
+const RECONNECT_ADDED_COLUMNS: [(&str, &str); 1] = [(
+    "purpose",
+    "TEXT NOT NULL DEFAULT 'reconnect' CHECK (purpose IN ('reconnect', 'calendar'))",
+)];
 
 /// Store errors.
 ///
@@ -469,6 +509,31 @@ pub struct Sharer {
     pub id: i64,
     pub label: String,
     pub account_email: String,
+}
+
+/// One active tenant as the features page draws it: who they are and which
+/// hidden features are ticked on their own row.
+///
+/// NOT `Debug`, for the reason [`Sharer`] is not: it carries a mailbox address.
+pub struct FeatureTenant {
+    pub id: i64,
+    pub label: String,
+    pub account_email: String,
+    /// Whether this tenant's daemon holds a control token. Without one it has
+    /// no way to ask what it was granted, so a ticked box on its row is a
+    /// grant that waits for `share mint` rather than one that is live.
+    pub has_token: bool,
+    /// Granted to THIS tenant. A feature that is on for everyone is not
+    /// repeated here; see [`FeatureBoard::everyone`].
+    pub features: BTreeSet<String>,
+}
+
+/// Everything the features page shows, read in one snapshot.
+pub struct FeatureBoard {
+    /// Active tenants, newest first.
+    pub tenants: Vec<FeatureTenant>,
+    /// Features that are on for every tenant.
+    pub everyone: BTreeSet<String>,
 }
 
 pub struct ControlStore {
@@ -1076,6 +1141,177 @@ impl ControlStore {
             })
         })
         .transpose()
+    }
+
+    // ---- hidden features --------------------------------------------------
+
+    /// What is on for one tenant: its own grants plus whatever is on for
+    /// everyone, sorted. The answer `GET /tenant/features` gives a daemon.
+    pub async fn features_for_tenant(&self, tenant_id: i64) -> Result<Vec<String>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT feature FROM tenant_features WHERE tenant_id = $1
+                 UNION
+                 SELECT feature FROM feature_defaults
+                 ORDER BY 1",
+                &[&tenant_id],
+            )
+            .await?;
+        rows.iter().map(|r| Ok(r.try_get(0)?)).collect()
+    }
+
+    /// Whether one feature is on for the ACTIVE tenant with this label: its
+    /// own row, or the Everyone default. The same union
+    /// [`Self::features_for_tenant`] serves the daemon, asked for one key, so
+    /// the control plane's own gates and the daemon cannot disagree.
+    pub async fn tenant_has_feature(&self, label: &str, feature: &str) -> Result<bool> {
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM tenant_features f
+                     JOIN tenants t ON t.id = f.tenant_id
+                     WHERE t.label = $1 AND t.status = $2 AND f.feature = $3
+                 ) OR EXISTS (
+                     SELECT 1 FROM feature_defaults WHERE feature = $3
+                 )",
+                &[&label, &STATUS_ACTIVE, &feature],
+            )
+            .await?;
+        Ok(row.try_get(0)?)
+    }
+
+    /// The features page's whole picture.
+    ///
+    /// ONE TRANSACTION, so the tenant list and the grants describe the same
+    /// moment: a tenant provisioned between two bare queries would otherwise
+    /// show up with grants and no row, or a row and somebody else's grants.
+    pub async fn feature_board(&self) -> Result<FeatureBoard> {
+        let mut client = self.client().await?;
+        let tx = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await?;
+        let mut tenants: Vec<FeatureTenant> = tx
+            .query(
+                "SELECT id, label, account_email, share_token_hash IS NOT NULL FROM tenants
+                  WHERE status = $1 ORDER BY id DESC",
+                &[&STATUS_ACTIVE],
+            )
+            .await?
+            .iter()
+            .map(|r| {
+                Ok(FeatureTenant {
+                    id: r.try_get(0)?,
+                    label: r.try_get(1)?,
+                    account_email: r.try_get(2)?,
+                    has_token: r.try_get(3)?,
+                    features: BTreeSet::new(),
+                })
+            })
+            .collect::<Result<_>>()?;
+        for row in tx
+            .query("SELECT tenant_id, feature FROM tenant_features", &[])
+            .await?
+        {
+            let tenant_id: i64 = row.try_get(0)?;
+            if let Some(tenant) = tenants.iter_mut().find(|t| t.id == tenant_id) {
+                tenant.features.insert(row.try_get(1)?);
+            }
+        }
+        let everyone = tx
+            .query("SELECT feature FROM feature_defaults", &[])
+            .await?
+            .iter()
+            .map(|r| Ok(r.try_get(0)?))
+            .collect::<Result<_>>()?;
+        tx.commit().await?;
+        Ok(FeatureBoard { tenants, everyone })
+    }
+
+    /// Make the grants match one submitted features page.
+    ///
+    /// SCOPED TO WHAT THE PAGE SHOWED, which is the two slices up front:
+    /// `tenants` are the rows it listed and `keys` the columns (the caller
+    /// passes the columns the FORM named, narrowed to the registry, so a page
+    /// rendered before a feature existed cannot untick it, and a body with no
+    /// columns at all touches nothing, the "everyone" row included). Inside that
+    /// rectangle, `grants` and `everyone` are the boxes that came back ticked
+    /// and everything else is unticked. Outside it nothing is touched, so a
+    /// tenant who signed up after the page was rendered keeps what they have,
+    /// and so does a grant for a feature this build's list no longer names.
+    ///
+    /// ONE TRANSACTION: a page saved is saved whole or not at all.
+    ///
+    /// A grant that was already there KEEPS ITS `enabled_at`, which is the only
+    /// record of how long somebody has had a feature; rewriting every row on
+    /// every save would make that the time of the last unrelated click.
+    ///
+    /// A grant naming a tenant that is not active, or a pair outside the
+    /// rectangle, is dropped rather than refused: the form is the operator's
+    /// own, and the worst a hand-built one can do is tick boxes the operator
+    /// could have ticked.
+    pub async fn save_features(
+        &self,
+        tenants: &[i64],
+        keys: &[String],
+        grants: &[(i64, String)],
+        everyone: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let in_scope = |tenant: &i64, key: &String| tenants.contains(tenant) && keys.contains(key);
+        let (grant_tenants, grant_keys): (Vec<i64>, Vec<String>) = grants
+            .iter()
+            .filter(|(tenant, key)| in_scope(tenant, key))
+            .cloned()
+            .unzip();
+        let everyone: Vec<String> = everyone
+            .iter()
+            .filter(|key| keys.contains(key))
+            .cloned()
+            .collect();
+        let at = stamp(now);
+
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        tx.execute(
+            "DELETE FROM tenant_features tf
+              WHERE tf.tenant_id = ANY($1) AND tf.feature = ANY($2)
+                AND NOT EXISTS (
+                    SELECT 1 FROM unnest($3::bigint[], $4::text[]) AS kept(tenant_id, feature)
+                     WHERE kept.tenant_id = tf.tenant_id AND kept.feature = tf.feature)",
+            &[&tenants, &keys, &grant_tenants, &grant_keys],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO tenant_features(tenant_id, feature, enabled_at)
+             SELECT t.id, wanted.feature, $3
+               FROM unnest($1::bigint[], $2::text[]) AS wanted(tenant_id, feature)
+               JOIN tenants t ON t.id = wanted.tenant_id AND t.status = $4
+             ON CONFLICT DO NOTHING",
+            &[&grant_tenants, &grant_keys, &at, &STATUS_ACTIVE],
+        )
+        .await?;
+        tx.execute(
+            "DELETE FROM feature_defaults
+              WHERE feature = ANY($1) AND NOT (feature = ANY($2))",
+            &[&keys, &everyone],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO feature_defaults(feature, enabled_at)
+             SELECT feature, $2 FROM unnest($1::text[]) AS wanted(feature)
+             ON CONFLICT DO NOTHING",
+            &[&everyone, &at],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Mint one code against this tenant's quota, ATOMICALLY.
@@ -1688,6 +1924,7 @@ async fn migrate(tx: &Transaction<'_>) -> Result<()> {
     add_missing_columns(tx, "invite_codes", &ADDED_COLUMNS).await?;
     add_missing_columns(tx, "tenants", &TENANT_ADDED_COLUMNS).await?;
     add_missing_columns(tx, "users", &USER_ADDED_COLUMNS).await?;
+    add_missing_columns(tx, "reconnect_jobs", &RECONNECT_ADDED_COLUMNS).await?;
     add_share_token_index(tx).await?;
     add_invited_by_index(tx).await?;
     backfill_expiry(tx).await?;

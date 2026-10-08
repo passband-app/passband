@@ -36,15 +36,39 @@ struct AttachmentTray: View {
 
     var body: some View {
         if let compose, !compose.attachments.isEmpty {
-            FlowLayout(spacing: Space.s6) {
-                ForEach(compose.attachments) { attachment in
-                    AttachmentRow(
-                        attachment: attachment,
-                        inline: ComposeMarkers.isInline(attachment, in: compose.body),
-                        editable: editable, slot: slot)
+            #if os(macOS)
+                FlowLayout(spacing: Space.s6) { rows(compose) }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            #else
+                // ONE ROW THAT SCROLLS SIDEWAYS, on a phone. A row is nearly
+                // as wide as the screen, so a flow of them is a column, and a
+                // column of ten photos under the editor took the editor's
+                // whole height: nothing left to type in and nothing to scroll.
+                // Sideways, the tray is one row tall however many files it
+                // holds, and the newest is brought into view as it lands.
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal) {
+                        HStack(spacing: Space.s6) { rows(compose) }
+                    }
+                    .scrollIndicators(.hidden)
+                    .onChange(of: compose.attachments.count) { old, new in
+                        guard new > old, let last = compose.attachments.last else { return }
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo(last.id, anchor: .trailing)
+                        }
+                    }
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            #endif
+        }
+    }
+
+    private func rows(_ compose: ComposeState) -> some View {
+        ForEach(compose.attachments) { attachment in
+            AttachmentRow(
+                attachment: attachment,
+                inline: ComposeMarkers.isInline(attachment, in: compose.body),
+                editable: editable, slot: slot)
+            .id(attachment.id)
         }
     }
 }

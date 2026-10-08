@@ -64,8 +64,10 @@ struct WhatsNewCard: View {
     /// A feature page's picture, the stage's 2:1 across the card.
     private static let artHeight: CGFloat = (width * VignetteClock.canvas.height / VignetteClock.canvas.width).rounded()
     /// Every page of a walk is this tall, so Next changes what the card says
-    /// and never where its buttons are.
-    private static var pageHeight: CGFloat { artHeight + Space.scaled(128) }
+    /// and never where its buttons are. Room for a page line that wraps to a
+    /// second row, with air under it: at the old one-row height a longer line
+    /// sat on the footer's rule.
+    private static var pageHeight: CGFloat { artHeight + Space.scaled(156) }
 
     var body: some View {
         // A CLICK NEVER CLOSES IT. The scrim's backdrop click is the shortcuts
@@ -164,8 +166,10 @@ struct WhatsNewCard: View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack {
                 Group {
-                    if let vignette = headliner.vignette {
-                        VignetteStage(scene: vignette.scene, live: !paused, cornerRadius: 0)
+                    if let scene = headliner.vignette?.scene {
+                        VignetteStage(scene: scene, live: !paused, cornerRadius: 0)
+                    } else if headliner.vignette == .agentSession {
+                        agentArt(headliner.symbol)
                     } else {
                         symbolArt(headliner.symbol)
                     }
@@ -225,6 +229,31 @@ struct WhatsNewCard: View {
     private func eyebrow(_ headliner: ReleaseDigest.Headliner) -> String {
         guard let note = notes.first(where: { $0.version == headliner.version }) else { return headliner.version }
         return "\(note.headline) · \(note.version)"
+    }
+
+    /// The agent door's page: the agent ad's own picture, the conversation
+    /// standing in the live phosphor, so the walk and the ad show one thing.
+    /// Night in both themes, like every other page of the walk. The phone has
+    /// neither the ad nor its mock, and draws the symbol.
+    @ViewBuilder
+    private func agentArt(_ symbol: String) -> some View {
+        #if os(macOS)
+            ZStack(alignment: .bottom) {
+                PhosphorBackdrop(paused: paused, scene: .whatsNewPage)
+                    .environment(\.colorScheme, .dark)
+                    .allowsHitTesting(false)
+                LinearGradient(colors: [.clear, .black.opacity(0.35)], startPoint: .center, endPoint: .bottom)
+                    .allowsHitTesting(false)
+                // The ad's composition at the card's size: the conversation
+                // rises out of the floor, its foot below the fold.
+                AgentSessionMock(reduceMotion: reduceMotion, live: !paused)
+                    .scaleEffect(1.34, anchor: .bottom)
+                    .offset(y: 16)
+            }
+            .accessibilityHidden(true)
+        #else
+            symbolArt(symbol)
+        #endif
     }
 
     /// A headliner with no vignette drawn for it: its symbol on the same night
@@ -459,16 +488,21 @@ struct WhatsNewCard: View {
                 }
                 .buttonStyle(.plain)
                 .animation(.smooth(duration: 0.32), value: page)
-                .accessibilityLabel(label(pages[index]))
+                .accessibilityLabel(label(at: index))
             }
         }
     }
 
-    private func label(_ page: Page) -> String {
-        switch page {
-        case .greeter: "Welcome back"
-        case .feature(let headliner): headliner.text
-        case .record: "Everything else"
+    /// By index and BOUNDS CHECKED: closing the card empties `notes` while
+    /// the dots drawn for the old page count are still being updated, and an
+    /// index past the new end crashed the app on Got it.
+    private func label(at index: Int) -> String {
+        let pages = pages
+        guard pages.indices.contains(index) else { return "" }
+        switch pages[index] {
+        case .greeter: return "Welcome back"
+        case .feature(let headliner): return headliner.text
+        case .record: return "Everything else"
         }
     }
 

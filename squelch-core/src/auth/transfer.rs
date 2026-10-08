@@ -181,6 +181,7 @@ mod tests {
             access_token: access.to_string(),
             refresh_token: refresh.map(|r| r.to_string()),
             expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: None,
         }
     }
 
@@ -353,6 +354,7 @@ mod tests {
                     access_token: "a".to_string(),
                     refresh_token: None,
                     expires_at: None,
+                    scopes: None,
                 },
             }],
         );

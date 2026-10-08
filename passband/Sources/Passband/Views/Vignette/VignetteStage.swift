@@ -105,7 +105,22 @@ enum VignetteClock {
 /// One scene: a pure drawing of time.
 protocol VignetteDrawing {
     static var posterTime: Double { get }
+    /// The design units the scene draws in. The card's 240 x 120 unless the
+    /// scene says otherwise: the iPhone's walk gives a picture most of a
+    /// portrait page, and its scenes are drawn square for it
+    /// (PassbandiOS/Views/PhoneVignettes.swift). Everything else in the
+    /// language above holds at any canvas.
+    static var canvas: CGSize { get }
+    /// How long one pass takes. 4.8 seconds unless the scene says otherwise:
+    /// a thumb's gesture has more parts than a key's (down, drag, lift, tap),
+    /// and a phone scene that needs them all may take a little longer.
+    static var loop: Double { get }
     static func draw(_ ctx: inout GraphicsContext, t: Double)
+}
+
+extension VignetteDrawing {
+    static var canvas: CGSize { VignetteClock.canvas }
+    static var loop: Double { VignetteClock.loop }
 }
 
 // MARK: - the stage
@@ -120,6 +135,16 @@ struct VignetteStage: View {
     var fixedTime: Double? = nil
     /// 0 for a stage that bleeds to the edge of a card which clips it.
     var cornerRadius: CGFloat = 12
+    /// False lets the stage take whatever shape it is given instead of its
+    /// canvas's own: the ground fills it and the scene is fitted and centred,
+    /// so a page shorter than the picture wants shrinks the scene and keeps
+    /// the screen.
+    var fitsCanvas = true
+    /// How much of the stage the SCENE keeps clear of, in points. The ground
+    /// still fills all of it: the phone's walk bleeds the night to the top of
+    /// the screen and sets its wordmark on it, and the picture has to start
+    /// below that.
+    var sceneInsets = EdgeInsets()
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var onScreen = false
@@ -135,10 +160,10 @@ struct VignetteStage: View {
         TimelineView(.animation(minimumInterval: 1 / 60, paused: !running)) { timeline in
             let t = time(timeline.date)
             Canvas { ctx, size in
-                Self.render(&ctx, size: size, scene: scene, t: t)
+                Self.render(&ctx, size: size, scene: scene, t: t, insets: sceneInsets)
             }
         }
-        .aspectRatio(VignetteClock.canvas.width / VignetteClock.canvas.height, contentMode: .fit)
+        .modifier(CanvasShape(ratio: fitsCanvas ? scene.canvas.width / scene.canvas.height : nil))
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
             if cornerRadius > 0 {
@@ -162,14 +187,17 @@ struct VignetteStage: View {
     private func time(_ date: Date) -> Double {
         if let fixedTime { return fixedTime }
         guard running else { return scene.posterTime }
-        return max(0, date.timeIntervalSince(startedAt)).truncatingRemainder(dividingBy: VignetteClock.loop)
+        return max(0, date.timeIntervalSince(startedAt)).truncatingRemainder(dividingBy: scene.loop)
     }
 
     /// One frame, ground included. Static so a frame can be drawn with no view
     /// around it. The ground fills whatever it is given; the scene is fitted
     /// to the height and centred, so a band wider than 2:1 is more night
     /// either side rather than a stretched picture.
-    static func render(_ ctx: inout GraphicsContext, size: CGSize, scene: any VignetteDrawing.Type, t: Double) {
+    static func render(
+        _ ctx: inout GraphicsContext, size: CGSize, scene: any VignetteDrawing.Type, t: Double,
+        insets: EdgeInsets = EdgeInsets()
+    ) {
         let full = CGRect(origin: .zero, size: size)
         ctx.fill(
             Path(full),
@@ -184,12 +212,31 @@ struct VignetteStage: View {
                 Gradient(colors: [VignettePalette.phosphor.opacity(0.15), .clear]),
                 center: CGPoint(x: full.midX, y: full.maxY + size.height * 0.1),
                 startRadius: 0, endRadius: size.width * 0.6))
-        let scale = min(size.width / VignetteClock.canvas.width, size.height / VignetteClock.canvas.height)
+        let canvas = scene.canvas
+        let room = CGRect(
+            x: insets.leading, y: insets.top,
+            width: max(1, size.width - insets.leading - insets.trailing),
+            height: max(1, size.height - insets.top - insets.bottom))
+        let scale = min(room.width / canvas.width, room.height / canvas.height)
         ctx.translateBy(
-            x: (size.width - VignetteClock.canvas.width * scale) / 2,
-            y: (size.height - VignetteClock.canvas.height * scale) / 2)
+            x: room.minX + (room.width - canvas.width * scale) / 2,
+            y: room.minY + (room.height - canvas.height * scale) / 2)
         ctx.scaleBy(x: scale, y: scale)
         scene.draw(&ctx, t: t)
+    }
+}
+
+/// The canvas's own shape, or none at all. Not `aspectRatio(nil)`: that is not
+/// "no ratio", it is the content's IDEAL ratio, and a Canvas's is square.
+private struct CanvasShape: ViewModifier {
+    let ratio: CGFloat?
+
+    func body(content: Content) -> some View {
+        if let ratio {
+            content.aspectRatio(ratio, contentMode: .fit)
+        } else {
+            content
+        }
     }
 }
 

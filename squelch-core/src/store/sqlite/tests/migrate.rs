@@ -2704,3 +2704,118 @@ fn reminder_tracker_and_run_lookups_seek_their_indexes() {
         "canary: runs do not fall back to a table scan:\n{p:#?}"
     );
 }
+
+/// The planner has statistics to plan with, from the pass the daemon runs on a
+/// schedule: the real tables are analyzed, the bulky FTS and vector shadow
+/// tables (the largest b-trees in the file, which nothing plans against) are
+/// not, and a later pass notices a table that grew.
+#[test]
+fn refresh_statistics_analyzes_the_real_tables_and_optimize_keeps_up() {
+    let (store, acct) = store();
+    for i in 0..5 {
+        let _ = triaged(acct, &format!("g{i}"), &format!("t{i}")).upsert(&store);
+    }
+    // Opening analyzed nothing: that work is the scheduled pass's, not the
+    // open path's (a CLI open must not take the write lock for it).
+    let stat_table_exists = |store: &SqliteStore| -> bool {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert!(!stat_table_exists(&store), "open must not analyze");
+
+    store.refresh_statistics().unwrap();
+    let stat_for = |store: &SqliteStore, tbl: &str| -> Vec<(String, String)> {
+        store
+            .lock()
+            .unwrap()
+            .prepare("SELECT idx, stat FROM sqlite_stat1 WHERE tbl = ?1 ORDER BY idx")
+            .unwrap()
+            .query_map([tbl], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    let first = stat_for(&store, "messages");
+    assert!(!first.is_empty(), "messages has statistics after the pass");
+    // The pass's own ANALYZE loop never names a shadow table. `PRAGMA
+    // optimize` then takes statistics for the few small keyed ones whose
+    // index the connection consulted (the FTS term index and the two config
+    // tables), which is SQLite's call and a few rows each; the bulky ones,
+    // the body blobs, docsizes and vector chunks, have no index to plan with
+    // and are never walked.
+    let shadow_rows: Vec<String> = store
+        .lock()
+        .unwrap()
+        .prepare(
+            "SELECT DISTINCT tbl FROM sqlite_stat1
+             WHERE tbl LIKE 'messages\\_fts%' ESCAPE '\\'
+                OR tbl LIKE 'message\\_vecs%' ESCAPE '\\'
+             ORDER BY tbl",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    let keyed_and_small = [
+        "message_vecs_info",
+        "messages_fts_config",
+        "messages_fts_idx",
+    ];
+    assert!(
+        shadow_rows
+            .iter()
+            .all(|t| keyed_and_small.contains(&t.as_str())),
+        "only the small keyed shadow tables may carry statistics: {shadow_rows:?}"
+    );
+    for bulky in [
+        "messages_fts_data",
+        "messages_fts_docsize",
+        "messages_fts_content",
+        "message_vecs_chunks",
+        "message_vecs_rowids",
+        "message_vecs_vector_chunks00",
+    ] {
+        assert!(
+            !shadow_rows.iter().any(|t| t == bulky),
+            "{bulky} holds the bodies or the vectors and is never walked"
+        );
+    }
+
+    // Fifty times the rows (optimize's growth gate is a b-tree page estimate,
+    // too coarse to trust at ten), read through an index so the connection
+    // has planned against the table, and the incremental pass re-analyzes
+    // it, at the full limit: the second line of statistics is the honest
+    // one, not SQLite's 2000-row sample.
+    for i in 5..255 {
+        let _ = triaged(acct, &format!("g{i}"), &format!("t{i}")).upsert(&store);
+    }
+    let _: i64 = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND received_at > ''",
+            [acct],
+            |r| r.get(0),
+        )
+        .unwrap();
+    store.refresh_statistics().unwrap();
+    let second = stat_for(&store, "messages");
+    assert_ne!(first, second, "a table that grew 50x is re-analyzed");
+    let received = second
+        .iter()
+        .find(|(idx, _)| idx == "idx_messages_received")
+        .map(|(_, stat)| stat.as_str())
+        .expect("the (account_id, received_at) index has statistics");
+    assert_eq!(
+        received, "255 255 1",
+        "every row was counted, so `account_id = ?` is known to match them all"
+    );
+}

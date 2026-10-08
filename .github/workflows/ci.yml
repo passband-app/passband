@@ -75,12 +75,15 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     # Two things keep the workspace inside the runner's disk. The hosted
-    # ubuntu image ships ~14 GB free on / and something like 25 GB of
-    # toolchains this job never touches (.NET, Android, Haskell, CodeQL);
-    # dropping those first is the cheap half. (Not in the background: that was
-    # tried, and an rm competing with the cache restore and clippy for the one
-    # disk freed 5 GB in five minutes where the foreground rm frees it all in
-    # one to two. There is no second disk on this image to build on instead.)
+    # ubuntu image ships ~13 GB free on / and this job needs ~11 GB of it (a
+    # 4.5 GB restored target that grows to ~10 GB), so it first drops the
+    # toolchains it never touches. Measured 2026-10-08: .NET 17 s for 6 GB,
+    # ghcup 4 s for 4 GB, CodeQL 10 s for 1 GB, and the Android SDK 133 s for
+    # 11 GB. The SDK is left alone on purpose: the other three leave ~13 GB
+    # spare at the end of the job, and its deletion was two thirds of the
+    # step. (Not in the background either: that was tried, and an rm
+    # competing with the cache restore and clippy for the one disk freed 5 GB
+    # in five minutes. There is no second disk on this image to build on.)
     # The other half is debuginfo:
     # `cargo test --workspace` links one binary per test target with the whole
     # dependency tree inside it, and at the default `debug = 2` those binaries
@@ -92,12 +95,13 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       # One directory at a time, with the clock and df after each, so the log
-      # says which of these are worth their seconds.
+      # keeps saying which of these are worth their seconds. If the build
+      # outgrows the headroom (see "disk after"), /usr/local/lib/android is
+      # the next 11 GB, at ~130 s.
       - name: free disk
         run: |
           df -h / | tail -1
-          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
+          for d in /usr/share/dotnet /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
             start=$(date +%s)
             sudo rm -rf "$d"
             echo "$d: $(( $(date +%s) - start ))s, $(df -h / | tail -1 | awk '{print $4}') free"
@@ -148,6 +152,8 @@ jobs:
         env:
           SQUELCH_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
 
+      # Headroom check for the comment above: what the job left free, and
+      # what target/ came to.
       - name: disk after
         if: always()
         run: |

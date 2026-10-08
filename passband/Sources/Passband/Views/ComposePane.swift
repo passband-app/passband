@@ -180,10 +180,13 @@ struct ComposePane: View {
     @ViewBuilder
     private func composerPage(_ compose: ComposeState) -> some View {
         VStack(alignment: .leading, spacing: Space.s12) {
+            // ABOVE the fields it is about: who this goes to and what it says
+            // are the two things to check, and the notice belongs where the
+            // eye starts, not under the last line of the body.
+            if compose.fromAgent { AgentDraftNotice() }
             editPane(compose)
             // A held send came back blocked: the verdict, and with it
             // the override in the footer.
-            if compose.fromAgent { AgentDraftNotice() }
             if guarded {
                 GuardVerdictBox(kinds: compose.guardKinds)
             }
@@ -773,6 +776,12 @@ struct ComposePane: View {
                 // Not from the drafts page: the mail being sent is not on
                 // screen, and a send should never be of something unseen.
                 guard !modalAbove, store.compose?.page != .drafts else { return false }
+                // A draft an agent put on screen is sent with the button,
+                // never this chord: see `ComposeState.keyboardSendLocked`.
+                guard store.compose?.keyboardSendLocked != true else {
+                    store.noteKeyboardSendLocked()
+                    return true
+                }
                 send(override: false)
                 return true
             },

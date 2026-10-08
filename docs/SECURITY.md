@@ -423,6 +423,65 @@ none and offers neither tool. For each call the mailer:
 An agent's composition is deliberately narrower than the owner's: no
 attachments, no forward, no send group, no read tracking, no scheduling.
 
+**Asking for a draft on screen (`open_draft`, and `open: true` on
+`create_draft`).** At `drafts` and above an agent may ask the owner's Mac to
+bring one of its drafts up in the composer. This is the first thing the agent
+door can do that reaches the owner's SCREEN AND KEYBOARD FOCUS, so it is held
+to these rules:
+
+- It is a request to an app, not a reach into a machine. The daemon publishes
+  the draft id on an in-memory channel (`ApiState::draft_opens`); a Mac app
+  that asked for it on its own authenticated event stream
+  (`GET /client/events?opens=1`) receives an unpersisted, dated `open_draft`
+  frame. Nothing is stored or replayed, and the app drops a frame more than a
+  minute old, so a Mac that wakes from sleep has no window thrown at it. The
+  phone never asks and is never told.
+- Only a draft an agent wrote can be named. The mailer refuses any other id
+  with the same `not found` as an unknown one, and the app checks
+  `from_agent` AGAIN against the daemon's own draft list before opening
+  anything.
+- **It can open a draft; it must never be able to send one.** Bringing an
+  app to the front under somebody who is typing delivers their next
+  keystrokes to it, and in an agent's chat Cmd+Enter is "submit". So:
+  a composer opened by a request has `ComposeState.keyboardSendLocked` set,
+  and Cmd+Enter does not send it; only the send button does, and a click
+  cannot be typed ahead. Keyboard focus is taken off the composer after it
+  opens. And when the owner has anything of their own being written in
+  Passband, the app does not come forward at all (their own half-written
+  mail would be the thing a typed-ahead Cmd+Enter sent): a toast waits
+  instead, and nothing on screen is replaced. It never switches accounts.
+- It is rationed: one request per five seconds per mailbox, across all
+  agents (`ApiState::draft_open_clock`). The clock is checked BEFORE the
+  draft is looked up, and a request inside the interval is refused alike
+  whatever it named and writes no ledger row. In the other order the
+  refusal would tell an agent whether the owner had sent or discarded a
+  draft, and every attempt would be a row.
+- The agent is told the truth. The result says whether any Mac was listening
+  (the channel's receiver count), and the instructions tell it not to claim a
+  draft is on screen when none was, and that an open draft or a link is not
+  approval to send.
+- Audited as `draft.open` (`ok:mac`, `ok:no_mac`, `failed:target`), at most
+  one row per interval. Best-effort, like the human door's action rows.
+
+**The `passband://draft/<id>?mailbox=<address>&t=<created>` link** every draft
+comes back with is UNTRUSTED INPUT on the app side: any web page or local
+process can open one. It is parsed strictly (`Lib/AgentDraftLink.swift`:
+exactly the minted shape, no user, port, fragment or second path segment). It
+is bound to one draft by `t`, the second that draft was created, because draft
+ids are small row ids that are reused: without it an old link in a transcript
+would open whichever agent draft held the number next, and anything could walk
+`draft/1..N`. The app opens a link only for a `from_agent` draft created at
+that second, in the mailbox the link names (confirmed against the account's
+own address, never assumed), at most once per five seconds, and under every
+rule above. It can neither open nor probe for a draft the owner wrote.
+
+Residual, accepted: on an Open door at the default level, anything that can
+reach `/mcp` can make Passband come to the front every five seconds with a
+draft it wrote, when the owner is not writing in Passband. It cannot send,
+read more, or displace the owner's writing. `on_mac` reports a live
+connection, which a Mac that just went to sleep still has for a while; the
+agent may be told a Mac heard a request that the app then drops as stale.
+
 `from_agent` is set at insert and never cleared. An owner who rewrites an
 agent's draft still sees it marked, and so does an owner whose own save landed
 on a row the agent created a moment earlier. That errs toward the warning.

@@ -212,6 +212,11 @@ private struct MobileShell: View {
         // the way up: a mail list is a reading surface first. Every tab here is a
         // real ScrollView or List, so all of them drive it.
         .tabBarMinimizeBehavior(.onScrollDown)
+        // Picking the search tab IS reaching for the field, so the tap that
+        // selects it also focuses it and raises the keyboard. The default
+        // lands on the tab and waits for a second tap on the field, which is
+        // one tap spent saying the same thing twice.
+        .tabViewSearchActivation(.searchTabSelection)
         // An auth notification tap: the Mac's routed Auth page is, here, the
         // login-codes page behind the Quick Look key. `initial` because a tap
         // that launched the app set the flag before this view existed.

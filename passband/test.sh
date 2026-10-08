@@ -314,6 +314,12 @@ run_suite email-images \
   Sources/Passband/Lib/ImageProxy.swift \
   Tests/EmailImagesTests.swift
 
+# What the fetcher falls back on when a host's Content-Type will not say image:
+# the opening bytes. Pinned in both directions, since nil here IS the refusal.
+run_suite image-sniff \
+  Sources/Passband/Lib/ImageSniff.swift \
+  Tests/ImageSniffTests.swift
+
 # The OTHER image rewrite: `cid:` references to this message's own parts. Pure
 # string and url work, so it builds with the wire type and the buckets it gates
 # on — no WebKit, no daemon. MailCSP rides along because the policy those urls

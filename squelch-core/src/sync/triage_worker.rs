@@ -753,7 +753,7 @@ fn investigation_budget_limits(config: &Config, job: &AgentJob) -> Vec<(String, 
     let mut limits = vec![(GLOBAL_BUDGET_KEY.into(), config.triage.agent.daily_run_cap)];
     if !job.foreground || job.kind == "access" {
         limits.push((
-            "__agent_background__".into(),
+            crate::triage::agent_config::BACKGROUND_BUDGET_KEY.into(),
             config.triage.agent.effective_background_daily_run_cap(),
         ));
     }
@@ -906,19 +906,21 @@ mod budget_tests {
         let config = Config::default();
         let mut job = read_job(account, 1);
         let background = investigation_budget_limits(&config, &job);
-        // Simulate a cutover larger than its entire daily budget.
-        for index in 0..1500 {
+        let agent = &config.triage.agent;
+        let background_cap = agent.effective_background_daily_run_cap();
+        // Simulate a cutover far larger than its background budget.
+        for index in 0..background_cap + 1300 {
             assert_eq!(
                 store
                     .reserve_agent_budget(account, "today", &background)
                     .unwrap(),
-                index < 200
+                index < background_cap
             );
         }
         job.foreground = true;
         let arrival = investigation_budget_limits(&config, &job);
         // This exceeds the retired 120/account, 5/sender and 3/thread limits.
-        for _ in 0..800 {
+        for _ in 0..agent.daily_run_cap - background_cap {
             assert!(
                 store
                     .reserve_agent_budget(account, "today", &arrival)
@@ -934,7 +936,7 @@ mod budget_tests {
             store
                 .stage2_budget_used(account, GLOBAL_BUDGET_KEY, "today")
                 .unwrap(),
-            1000
+            agent.daily_run_cap
         );
     }
 

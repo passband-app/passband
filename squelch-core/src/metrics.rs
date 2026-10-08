@@ -1313,6 +1313,8 @@ pub struct StoreSnapshot {
     pub clients: Vec<crate::store::ClientSeen>,
     /// Durable investigation jobs, including delayed retries; excludes notifications.
     pub triage_jobs: [u64; 2],
+    /// Today's investigation runs against the daily caps, and what they hold.
+    pub triage_budget: crate::triage::agent_config::DailyBudgetStatus,
     /// The same rolling 24-hour manual re-triage window as /client/retriage.
     pub retriage: crate::types::RetriageProgress,
 }
@@ -1712,6 +1714,51 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         for (state, count) in ["queued", "leased"].into_iter().zip(db.triage_jobs) {
             e.sample("squelchd_triage_jobs", &[("state", state)], count as f64);
         }
+        let budget = &db.triage_budget;
+        e.family(
+            "squelchd_triage_daily_runs",
+            MetricKind::Gauge,
+            "Investigation runs spent this UTC day. Background runs also count toward the total.",
+        );
+        e.sample(
+            "squelchd_triage_daily_runs",
+            &[("scope", "total")],
+            budget.total_used as f64,
+        );
+        e.sample(
+            "squelchd_triage_daily_runs",
+            &[("scope", "background")],
+            budget.background_used as f64,
+        );
+        e.family("squelchd_triage_daily_run_cap", MetricKind::Gauge,
+            "The cap squelchd_triage_daily_runs is held to today: the configured cap plus any one-day grant from `squelchd triage grant`.");
+        e.sample(
+            "squelchd_triage_daily_run_cap",
+            &[("scope", "total")],
+            budget.total_cap as f64,
+        );
+        e.sample(
+            "squelchd_triage_daily_run_cap",
+            &[("scope", "background")],
+            budget.background_cap as f64,
+        );
+        e.family("squelchd_triage_jobs_held", MetricKind::Gauge,
+            "Jobs parked until the next UTC day by a daily cap. scope=arrival is newly arrived mail going untriaged; scope=background is backlog draining at the background cap; scope=revisit is autonomous revisits, which also answer to [revisit].daily_cap.");
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "arrival")],
+            budget.held_arrival as f64,
+        );
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "background")],
+            budget.held_background as f64,
+        );
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "revisit")],
+            budget.held_revisit as f64,
+        );
         e.scalar(
             "squelchd_retriage_messages_total",
             MetricKind::Gauge,
@@ -2260,6 +2307,15 @@ mod tests {
                 },
             ],
             triage_jobs: [9, 2],
+            triage_budget: crate::triage::agent_config::DailyBudgetStatus {
+                total_used: 1000,
+                total_cap: 1500,
+                background_used: 200,
+                background_cap: 200,
+                held_arrival: 4,
+                held_background: 642,
+                held_revisit: 12,
+            },
             retriage: crate::types::RetriageProgress {
                 total: 7,
                 done: 3,
@@ -2274,6 +2330,13 @@ mod tests {
         assert!(text.contains("squelchd_store_messages_sealed 2\n"));
         assert!(text.contains("squelchd_triage_jobs{state=\"queued\"} 9\n"));
         assert!(text.contains("squelchd_triage_jobs{state=\"leased\"} 2\n"));
+        assert!(text.contains("squelchd_triage_daily_runs{scope=\"total\"} 1000\n"));
+        assert!(text.contains("squelchd_triage_daily_run_cap{scope=\"total\"} 1500\n"));
+        assert!(text.contains("squelchd_triage_daily_runs{scope=\"background\"} 200\n"));
+        assert!(text.contains("squelchd_triage_daily_run_cap{scope=\"background\"} 200\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"arrival\"} 4\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"background\"} 642\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"revisit\"} 12\n"));
         assert!(text.contains("squelchd_retriage_messages_total 7\n"));
         assert!(text.contains("squelchd_retriage_messages_done 3\n"));
         assert!(text.contains("squelchd_llm_calls_total{category=\"extract_banking\"} 3\n"));

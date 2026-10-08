@@ -34,6 +34,15 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a page gets to finish loading after a navigation or a click.
 const LOAD_WAIT: Duration = Duration::from_secs(10);
+/// How long the page's own requests get to finish before it is read. A page
+/// built by script is often an empty shell until a fetch comes back, and a
+/// document that has merely stopped changing may only be waiting on one.
+const NETWORK_WAIT: Duration = Duration::from_secs(6);
+/// The network counts as calm once nothing has been in flight for this long.
+const NETWORK_CALM: Duration = Duration::from_millis(500);
+/// A request still open after this long is a stream or a long poll, not
+/// something the page is waiting on to draw itself.
+const REQUEST_IS_A_STREAM_AFTER: Duration = Duration::from_secs(4);
 /// A dialog's text, as kept for the next reading of the page.
 const MAX_DIALOG_CHARS: usize = 200;
 
@@ -124,7 +133,11 @@ pub(crate) struct Cdp {
     tx: mpsc::Sender<Command>,
     /// Text of JavaScript dialogs the pump accepted since the last reading.
     dialogs: Arc<Mutex<Vec<String>>>,
+    /// Requests the page has in flight, by id, with when each started.
+    in_flight: InFlight,
 }
+
+type InFlight = Arc<Mutex<HashMap<String, tokio::time::Instant>>>;
 
 impl Cdp {
     /// Connect to a browser-level DevTools endpoint. `ws_url` IS A CREDENTIAL
@@ -138,8 +151,13 @@ impl Cdp {
                 .map_err(|_| PageError::Browser("connect"))?;
         let (tx, rx) = mpsc::channel(16);
         let dialogs = Arc::new(Mutex::new(Vec::new()));
-        tokio::spawn(pump(ws, rx, dialogs.clone()));
-        Ok(Self { tx, dialogs })
+        let in_flight: InFlight = Arc::default();
+        tokio::spawn(pump(ws, rx, dialogs.clone(), in_flight.clone()));
+        Ok(Self {
+            tx,
+            dialogs,
+            in_flight,
+        })
     }
 
     async fn call(
@@ -165,6 +183,19 @@ impl Cdp {
         }
     }
 
+    /// How many requests the page is plausibly still waiting on.
+    fn busy(&self) -> usize {
+        let now = tokio::time::Instant::now();
+        self.in_flight
+            .lock()
+            .map(|m| {
+                m.values()
+                    .filter(|started| now.duration_since(**started) < REQUEST_IS_A_STREAM_AFTER)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     fn take_dialogs(&self) -> Vec<String> {
         self.dialogs
             .lock()
@@ -173,12 +204,14 @@ impl Cdp {
     }
 }
 
-/// Owns the socket: writes commands, routes replies by id, and answers the one
-/// event that would otherwise freeze the page.
+/// Owns the socket: writes commands, routes replies by id, answers the one
+/// event that would otherwise freeze the page, and keeps count of the page's
+/// requests so a reader can wait for them.
 async fn pump<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     mut rx: mpsc::Receiver<Command>,
     dialogs: Arc<Mutex<Vec<String>>>,
+    in_flight: InFlight,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -217,11 +250,28 @@ async fn pump<S>(
                     let _ = reply.send(result);
                     continue;
                 }
+                let method = msg.get("method").and_then(Value::as_str);
+                if let Some(id) = msg["params"]["requestId"].as_str()
+                    && let Ok(mut flying) = in_flight.lock()
+                {
+                    match method {
+                        Some("Network.requestWillBeSent") => {
+                            // Bounded: a page cannot grow this without end.
+                            if flying.len() < 2000 {
+                                flying.insert(id.to_string(), tokio::time::Instant::now());
+                            }
+                        }
+                        Some("Network.loadingFinished" | "Network.loadingFailed") => {
+                            flying.remove(id);
+                        }
+                        _ => {}
+                    }
+                }
                 // A JavaScript dialog (`confirm("Are you sure?")`) blocks the
                 // page until it is answered, and the only person here is us.
                 // Accepting is what pressing the page's own button meant; the
                 // text is kept so the agent reads what was agreed to.
-                if msg.get("method").and_then(Value::as_str) == Some("Page.javascriptDialogOpening") {
+                if method == Some("Page.javascriptDialogOpening") {
                     let said = msg["params"]["message"].as_str().unwrap_or("");
                     if let Ok(mut d) = dialogs.lock() {
                         d.push(said.chars().take(MAX_DIALOG_CHARS).collect());
@@ -276,7 +326,9 @@ fn classify_protocol_error(err: &Value) -> PageError {
 /// opacity, content-visibility, closed `<details>`), when it is collapsed
 /// behind a clip (`overflow: hidden` on a box under two pixels: closed
 /// accordions and screen-reader-only text), or when it sits entirely off the
-/// top or left of the document.
+/// top or left of the document. An element with `display: contents` is the
+/// one thing the browser calls invisible that is not: it has no box, and its
+/// children are on screen.
 ///
 /// Square brackets in the page's own text become parentheses, so the only
 /// bracketed controls the agent ever sees are the ones written here.
@@ -291,6 +343,10 @@ const SNAPSHOT_JS: &str = r#"function() {
     'EMBED', 'CANVAS', 'VIDEO', 'AUDIO', 'OPTION', 'OPTGROUP', 'svg', 'SVG']);
   const BLOCK = /^(block|flex|grid|list-item|table|table-row|table-caption|flow-root)$/;
   const rendered = (el) => {
+    // `display: contents` has no box of its own, so the browser calls it not
+    // visible, while everything inside it is drawn as usual. Whole sites are
+    // wrapped in these; each child answers for itself.
+    if (getComputedStyle(el).display === 'contents') return true;
     if (el.checkVisibility) {
       return el.checkVisibility({ opacityProperty: true, visibilityProperty: true });
     }
@@ -606,7 +662,8 @@ impl CdpPage {
     }
 
     /// Wait for whatever the last action started: the load, then the page's
-    /// own scripts going quiet. Then follow a newly opened tab, if there is one.
+    /// own requests, then its scripts going quiet. Then follow a newly opened
+    /// tab, if there is one.
     /// Never fails: a page that will not settle is read as it stands.
     async fn settle(&mut self) {
         self.world = None;
@@ -628,6 +685,7 @@ impl CdpPage {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+        self.calm().await;
         let _ = self
             .call(
                 "Runtime.evaluate",
@@ -635,6 +693,30 @@ impl CdpPage {
             )
             .await;
         self.follow_new_tab().await;
+    }
+
+    /// Wait until the page has had nothing in flight for [`NETWORK_CALM`], or
+    /// [`NETWORK_WAIT`] has passed. "The document stopped changing" is not
+    /// "the page is drawn": an app shell sits perfectly still while the fetch
+    /// that fills it is on the wire.
+    async fn calm(&self) {
+        let deadline = tokio::time::Instant::now() + NETWORK_WAIT;
+        let mut calm_since: Option<tokio::time::Instant> = None;
+        loop {
+            let now = tokio::time::Instant::now();
+            if self.cdp.busy() == 0 {
+                let since = *calm_since.get_or_insert(now);
+                if now.duration_since(since) >= NETWORK_CALM {
+                    return;
+                }
+            } else {
+                calm_since = None;
+            }
+            if now >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// A link with `target=_blank`, or a script's `window.open`, puts the next
@@ -657,6 +739,7 @@ impl CdpPage {
             // The new tab may still be loading; one more wait, no recursion
             // into tab-following.
             tokio::time::sleep(Duration::from_millis(500)).await;
+            self.calm().await;
             let _ = self
                 .call(
                     "Runtime.evaluate",
@@ -825,7 +908,7 @@ fn page_targets(targets: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Attach to a tab and turn on the one domain whose events we answer.
+/// Attach to a tab and turn on the two domains whose events we use.
 async fn attach_to(cdp: &Cdp, target: &str) -> Result<String, PageError> {
     let session = cdp
         .call(
@@ -837,8 +920,11 @@ async fn attach_to(cdp: &Cdp, target: &str) -> Result<String, PageError> {
         .as_str()
         .ok_or(PageError::Browser("no session"))?
         .to_string();
-    // Dialog events arrive only with the Page domain enabled.
+    // Dialog events arrive only with the Page domain enabled, and the count
+    // of requests in flight only with Network.
     cdp.call(Some(&session), "Page.enable", json!({})).await?;
+    cdp.call(Some(&session), "Network.enable", json!({}))
+        .await?;
     Ok(session)
 }
 
@@ -862,7 +948,7 @@ pub(crate) mod tests {
     /// success message present-but-hidden from the start, a `confirm()` on
     /// save, and a save that is a `fetch`, not a form post.
     pub(crate) const PREFS: &str = r#"<!doctype html><html><head><title>Email [preferences]</title></head><body>
-<div id="app"></div>
+<div style="display:contents"><div id="app"></div></div>
 <script>
 setTimeout(() => {
   document.getElementById('app').innerHTML = `
@@ -998,7 +1084,10 @@ setTimeout(() => {
         eprintln!("--- snapshot ---\n{}\n---", snap.text);
 
         // Read: what a person sees, and only that.
-        assert!(snap.text.contains("Manage your emails"), "the script ran");
+        assert!(
+            snap.text.contains("Manage your emails"),
+            "the script ran, and a `display: contents` wrapper hides nothing"
+        );
         assert!(
             !snap.text.contains("unsubscribed") && !snap.text.contains("removed"),
             "a success message that is in the markup but not on screen is not read"

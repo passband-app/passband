@@ -1181,4 +1181,52 @@ document.getElementById('save').addEventListener('click', async () => {
         assert_eq!(sent["news"], false);
         assert_eq!(sent["partners"], "false");
     }
+
+    /// ONE REAL LINK, THROUGH THE REAL BROWSER AND THE REAL MODEL, with every
+    /// step printed: what the agent was shown and what it answered. For
+    /// working out why a particular sender's page ended the way it did. The
+    /// link is a credential of the recipient's, so it comes from the
+    /// environment and is never printed.
+    /// `UNSUB_URL=... cargo test -p squelch-api live_link -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs UNSUB_URL, a Browserbase key and ANTHROPIC_API_KEY; acts on a real page"]
+    async fn live_link_is_driven_with_every_step_shown() {
+        struct Live(UnsubPageClient);
+        impl Decide for Live {
+            async fn decide(&self, o: &Observation<'_>) -> Option<Step> {
+                eprintln!(
+                    "--- step {} on {} ({}) ---\n{}\nhistory: {:?}",
+                    o.step, o.host, o.title, o.page, o.history
+                );
+                let (step, _) = unsub_agent::next_step(&self.0, o).await;
+                eprintln!("--- model says: {step:?}");
+                Some(step)
+            }
+        }
+        let url = std::env::var("UNSUB_URL").expect("UNSUB_URL");
+        let email = std::env::var("UNSUB_EMAIL").unwrap_or_else(|_| "me@example.com".into());
+        let client = UnsubPageClient::new(
+            reqwest::Client::new(),
+            squelch_core::triage::llm::provider_url(Stage2Provider::Anthropic),
+            std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY"),
+            Stage2Provider::Anthropic,
+            squelch_core::config::Config::default().notify.model,
+            squelch_core::config::Config::default().notify.effort,
+        );
+        let bb = Browserbase::from_env().expect("a Browserbase key");
+        let session = bb.open().await.expect("a session was rented");
+        let out = async {
+            let cdp = Cdp::connect(&session.connect_url).await.ok()?;
+            let mut page = CdpPage::attach(cdp).await.ok()?;
+            let errand = Errand {
+                url: &url,
+                sender: "the sender",
+                email: &email,
+            };
+            Some(unsub_browser::drive(&mut page, &Live(client), &errand).await)
+        }
+        .await;
+        bb.release(&session).await;
+        eprintln!("outcome: {out:?}");
+    }
 }

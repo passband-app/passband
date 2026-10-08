@@ -75,6 +75,21 @@ struct SearchView: View {
     /// list behind "searching…", and an append must leave the read hits alone.
     @State private var loadingMore = false
     @FocusState private var focused: Bool
+    /// The sender directory's answer to the plain words in the field, as last
+    /// fetched. Drawn through `senders`, which drops the rows a newer keystroke
+    /// has ruled out.
+    @State private var fetchedSenders: [SenderHit] = []
+    /// The armed sender row, -1 for none. BESIDE `store.search.index` rather
+    /// than folded into it: that one is parked in the store and counted against
+    /// the hits by everything that resumes a search, so the sender rows get an
+    /// index of their own and `move` walks the two as one column.
+    @State private var senderIndex = -1
+
+    /// The senders offered above the hits: who the words in the field could be
+    /// naming. Picking one lists everything they have sent, newest first.
+    private var senders: [SenderHit] {
+        SearchFetch.senders(fetchedSenders, stillMatching: store.search.query)
+    }
 
     /// The terms the on-screen hits were actually fetched for — the live query
     /// can be mid-edit, and highlighting it would mark text the server never
@@ -169,7 +184,12 @@ struct SearchView: View {
             }
 
             HStack {
+                // A listing has no ranking to choose between: it is date order
+                // whatever the picker says, so the picker stands down rather
+                // than offer a switch that does nothing.
                 SearchSortPicker()
+                    .disabled(store.search.showsListing)
+                    .opacity(store.search.showsListing ? 0.4 : 1)
                 Spacer(minLength: Space.s8)
                 if expanded { askAgentButton }
             }
@@ -237,6 +257,7 @@ struct SearchView: View {
         .onChange(of: store.searchFocusRequest) { focusField() }
         .onChange(of: store.search.query) { _, query in
             store.search.index = -1
+            senderIndex = -1
             if query.trimmed.isEmpty {
                 store.resetSearchLane()
             }
@@ -269,6 +290,12 @@ struct SearchView: View {
         .task(id: [store.search.query, prefs.searchSort.rawValue,
                    String(prefs.searchIncludeRelated), String(store.search.revision)]) {
             await runSearch()
+        }
+        .task(id: store.search.query) {
+            guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
+            // A different list under an armed row is a different row armed.
+            if found != fetchedSenders { senderIndex = -1 }
+            fetchedSenders = found
         }
     }
 
@@ -311,18 +338,22 @@ struct SearchView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(Array(store.search.hits.enumerated()), id: \.element.id) { i, hit in
-                        if i == 0 || hit.is_done != store.search.hits[i - 1].is_done {
-                            Text(hit.is_done.map { $0 ? "Done" : "Not done" } ?? "Results")
-                                .font(Typo.micro)
-                                .textCase(.uppercase)
-                                .tracking(1)
-                                .foregroundStyle(Palette.inkDim)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, Space.s14)
-                                .padding(.top, Space.s14)
-                                .padding(.bottom, Space.s6)
+                    // WHO THE WORDS COULD BE NAMING, at the top of the results
+                    // and scrolling away with them. Inside the scroller rather
+                    // than pinned above it: three rows held over fifty hits is
+                    // a quarter of the strip spent on an offer already declined.
+                    if !senders.isEmpty {
+                        sectionHeader("Senders").id(Self.sendersAnchor)
+                        ForEach(Array(senders.enumerated()), id: \.element.id) { i, sender in
+                            SenderRow(
+                                sender: sender, selected: i == senderIndex,
+                                // Tab takes the armed row, or the first.
+                                tabTakes: i == max(0, senderIndex)
+                            ) { show(sender) }
                         }
+                    }
+                    ForEach(Array(store.search.hits.enumerated()), id: \.element.id) { i, hit in
+                        if let title = header(above: i) { sectionHeader(title) }
                         // One click opens: the reader sits beside this list,
                         // so opening a hit costs the results nothing.
                         HitRow(
@@ -330,6 +361,7 @@ struct SearchView: View {
                             selected: i == store.search.index, expanded: expanded
                         ) {
                             store.search.index = i
+                            senderIndex = -1
                             open()
                         }
                         .id(hit.id)
@@ -367,7 +399,39 @@ struct SearchView: View {
                     proxy.scrollTo(hit.id, anchor: .center)
                 }
             }
+            // Arrowing back up out of the hits has to bring the senders back
+            // into view, or the selection walks off the top of the list.
+            .onChange(of: senderIndex) { _, i in
+                guard i >= 0 else { return }
+                withAnimation(Motion.scrollFollow) {
+                    proxy.scrollTo(Self.sendersAnchor, anchor: .top)
+                }
+            }
         }
+    }
+
+    private static let sendersAnchor = "senders"
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(Typo.micro)
+            .textCase(.uppercase)
+            .tracking(1)
+            .foregroundStyle(Palette.inkDim)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Space.s14)
+            .padding(.top, Space.s14)
+            .padding(.bottom, Space.s6)
+    }
+
+    /// The header that goes above hit `i`, if one does. A ranked search is
+    /// split where the status turns over; a listing is one run in date order,
+    /// so it gets one header saying which way the dates go.
+    private func header(above i: Int) -> String? {
+        let hits = store.search.hits
+        if store.search.showsListing { return i == 0 ? "Newest first" : nil }
+        guard i == 0 || hits[i].is_done != hits[i - 1].is_done else { return nil }
+        return hits[i].is_done.map { $0 ? "Done" : "Not done" } ?? "Results"
     }
 
     /// The band as the STRIP draws it: above the hits, and never allowed to
@@ -416,6 +480,8 @@ struct SearchView: View {
             KeyBinding("Enter", enterDescription, allowInInput: true) {
                 if showingRecents, let query = recents[safe: store.search.index] {
                     run(query)
+                } else if let sender = senders[safe: senderIndex] {
+                    show(sender)
                 } else if store.search.index >= 0 {
                     open()
                 } else if store.search.expanded, answered, !store.search.hits.isEmpty {
@@ -432,7 +498,13 @@ struct SearchView: View {
             // j/k also work when focus is not in the input.
             KeyBinding("j", "next hit") { move(1) },
             KeyBinding("k", "prev hit") { move(-1) },
-        ]
+        ] + (senders.isEmpty ? [] : [
+            // Only while a sender is on offer, so Tab is otherwise the
+            // system's. The armed one, or the first: the row wearing the hint.
+            KeyBinding("Tab", "show this sender's mail", allowInInput: true) {
+                if let sender = senders[safe: max(0, senderIndex)] { show(sender) }
+            },
+        ])
     }
 
     /// The retained sidebar can expand once there is a query to inspect.
@@ -445,14 +517,39 @@ struct SearchView: View {
     /// that the branches above stay one decision: `recents[safe:]` returns nil
     /// at -1, so an unarmed empty state falls through to the expand test.
     private var enterDescription: String {
+        if senders.indices.contains(senderIndex) { return "show this sender's mail" }
         if store.search.index >= 0 { return showingRecents ? "search this" : "open thread" }
         if store.search.expanded, answered, !store.search.hits.isEmpty { return "open first result" }
         return canExpand ? "expand previews" : "nothing to open"
     }
 
     /// Floor -1, not 0: ArrowUp from the top row disarms back to the bar.
+    ///
+    /// The sender rows and the hits are ONE COLUMN to the arrows, senders
+    /// first, though they are armed by two indices (see `senderIndex`). The
+    /// position is worked out across both and written back to whichever list
+    /// it lands in, so exactly one row is ever armed.
     private func move(_ delta: Int) {
-        store.search.index = max(-1, min(rowCount - 1, store.search.index + delta))
+        guard !showingRecents else {
+            store.search.index = max(-1, min(rowCount - 1, store.search.index + delta))
+            return
+        }
+        let offered = senders.count
+        let at = senders.indices.contains(senderIndex) ? senderIndex
+            : store.search.index >= 0 ? offered + store.search.index : -1
+        let to = max(-1, min(offered + rowCount - 1, at + delta))
+        senderIndex = to < offered ? to : -1
+        store.search.index = to < offered ? -1 : to - offered
+    }
+
+    /// List everything from one sender: the completed operator goes into the
+    /// FIELD, the way a remembered query does, and the panel's own debounced
+    /// task fetches it. The reader can see what was asked and narrow it.
+    private func show(_ sender: SenderHit) {
+        store.search.query = FromOperator.listing(of: sender.addr)
+        store.search.index = -1
+        senderIndex = -1
+        focused = true
     }
 
     private func open() {
@@ -689,6 +786,64 @@ struct SearchView: View {
             // more than an error line, and scrolling the last row back into
             // view retries. The bar reports failures for the search itself.
         }
+    }
+}
+
+/// One sender offered above the hits. Built on the hit row's own grid (avatar,
+/// then a name, then a trailing figure) so the block reads as the top of the
+/// results rather than a menu laid over them.
+private struct SenderRow: View {
+    let sender: SenderHit
+    let selected: Bool
+    /// This is the row Tab would take, so it is the one that says so.
+    let tabTakes: Bool
+    let onShow: () -> Void
+
+    private var name: String? {
+        sender.display_name.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    var body: some View {
+        Button(action: onShow) {
+            HStack(spacing: Space.s10) {
+                // Sender strings are email-derived: rendered as Text only,
+                // never as markup.
+                Avatar(sender: name.map { "\($0) <\(sender.addr)>" } ?? sender.addr, size: 26)
+                    .accessibilityHidden(true)
+                if let name {
+                    Text(name)
+                        .font(Typo.ui(12, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+                Text(sender.addr)
+                    .font(Typo.mono(11))
+                    .foregroundStyle(name == nil ? Palette.ink : Palette.inkDim)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: Space.s8)
+                Text(sender.msg_count == 1 ? "1 email" : "\(sender.msg_count) emails")
+                    .font(Typo.ui(11))
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize()
+                if tabTakes { Kbd("tab") }
+            }
+            .padding(.vertical, Space.scaled(7))
+            .padding(.leading, Space.s16)
+            .padding(.trailing, Space.s12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(selected ? Palette.accentSoft : Color.clear)
+        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 0.5) }
+        .overlay {
+            if selected { Rectangle().strokeBorder(Palette.accent.opacity(0.6), lineWidth: 1) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Shows all mail from this sender, newest first")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 

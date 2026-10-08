@@ -28,6 +28,12 @@ enum SearchFetch {
     /// matches only. Unfinished mail ranks first, which is what the Done / Not
     /// done headers in both shells are drawn from.
     ///
+    /// EXCEPT A LISTING (`FromOperator.isListing`: operators and no words,
+    /// which is what picking a sender writes). Nothing is ranked there, the
+    /// reader asked for one person's mail in order, and splitting it by status
+    /// would put last year's unfinished mail above this morning's. Derived from
+    /// the term alone, so every page of one query is asked for the same way.
+    ///
     /// A cursor is an offset into one ranking, so a caller paging passes the
     /// sort and mode the hits on screen were fetched under, never the live
     /// preferences.
@@ -36,7 +42,7 @@ enum SearchFetch {
     ) async throws -> SearchPage {
         var page = try await APIClient.shared.search(
             term, limit: pageSize, cursor: cursor, mode: related ? .hybrid : .keyword, sort: sort,
-            partial: true, unfinishedFirst: true)
+            partial: true, unfinishedFirst: !FromOperator.isListing(term))
         // Prepared once here rather than per render: the cleaner runs a regex
         // over every URL in the excerpt, and a row redraws far more often than
         // a page arrives.
@@ -49,7 +55,46 @@ enum SearchFetch {
     }
 }
 
+extension SearchFetch {
+    /// How many senders ride above the hits. A short list on purpose: this is
+    /// an offer at the top of the results, and the results are still the point.
+    static let senderRows = 3
+
+    /// Same as the `from:` menu's: one request per typing run.
+    private static let senderDebounce = Duration.milliseconds(120)
+
+    /// The senders to offer above the hits for what is in the field, or nil
+    /// when this task was superseded and must write nothing. Empty when the
+    /// query is not a sender's to answer (`FromOperator.senderFragment`), and
+    /// empty on a failed fetch: the offer is a convenience, the search under it
+    /// reports its own errors.
+    static func senders(matching query: String) async -> [SenderHit]? {
+        guard let fragment = FromOperator.senderFragment(in: query) else { return [] }
+        try? await Task.sleep(for: senderDebounce)
+        guard !Task.isCancelled else { return nil }
+        let found = (try? await APIClient.shared.senders(fragment, limit: senderRows)) ?? []
+        return Task.isCancelled ? nil : found
+    }
+
+    /// The fetched senders that still answer the live field. The fetch trails
+    /// the typing by a debounce and a round trip, and a row the last keystroke
+    /// ruled out must not sit there armed in the meantime.
+    static func senders(_ fetched: [SenderHit], stillMatching query: String) -> [SenderHit] {
+        guard let fragment = FromOperator.senderFragment(in: query) else { return [] }
+        return fetched.filter {
+            FromOperator.matches(addr: $0.addr, name: $0.display_name, fragment: fragment)
+        }
+    }
+}
+
 extension SearchSession {
+    /// The hits on screen are a listing: one newest-first run, not a ranking
+    /// split by status. Read from the query they were FETCHED for, because
+    /// mid-edit the field is already about something else.
+    var showsListing: Bool {
+        fetchedQuery.map(FromOperator.isListing) ?? false
+    }
+
     /// THE HITS ON SCREEN ARE THE ANSWER to `term` under these rules: same
     /// words, same order, same mode, and no revision since. Both halves of the
     /// panels' contract read it — "no matches" may only be said when this is

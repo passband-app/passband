@@ -58,8 +58,65 @@ enum FromOperator {
         let tokens = query.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
         guard !tokens.isEmpty else { return false }
         return tokens.allSatisfy { token in
-            ["from:", "after:", "before:"].contains(token.lowercased())
+            operators.contains(token.lowercased())
         }
+    }
+
+    // MARK: - a sender typed as plain words
+
+    /// The three operators the daemon parses, lowercased.
+    private static let operators = ["from:", "after:", "before:"]
+
+    /// Past this many words the reader is describing mail, not naming a person.
+    private static let senderWords = 3
+
+    /// What to look senders up for when the reader has typed plain words and no
+    /// operator: the whole query, trimmed. nil when there is nothing to offer
+    /// for: one character (every sender matches it), a query that already
+    /// carries an operator (the reader has said who, or is saying it through
+    /// the `from:` menu), or more words than a name has.
+    static func senderFragment(in query: String) -> String? {
+        let tokens = query.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+        guard !tokens.isEmpty, tokens.count <= senderWords else { return nil }
+        guard !tokens.contains(where: { isOperator($0) }) else { return nil }
+        let fragment = tokens.joined(separator: " ")
+        return fragment.count >= 2 ? fragment : nil
+    }
+
+    /// Whether a sender is still an answer to `fragment`, by the directory's own
+    /// test (a substring of the address or the display name, case folded). The
+    /// panel holds the last fetch while the next is in flight; this is what
+    /// keeps a row the new keystroke ruled out from being offered meanwhile.
+    static func matches(addr: String, name: String?, fragment: String) -> Bool {
+        let needle = fragment.lowercased()
+        return addr.lowercased().contains(needle)
+            || (name?.lowercased().contains(needle) ?? false)
+    }
+
+    /// The query that lists one sender's mail: the operator, the address, and
+    /// the closing space `accepting` leaves, so the next keystroke narrows the
+    /// listing rather than editing the address.
+    static func listing(of address: String) -> String {
+        "\(prefix)\(address) "
+    }
+
+    /// True when the query is operators and nothing else, each with a value
+    /// (`from:dan@example.com`, `from:dan after:2026-01-01`). There are no
+    /// words to rank on, so the daemon answers with a plain newest-first page,
+    /// and the shells draw it as one list in date order rather than split into
+    /// Not done and Done.
+    static func isListing(_ query: String) -> Bool {
+        let tokens = query.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+        guard !tokens.isEmpty else { return false }
+        return tokens.allSatisfy { token in
+            let lower = token.lowercased()
+            return operators.contains { lower.hasPrefix($0) && lower.count > $0.count }
+        }
+    }
+
+    private static func isOperator(_ token: Substring) -> Bool {
+        let lower = token.lowercased()
+        return operators.contains { lower.hasPrefix($0) }
     }
 
     /// The last whitespace-separated token, or nil when the text is empty or

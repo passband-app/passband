@@ -536,6 +536,11 @@ enum ProductGuide {
         - Login codes and spam are not searchable.
         - Unfinished mail is listed first, and the matching words are highlighted.
 
+        Finding a sender:
+        - Typing a name or an email address lists up to three matching senders above the results, each with how many emails they have sent. Down arrow and Enter, Tab, or a click picks one.
+        - Picking a sender shows every email from them, newest first, in one list that is not split into Not done and Done. The field then reads from: and their address, and more words typed after it search within their mail.
+        - It works the same way in the phone's Search tab: tap the sender.
+
         Operators:
         - from: narrows to a sender. Typing from: opens a menu of the people who write to the user; the arrows pick and Enter or Tab accepts.
         - after: and before: narrow by date.

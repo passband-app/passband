@@ -40,20 +40,20 @@ enum OpenSource: String, Sendable {
 }
 
 enum MainView: String, Sendable, Hashable, CaseIterable {
-    case sitrep, calendar, emails, auth, rules, groups, usage, settings, process, discovery
+    case sitrep, calendar, emails, auth, usage, settings, process, discovery
 
     /// The TOP rail group — also the 1..N number-key mapping, taken from
     /// POSITION in this array. Usage/Settings are excluded so that adding one
     /// never renumbers the rest. `process` is off the rail entirely: its one door
     /// is the all-mail header's peer-review chip.
     ///
-    /// `groups` is APPENDED rather than inserted: anywhere earlier and every
-    /// digit above it shifts, and the keys people have in their fingers are
-    /// worth more than alphabetical tidiness. Audit used to sit between the two,
-    /// and taking a destination OUT does renumber — it is the one edit that
-    /// cannot be made additively, and it was worth it once, to give the ledger
-    /// back the window it was spending (see Views/AuditView.swift).
-    static let mainViews: [MainView] = [.sitrep, .emails, .auth, .rules, .groups]
+    /// Rules and Groups used to be the fourth and fifth, and are Settings panes
+    /// now (`SettingsSection.rules` / `.groups`), the move Audit made before
+    /// them: each is a page you visit to set something up, not one you work
+    /// from, and the rail is for the second kind. They came off the END, so no
+    /// digit that is left moved, and the two digits after the rail's last page
+    /// still open them where they live (see `RootView.globalBindings`).
+    static let mainViews: [MainView] = [.sitrep, .emails, .auth]
     /// The BOTTOM rail group, pinned below a divider.
     ///
     /// `discovery` is in neither group: its one door is the ring, alone above
@@ -91,8 +91,6 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .calendar: "Calendar"
         case .emails: "Emails"
         case .auth: "Auth"
-        case .rules: "Rules"
-        case .groups: "Groups"
         case .usage: "Usage"
         case .settings: "Settings"
         case .process: "Process"
@@ -106,8 +104,6 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .calendar: "calendar"
         case .emails: "envelope"
         case .auth: "key"
-        case .rules: "slider.horizontal.3"
-        case .groups: "person.2"
         case .usage: "waveform.path.ecg"
         case .settings: "gearshape"
         case .process: "checkmark.seal"

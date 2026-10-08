@@ -583,7 +583,7 @@ enum AgentTools {
         }
         guard !existing.contains(where: { $0.match_pattern.lowercased() == normalized }) else {
             return failure(
-                "a rule for that pattern exists; the user can edit it in Settings",
+                "a rule for that pattern exists; the user can edit it in Settings > Rules",
                 summary: "rule already exists")
         }
         // Disposition is OMITTED so the daemon infers it from `want` — the
@@ -1211,9 +1211,9 @@ enum AgentTools {
                 and what they want to happen with them. Passband decides from `want` \
                 whether that means always surface, mute, or filter. LOCAL TRIAGE ONLY: \
                 it shapes what gets surfaced from now on, never the mailbox, and \
-                nothing already delivered moves. Reversible on the Rules screen. \
+                nothing already delivered moves. Reversible in Settings > Rules. \
                 Creates only: if a rule for that pattern exists, this reports so rather \
-                than changing it, and the user edits theirs in Settings.
+                than changing it, and the user edits theirs in Settings > Rules.
                 """,
             input_schema: .init(
                 properties: [

@@ -1,8 +1,10 @@
 // Settings: a routed main view with a left sub-nav whose section is persisted.
-// General (name, appearance, notifications, help, developer), mail, assistant
-// (BYOK key, model), privacy, audit, account (the mailboxes, and each one's
-// server + token). Escape is the only key bound here, so global 1..5 / ⌘[ ] nav keeps
-// working and the dispatcher's input guard covers the typed fields.
+// General (name, appearance, notifications, help, developer), mail, rules,
+// groups, assistant (BYOK key, model), privacy, audit, account (the mailboxes,
+// and each one's server + token). Escape and / are the only keys the shell
+// binds, so global digit / ⌘[ ] nav keeps working and the dispatcher's input
+// guard covers the typed fields. The Rules and Groups panes bring their own
+// list keys (j/k, n, e, x) and register them only while they are on screen.
 //
 // `SettingsView` ITSELF IS THE MAC'S SHELL — a fixed nav column beside a scroll
 // pane, which is a window shape and only a window shape. The phone's shell is
@@ -54,7 +56,21 @@ struct SettingsView: View {
                 // as one page would carry the filters off the top of the screen
                 // just as you started using them. So the ledger is given the
                 // height instead, and does its own scrolling inside it.
-                if fullHeightPane {
+                //
+                // RULES AND GROUPS ARE WHOLE PAGES, moved here off the rail with
+                // their own scrollers and their own key bar along the bottom.
+                // They take the height like the ledger and none of the pane's
+                // padding: each already sets its rows on the page gutter, and a
+                // key bar inset on both sides reads as a card with no card.
+                if pagePane {
+                    pane(prefs.settingsSection)
+                        .padding(.top, Space.s8)
+                        .frame(
+                            maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .overlay(alignment: .leading) {
+                            Rectangle().fill(Palette.hairline).frame(width: 0.5)
+                        }
+                } else if fullHeightPane {
                     pane(prefs.settingsSection)
                         .padding(.horizontal, Space.scaled(22))
                         .padding(.vertical, Space.scaled(18))
@@ -84,6 +100,12 @@ struct SettingsView: View {
             // still in the corner on every tab instead of scrolling away with
             // whichever one is showing.
             .overlay(alignment: .bottomTrailing) { versionStamp }
+        }
+        // A pane asked for by KEY (`4`, `5`, `A` from anywhere) has to win over
+        // a search left in the field, or the key routes and nothing changes.
+        .onChange(of: prefs.settingsSection) { _, _ in
+            query = ""
+            searchFocused = false
         }
         // Escape is exempt from the dispatcher's input guard precisely so a
         // surface this full of text fields can still be left.
@@ -116,6 +138,14 @@ struct SettingsView: View {
         !searching && prefs.settingsSection == .audit
     }
 
+    /// Whether the section on the right is one of the two former rail pages,
+    /// which fill the pane edge to edge. Never while searching, for the same
+    /// reason as above, and so that their list keys are not live under a
+    /// results column that is showing something else.
+    private var pagePane: Bool {
+        !searching && (prefs.settingsSection == .rules || prefs.settingsSection == .groups)
+    }
+
     /// One category's cards, in the order that category presents them. The
     /// switch is the ONLY place that ordering lives; search results reuse the
     /// same card views through `SettingsCardView`.
@@ -132,6 +162,10 @@ struct SettingsView: View {
             SearchSection()
             SignatureSection()
             ReadTrackingSection()
+        case .rules:
+            RulesView()
+        case .groups:
+            GroupsView()
         case .assistant:
             AssistantSection()
         case .agents:
@@ -143,6 +177,14 @@ struct SettingsView: View {
         case .account:
             AccountSection()
         }
+    }
+
+    /// Leave the search for a named pane: what a result does when the thing it
+    /// found is a page rather than a card.
+    private func openPane(_ section: SettingsSection) {
+        query = ""
+        searchFocused = false
+        prefs.settingsSection = section
     }
 
     /// THE MATCHES, DRAWN AS A CATEGORY WOULD BE: the same cards, live and
@@ -171,7 +213,7 @@ struct SettingsView: View {
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
                         .padding(.leading, 2)
-                    SettingsCardView(card: card)
+                    SettingsCardView(card: card, openPane: openPane)
                 }
             }
         }
@@ -197,41 +239,74 @@ struct SettingsView: View {
     }
 
     private var nav: some View {
-        @Bindable var prefs = prefs
-        return VStack(alignment: .leading, spacing: Space.s2) {
+        VStack(alignment: .leading, spacing: Space.s2) {
             search
                 .padding(.bottom, Space.s10)
-            ForEach(SettingsSection.allCases, id: \.self) { section in
-                // Nothing is selected while a search is up, because nothing IS:
-                // the pane on the right is the query's, not this section's, and
-                // a lit row beside it would be claiming otherwise.
-                let active = !searching && prefs.settingsSection == section
-                Button {
-                    // Picking a category is how you leave a search, so it
-                    // clears the field rather than selecting underneath it.
-                    query = ""
-                    searchFocused = false
-                    prefs.settingsSection = section
-                } label: {
-                    Text(section.label)
-                        .font(Typo.ui(12, weight: .medium))
-                        .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(Array(Self.navGroups.enumerated()), id: \.offset) { index, group in
+                if index > 0 {
+                    Rectangle()
+                        .fill(Palette.hairline)
+                        .frame(height: 0.5)
                         .padding(.horizontal, Space.scaled(11))
-                        .padding(.vertical, Space.s6)
-                        .contentShape(Rectangle())
+                        .padding(.vertical, Space.s8)
                 }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(active ? Palette.accentSoft : .clear)
-                )
+                ForEach(group, id: \.self) { section in
+                    navRow(section)
+                }
             }
             Spacer()
         }
         .frame(width: Typo.measure(158))
         .padding(.horizontal, Space.s12)
         .padding(.vertical, Space.scaled(18))
+    }
+
+    /// THE SUB-NAV IS TWO LISTS WITH A RULE BETWEEN THEM. Above it, the things
+    /// you come here to WORK ON: your mailboxes, your sender rules, your groups.
+    /// Below it, the settings proper, which you change once and forget. Mixed
+    /// into one column they read as nine equal preferences, and three of them
+    /// are not preferences at all.
+    ///
+    /// Its own order, not `SettingsSection.allCases`: the enum is a taxonomy
+    /// the search index and the phone share, and neither wants this grouping.
+    private static let navGroups: [[SettingsSection]] = [
+        [.account, .rules, .groups],
+        [.general, .mail, .assistant, .agents, .privacy, .audit],
+    ]
+
+    private func navRow(_ section: SettingsSection) -> some View {
+        // Nothing is selected while a search is up, because nothing IS: the
+        // pane on the right is the query's, not this section's, and a lit row
+        // beside it would be claiming otherwise.
+        let active = !searching && prefs.settingsSection == section
+        return Button {
+            // Picking a category is how you leave a search, so it clears the
+            // field rather than selecting underneath it.
+            query = ""
+            searchFocused = false
+            prefs.settingsSection = section
+        } label: {
+            HStack(spacing: Space.s8) {
+                // A FIXED SLOT, centred: SF Symbols are as wide as they are
+                // drawn, so without one the labels start on nine different
+                // lines and the column stops reading as a column.
+                Image(systemName: section.symbol)
+                    .font(Typo.ui(12, weight: .medium))
+                    .frame(width: Space.scaled(18))
+                Text(section.label)
+                    .font(Typo.ui(12, weight: .medium))
+            }
+                .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Space.scaled(9))
+                .padding(.vertical, Space.s6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(active ? Palette.accentSoft : .clear)
+        )
     }
 
     /// The field above the categories. It sits HERE, in the column that lists
@@ -294,6 +369,8 @@ struct SettingsView: View {
 /// you navigated to it and another when you searched for it.
 struct SettingsCardView: View {
     let card: SettingsCard
+    /// How a result that stands for a whole pane gets the shell to show it.
+    var openPane: (SettingsSection) -> Void = { _ in }
 
     var body: some View {
         switch card {
@@ -316,6 +393,33 @@ struct SettingsCardView: View {
         case .search: SearchSection()
         case .signature: SignatureSection()
         case .readTracking: ReadTrackingSection()
+        // THE TWO EXCEPTIONS to "a result is the real control". Rules and
+        // Groups are pages with their own scrollers and list keys, and a page
+        // drawn inside a column of results is a scroller in a scroller with
+        // `x` armed to delete something you were not looking at. So these two
+        // are doors: one row saying what is behind it, and a button.
+        case .rules:
+            SectionCard(label: "Rules") {
+                SettingsRow(
+                    title: "Sender rules",
+                    detail: "Choose how mail from a sender or a whole domain is handled: allow, filter or mute."
+                ) {
+                    Button("Open") { openPane(.rules) }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                }
+            }
+        case .groups:
+            SectionCard(label: "Groups") {
+                SettingsRow(
+                    title: "Groups",
+                    detail: "Named sets of people you write to together and address by name."
+                ) {
+                    Button("Open") { openPane(.groups) }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                }
+            }
         case .assistant: AssistantSection()
         case .agents: AgentsSection()
         case .privacy: PrivacySection()

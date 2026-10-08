@@ -355,12 +355,22 @@ pub(super) fn thread_guard_and_subject(
     .ok_or(CoreError::NotFound)
 }
 
+/// The most access checks one thread open asks for, live and archive together.
+const THREAD_ACCESS_BATCH: usize = 8;
+
 /// Only an explicit external thread-open request may schedule source assessments.
 /// Permission probes for human cache policy, listings and search remain pure.
+///
+/// `archive_caps` is what the caller may spend on the thread's ARCHIVE
+/// siblings. `None` queues nothing for them: that is every read that is not a
+/// door's own "open this thread" step (`thread_view` itself, and so the reply
+/// target check behind create_draft and send_email), because an archive check
+/// is only ever bought inside the surfacing ceilings.
 pub(super) fn request_external_thread_access_conn(
     conn: &Connection,
     account_id: AccountId,
     thread_id: &str,
+    archive_caps: Option<crate::store::ArchiveAccessCaps>,
     now: DateTime<Utc>,
 ) -> Result<Vec<i64>> {
     // Reading a legacy thread is demand for assessing its unseen sources. Queue
@@ -370,22 +380,41 @@ pub(super) fn request_external_thread_access_conn(
         .prepare(
             "SELECT m.id FROM messages m
          LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
-         WHERE m.account_id=?1 AND m.thread_id=?2
+         WHERE m.account_id=?1 AND m.thread_id=?2 AND m.is_archive=0
            AND (a.access IS NULL OR a.access='pending')
            AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs j
              WHERE j.account_id=m.account_id AND j.message_id=m.id
                AND j.kind IN ('triage','access') AND j.input_revision=a.revision)
-         ORDER BY m.received_at DESC,m.id DESC LIMIT 8",
+         ORDER BY m.received_at DESC,m.id DESC LIMIT ?3",
         )?
-        .query_map(params![account_id, thread_id], |row| row.get(0))?
+        .query_map(
+            params![account_id, thread_id, THREAD_ACCESS_BATCH as i64],
+            |row| row.get(0),
+        )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     super::agent_triage::ensure_agent_source_ids_conn(conn, account_id, &missing)?;
-    // An archive sibling whose check FAILED would otherwise be omitted from
-    // this thread for good; a day-old failure is asked for again, inside the
-    // same batch of eight.
-    let room = 8usize.saturating_sub(missing.len());
-    missing.extend(super::agent_triage::revive_failed_thread_access_conn(
-        conn, account_id, thread_id, room, now,
+    let room = THREAD_ACCESS_BATCH.saturating_sub(missing.len());
+    let Some(caps) = archive_caps.filter(|_| room > 0) else {
+        return Ok(missing);
+    };
+    // ARCHIVE SIBLINGS GO THROUGH THE SURFACING CEILINGS, never the path
+    // above: opening a thread is the same purchase as a search matching it,
+    // and thread ids are cheap to come by. Candidates are the siblings a
+    // check can still be bought for (`archive_askable_sql!`), a FAILED one
+    // included: asked for again once a day old, or the row would be omitted
+    // from this thread for good.
+    let archive: Vec<i64> = conn
+        .prepare(concat!(
+            "SELECT m.id FROM messages m
+             LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+             WHERE m.account_id=?1 AND m.thread_id=?2 AND ",
+            archive_askable_sql!(),
+            " ORDER BY m.received_at DESC,m.id DESC LIMIT 64"
+        ))?
+        .query_map(params![account_id, thread_id], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    missing.extend(super::agent_triage::request_archive_access_conn(
+        conn, account_id, &archive, room, caps, now,
     )?);
     Ok(missing)
 }
@@ -625,7 +654,9 @@ impl SqliteStore {
 
     pub(super) fn thread_view(&self, account_id: AccountId, thread_id: &str) -> Result<ThreadView> {
         let conn = self.lock()?;
-        request_external_thread_access_conn(&conn, account_id, thread_id, Utc::now())?;
+        // No caps: this read queues nothing for archive siblings. The doors
+        // ask for those first, inside the surfacing ceilings.
+        request_external_thread_access_conn(&conn, account_id, thread_id, None, Utc::now())?;
         let subject = thread_guard_and_subject(&conn, account_id, thread_id)?;
 
         // THE AGENT DOOR GETS NO SPAM AT ALL, not spam it is told to distrust.

@@ -261,15 +261,14 @@ pub struct SyncConfig {
     /// the reader, with no model call at ingest. It is its own window and moves
     /// none of the others: triage cutover, the blank-body heal, the spam page
     /// and catch-up all keep reading `backfill_days`. Raising it resumes the
-    /// walk; 0 turns the archive off. Env: SQUELCH_ARCHIVE_DAYS. Clamped to
-    /// [`ARCHIVE_DAYS_MAX`] at load.
+    /// walk; 0 turns the archive off. Set in the config file only: there is
+    /// no environment override. Clamped to [`ARCHIVE_DAYS_MAX`] at load.
     pub archive_days: u32,
     /// THE ARCHIVE WALK'S DISK FLOOR, in MiB: the walk stores nothing while
     /// the filesystem holding the database has less than this free, and holds
     /// off just the same when free space cannot be read. A year of bodies is
     /// the largest thing this daemon writes, and a full disk fails the LIVE
-    /// ingest, not the walk. 0 turns the check off.
-    /// Env: SQUELCH_ARCHIVE_MIN_FREE_MB.
+    /// ingest, not the walk. 0 turns the check off. Config file only.
     pub archive_min_free_mb: u64,
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
@@ -1943,10 +1942,6 @@ impl Config {
             &mut self.triage.agent.background_daily_run_cap,
         );
         env_override(
-            "SQUELCH_TRIAGE_ARCHIVE_ACCESS_DAILY_CAP",
-            &mut self.triage.agent.archive_access_daily_cap,
-        );
-        env_override(
             "SQUELCH_TRIAGE_MAX_ATTEMPTS",
             &mut self.triage.agent.max_attempts,
         );
@@ -1980,9 +1975,8 @@ impl Config {
             self.account_email = Some(v);
         }
         env_override("SQUELCH_BACKFILL_DAYS", &mut self.sync.backfill_days);
-        env_override("SQUELCH_ARCHIVE_DAYS", &mut self.sync.archive_days);
-        // AFTER the env, so the bound holds whichever of the file and the
-        // environment supplied the number.
+        // The archive's settings have no environment override, so this is
+        // the file's number (or the default) being bounded.
         if self.sync.archive_days > ARCHIVE_DAYS_MAX {
             eprintln!(
                 "squelch: config sync.archive_days={} is past the {ARCHIVE_DAYS_MAX}-day limit; \
@@ -1991,10 +1985,6 @@ impl Config {
             );
             self.sync.archive_days = ARCHIVE_DAYS_MAX;
         }
-        env_override(
-            "SQUELCH_ARCHIVE_MIN_FREE_MB",
-            &mut self.sync.archive_min_free_mb,
-        );
         env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
         env_override(
             "SQUELCH_FETCH_CONCURRENCY",
@@ -2532,7 +2522,6 @@ mod tests {
             "SQUELCH_TRIAGE_MAX_ATTEMPTS",
             "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
             "SQUELCH_TRIAGE_BACKGROUND_DAILY_RUN_CAP",
-            "SQUELCH_TRIAGE_ARCHIVE_ACCESS_DAILY_CAP",
         ];
         let previous = names.map(std::env::var_os);
         // SAFETY: every environment-mutating config test holds ENV_LOCK.
@@ -2541,10 +2530,8 @@ mod tests {
             std::env::set_var(names[1], "4");
             std::env::set_var(names[2], "600");
             std::env::set_var(names[3], "5");
-            std::env::set_var(names[4], "9");
         }
         let mut config = Config::default();
-        assert_eq!(config.triage.agent.archive_access_daily_cap, 50);
         config.apply_env_overrides();
         unsafe {
             for (name, value) in names.into_iter().zip(previous) {
@@ -2557,7 +2544,6 @@ mod tests {
         }
         assert_eq!(config.triage.agent.daily_run_cap, 17);
         assert_eq!(config.triage.agent.background_daily_run_cap, 5);
-        assert_eq!(config.triage.agent.archive_access_daily_cap, 9);
         assert_eq!(config.triage.agent.max_attempts, 4);
         assert_eq!(config.triage.agent.outage_retry_secs, 600);
     }
@@ -2997,7 +2983,6 @@ archive_days = 730
         unsafe {
             std::env::set_var("SQUELCH_CLIENT_ID", "env-id");
             std::env::set_var("SQUELCH_BACKFILL_DAYS", "7");
-            std::env::set_var("SQUELCH_ARCHIVE_DAYS", "0");
         }
         let mut c = Config {
             client_id: Some("file-id".to_string()),
@@ -3006,42 +2991,64 @@ archive_days = 730
         c.apply_env_overrides();
         assert_eq!(c.client_id.as_deref(), Some("env-id"));
         assert_eq!(c.sync.backfill_days, 7);
-        assert_eq!(c.sync.archive_days, 0, "0 is the off switch, not a default");
         unsafe {
             std::env::remove_var("SQUELCH_CLIENT_ID");
             std::env::remove_var("SQUELCH_BACKFILL_DAYS");
-            std::env::remove_var("SQUELCH_ARCHIVE_DAYS");
         }
     }
 
-    /// AN ABSURD ARCHIVE DEPTH IS CLAMPED AT LOAD, from the file and from the
-    /// environment alike, so no caller downstream does date arithmetic on it.
+    /// AN ABSURD ARCHIVE DEPTH IS CLAMPED AT LOAD, so no caller downstream
+    /// does date arithmetic on it. AND THE ARCHIVE HAS NO ENVIRONMENT KNOBS:
+    /// the tier takes hold with the daemon version, on every deployment alike,
+    /// and what tunes it is the config file. A stray variable with a
+    /// plausible name changes nothing.
     #[test]
-    fn archive_days_is_clamped_at_load_and_the_disk_floor_reads_its_env() {
+    fn archive_days_is_clamped_at_load_and_no_environment_variable_moves_the_archive() {
         let _g = ENV_LOCK.lock().unwrap();
         let mut c = Config::default();
         c.sync.archive_days = u32::MAX;
         c.apply_env_overrides();
         assert_eq!(c.sync.archive_days, ARCHIVE_DAYS_MAX);
-        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
-        unsafe {
-            std::env::set_var("SQUELCH_ARCHIVE_DAYS", "4000000000");
-            std::env::set_var("SQUELCH_ARCHIVE_MIN_FREE_MB", "512");
-        }
-        let mut c = Config::default();
-        c.apply_env_overrides();
-        unsafe {
-            std::env::remove_var("SQUELCH_ARCHIVE_DAYS");
-            std::env::remove_var("SQUELCH_ARCHIVE_MIN_FREE_MB");
-        }
-        assert_eq!(c.sync.archive_days, ARCHIVE_DAYS_MAX);
-        assert_eq!(c.sync.archive_min_free_mb, 512);
         let mut c = Config::default();
         c.sync.archive_days = ARCHIVE_DAYS_MAX;
         c.apply_env_overrides();
         assert_eq!(
             c.sync.archive_days, ARCHIVE_DAYS_MAX,
             "the limit itself stands"
+        );
+
+        let names = [
+            ["SQUELCH", "ARCHIVE", "DAYS"].join("_"),
+            ["SQUELCH", "ARCHIVE", "MIN", "FREE", "MB"].join("_"),
+            ["SQUELCH", "TRIAGE", "ARCHIVE", "ACCESS", "DAILY", "CAP"].join("_"),
+        ];
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            for name in &names {
+                std::env::set_var(name, "7");
+            }
+        }
+        let mut c = Config::default();
+        c.sync.archive_days = 730;
+        c.sync.archive_min_free_mb = 512;
+        c.triage.agent.archive_access_daily_cap = 9;
+        c.apply_env_overrides();
+        unsafe {
+            for name in &names {
+                std::env::remove_var(name);
+            }
+        }
+        assert_eq!(c.sync.archive_days, 730);
+        assert_eq!(c.sync.archive_min_free_mb, 512);
+        assert_eq!(c.triage.agent.archive_access_daily_cap, 9);
+        let d = Config::default();
+        assert_eq!(
+            (
+                d.sync.archive_days,
+                d.sync.archive_min_free_mb,
+                d.triage.agent.archive_access_daily_cap
+            ),
+            (365, 2048, 50)
         );
     }
 

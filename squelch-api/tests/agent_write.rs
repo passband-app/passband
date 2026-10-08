@@ -928,3 +928,133 @@ async fn open_requests_are_spaced_out_and_the_refusal_says_nothing() {
         "a request inside the interval writes no ledger row"
     );
 }
+
+// --- the archive tier (issue #422) -------------------------------------------
+
+/// An archive row through the real archive write: old mail, stored unassessed.
+fn old_mail(f: &Fixture, gmail: &str, thread: &str) -> i64 {
+    use squelch_core::sync::ingest::{RawFetched, ingest};
+    let when = Utc::now() - chrono::Duration::days(200);
+    let fetched = RawFetched {
+        account_id: f.acct,
+        gmail_msg_id: gmail.into(),
+        gmail_thread_id: Some(thread.into()),
+        raw: b"From: Zed Old <zed@old.example>\r\nTo: me@example.com\r\nSubject: heron ledger\r\n\r\nheron ledger\r\n"
+            .to_vec(),
+        internal_date: Some(when),
+        is_sent: false,
+        is_spam: false,
+        account_addr: "me@example.com".into(),
+    };
+    let triaged = ingest(&fetched, &Default::default(), Utc::now(), |_| false);
+    f.store.ingest_archive_message(&triaged).unwrap().unwrap()
+}
+
+/// Every job on `id`, as (kind, trigger, state).
+fn job_rows(f: &Fixture, id: i64) -> Vec<(String, String, String)> {
+    f.store.agent_diagnostics(f.acct, id).unwrap()["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| {
+            let field = |name: &str| job[name].as_str().unwrap().to_string();
+            (field("kind"), field("trigger"), field("state"))
+        })
+        .collect()
+}
+
+/// S5. A REPLY-TARGETED WRITE BUYS NOTHING AND PROMOTES NOTHING. `create_draft`
+/// and `send_email` check their reply target by performing the agent door's
+/// own thread read (`readable_parent`), and that read used to queue an access
+/// check on every unassessed archive sibling it passed, outside every cap: a
+/// write tool pointed at old mail was a way to spend. Driven here through the
+/// REAL mailer the daemon hands the agent door, not a recording stand-in.
+#[tokio::test]
+async fn a_reply_targeted_write_queues_no_work_on_archive_mail_and_promotes_none() {
+    use squelch_core::triage::access::AccessDecision;
+    let f = fixture(AgentWriteAccess::Send, true).await;
+    // Unassessed and alone; unassessed beside a live readable message; and
+    // one an access check has already cleared.
+    let lone = old_mail(&f, "g-lone", "t-lone");
+    let ancestor = old_mail(&f, "g-anc", "t-mixed");
+    let live = f
+        .store
+        .upsert_message(&msg(f.acct, "g-live", "t-mixed", "Re: heron", "osprey"))
+        .unwrap();
+    assess(&f.store, f.acct, live, false);
+    let cleared = old_mail(&f, "g-cleared", "t-cleared");
+    assert_eq!(
+        f.store
+            .request_archive_access(f.acct, &[cleared], Default::default(), Utc::now())
+            .unwrap(),
+        vec![cleared]
+    );
+    let job = f
+        .store
+        .claim_agent_job(f.acct, "access", Utc::now(), 120)
+        .unwrap()
+        .unwrap();
+    let original = f.store.load_agent_access_message(&job).unwrap();
+    let allowed = AccessDecision {
+        restricted: false,
+        reason: "test".into(),
+    };
+    f.store
+        .commit_agent_access(&job, &original, &allowed, &serde_json::json!({}))
+        .unwrap();
+    let cleared_jobs = vec![(
+        "access".to_string(),
+        "archive_access".to_string(),
+        "completed".to_string(),
+    )];
+    assert_eq!(job_rows(&f, cleared), cleared_jobs);
+
+    for round in 0..2 {
+        // An archive row nobody has cleared is not a reply target, exactly
+        // as mail that does not exist is not.
+        for id in [lone, ancestor] {
+            assert_eq!(
+                f.mailer.create_draft(reply(id, "hello")).await,
+                Err(AgentWriteError::NotFound),
+                "round {round}"
+            );
+            assert_eq!(
+                f.mailer.send(reply(id, "hello")).await,
+                Err(AgentWriteError::NotFound),
+                "round {round}"
+            );
+        }
+        // THE READ REALLY RAN: the live message beside the unassessed
+        // ancestor and the cleared archive row are both served by it.
+        f.mailer.send(reply(live, "Works for me.")).await.unwrap();
+        f.mailer.send(reply(cleared, "Found it.")).await.unwrap();
+        if round == 0 {
+            f.mailer
+                .create_draft(reply(live, "A draft."))
+                .await
+                .unwrap();
+            f.mailer
+                .create_draft(reply(cleared, "A draft."))
+                .await
+                .unwrap();
+        }
+
+        for id in [lone, ancestor, cleared] {
+            assert!(
+                f.store.message_is_archive(f.acct, id).unwrap(),
+                "round {round}: {id} was promoted from the agent door"
+            );
+        }
+        // Not "no triage job": NO JOB AT ALL on the rows nobody cleared, and
+        // on the cleared one the single check it already had.
+        assert_eq!(job_rows(&f, lone), vec![], "round {round}");
+        assert_eq!(job_rows(&f, ancestor), vec![], "round {round}");
+        assert_eq!(job_rows(&f, cleared), cleared_jobs, "round {round}");
+    }
+    let sends = requests(&f)
+        .iter()
+        .filter(|request| request.contains("/messages/send"))
+        .count();
+    assert_eq!(sends, 4, "two readable targets, two rounds");
+    assert_eq!(f.store.list_drafts(f.acct).unwrap().len(), 2);
+}

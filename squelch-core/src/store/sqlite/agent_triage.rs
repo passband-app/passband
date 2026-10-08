@@ -421,15 +421,27 @@ fn is_archive_conn(conn: &Connection, account: AccountId, message: i64) -> Resul
 /// `retriage_reset`'s single-message arm and [`correct_agent_triage_conn`] for
 /// any field but `external_access`. Nothing at the agent door, in the walk, in
 /// a live re-sighting or in a heal reaches either. It touches the flag and
-/// nothing else, so an access verdict already on the row (a 'restricted' most
-/// of all) is exactly what it was. Returns whether the row was promoted.
+/// nothing else. What happens to the row's access verdict afterwards is what
+/// happens to any live row's: the triage the caller queues re-judges it, so a
+/// model's 'restricted' may become 'allowed'; only the owner's own seal
+/// (`external_access` corrected to true) outlives that.
+///
+/// NEVER THE OWNER'S OWN MAIL. Sent mail has no verdict to redo (see
+/// `OWN_MAIL`), so there is nothing a promotion would buy; and a promoted
+/// sent row is live and pending, which closes its thread at the agent door
+/// over archive siblings that door could read a moment before. Returns
+/// whether the row was promoted.
 pub(super) fn promote_archive_conn(
     conn: &Connection,
     account: AccountId,
     message: i64,
 ) -> Result<bool> {
     Ok(conn.execute(
-        "UPDATE messages SET is_archive=0 WHERE account_id=?1 AND id=?2 AND is_archive=1",
+        concat!(
+            "UPDATE messages AS m SET is_archive=0
+             WHERE m.account_id=?1 AND m.id=?2 AND m.is_archive=1 AND NOT ",
+            own_mail_sql!()
+        ),
         params![account, message],
     )? == 1)
 }
@@ -460,11 +472,12 @@ pub(super) fn correct_agent_triage_conn(
     // any corrected row gets. Sealing or unsealing one (`external_access`) is
     // not that. It is a statement about who may read the row, it is applied
     // below without a model, and the row stays in the archive with no job.
+    //
+    // An archive row that is NOT promoted (the owner's own sent mail) gets the
+    // correction recorded and no job either: nothing may queue work on a row
+    // still in the archive from here.
     let archived = is_archive_conn(conn, account, message)?;
-    if !(archived && field == "external_access") {
-        if archived {
-            promote_archive_conn(conn, account, message)?;
-        }
+    if !archived || (field != "external_access" && promote_archive_conn(conn, account, message)?) {
         let trigger = format!("correction:{}", now.to_rfc3339());
         enqueue_agent_triage_conn(conn, account, message, &trigger, false)?;
     }
@@ -1094,28 +1107,22 @@ pub(super) fn ensure_agent_source_ids_conn(
         .iter()
         .map(|id| read_message(conn, account, *id))
         .collect::<Result<Vec<_>>>()?;
-    // The one explicit caller: a thread somebody opened at the agent door.
-    ensure_source_assessments(conn, account, &messages, true)
+    ensure_source_assessments(conn, account, &messages)
 }
 
-/// `explicit` is whether a caller outside the daemon asked for these rows by
-/// name. Everything else (the triage agent's own evidence reads, a human
-/// opening a message) is unprompted, and unprompted work never assesses an
-/// archive row: that is a model call per message over a year of mail.
+/// NEVER ASSESSES AN ARCHIVE ROW, whoever is asking. The triage agent's own
+/// evidence reads and a human opening a message are unprompted, and unprompted
+/// work on the archive is a model call per message over a year of mail. An
+/// agent-door caller who names an archive row is prompted, but that request
+/// has ceilings this function knows nothing about: it goes through
+/// [`request_archive_access_conn`] and nowhere else.
 fn ensure_source_assessments(
     conn: &Connection,
     account: AccountId,
     messages: &[AgentMessage],
-    explicit: bool,
 ) -> Result<()> {
     for message in messages {
-        if !explicit
-            && conn.query_row(
-                "SELECT is_archive FROM messages WHERE account_id=?1 AND id=?2",
-                params![account, message.id],
-                |row| row.get::<_, bool>(0),
-            )?
-        {
+        if is_archive_conn(conn, account, message.id)? {
             continue;
         }
         let access: Option<String> = conn
@@ -1922,7 +1929,7 @@ impl AgentTriageStore for SqliteStore {
             .iter()
             .map(|id| read_evidence_message(&conn, account, *id))
             .collect::<Result<Vec<_>>>()?;
-        ensure_source_assessments(&conn, account, &messages, false)?;
+        ensure_source_assessments(&conn, account, &messages)?;
         messages
             .into_iter()
             .map(|message| read_message(&conn, account, message.id).map(|m| m.source))
@@ -1950,13 +1957,13 @@ impl AgentTriageStore for SqliteStore {
     fn agent_read_message(&self, account: AccountId, message: i64) -> Result<AgentMessage> {
         let conn = self.lock()?;
         let message = read_evidence_message(&conn, account, message)?;
-        ensure_source_assessments(&conn, account, std::slice::from_ref(&message), false)?;
+        ensure_source_assessments(&conn, account, std::slice::from_ref(&message))?;
         read_message(&conn, account, message.id)
     }
     fn human_read_message(&self, account: AccountId, message: i64) -> Result<AgentMessage> {
         let conn = self.lock()?;
         let message = read_message(&conn, account, message)?;
-        ensure_source_assessments(&conn, account, std::slice::from_ref(&message), false)?;
+        ensure_source_assessments(&conn, account, std::slice::from_ref(&message))?;
         read_message(&conn, account, message.id)
     }
     fn agent_read_thread(
@@ -1967,7 +1974,7 @@ impl AgentTriageStore for SqliteStore {
     ) -> Result<Vec<AgentMessage>> {
         let conn = self.lock()?;
         let messages = read_thread(&conn, account, thread, limit)?;
-        ensure_source_assessments(&conn, account, &messages, false)?;
+        ensure_source_assessments(&conn, account, &messages)?;
         read_thread(&conn, account, thread, limit)
     }
     fn agent_search_mail(
@@ -2005,7 +2012,7 @@ impl AgentTriageStore for SqliteStore {
                 }
             }
         }
-        ensure_source_assessments(&conn, account, &rows, false)?;
+        ensure_source_assessments(&conn, account, &rows)?;
         rows.into_iter()
             .map(|message| read_message(&conn, account, message.id))
             .collect()
@@ -2026,7 +2033,7 @@ impl AgentTriageStore for SqliteStore {
         let rows = statement
             .query_map(params![account, sender, limit.min(100) as i64], message_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        ensure_source_assessments(&conn, account, &rows, false)?;
+        ensure_source_assessments(&conn, account, &rows)?;
         rows.into_iter()
             .map(|message| read_message(&conn, account, message.id))
             .collect()
@@ -2209,7 +2216,7 @@ fn revive_failed_archive_access(
                    AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs live
                        WHERE live.account_id=m.account_id AND live.message_id=m.id
                          AND live.kind IN ('triage','access') AND live.state IN ('queued','leased'))
-                 ORDER BY j.id DESC LIMIT 1"
+                 ORDER BY j.trigger='archive_access' DESC,j.id DESC LIMIT 1"
             ),
             params![account, message, cutoff],
             |row| row.get(0),
@@ -2218,64 +2225,105 @@ fn revive_failed_archive_access(
     let Some(job) = job else {
         return Ok(false);
     };
+    // Revived AS `archive_access`, whatever queued it first: the trigger is
+    // what the outstanding ceiling counts and what the worker charges the
+    // daily sub-cap on, so a revived check is inside both. The select above
+    // prefers a job that already carries it, which is what keeps this rename
+    // clear of the jobs' unique key.
     conn.execute(
-        "UPDATE agent_triage_jobs SET state='queued',attempts=0,available_at=?2,last_error=NULL
+        "UPDATE agent_triage_jobs SET state='queued',attempts=0,available_at=?2,last_error=NULL,
+             trigger='archive_access'
          WHERE id=?1",
         params![job, now.to_rfc3339()],
     )?;
     Ok(true)
 }
 
-/// The thread-open half of the same rule: revive the stale failed checks of
-/// up to `limit` unassessed archive siblings, newest first. Returns their ids.
-pub(super) fn revive_failed_thread_access_conn(
+/// ASSESS ON SURFACING, in the caller's transaction: queue one `access` job
+/// (trigger `archive_access`) for each of `ids` that is an unassessed archive
+/// row of this account with NO job at its current revision, in any state. A
+/// row whose check already ran or is parked on the daily budget is left
+/// exactly as it is, so repeating a request never buys a second model call;
+/// one whose check FAILED is asked for again once that failure is a day old.
+/// Taken in the order given (the caller passes best-ranked first). Returns
+/// the ids queued.
+///
+/// THE ONE PLACE AN AGENT-DOOR CALLER CAN QUEUE WORK ON AN ARCHIVE ROW, a
+/// search that matched it and a thread open that named it alike, so both obey
+/// the same ceilings and neither can queue what the worker would only park:
+/// at most `limit` (never over [`ARCHIVE_SURFACE_CAP`]) per call; never more
+/// than [`ARCHIVE_ACCESS_OUTSTANDING_MAX`] outstanding for the account; never
+/// more than today's `caps.daily` can still pay for, counting what is already
+/// outstanding. And nothing at all once today's background budget is spent,
+/// because every one of these would park.
+pub(super) fn request_archive_access_conn(
     conn: &Connection,
     account: AccountId,
-    thread: &str,
+    ids: &[i64],
     limit: usize,
+    caps: ArchiveAccessCaps,
     now: DateTime<Utc>,
 ) -> Result<Vec<i64>> {
-    let candidates: Vec<i64> = conn
-        .prepare(concat!(
-            "SELECT m.id FROM messages m
-             JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
-             WHERE m.account_id=?1 AND m.thread_id=?2 AND m.is_spam=0 AND ",
-            archive_unassessed_sql!(),
-            " AND EXISTS(SELECT 1 FROM agent_triage_jobs j WHERE j.account_id=m.account_id
-                   AND j.message_id=m.id AND j.kind='access' AND j.state='failed'
-                   AND j.input_revision=a.revision)
-             ORDER BY m.received_at DESC,m.id DESC"
-        ))?
-        .query_map(params![account, thread], |row| row.get(0))?
-        .collect::<std::result::Result<_, _>>()?;
-    let mut revived = Vec::new();
-    for id in candidates {
-        if revived.len() >= limit {
+    let day = now.format("%Y-%m-%d").to_string();
+    let used = |key: &str| -> Result<u32> {
+        Ok(conn.query_row(
+            "SELECT COALESCE((SELECT model_calls FROM wake_budget
+                 WHERE account_id=?1 AND thread_id=?2 AND day=?3),0)",
+            params![account, key, day],
+            |row| row.get(0),
+        )?)
+    };
+    if used(BACKGROUND_BUDGET_KEY)? >= caps.background_daily {
+        return Ok(Vec::new());
+    }
+    let outstanding: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM agent_triage_jobs WHERE account_id=?1 AND kind='access'
+           AND trigger='archive_access' AND state IN ('queued','leased')",
+        [account],
+        |row| row.get(0),
+    )?;
+    let room = limit
+        .min(ARCHIVE_SURFACE_CAP)
+        .min(ARCHIVE_ACCESS_OUTSTANDING_MAX.saturating_sub(outstanding) as usize)
+        .min(
+            caps.daily
+                .saturating_sub(used(ARCHIVE_ACCESS_BUDGET_KEY)?)
+                .saturating_sub(outstanding) as usize,
+        );
+    let mut queued = Vec::new();
+    for id in ids {
+        if queued.len() >= room {
             break;
         }
-        if revive_failed_archive_access(conn, account, id, now)? {
-            revived.push(id);
+        let wanted: bool = conn.query_row(
+            concat!(
+                "SELECT EXISTS(SELECT 1 FROM messages m
+                 LEFT JOIN agent_message_state a
+                   ON a.account_id=m.account_id AND a.message_id=m.id
+                 WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0 AND ",
+                archive_unassessed_sql!(),
+                " AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs j
+                     WHERE j.account_id=m.account_id AND j.message_id=m.id
+                       AND j.kind IN ('triage','access')
+                       AND j.input_revision=COALESCE(a.revision,1)))"
+            ),
+            params![account, id],
+            |row| row.get(0),
+        )?;
+        if wanted {
+            enqueue_agent_triage_conn(conn, account, *id, "archive_access", false)?;
+            queued.push(*id);
+        } else if revive_failed_archive_access(conn, account, *id, now)? {
+            queued.push(*id);
         }
     }
-    Ok(revived)
+    Ok(queued)
 }
 
 impl SqliteStore {
-    /// ASSESS ON SURFACING: queue one `access` job (trigger `archive_access`)
-    /// for each of `ids` that is an unassessed archive row of this account
-    /// with NO job at its current revision, in any state. A row whose check
-    /// already ran or is parked on the daily budget is left exactly as it is,
-    /// so repeating a search never buys a second model call; one whose check
-    /// FAILED is asked for again once that failure is a day old. Taken in the
-    /// order given (the caller passes best-ranked first). Returns the ids
-    /// queued.
-    ///
-    /// THREE CEILINGS, all checked here so a caller cannot queue what the
-    /// worker would only park: at most [`ARCHIVE_SURFACE_CAP`] per call; never
-    /// more than [`ARCHIVE_ACCESS_OUTSTANDING_MAX`] outstanding for the
-    /// account; never more than today's `caps.daily` can still pay for,
-    /// counting what is already outstanding. And nothing at all once today's
-    /// background budget is spent, because every one of these would park.
+    /// [`request_archive_access_conn`] for a search's matches, in its own
+    /// transaction: up to [`ARCHIVE_SURFACE_CAP`] of `ids`, inside every
+    /// ceiling that function keeps.
     pub fn request_archive_access(
         &self,
         account: AccountId,
@@ -2285,58 +2333,8 @@ impl SqliteStore {
     ) -> Result<Vec<i64>> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let day = now.format("%Y-%m-%d").to_string();
-        let used = |key: &str| -> Result<u32> {
-            Ok(tx.query_row(
-                "SELECT COALESCE((SELECT model_calls FROM wake_budget
-                     WHERE account_id=?1 AND thread_id=?2 AND day=?3),0)",
-                params![account, key, day],
-                |row| row.get(0),
-            )?)
-        };
-        if used(BACKGROUND_BUDGET_KEY)? >= caps.background_daily {
-            return Ok(Vec::new());
-        }
-        let outstanding: u32 = tx.query_row(
-            "SELECT COUNT(*) FROM agent_triage_jobs WHERE account_id=?1 AND kind='access'
-               AND trigger='archive_access' AND state IN ('queued','leased')",
-            [account],
-            |row| row.get(0),
-        )?;
-        let room = ARCHIVE_SURFACE_CAP
-            .min(ARCHIVE_ACCESS_OUTSTANDING_MAX.saturating_sub(outstanding) as usize)
-            .min(
-                caps.daily
-                    .saturating_sub(used(ARCHIVE_ACCESS_BUDGET_KEY)?)
-                    .saturating_sub(outstanding) as usize,
-            );
-        let mut queued = Vec::new();
-        for id in ids {
-            if queued.len() >= room {
-                break;
-            }
-            let wanted: bool = tx.query_row(
-                concat!(
-                    "SELECT EXISTS(SELECT 1 FROM messages m
-                     LEFT JOIN agent_message_state a
-                       ON a.account_id=m.account_id AND a.message_id=m.id
-                     WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0 AND ",
-                    archive_unassessed_sql!(),
-                    " AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs j
-                         WHERE j.account_id=m.account_id AND j.message_id=m.id
-                           AND j.kind IN ('triage','access')
-                           AND j.input_revision=COALESCE(a.revision,1)))"
-                ),
-                params![account, id],
-                |row| row.get(0),
-            )?;
-            if wanted {
-                enqueue_agent_triage_conn(&tx, account, *id, "archive_access", false)?;
-                queued.push(*id);
-            } else if revive_failed_archive_access(&tx, account, *id, now)? {
-                queued.push(*id);
-            }
-        }
+        let queued =
+            request_archive_access_conn(&tx, account, ids, ARCHIVE_SURFACE_CAP, caps, now)?;
         tx.commit()?;
         Ok(queued)
     }
@@ -2376,15 +2374,26 @@ impl SqliteStore {
     }
 
     /// An explicit thread open at the agent door, as its own step: queue the
-    /// access checks [`Self::thread_view`] would (the newest unassessed
-    /// siblings) and return the ids queued, so the door can wait on them
-    /// BEFORE it applies the guard. Idempotent; the read that follows queues
-    /// nothing more.
-    pub fn request_thread_access(&self, account: AccountId, thread: &str) -> Result<Vec<i64>> {
+    /// access checks its newest unassessed siblings need and return the ids
+    /// queued, so the door can wait on them BEFORE it applies the guard. Live
+    /// siblings as [`Self::thread_view`] would; ARCHIVE siblings only here,
+    /// and only inside `caps` (see [`request_archive_access_conn`]): the read
+    /// itself never queues work on an archive row. Idempotent.
+    pub fn request_thread_access(
+        &self,
+        account: AccountId,
+        thread: &str,
+        caps: ArchiveAccessCaps,
+    ) -> Result<Vec<i64>> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let queued =
-            super::messages::request_external_thread_access_conn(&tx, account, thread, Utc::now())?;
+        let queued = super::messages::request_external_thread_access_conn(
+            &tx,
+            account,
+            thread,
+            Some(caps),
+            Utc::now(),
+        )?;
         tx.commit()?;
         Ok(queued)
     }
@@ -4191,7 +4200,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_explicit_request_assesses_an_archive_source() {
+    fn only_a_capped_surfacing_request_assesses_an_archive_source() {
         let store = fixture();
         let conn = store.lock().unwrap();
         conn.execute("UPDATE messages SET is_archive=1 WHERE id=1", [])
@@ -4207,16 +4216,31 @@ mod tests {
         };
         let message = read_message(&conn, 1, 1).unwrap();
 
-        // The triage agent's own reads, and a human's open: nothing.
-        ensure_source_assessments(&conn, 1, std::slice::from_ref(&message), false).unwrap();
+        // The triage agent's own reads, a human's open, and the source repair
+        // behind a thread read: nothing. None of them carries a ceiling.
+        ensure_source_assessments(&conn, 1, std::slice::from_ref(&message)).unwrap();
+        ensure_agent_source_ids_conn(&conn, 1, &[1]).unwrap();
         assert!(queued(&conn).is_empty());
 
-        // A thread opened at the agent door: one access job, on the revision
-        // the archive write recorded.
-        ensure_agent_source_ids_conn(&conn, 1, &[1]).unwrap();
+        // A surfacing request with nothing left to spend: still nothing.
+        let caps = ArchiveAccessCaps::default();
+        let spent = ArchiveAccessCaps { daily: 0, ..caps };
+        assert!(
+            request_archive_access_conn(&conn, 1, &[1], 8, spent, Utc::now())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(queued(&conn).is_empty());
+
+        // One inside its caps: one access job, on the revision the archive
+        // write recorded.
+        assert_eq!(
+            request_archive_access_conn(&conn, 1, &[1], 8, caps, Utc::now()).unwrap(),
+            vec![1]
+        );
         assert_eq!(
             queued(&conn),
-            vec![("access".to_string(), "source_access".to_string())]
+            vec![("access".to_string(), "archive_access".to_string())]
         );
         let revision: i64 = conn
             .query_row(

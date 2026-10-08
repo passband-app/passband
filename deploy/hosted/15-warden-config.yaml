@@ -327,22 +327,6 @@ data:
   # dropping it and handing the heap back. Unset, the daemon's own default (600)
   # applies; this is the OFF SWITCH (0 = never unload) if the reaper misbehaves.
   # SQUELCH_WARDEN_EMBED_IDLE_UNLOAD_SECS: "0"
-  # How many days back a tenant daemon keeps mail findable by search: mail
-  # older than the 30-day backfill is fetched once by a slow background walk
-  # and stored with no model call. UNSET IS OFF for hosted tenants: the warden
-  # renders SQUELCH_ARCHIVE_DAYS=0 unless this is set, whatever the daemon's
-  # own default (365, which is for self-hosters). The reason is disk: a year
-  # of bodies lands on the tenant volume (10Gi by default), nobody has sized
-  # one for it yet, and a full volume fails live ingest. Size ONE tenant first
-  # (set it on a test fleet, watch the PVC and
-  # squelchd_archive_walked_to_timestamp_seconds), then enable it here. The
-  # daemon also stops walking under 2 GiB free (the floor below). Clamped to
-  # 7300. Like every value here it lands on the pod spec, so setting it costs
-  # each tenant one restart.
-  # SQUELCH_WARDEN_ARCHIVE_DAYS: "365"
-  # The walk's free-space floor in MiB on the tenant volume; unset, the
-  # daemon's default (2048) applies, 0 switches the check off.
-  # SQUELCH_WARDEN_ARCHIVE_MIN_FREE_MB: "2048"
   # Moves the whole fleet's embedding model without cutting a new daemon image;
   # unset means the daemon's own pin, which is Xenova/bge-small-en-v1.5.
   #

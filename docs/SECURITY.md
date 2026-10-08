@@ -246,18 +246,25 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   sealed by hand, and any NON-archive pending sibling close the thread as before.
 - The check is bought when an external caller surfaces the row: an agent search
   whose KEYWORD leg matches it (`search_mail`, `GET /client/agent/search`) queues
-  one `access` job with trigger `archive_access`, best-ranked first, and opening
-  its thread queues `source_access` for it as for any legacy source. A row the
-  vector leg alone returned is never queued: nearest neighbours are not matches.
-  A row that already has a job at its revision (finished, or parked on the daily
-  budget) is never queued again; one whose job FAILED may be asked for again
-  once that failure is a day old.
-- Three ceilings bound what a caller can make the daemon spend: ten rows per
+  one `access` job with trigger `archive_access`, best-ranked first, and an
+  explicit thread open at the door (`get_thread`, `GET /client/agent/thread/{id}`)
+  queues the SAME job for the thread's newest unassessed archive siblings, at
+  most eight an open. A row the vector leg alone returned is never queued:
+  nearest neighbours are not matches. A row that already has a job at its
+  revision (finished, or parked on the daily budget) is never queued again; one
+  whose job FAILED may be asked for again once that failure is a day old, and
+  comes back as `archive_access` whatever queued it first.
+- Three ceilings bound what a caller can make the daemon spend on archive mail,
+  and every agent-door path that queues work on an archive row goes through the
+  one function that keeps them (`request_archive_access_conn`): ten rows per
   call, twenty `archive_access` jobs outstanding per account, and
   `triage.agent.archive_access_daily_cap` (default 50) a day, charged on top of
   the total and background budgets. Nothing is queued once today's background
   budget is spent. A check that has been deferred even once loses its place
-  ahead of ordinary background work.
+  ahead of ordinary background work. The thread READ itself (`thread_view`,
+  which is also how create_draft and send_email check a reply target) queues
+  nothing for an archive row, and neither does the source repair the triage
+  agent's evidence tools run; `source_access` is for live mail only.
 - The door waits for the checks it queued only while the refine lane says it
   can run (a poll has succeeded, a model is configured, the provider circuit is
   closed), gives up after two seconds if no worker has picked one up, and stops
@@ -274,18 +281,52 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   cursor (or, with no walk, where agent-readable mail first becomes dense, never
   one row's timestamp), and `archive` = `{target, walk_complete, older_mail}`
   where `older_mail` is the constant `"checked_on_first_match"`.
-- Accepted residual: the time a search takes still says that some unassessed
-  archive row keyword-matched and was queued. It is bounded by the ceilings
-  above and carries no content.
+- HIDDEN MAIL TAKES NO PLACE IN AN EXTERNAL SEARCH. Both agent doors run one
+  store method (`external_search_filtered`). Its recall legs carry a PREFILTER
+  in their own SQL (`external_candidate_sql!`: the row is `allowed`, the owner
+  has not sealed it, and no sibling the thread guard counts is un-allowed or
+  sealed), so a row the caller cannot be shown is never ranked, windowed or
+  hydrated. The prefilter is a necessary condition and authorizes nothing: each
+  leg's list is then cut to what the AUTHORITY allows
+  (`external_message_allowed_conn`, with its recursive check of every source a
+  decision consumed, plus `thread_guard_and_subject`) BEFORE the legs are fused,
+  and every hit is rehydrated through the same authority on the way out. Which
+  readable rows come back, in what order and with what `relevance`, is therefore
+  decided over readable mail (but see residual 3). Do not replace the authority
+  with the prefilter, and do not loosen one without the other:
+  `the_external_prefilter_is_implied_by_the_authority` holds them together.
+- The rows a search asks an access check for are chosen by a separate query
+  bounded at ten (`archive_surface_candidates`), before the search runs, so the
+  search itself runs once. A query with no text the index can look up
+  (operators alone: a sender, a date range) is not a keyword match and buys
+  nothing, at either door.
+- Accepted residuals. (1) The time a search takes still says that some
+  unassessed archive row keyword-matched and was queued; bounded by the
+  ceilings above, and carries no content. (2) Scoring every row a word matches
+  is work FTS5 does whether or not the caller may read them, so a word that
+  thousands of hidden rows say takes measurably longer than one nobody says
+  (about 17 ms against 0.3 ms over 4,200 hidden rows in a debug build; it was
+  1.3 s before the prefilter). (3) bm25's term weights and length
+  normalisation come from the whole index, so for a query of several words
+  where readable rows match different ones, their relative order can move with
+  how common each word is in mail the caller cannot read. (4) The vector leg
+  is one KNN of at most 4,096 neighbours, filtered afterwards: a readable row
+  farther out than that is found by the keyword leg or not at all.
 - PROMOTION is the one way `is_archive` changes, 1 to 0 and never back: the
   owner, at the human door, re-triages one archive message or corrects how it
   is filed (`promote_archive_conn`, called from `retriage_reset`'s
   single-message arm and from `correct_agent_triage_conn` for every field but
   `external_access`). Nothing at the agent door, in the walk, in a live
-  re-sighting or in a heal reaches it. A promoted row is live mail: while its
-  access is pending it CLOSES its thread like any live pending row, and a
-  `restricted` verdict already on it is untouched. Sealing or unsealing an
-  archive row by hand does not promote it and queues nothing.
+  re-sighting or in a heal reaches it. A promoted row is live mail in every
+  respect: while its access is pending it CLOSES its thread like any live
+  pending row, and it is RE-JUDGED like any live row. The triage that promotion
+  queues writes access from its own decision, so a `restricted` an earlier
+  access check put on the row holds only until that triage commits and may
+  become `allowed`. The one verdict that is permanent is the owner's own seal
+  (`external_access` corrected to true), which survives promotion and every
+  later triage. Sealing or unsealing an archive row by hand does not promote it
+  and queues nothing. The owner's OWN archive mail (sent, or from their
+  address) is never promoted and never queued, whichever path names it.
 - `cache_allowed` on the human routes is stricter than the agent guard
   (`human_cache_allowed`): the human reader is served the archive sibling, so a
   thread carrying an unassessed one is not cacheable.

@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 use squelch_core::{
     CoreError,
     store::{
-        LeggedHit, SearchSort, Store,
+        ExternalSearchMode, SearchSort, Store,
         agent_triage::{AgentListItem, AgentTriageStore},
-        archive_surface::{SurfaceWait, await_thread_access, search_with_surfacing},
+        archive_surface::{KeywordMatch, SurfaceWait, await_thread_access, search_with_surfacing},
         parse_search_query,
     },
     triage::decision::{EmailKind, RecordProposal},
@@ -117,69 +117,44 @@ pub async fn search(
     .to_owned();
     let response_mode = mode.clone();
     let account = state.account_id;
-    // ASSESS ON SURFACING: archive mail the KEYWORD leg matched but that has
-    // never had an access check gets one now, and the search is run again
-    // after a short wait. See `squelch_core::store::archive_surface`.
+    let (search_mode, keyword_leg) = match mode.as_str() {
+        "hybrid" => (ExternalSearchMode::Hybrid, true),
+        "semantic" => (ExternalSearchMode::Semantic, false),
+        _ => (ExternalSearchMode::Keyword, true),
+    };
+    // ASSESS ON SURFACING: archive mail the KEYWORD leg matches but that has
+    // never had an access check gets one before the search runs. See
+    // `squelch_core::store::archive_surface`.
+    //
+    // A KEYWORD MATCH OR NOTHING. Semantic mode has no keyword leg, and a
+    // query of operators alone (`from:x before:2025-03-01`) matched no word:
+    // neither buys a check, or a caller could sweep the archive by sender
+    // and date instead of by something it was actually looking for.
+    let keyword = (keyword_leg && !text.is_empty()).then(|| KeywordMatch {
+        text: text.clone(),
+        filter: filter.clone(),
+        // Keyword mode leaves out the owner's sent mail unless the query asks
+        // for it; the hybrid keyword leg always recalls it.
+        include_sent: search_mode == ExternalSearchMode::Hybrid || filter.include_sent,
+    });
+    // One store method for both agent doors: it fetches only rows this door
+    // may be shown, applies the full access check before the public result
+    // limit, and stops growing its window at the same ceiling in every mode.
     let search = move |store: &squelch_core::store::SqliteStore| {
-        // Which leg found a row matters here and only here: a vector-only
-        // neighbour is never sent for a check.
-        let legged = |hits: Vec<_>, keyword: bool| -> Vec<LeggedHit> {
-            hits.into_iter()
-                .map(|hit| LeggedHit {
-                    hit,
-                    keyword,
-                    vector: !keyword,
-                })
-                .collect()
-        };
-        // Access is applied before the public result limit, inside the one
-        // recall loop both doors share: a hidden leading window must not hide
-        // a readable result farther down the ranking, and the window stops
-        // growing at the same ceiling in every mode.
-        store.external_recall(account, limit as usize, |window| {
-            Ok(match mode.as_str() {
-                // No snippet windows: every hit is rehydrated by the loop.
-                "hybrid" => store.hybrid_search_legs(
-                    account,
-                    &text,
-                    &filter,
-                    SearchSort::default(),
-                    false,
-                    false,
-                    window,
-                )?,
-                "semantic" => {
-                    let (hits, full) = store.semantic_search_hits(
-                        account,
-                        &text,
-                        &filter,
-                        SearchSort::default(),
-                        false,
-                        window,
-                    )?;
-                    (legged(hits, false), full)
-                }
-                _ => {
-                    let hits = store.search_filtered(
-                        account,
-                        &text,
-                        &filter,
-                        SearchSort::default(),
-                        false,
-                        window as u32,
-                        0,
-                    )?;
-                    let full = hits.len() == window;
-                    (legged(hits, true), full)
-                }
-            })
-        })
+        store.external_search_filtered(
+            account,
+            &text,
+            &filter,
+            SearchSort::default(),
+            search_mode,
+            limit as usize,
+        )
     };
     let surfacing = state
         .archive_surfacing
         .clone()
         .capped(SurfaceWait::HTTP_DEADLINE);
-    let (hits, horizon) = search_with_surfacing(&state.store, account, &surfacing, search)
+    let (hits, horizon) = search_with_surfacing(&state.store, account, &surfacing, keyword, search)
         .await
         .map_err(ApiError::from)?;
     let mut body = json!({"items": hits, "match_kind": response_mode, "sort": "recent"});

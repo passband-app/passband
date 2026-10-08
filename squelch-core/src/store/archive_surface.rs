@@ -3,7 +3,7 @@
 //! Archive mail is stored without an access check, because a check is a model
 //! call and a year of mail is a lot of them. The check is bought the moment an
 //! external caller's KEYWORD search actually matches such a row: queue it, wake
-//! the worker, wait a short while, search again. Both doors (MCP `search_mail`
+//! the worker, wait a short while, then search. Both doors (MCP `search_mail`
 //! and `GET /client/agent/search`) run the same steps through this module so
 //! the caps, the wait and the horizon cannot drift apart. `get_thread` uses the
 //! same wait for the sibling checks an explicit open queues.
@@ -23,7 +23,7 @@ use serde::Serialize;
 use tokio::sync::Notify;
 
 use crate::error::{CoreError, Result};
-use crate::store::{ArchiveAccessCaps, ExternalSearch, SearchHit, SqliteStore, Store};
+use crate::store::{ArchiveAccessCaps, SearchFilter, SearchHit, SqliteStore, Store};
 use crate::types::AccountId;
 
 /// THE DOORS' HANDLE ON THE REFINE LANE: a poke ("I just queued work somebody
@@ -128,44 +128,69 @@ impl ArchiveSurfacing {
     }
 }
 
-/// One agent search, start to finish: search, send the unassessed archive
-/// rows the keyword leg matched for an access check, wait briefly, search
-/// again, and say how far back the index goes. `search` runs on the blocking
-/// pool, once or twice.
+/// What a door's search asked the KEYWORD leg, which is all that surfacing
+/// looks at. A door passes `None` when no keyword leg ran: semantic mode, or
+/// a query of operators with no text. A date range or a sender is not a match.
+#[derive(Debug, Clone, Default)]
+pub struct KeywordMatch {
+    pub text: String,
+    /// The operators the search applies, so a check is not bought for a row
+    /// the search itself would then filter out.
+    pub filter: SearchFilter,
+    /// Whether the leg that runs includes the owner's own sent mail.
+    pub include_sent: bool,
+}
+
+/// One agent search, start to finish: pick the unassessed archive rows the
+/// keyword leg matches (a bounded query of its own), send them for an access
+/// check, wait briefly, then run the search and say how far back the index
+/// goes. `search` runs on the blocking pool, ONCE: the checks are settled
+/// before it starts, so there is nothing to run it again for.
 ///
 /// Returns the readable hits and the horizon, and nothing else: what is still
-/// unassessed after the wait is dropped here, on purpose (see the module doc).
+/// unassessed after the wait never reaches the caller (see the module doc).
 pub async fn search_with_surfacing<F>(
     store: &Arc<SqliteStore>,
     account: AccountId,
     surfacing: &ArchiveSurfacing,
+    keyword: Option<KeywordMatch>,
     search: F,
 ) -> Result<(Vec<SearchHit>, SearchHorizon)>
 where
-    F: Fn(&SqliteStore) -> Result<ExternalSearch> + Clone + Send + 'static,
+    F: FnOnce(&SqliteStore) -> Result<Vec<SearchHit>> + Send + 'static,
 {
-    let run = |search: F| {
-        let store = store.clone();
-        blocking(move || search(&store))
-    };
-    let mut found = run(search.clone()).await?;
-    if surface_archive_matches(store, account, &found.pending_archive, surfacing).await? {
-        found = run(search).await?;
+    if let Some(keyword) = keyword {
+        let pending = {
+            let store = store.clone();
+            blocking(move || {
+                store.archive_surface_candidates(
+                    account,
+                    &keyword.text,
+                    &keyword.filter,
+                    keyword.include_sent,
+                )
+            })
+            .await?
+        };
+        surface_archive_matches(store, account, &pending, surfacing).await?;
     }
+    let hits = {
+        let store = store.clone();
+        blocking(move || search(&store)).await?
+    };
     let archive_days = surfacing.archive_days;
     let horizon = {
         let store = store.clone();
         blocking(move || search_horizon(&store, account, archive_days, Utc::now())).await?
     };
-    Ok((found.hits, horizon))
+    Ok((hits, horizon))
 }
 
 /// Queue an access check for the best-ranked of `pending` (the store applies
 /// every cap and skips rows that already have a job), poke the worker and wait
 /// for those checks as [`wait_for_checks`] does.
 ///
-/// Returns whether the caller should search again. NEVER BLOCKS WHEN NOTHING
-/// WAS QUEUED.
+/// Returns whether any of them moved. NEVER BLOCKS WHEN NOTHING WAS QUEUED.
 pub async fn surface_archive_matches(
     store: &Arc<SqliteStore>,
     account: AccountId,
@@ -198,7 +223,8 @@ pub async fn await_thread_access(
     let queued = {
         let store = store.clone();
         let thread_id = thread_id.to_string();
-        blocking(move || store.request_thread_access(account, &thread_id)).await?
+        let caps = surfacing.caps;
+        blocking(move || store.request_thread_access(account, &thread_id, caps)).await?
     };
     wait_for_checks(store, account, queued, surfacing).await?;
     Ok(())

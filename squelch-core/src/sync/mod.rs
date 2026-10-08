@@ -25,7 +25,7 @@ use crate::config::{ARCHIVE_DAYS_MAX, Config, ResolvedLlm, Stage2Provider};
 use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
 use crate::gmail_budget::{GmailBudget, gmail_path};
-use crate::metrics::{GmailErrorKind, SyncMetrics};
+use crate::metrics::{ArchiveHold, GmailErrorKind, SyncMetrics};
 use crate::store::{ContactEntry, SPAM_SYNCED_AT_KEY, Store, SyncState, TriagedMessage};
 use crate::sync::ingest::{
     RawFetched, collect_mailboxes, format_recipients, ingest_with_rules, is_robot_address,
@@ -1497,9 +1497,48 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
     }
 
-    /// May the archive walk touch Gmail right now. See [`Self::archive_lane`].
-    fn archive_may_run(&self) -> bool {
-        self.poll_healthy.load(Ordering::Relaxed) && !self.window_in_flight.load(Ordering::Relaxed)
+    /// WHAT, IF ANYTHING, STOPS THE WALK TOUCHING GMAIL RIGHT NOW. See
+    /// [`Self::archive_lane`]. A poll that has not succeeded comes first: a
+    /// window is only ever in flight under one that has.
+    fn archive_gate(&self) -> Option<ArchiveHold> {
+        if !self.poll_healthy.load(Ordering::Relaxed) {
+            Some(ArchiveHold::Poll)
+        } else if self.window_in_flight.load(Ordering::Relaxed) {
+            Some(ArchiveHold::Window)
+        } else {
+            None
+        }
+    }
+
+    /// A HOLD IS SAID ONCE, WHEN IT STARTS OR CHANGES, and shown for as long
+    /// as it lasts. The lane looks again every thirty seconds, so the log gets
+    /// one line per stretch and the gauge carries the rest. `None` (walking,
+    /// finished, off) clears the gauge and says so if something had been
+    /// holding it. Returns [`ArchiveStep::Held`] for a hold, for the caller's
+    /// convenience.
+    fn archive_hold(&self, hold: Option<ArchiveHold>) -> ArchiveStep {
+        self.metrics.note_archive_hold(hold);
+        let before = std::mem::replace(&mut self.archive.state().hold, hold);
+        if before != hold {
+            match hold {
+                Some(hold) => eprintln!(
+                    "squelch: archive walk holding ({}): {}",
+                    hold.label(),
+                    match hold {
+                        ArchiveHold::Poll => "no poll has succeeded yet",
+                        ArchiveHold::Window => "a window of mail is being fetched",
+                        ArchiveHold::Embedder => "the embedder has not finished loading",
+                        ArchiveHold::Disk =>
+                            "the database volume is under sync.archive_min_free_mb, or its free \
+                             space could not be read",
+                        ArchiveHold::Clock => "the clock reads before 2024",
+                        ArchiveHold::QuotaDay => "Gmail refused it three times today",
+                    }
+                ),
+                None => eprintln!("squelch: archive walk no longer holding"),
+            }
+        }
+        ArchiveStep::Held
     }
 
     /// May the refine lane drain missing vectors this round. See the call.
@@ -1527,9 +1566,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self.archive.state().clock.unwrap_or_else(Utc::now)
     }
 
-    /// IS THERE ROOM TO STORE A CHUNK. Below `sync.archive_min_free_mb` the
-    /// walk writes nothing, and a number that cannot be read is treated as no
-    /// room: the walk is the one writer here that can always wait. Logged once
+    /// IS THERE ROOM TO STORE MORE. Below `sync.archive_min_free_mb` the walk
+    /// writes nothing, and a number that cannot be read is treated as no room:
+    /// the walk is the one writer here that can always wait. Measured on the
+    /// filesystem the database file itself is on (`Store::free_disk_bytes`),
+    /// and asked BEFORE EVERY BATCH as well as before every chunk: a chunk is
+    /// a whole week of mail, however much that is, and this floor is the only
+    /// thing between a heavy week and a full volume. The number is logged once
     /// per stretch rather than every thirty seconds.
     fn archive_has_room(&self) -> bool {
         let floor_mb = self.config.sync.archive_min_free_mb;
@@ -1582,10 +1625,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// write door; mail somebody is waiting for must not keep paying for mail
     /// nobody is.
     ///
-    /// ANY OTHER ERROR counts against the chunk it happened in. After
-    /// [`ArchivePace::poison_attempts`] failures of the same chunk the next
-    /// try runs TOLERANT (see [`Self::archive_skip`]), so one message Gmail
-    /// will not serve cannot stop the walk at its week for good.
+    /// ANY OTHER ERROR fails the chunk and leaves the cursor, to be tried
+    /// again whole. The one thing that ever lets a failing chunk through is a
+    /// MESSAGE that has itself failed on [`ArchivePace::poison_attempts`]
+    /// separate passes (see [`Self::archive_skip`]), so one message Gmail will
+    /// not serve cannot stop the walk at its week for good, and a bad quarter
+    /// of an hour at Gmail cannot make it drop mail it never retried.
     async fn archive_walk_chunk(
         &self,
         shutdown: &mut tokio::sync::watch::Receiver<bool>,
@@ -1594,8 +1639,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if days == 0 {
             return Ok(ArchiveStep::Off);
         }
-        if !self.archive_may_run() || !self.archive_embedder_settled() {
-            return Ok(ArchiveStep::Held);
+        if let Some(gate) = self.archive_gate() {
+            return Ok(self.archive_hold(Some(gate)));
+        }
+        if !self.archive_embedder_settled() {
+            return Ok(self.archive_hold(Some(ArchiveHold::Embedder)));
         }
         let now = self.archive_now();
         // A CLOCK THAT IS PLAINLY WRONG persists nothing. The walk's start is
@@ -1603,7 +1651,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // otherwise store a start decades back and read as finished for ever
         // once the clock was set.
         if now.timestamp() < ARCHIVE_CLOCK_FLOOR_UNIX {
-            return Ok(ArchiveStep::Held);
+            return Ok(self.archive_hold(Some(ArchiveHold::Clock)));
         }
         let today = now.date_naive();
         {
@@ -1612,26 +1660,26 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 state.quota_day = Some(today);
                 state.quota_refusals_today = 0;
             }
-            if state.quota_refusals_today >= self.archive_pace.quota_refusals_per_day {
-                return Ok(ArchiveStep::Held);
+            let refused = state.quota_refusals_today >= self.archive_pace.quota_refusals_per_day;
+            drop(state);
+            if refused {
+                return Ok(self.archive_hold(Some(ArchiveHold::QuotaDay)));
             }
         }
         if !self.archive_has_room() {
-            return Ok(ArchiveStep::Held);
+            return Ok(self.archive_hold(Some(ArchiveHold::Disk)));
         }
+        self.archive_hold(None);
 
         let refusals = self.archive.quota_refusals.load(Ordering::Relaxed);
         self.archive.skipped.store(0, Ordering::Relaxed);
-        let mut chunk = None;
-        let out = self
-            .archive_walk_step(shutdown, now, days, &mut chunk)
-            .await;
-        self.archive.tolerant.store(false, Ordering::Relaxed);
+        let out = self.archive_walk_step(shutdown, now, days).await;
         let refused = self.archive.quota_refusals.load(Ordering::Relaxed) != refusals;
         let pace = self.archive_pace;
         let mut state = self.archive.state();
         match &out {
             Ok(ArchiveStep::Walked) => {
+                // The chunk is behind the cursor; so is what failed in it.
                 state.failing = None;
                 state.quota_wait = None;
                 state.quota_backoff = None;
@@ -1649,24 +1697,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     );
                 }
             }
-            Err(_) => {
-                state.quota_wait = None;
-                state.failing = match (state.failing, chunk) {
-                    (Some((failing, n)), Some(now_failing)) if failing == now_failing => {
-                        Some((failing, n + 1))
-                    }
-                    (_, Some(now_failing)) => Some((now_failing, 1)),
-                    (kept, None) => kept,
-                };
-            }
+            // Nothing is counted against the CHUNK. What may eventually be
+            // stepped over is one message that has itself failed, pass after
+            // pass, and that is booked where it fails ([`Self::archive_skip`]).
+            Err(_) => state.quota_wait = None,
             Ok(_) => {}
         }
         out
     }
 
     /// The chunk [`Self::archive_walk_chunk`] wraps: a forward one when one is
-    /// due, else the next one backwards. `chunk` is set to the chunk's
-    /// identity before anything in it can fail.
+    /// due, else the next one backwards.
     ///
     /// LISTS ALL MAIL backwards, with no `labelIds`: the archive is everything
     /// the mailbox holds, read or filed, received or sent, and `is_sent` comes
@@ -1692,7 +1733,6 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         shutdown: &mut tokio::sync::watch::Receiver<bool>,
         now: DateTime<Utc>,
         days: u32,
-        chunk: &mut Option<(bool, i64)>,
     ) -> Result<ArchiveStep> {
         let pace = self.archive_pace;
         // Relative to NOW, every chunk: a walk that finished last month is
@@ -1704,8 +1744,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // FIRST USE. The walk starts where the backfill window ended, and
             // the store leaves creating the row to the one caller that knows
             // where that is. The forward edge starts at the same instant.
+            //
+            // AND NEVER NEARER TO NOW THAN THE FORWARD PASS'S OWN LAG. The
+            // backward listing carries no `-in:inbox`, so with a backfill
+            // window of zero days it would start at this instant and could
+            // store a message that arrived a second ago before the poll
+            // ingests it: an archive row is write-once, so that message would
+            // never be triaged or notified. A day back, the live paths have
+            // long since had their turn.
             None => {
-                let start = now - ChronoDuration::days(i64::from(self.config.sync.backfill_days));
+                let start = (now - ChronoDuration::days(i64::from(self.config.sync.backfill_days)))
+                    .min(now - pace.forward_lag);
                 self.store.set_archive_walked_to(self.account_id, start)?;
                 start
             }
@@ -1713,7 +1762,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let done = walked_to <= target;
         self.metrics.note_archive_walk(walked_to, done);
 
-        if let Some(step) = self.archive_forward_chunk(shutdown, now, chunk).await? {
+        if let Some(step) = self.archive_forward_chunk(shutdown, now).await? {
             return Ok(step);
         }
         if done {
@@ -1721,7 +1770,6 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
 
         let from = (walked_to - pace.chunk).max(target);
-        *chunk = Some((false, walked_to.timestamp()));
         // Epoch seconds, which Gmail reads as exact instants (a bare date is a
         // day in the ACCOUNT's timezone, which this daemon does not know). The
         // lower bound is one second early so two neighbouring chunks overlap
@@ -1792,7 +1840,6 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         &self,
         shutdown: &mut tokio::sync::watch::Receiver<bool>,
         now: DateTime<Utc>,
-        chunk: &mut Option<(bool, i64)>,
     ) -> Result<Option<ArchiveStep>> {
         let pace = self.archive_pace;
         if self
@@ -1811,12 +1858,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let Some(covered_to) = self.store.archive_covered_to(self.account_id)? else {
             return Ok(None);
         };
+        self.metrics.note_archive_covered_to(covered_to);
         if covered_to >= bound {
             self.archive.state().forward_caught_up = Some(tokio::time::Instant::now());
             return Ok(None);
         }
         let to = (covered_to + pace.chunk).min(bound);
-        *chunk = Some((true, covered_to.timestamp()));
         let q = format!(
             "after:{} before:{} -in:inbox -in:sent -in:draft -in:chats",
             covered_to.timestamp() - 1,
@@ -1827,6 +1874,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             return Ok(Some(ArchiveStep::Held));
         };
         self.store.set_archive_covered_to(self.account_id, to)?;
+        self.metrics.note_archive_covered_to(to);
         if stored > 0 {
             eprintln!(
                 "squelch: archive walk stored {stored} unlabelled message(s), forward to {}",
@@ -1856,16 +1904,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         shutdown: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<(usize, Duration)>> {
         let pace = self.archive_pace;
-        // THIS chunk's failures, not whichever chunk failed last.
-        let tolerant = self
-            .archive
-            .state()
-            .failing
-            .is_some_and(|(failing, n)| failing == chunk && n >= pace.poison_attempts);
         let mut burst = tokio::time::Instant::now();
         let listed = self
             .list_message_ids_in(None, Some(q), None, GmailRetry::Archive)
             .await?;
+        // AFTER the listing, so a listing that fails is no pass at all: the
+        // per-message failures below are of THIS chunk (another chunk's are
+        // forgotten here), and each id counts at most once per pass.
+        self.archive.state().begin_pass(chunk);
         let stored = self.store.stored_gmail_msg_ids(self.account_id, &listed)?;
         let ids: Vec<String> = listed
             .into_iter()
@@ -1878,7 +1924,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // Between batches, never inside one: a catch-up that starts now
             // gets the budget back within one batch, and the rows this chunk
             // has already stored are skipped when the walk comes back to it.
-            if !self.archive_may_run() {
+            if let Some(gate) = self.archive_gate() {
+                self.archive_hold(Some(gate));
+                return Ok(None);
+            }
+            // THE DISK FLOOR, PER BATCH. One chunk is a week of mail and can
+            // be thousands of bodies; asked only at its start, a heavy week
+            // would be written straight through the floor. Stopping here
+            // loses nothing: the cursor has not moved, and what this chunk
+            // already stored is skipped when the walk comes back to it.
+            if !self.archive_has_room() {
+                self.archive_hold(Some(ArchiveHold::Disk));
                 return Ok(None);
             }
             let wait =
@@ -1895,7 +1951,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             {
                 // Raised for the batch and no longer: the refine lane's vector
                 // drain stays out while bodies are being parsed and embedded.
-                let _in_flight = ArchiveBatchGuard::new(&self.archive, tolerant);
+                let _in_flight = ArchiveBatchGuard::new(&self.archive);
                 self.fetch_raw_and_ingest(
                     batch,
                     Mailbox::Inbox,
@@ -1918,27 +1974,42 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
     /// MAY THE WALK SKIP THIS MESSAGE and go on to the next. Always for a 404:
     /// the message was deleted between the listing and the fetch, and there is
-    /// nothing to come back for. Otherwise only on a TOLERANT pass (the chunk
-    /// has already failed [`ArchivePace::poison_attempts`] times), and then
-    /// never for a store error, a credential error, or anything in a batch
-    /// where Gmail has refused the walk for quota or auth: those are not about
-    /// the message, and skipping past them would walk the cursor over mail
-    /// that was never tried.
+    /// nothing to come back for.
     ///
-    /// AT MOST [`ArchivePace::poison_skips`] A CHUNK. A message Gmail will not
-    /// serve is one or two; a network outage is all of them, and three failed
-    /// attempts fifteen minutes apart do not prove which this is.
-    fn archive_skip(&self, error: &CoreError, quota_or_auth_before: u64) -> bool {
+    /// OTHERWISE ONLY A MESSAGE THAT HAS ITSELF FAILED BEFORE, on
+    /// [`ArchivePace::poison_attempts`] separate passes over this chunk: its
+    /// own fetch, or its own write to the store. Never on a first failure,
+    /// whatever else has gone wrong with the chunk. Neither cursor ever looks
+    /// back, so a skip is for good, and what earns one has to be evidence
+    /// about that message: a transient Gmail error fails the pass, is booked
+    /// against the one id it hit, and the whole chunk is tried again.
+    ///
+    /// NOT ABOUT THE MESSAGE, and so neither booked nor skipped: a credential
+    /// error, and anything in a batch where Gmail has refused the walk for
+    /// quota or auth. (A failed LISTING never reaches here at all.)
+    ///
+    /// AT MOST [`ArchivePace::poison_skips`] A PASS. A message Gmail will not
+    /// serve is one or two; more than a handful failing over and over is an
+    /// outage or a broken store, and the chunk stays where it is.
+    fn archive_skip(&self, id: &str, error: &CoreError, quota_or_auth_before: u64) -> bool {
         if matches!(error, CoreError::NotFound) {
+            self.metrics.count_archive_skipped();
             return true;
         }
-        if !self.archive.tolerant.load(Ordering::Relaxed)
-            || !matches!(error, CoreError::Other(_))
+        if matches!(error, CoreError::Credential(_))
             || self.archive.quota_or_auth() != quota_or_auth_before
         {
             return false;
         }
-        self.archive.skipped.fetch_add(1, Ordering::Relaxed) < self.archive_pace.poison_skips
+        let earlier = self.archive.state().book_failure(id);
+        if earlier < self.archive_pace.poison_attempts
+            || self.archive.skipped.fetch_add(1, Ordering::Relaxed)
+                >= self.archive_pace.poison_skips
+        {
+            return false;
+        }
+        self.metrics.count_archive_skipped();
+        true
     }
 
     /// Poll `history.list` every `poll_secs`, ingesting `messageAdded` INBOX
@@ -3048,7 +3119,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // THE WALK MAY STEP OVER A MESSAGE; nothing else may. A live path
             // that dropped an id would have lost mail somebody is owed.
             let skip = match &fetched {
-                Err(e) if origin == IngestOrigin::Archive => self.archive_skip(e, quota_or_auth),
+                Err(e) if origin == IngestOrigin::Archive => {
+                    self.archive_skip(id, e, quota_or_auth)
+                }
                 _ => false,
             };
             // AFTER the `?`, so a failed fetch does not push one more GET
@@ -3146,7 +3219,23 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // network round trip. `ingest_with_rules` reads the same value; it
             // is a pure function of the message and the clock, so per-message is
             // simply the more truthful "now" for it too.
-            let Some(ingested) = self.ingest_one(&fetched, &rules, now, origin)? else {
+            let ingested = match self.ingest_one(&fetched, &rules, now, origin) {
+                Ok(ingested) => ingested,
+                // A message the store will not take is the walk's to step
+                // over on the same terms as one Gmail will not serve.
+                Err(e)
+                    if origin == IngestOrigin::Archive
+                        && self.archive_skip(id, &e, quota_or_auth) =>
+                {
+                    eprintln!(
+                        "squelch: archive walk skipping message {id} ({})",
+                        archive_skip_kind(&e)
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let Some(ingested) = ingested else {
                 count += 1;
                 continue;
             };
@@ -3619,10 +3708,10 @@ struct ArchivePace {
     quota_backoff_cap: Duration,
     /// Quota refusals in one UTC day after which the walk stops until the next.
     quota_refusals_per_day: u32,
-    /// Failures of one chunk after which its next try runs tolerant. See
-    /// [`SyncEngine::archive_skip`].
+    /// Separate passes on which ONE MESSAGE must have failed before the next
+    /// pass may step over it. See [`SyncEngine::archive_skip`].
     poison_attempts: u32,
-    /// The most messages one tolerant chunk may skip before it fails instead.
+    /// The most such messages one pass may step over before it fails instead.
     poison_skips: u32,
     /// How far behind the last successful poll the forward pass stays. See
     /// [`SyncEngine::archive_forward_chunk`] for what the day is for.
@@ -3673,9 +3762,7 @@ struct ArchiveRun {
     /// `window_in_flight`: that flag also stops the walk itself and drives the
     /// catch-up gauges, and the walk is no window anybody is waiting on.
     in_flight: AtomicBool,
-    /// This batch belongs to a tolerant pass. See [`SyncEngine::archive_skip`].
-    tolerant: AtomicBool,
-    /// Messages the current chunk has skipped on a tolerant pass.
+    /// Messages the pass now running has stepped over for failing repeatedly.
     skipped: std::sync::atomic::AtomicU32,
     /// Quota and credential refusals Gmail has given the walk, ever. Counters
     /// rather than a last-error slot so a caller compares before and after its
@@ -3691,9 +3778,17 @@ struct ArchiveRun {
 
 #[derive(Default)]
 struct ArchiveState {
-    /// The chunk that last failed, as (forward?, cursor epoch), and how many
-    /// times running.
-    failing: Option<((bool, i64), u32)>,
+    /// THE MESSAGES THAT HAVE FAILED IN THE CHUNK BEING WALKED: the chunk, as
+    /// (forward?, cursor epoch), and for each Gmail id that failed in it, on
+    /// how many separate passes. Per message and never per chunk: what it
+    /// licenses is skipping that one message. Dropped when the chunk is
+    /// walked or another chunk is begun.
+    failing: Option<((bool, i64), std::collections::HashMap<String, u32>)>,
+    /// The ids already booked in the pass now running, so one pass counts
+    /// once however many times it meets an id.
+    failed_this_pass: std::collections::HashSet<String>,
+    /// What the walk last said was holding it off; `None` for nothing.
+    hold: Option<ArchiveHold>,
     /// The wait the next quota refusal earns; `None` is the starting one.
     quota_backoff: Option<Duration>,
     /// The wait the LAST error earned, when it was a quota refusal.
@@ -3726,6 +3821,34 @@ impl ArchiveRun {
 }
 
 impl ArchiveState {
+    /// A pass over `chunk` is starting: keep its failures so far, forget any
+    /// other chunk's, and open a fresh pass.
+    fn begin_pass(&mut self, chunk: (bool, i64)) {
+        if self
+            .failing
+            .as_ref()
+            .is_none_or(|(failing, _)| *failing != chunk)
+        {
+            self.failing = Some((chunk, std::collections::HashMap::new()));
+        }
+        self.failed_this_pass.clear();
+    }
+
+    /// `id` failed in the pass now running. Returns on how many EARLIER
+    /// passes it had failed, and books this one (once per pass).
+    fn book_failure(&mut self, id: &str) -> u32 {
+        let Some((_, failures)) = self.failing.as_mut() else {
+            return 0;
+        };
+        let count = failures.entry(id.to_string()).or_insert(0);
+        if self.failed_this_pass.insert(id.to_string()) {
+            *count += 1;
+            *count - 1
+        } else {
+            count.saturating_sub(1)
+        }
+    }
+
     /// Book `n` messages against the minute's ceiling. Zero means go now;
     /// anything else is how long until the minute turns, and the booking then
     /// stands for the minute that starts when the caller wakes.
@@ -3751,15 +3874,14 @@ impl ArchiveState {
     }
 }
 
-/// Holds [`ArchiveRun::in_flight`] (and the tolerant flag) for one batch, and
-/// lowers both however the batch ends: an error, or the lane's future being
-/// dropped at an await when the poll lane bounces the lifecycle.
+/// Holds [`ArchiveRun::in_flight`] for one batch, and lowers it however the
+/// batch ends: an error, or the lane's future being dropped at an await when
+/// the poll lane bounces the lifecycle.
 struct ArchiveBatchGuard<'a>(&'a ArchiveRun);
 
 impl<'a> ArchiveBatchGuard<'a> {
-    fn new(run: &'a ArchiveRun, tolerant: bool) -> Self {
+    fn new(run: &'a ArchiveRun) -> Self {
         run.in_flight.store(true, Ordering::Relaxed);
-        run.tolerant.store(tolerant, Ordering::Relaxed);
         Self(run)
     }
 }
@@ -3767,7 +3889,6 @@ impl<'a> ArchiveBatchGuard<'a> {
 impl Drop for ArchiveBatchGuard<'_> {
     fn drop(&mut self) {
         self.0.in_flight.store(false, Ordering::Relaxed);
-        self.0.tolerant.store(false, Ordering::Relaxed);
     }
 }
 
@@ -3776,6 +3897,7 @@ impl Drop for ArchiveBatchGuard<'_> {
 fn archive_skip_kind(error: &CoreError) -> &'static str {
     match error {
         CoreError::NotFound => "gone",
+        CoreError::Sqlite(_) => "unstorable",
         _ => "unreadable",
     }
 }
@@ -8397,11 +8519,26 @@ mod tests {
         ));
     }
 
-    /// A POISON MESSAGE HOLDS ITS CHUNK FOR THREE ATTEMPTS AND NO MORE. One
-    /// body Gmail will not serve used to stop the walk at its week for good.
-    /// The fourth try steps over it, stores the rest and moves the cursor.
+    /// How many separate passes `id` has failed on in the chunk being walked.
+    fn booked(eng: &SyncEngine<SqliteStore, FixedToken>, id: &str) -> u32 {
+        eng.archive
+            .state()
+            .failing
+            .as_ref()
+            .and_then(|(_, failures)| failures.get(id).copied())
+            .unwrap_or(0)
+    }
+
+    fn stored(store: &SqliteStore, acct: AccountId, gmail_id: &str) -> bool {
+        store.thread_view_with_html(acct, gmail_id).is_ok()
+    }
+
+    /// A POISON MESSAGE HOLDS ITS CHUNK FOR THREE PASSES AND NO MORE. One body
+    /// Gmail will not serve used to stop the walk at its week for good. Once
+    /// THAT MESSAGE has failed on three separate passes, the fourth steps over
+    /// it, stores the rest and moves the cursor.
     #[tokio::test]
-    async fn a_poison_message_stops_holding_the_walk_after_three_attempts() {
+    async fn a_message_that_has_itself_failed_three_passes_is_stepped_over_on_the_fourth() {
         let (store, acct) = store_at_cursor(Some(100));
         let cursor = days_ago(40);
         store.set_archive_walked_to(acct, cursor).unwrap();
@@ -8414,21 +8551,25 @@ mod tests {
             std::iter::repeat_n((500, "backendError".to_string()), 10).collect(),
         );
         let base = serve_mock(g.clone()).await;
-        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.config.sync.fetch_concurrency = 1;
         let (_tx, mut rx) = never_shutdown();
 
-        for attempt in 1..=3 {
+        for pass in 1..=3 {
             assert!(
                 eng.archive_walk_chunk(&mut rx).await.is_err(),
-                "attempt {attempt} still fails whole"
+                "pass {pass} still fails whole"
             );
             assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+            assert_eq!(booked(&eng, "g-bad"), pass, "booked against the message");
+            assert_eq!(booked(&eng, "g-ok"), 0);
             assert_eq!(
                 eng.archive_error_wait(),
                 eng.archive_pace.error_backoff,
                 "not a quota refusal, so the flat wait"
             );
             assert!(!eng.archive.in_flight.load(Ordering::Relaxed));
+            assert_eq!(eng.metrics.archive_skipped(), 0);
         }
         assert_eq!(
             eng.archive_walk_chunk(&mut rx).await.unwrap(),
@@ -8439,28 +8580,87 @@ mod tests {
             Some(cursor - ChronoDuration::days(7))
         );
         assert_eq!(g.calls("get:g-bad"), 4);
-        assert!(store.thread_view_with_html(acct, "g-bad").is_err());
-        assert_eq!(
-            store
-                .thread_view_with_html(acct, "g-ok")
-                .unwrap()
-                .messages
-                .len(),
-            1
-        );
+        assert!(!stored(&store, acct, "g-bad"));
+        assert!(stored(&store, acct, "g-ok"));
+        assert_eq!(eng.metrics.archive_skipped(), 1, "and counted");
         assert!(
-            !eng.archive.tolerant.load(Ordering::Relaxed),
-            "tolerance ends with the chunk that earned it"
+            eng.archive.state().failing.is_none(),
+            "what failed in a chunk is forgotten with the chunk"
         );
-        assert!(eng.archive.state().failing.is_none());
     }
 
-    /// TOLERANT IS NOT BLIND. A chunk on its tolerant pass still fails whole
-    /// when Gmail refuses the walk for quota (that is not about one message),
-    /// and when more than a handful of its messages fail (that is an outage,
-    /// not a poison message). Either way the cursor stays.
+    /// A TRANSIENT ERROR NEVER COSTS A MESSAGE. Gmail fails one body for a
+    /// quarter of an hour and then a different one once. Counted per CHUNK,
+    /// the fourth pass was "tolerant" and dropped the second message on its
+    /// very first failure, for good: neither cursor ever looks back. Counted
+    /// per MESSAGE, the second one has failed once, the pass fails, and the
+    /// next pass stores them both.
     #[tokio::test]
-    async fn a_tolerant_pass_still_stops_for_a_quota_refusal_and_for_an_outage() {
+    async fn a_message_is_never_stepped_over_on_its_first_failure() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-a", at, alert_eml(at));
+        g.old_mail("g-b", at, alert_eml(at));
+        {
+            let mut st = g.0.lock().unwrap();
+            st.errors.insert(
+                "g-a".to_string(),
+                std::iter::repeat_n((500, "backendError".to_string()), 3).collect(),
+            );
+            st.errors.insert(
+                "g-b".to_string(),
+                std::collections::VecDeque::from([(503, "backendError".to_string())]),
+            );
+            // And a listing that fails first: no pass, nothing booked.
+            st.all_mail_failures = 2;
+        }
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        // One GET at a time, so which message a pass reaches is not a race.
+        eng.config.sync.fetch_concurrency = 1;
+        let (_tx, mut rx) = never_shutdown();
+
+        for _ in 0..2 {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        }
+        assert!(
+            eng.archive.state().failing.is_none(),
+            "a failed listing is not a pass over any message"
+        );
+        assert_eq!(g.calls("get:g-a") + g.calls("get:g-b"), 0);
+
+        for pass in 1..=3 {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+            assert_eq!((booked(&eng, "g-a"), booked(&eng, "g-b")), (pass, 0));
+        }
+        // The fourth pass: g-a is served at last, and g-b fails for the first
+        // time. It is not stepped over.
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        assert!(stored(&store, acct, "g-a"));
+        assert!(!stored(&store, acct, "g-b"));
+        assert_eq!(booked(&eng, "g-b"), 1);
+        assert_eq!(eng.metrics.archive_skipped(), 0);
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert!(stored(&store, acct, "g-b"), "nothing was lost");
+        assert_eq!(eng.metrics.archive_skipped(), 0);
+        assert_eq!(g.calls("get:g-a"), 4, "stored once, never fetched again");
+    }
+
+    /// REPEATED FAILURE IS STILL NOT A LICENCE FOR EVERYTHING. A message that
+    /// has failed three passes is not stepped over when Gmail refuses the walk
+    /// for quota (that is not about the message, and is not booked against
+    /// it), nor when more than a handful are in the same state (that is an
+    /// outage, not a poison message). Either way the cursor stays.
+    #[tokio::test]
+    async fn repeated_failure_does_not_excuse_a_quota_refusal_or_an_outage() {
         let (store, acct) = store_at_cursor(Some(100));
         let cursor = days_ago(40);
         store.set_archive_walked_to(acct, cursor).unwrap();
@@ -8472,26 +8672,290 @@ mod tests {
             std::collections::VecDeque::from([(429, "rateLimitExceeded".to_string())]),
         );
         let base = serve_mock(g.clone()).await;
-        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.config.sync.fetch_concurrency = 1;
         let (_tx, mut rx) = never_shutdown();
-        let tolerant = Some(((false, cursor.timestamp()), 3));
+        // Every id here has already failed on three separate passes.
+        let thrice = |ids: &[&str]| {
+            Some((
+                (false, cursor.timestamp()),
+                ids.iter().map(|id| (id.to_string(), 3)).collect(),
+            ))
+        };
 
-        eng.archive.state().failing = tolerant;
+        eng.archive.state().failing = thrice(&["g-refused"]);
         assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
         assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        assert_eq!(booked(&eng, "g-refused"), 3, "a refusal is not booked");
+        assert_eq!(eng.metrics.archive_skipped(), 0);
 
-        // Six bodies that all fail: one more than a tolerant chunk may skip.
-        for i in 0..6 {
-            let id = format!("g-down-{i}");
-            g.old_mail(&id, at, alert_eml(at));
+        // Six bodies that all fail again: one more than a pass may step over.
+        let down: Vec<String> = (0..6).map(|i| format!("g-down-{i}")).collect();
+        for id in &down {
+            g.old_mail(id, at, alert_eml(at));
             g.0.lock().unwrap().errors.insert(
-                id,
-                std::collections::VecDeque::from([(500, "backendError".to_string())]),
+                id.clone(),
+                std::iter::repeat_n((500, "backendError".to_string()), 2).collect(),
             );
         }
-        eng.archive.state().failing = tolerant;
+        // The refused one is served now; start the day's refusals afresh.
+        eng.archive.state().quota_refusals_today = 0;
+        let ids: Vec<&str> = down.iter().map(String::as_str).collect();
+        eng.archive.state().failing = thrice(&ids);
         assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
         assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        // Five of them: a pass may step over those, and does.
+        g.0.lock().unwrap().errors.remove("g-down-5");
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert!(stored(&store, acct, "g-down-5"));
+        assert!(!stored(&store, acct, "g-down-0"));
+    }
+
+    /// A MESSAGE THE STORE WILL NOT TAKE is stepped over on the same terms as
+    /// one Gmail will not serve: three separate passes first. It used to be
+    /// the one failure that held a chunk for good.
+    #[tokio::test]
+    async fn a_message_the_store_refuses_three_passes_running_is_stepped_over_too() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.old_mail("g-ok", at, alert_eml(at));
+        store.execute_batch_for_test(
+            "CREATE TRIGGER refuse_one BEFORE INSERT ON messages
+             WHEN NEW.gmail_msg_id='g-bad'
+             BEGIN SELECT RAISE(ABORT,'refused'); END;",
+        );
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.config.sync.fetch_concurrency = 1;
+        let (_tx, mut rx) = never_shutdown();
+
+        for pass in 1..=3 {
+            assert!(matches!(
+                eng.archive_walk_chunk(&mut rx).await,
+                Err(CoreError::Sqlite(_))
+            ));
+            assert_eq!(booked(&eng, "g-bad"), pass);
+            assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        }
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert!(stored(&store, acct, "g-ok"));
+        assert!(!stored(&store, acct, "g-bad"));
+        assert_eq!(eng.metrics.archive_skipped(), 1);
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor - ChronoDuration::days(7))
+        );
+    }
+
+    /// W2. THE WALK NEVER STARTS NEARER TO NOW THAN A DAY. With a backfill
+    /// window of zero days the start used to be this instant, and the first
+    /// backward listing (all mail, no `-in:inbox`) could store a message that
+    /// arrived a second ago before the poll ingested it: write-once, so never
+    /// triaged and never notified.
+    #[tokio::test]
+    async fn a_zero_day_backfill_does_not_start_the_walk_at_now() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let now = days_ago(0);
+        let g = MockGmail::default();
+        let just_now = now - ChronoDuration::minutes(1);
+        g.old_mail("g-new", just_now, alert_eml(just_now));
+        g.message_labels("g-new", &["INBOX"]);
+        let older = now - ChronoDuration::days(2);
+        g.old_mail("g-older", older, alert_eml(older));
+        let base = serve_mock(g.clone()).await;
+        let mut config = Config::default();
+        config.sync.archive_days = 365;
+        config.sync.backfill_days = 0;
+        let mut eng = engine_with_config(store.clone(), acct, &base, config);
+        eng.archive_pace = instant_pace();
+        eng.poll_healthy.store(true, Ordering::Relaxed);
+        eng.archive.state().clock = Some(now);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        let start = now - eng.archive_pace.forward_lag;
+        assert_eq!(
+            g.queries(""),
+            vec![archive_q(start - ChronoDuration::days(7), start)],
+            "the first week listed ends a day ago, not now"
+        );
+        assert_eq!(g.calls("get:g-new"), 0);
+        assert!(!stored(&store, acct, "g-new"), "the poll's, not the walk's");
+        assert!(stored(&store, acct, "g-older"));
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(start - ChronoDuration::days(7))
+        );
+
+        // A real backfill window is older than a day and is where it starts.
+        let (store, acct) = store_at_cursor(Some(100));
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.archive.state().clock = Some(now);
+        assert_eq!(eng.config.sync.backfill_days, 30);
+        eng.archive_walk_chunk(&mut rx).await.unwrap();
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(now - ChronoDuration::days(37))
+        );
+    }
+
+    /// W4. THE DISK FLOOR IS ASKED BEFORE EVERY BATCH. A chunk is a week of
+    /// mail, however much that is; asked only at its start, a heavy week was
+    /// written straight through the floor. The walk stops between batches,
+    /// the cursor stays, and what the chunk already stored is not fetched
+    /// again when there is room.
+    #[tokio::test]
+    async fn the_disk_floor_stops_a_chunk_between_batches() {
+        use std::sync::atomic::AtomicUsize;
+        // Room for the chunk's own check and the first batch's, then none.
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        fn filling_up() -> Option<u64> {
+            let floor = 2048 * 1024 * 1024;
+            Some(if ASKED.fetch_add(1, Ordering::SeqCst) < 2 {
+                floor
+            } else {
+                floor - 1
+            })
+        }
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        let ids: Vec<String> = (0..25).map(|i| format!("g-{i:02}")).collect();
+        for id in &ids {
+            g.old_mail(id, at, alert_eml(at));
+        }
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(eng.archive_pace.batch, 10);
+        let (_tx, mut rx) = never_shutdown();
+        let fetched = |g: &MockGmail| g.seen().iter().filter(|s| s.starts_with("get:")).count();
+
+        eng.archive.state().free_probe = Some(filling_up);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(
+            ASKED.load(Ordering::SeqCst),
+            3,
+            "the chunk, then each batch"
+        );
+        assert_eq!(fetched(&g), 10, "one batch and no more");
+        assert_eq!(ids.iter().filter(|id| stored(&store, acct, id)).count(), 10);
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::Disk));
+
+        // Still short: nothing at all, not even the listing.
+        let served = g.seen().len();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(g.seen().len(), served, "held means off the wire");
+
+        // Room again: the other fifteen, and only those.
+        eng.archive.state().free_probe = Some(|| Some(u64::MAX));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(fetched(&g), 25);
+        assert!(ids.iter().all(|id| stored(&store, acct, id)));
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor - ChronoDuration::days(7))
+        );
+        assert_eq!(eng.metrics.archive_hold(), None);
+    }
+
+    /// W3. A HELD WALK SAYS WHY. Each reason the walk can hold for reaches the
+    /// gauge (and the log, once, when it changes); a walk that then runs
+    /// clears it. Without this a walk waiting on a hung embedder or a wrong
+    /// clock looked exactly like a walk that was switched off.
+    #[tokio::test]
+    async fn a_held_walk_reports_the_reason_it_is_holding() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let eng = archive_engine(store.clone(), acct, &base, 365).with_embedder_gate(gate_rx);
+        let (_tx, mut rx) = never_shutdown();
+        let now = Utc::now();
+        assert_eq!(eng.metrics.archive_hold(), None, "nothing said yet");
+
+        // Every reason at once, lifted one at a time in the order the walk
+        // checks them.
+        eng.poll_healthy.store(false, Ordering::Relaxed);
+        eng.window_in_flight.store(true, Ordering::Relaxed);
+        {
+            let mut state = eng.archive.state();
+            state.clock = DateTime::from_timestamp(ARCHIVE_CLOCK_FLOOR_UNIX - 1, 0);
+            state.free_probe = Some(|| None);
+        }
+        let mut seen = Vec::new();
+        for lift in 0..6 {
+            match lift {
+                0 => {}
+                1 => eng.poll_healthy.store(true, Ordering::Relaxed),
+                2 => eng.window_in_flight.store(false, Ordering::Relaxed),
+                3 => gate_tx.send(true).unwrap(),
+                4 => {
+                    let mut state = eng.archive.state();
+                    state.clock = Some(now);
+                    state.quota_day = Some(now.date_naive());
+                    state.quota_refusals_today = eng.archive_pace.quota_refusals_per_day;
+                }
+                _ => eng.archive.state().quota_refusals_today = 0,
+            }
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Held
+            );
+            let hold = eng
+                .metrics
+                .archive_hold()
+                .expect("a held walk has a reason");
+            assert_eq!(eng.archive.state().hold, Some(hold));
+            seen.push(hold);
+        }
+        assert_eq!(
+            seen,
+            [
+                ArchiveHold::Poll,
+                ArchiveHold::Window,
+                ArchiveHold::Embedder,
+                ArchiveHold::Clock,
+                ArchiveHold::QuotaDay,
+                ArchiveHold::Disk,
+            ]
+        );
+        assert!(g.seen().is_empty(), "held means off the wire, every time");
+
+        eng.archive.state().free_probe = Some(|| Some(u64::MAX));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(eng.metrics.archive_hold(), None);
+        assert_eq!(eng.archive.state().hold, None);
     }
 
     /// A QUOTA REFUSAL BACKS THE WALK OFF, LONGER EACH TIME, AND THREE IN A DAY
@@ -8527,9 +8991,10 @@ mod tests {
                 "the wait doubles"
             );
         }
-        assert!(
-            eng.archive.state().failing.is_none(),
-            "a refusal is not an attempt at the chunk"
+        assert_eq!(
+            booked(&eng, "g-a"),
+            0,
+            "a refusal is not a failure of the message"
         );
         let served = g.seen().len();
         assert_eq!(
@@ -8710,6 +9175,11 @@ mod tests {
             store.archive_walked_to(acct).unwrap(),
             Some(start),
             "the backward edge is not the forward pass's to move"
+        );
+        assert_eq!(
+            eng.metrics.archive_covered_to(),
+            covered.timestamp(),
+            "and the gauge shows the forward edge"
         );
 
         // CAUGHT UP: nothing more on the wire until the recheck comes round.

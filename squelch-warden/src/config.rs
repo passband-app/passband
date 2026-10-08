@@ -65,11 +65,6 @@ pub const DEFAULT_OAUTH_SECRET_NAME: &str = "google-oauth-client";
 pub const DEFAULT_RELAY_SECRET_NAME: &str = "apns-relay";
 
 /// k3s's built-in dynamic provisioner.
-/// The deepest archive the warden will render, in days: the daemon's own
-/// `ARCHIVE_DAYS_MAX` (squelch-core is deliberately not a dependency here, so
-/// the number is repeated and a test in each crate pins it at 7300).
-pub const ARCHIVE_DAYS_MAX: u32 = 7300;
-
 pub const DEFAULT_STORAGE_CLASS: &str = "local-path";
 
 /// Per-tenant data volume size. The SQLite index plus the embedding cache.
@@ -381,18 +376,6 @@ pub struct Config {
     /// unless the warden renders it. `0` pins the session in memory, which is
     /// the off switch if the reaper ever misbehaves in production.
     pub embed_idle_unload_secs: Option<u64>,
-    /// How many days back tenant daemons keep searchable archive mail, passed
-    /// on as `SQUELCH_ARCHIVE_DAYS`. UNSET RENDERS `0`, NOT NOTHING: the
-    /// archive is OFF for hosted tenants until an operator turns it on. The
-    /// daemon's own default is a year, which suits a self-hoster's disk and
-    /// not a tenant volume nobody has sized for it; left to that default the
-    /// whole fleet would start walking at the next daemon roll. Enable it per
-    /// fleet after sizing one tenant. Clamped to [`ARCHIVE_DAYS_MAX`].
-    pub archive_days: Option<u32>,
-    /// The archive walk's free-space floor in MiB, passed on as
-    /// `SQUELCH_ARCHIVE_MIN_FREE_MB`. Unset leaves the daemon's own default
-    /// (2048); `0` switches the check off.
-    pub archive_min_free_mb: Option<u64>,
     /// The OAuth authorization server tenant daemons trust for the AGENT door,
     /// from `SQUELCH_WARDEN_MCP_OAUTH_ISSUER`. Absent, the agent door stays
     /// unpublished and the render is byte-identical to a warden that never
@@ -471,8 +454,6 @@ impl std::fmt::Debug for Config {
             .field("llm_stage1_daily_cap", &self.llm_stage1_daily_cap)
             .field("llm_stage2_daily_cap", &self.llm_stage2_daily_cap)
             .field("embed_idle_unload_secs", &self.embed_idle_unload_secs)
-            .field("archive_days", &self.archive_days)
-            .field("archive_min_free_mb", &self.archive_min_free_mb)
             .field("mcp_oauth_issuer", &self.mcp_oauth_issuer)
             // The relay bearer is not a field at all: the warden holds only the
             // Secret's NAME, and the kubelet resolves the value into the pod.
@@ -814,30 +795,6 @@ impl Config {
             }
         };
 
-        let archive_days = match var(get, "SQUELCH_WARDEN_ARCHIVE_DAYS") {
-            None => None,
-            Some(value) => Some(
-                value
-                    .parse::<u32>()
-                    .map_err(|e| {
-                        ConfigError::invalid(format!(
-                            "invalid SQUELCH_WARDEN_ARCHIVE_DAYS `{value}`: {e}"
-                        ))
-                    })?
-                    // The daemon clamps too; clamping here keeps the rendered
-                    // pod spec saying what the daemon will actually do.
-                    .min(ARCHIVE_DAYS_MAX),
-            ),
-        };
-        let archive_min_free_mb = match var(get, "SQUELCH_WARDEN_ARCHIVE_MIN_FREE_MB") {
-            None => None,
-            Some(value) => Some(value.parse::<u64>().map_err(|e| {
-                ConfigError::invalid(format!(
-                    "invalid SQUELCH_WARDEN_ARCHIVE_MIN_FREE_MB `{value}`: {e}"
-                ))
-            })?),
-        };
-
         let mcp_oauth_issuer = match var(get, "SQUELCH_WARDEN_MCP_OAUTH_ISSUER") {
             None => None,
             Some(raw) => Some(canonical_mcp_oauth_issuer(&raw)?),
@@ -923,8 +880,6 @@ impl Config {
             llm_stage1_daily_cap,
             llm_stage2_daily_cap,
             embed_idle_unload_secs,
-            archive_days,
-            archive_min_free_mb,
             mcp_oauth_issuer,
             relay_url,
             relay_secret_name: name_var(
@@ -1325,8 +1280,6 @@ mod tests {
         assert!(c.console_sso_url.is_none());
         // Unset means the tenant daemon keeps its own idle-unload default.
         assert!(c.embed_idle_unload_secs.is_none());
-        // Unset means the tenant daemon keeps its own archive depth.
-        assert!(c.archive_days.is_none());
         // The LLM env feature is off unless the operator turns it on.
         assert!(c.llm_base_url.is_none());
         assert!(c.llm_stage1_model.is_none());
@@ -1691,46 +1644,6 @@ mod tests {
         vars.insert(
             "SQUELCH_WARDEN_EMBED_IDLE_UNLOAD_SECS".to_string(),
             "ten minutes".to_string(),
-        );
-        assert!(load(&vars).is_err(), "a bad value is a refusal to boot");
-    }
-
-    /// The archive depth parses as a number of days, and `0` survives as
-    /// `Some(0)`: it switches the walk off, which is not the same as unset.
-    #[test]
-    fn the_archive_depth_parses_and_zero_is_a_value() {
-        let mut vars = required();
-        vars.insert("SQUELCH_WARDEN_ARCHIVE_DAYS".to_string(), "730".to_string());
-        assert_eq!(load(&vars).unwrap().archive_days, Some(730));
-
-        vars.insert("SQUELCH_WARDEN_ARCHIVE_DAYS".to_string(), "0".to_string());
-        assert_eq!(load(&vars).unwrap().archive_days, Some(0));
-
-        // Past twenty years is clamped, so the pod spec names the depth the
-        // daemon will really use.
-        vars.insert(
-            "SQUELCH_WARDEN_ARCHIVE_DAYS".to_string(),
-            "4000000000".to_string(),
-        );
-        assert_eq!(load(&vars).unwrap().archive_days, Some(ARCHIVE_DAYS_MAX));
-        assert_eq!(ARCHIVE_DAYS_MAX, 7300);
-
-        assert_eq!(load(&vars).unwrap().archive_min_free_mb, None);
-        vars.insert(
-            "SQUELCH_WARDEN_ARCHIVE_MIN_FREE_MB".to_string(),
-            "512".to_string(),
-        );
-        assert_eq!(load(&vars).unwrap().archive_min_free_mb, Some(512));
-        vars.insert(
-            "SQUELCH_WARDEN_ARCHIVE_MIN_FREE_MB".to_string(),
-            "lots".to_string(),
-        );
-        assert!(load(&vars).is_err());
-        vars.remove("SQUELCH_WARDEN_ARCHIVE_MIN_FREE_MB");
-
-        vars.insert(
-            "SQUELCH_WARDEN_ARCHIVE_DAYS".to_string(),
-            "a year".to_string(),
         );
         assert!(load(&vars).is_err(), "a bad value is a refusal to boot");
     }

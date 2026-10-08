@@ -4,8 +4,8 @@
 use super::super::*;
 use crate::store::agent_triage::AgentTriageStore;
 use crate::store::archive_surface::{
-    ArchiveSurfacing, OLDER_MAIL_POLICY, RefinePoke, SurfaceWait, await_thread_access,
-    search_with_surfacing, surface_archive_matches,
+    ArchiveSurfacing, KeywordMatch, OLDER_MAIL_POLICY, RefinePoke, SurfaceWait,
+    await_thread_access, search_with_surfacing, surface_archive_matches,
 };
 use crate::sync::ingest::{RawFetched, ingest_with_rules};
 use crate::triage::access::AccessDecision;
@@ -387,14 +387,21 @@ async fn an_old_message_is_found_by_subject_for_exactly_one_job() {
     let done = worker(store.clone(), account, poke.clone(), Finish::Allow);
     let surfacing = surfacing(Some(poke), wait(20_000));
     let search = move |store: &SqliteStore| {
-        store.external_search_surfacing(
+        store.external_search(
             account,
             "heron one",
             crate::store::SearchSort::BestMatch,
             10,
         )
     };
-    let (hits, horizon) = search_with_surfacing(&store, account, &surfacing, search)
+    let keyword = || {
+        Some(KeywordMatch {
+            text: "heron one".into(),
+            filter: Default::default(),
+            include_sent: true,
+        })
+    };
+    let (hits, horizon) = search_with_surfacing(&store, account, &surfacing, keyword(), search)
         .await
         .unwrap();
     done.await.unwrap();
@@ -405,7 +412,7 @@ async fn an_old_message_is_found_by_subject_for_exactly_one_job() {
 
     // And again, and again: the same answer for the same one job.
     for _ in 0..2 {
-        let (again, _) = search_with_surfacing(&store, account, &surfacing, search)
+        let (again, _) = search_with_surfacing(&store, account, &surfacing, keyword(), search)
             .await
             .unwrap();
         assert_eq!(again.len(), 1);

@@ -619,10 +619,50 @@ fn free_disk_bytes_reads_the_databases_own_filesystem() {
     std::fs::create_dir_all(&dir).unwrap();
     let on_disk = SqliteStore::open(dir.join("squelch.db")).unwrap();
     let free = on_disk.free_disk_bytes().unwrap();
+    // The same question asked of the directory the file is in, by hand: the
+    // floor is only a guard if the number is this volume's and nobody else's.
+    #[cfg(unix)]
+    let expected = {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap();
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: a NUL-terminated path and writable storage of the right type.
+        assert_eq!(
+            unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: a zero return means the struct was filled in.
+        let stat = unsafe { stat.assume_init() };
+        #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+        let bytes = (stat.f_bavail as u64) * (stat.f_frsize as u64);
+        bytes
+    };
+    // The path the store asked about is the database file itself.
+    let file: String = on_disk
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT file FROM pragma_database_list WHERE name='main'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     std::fs::remove_dir_all(&dir).ok();
     assert!(
         free > 0 && free < u64::MAX,
         "a real number of bytes: {free}"
+    );
+    assert!(
+        std::path::Path::new(&file).ends_with("squelch.db")
+            && file.contains(&format!("squelch-free-{}", std::process::id())),
+        "{file}"
+    );
+    // Other processes write to this volume while the suite runs, so within a
+    // gigabyte and not to the byte.
+    #[cfg(unix)]
+    assert!(
+        free.abs_diff(expected) < 1 << 30,
+        "{free} bytes free, where the volume itself says {expected}"
     );
 }
 
@@ -671,13 +711,26 @@ fn live_allowed(store: &SqliteStore, builder: &TriagedBuilder) -> i64 {
     id
 }
 
-fn agent_search(store: &SqliteStore, acct: AccountId, query: &str) -> crate::store::ExternalSearch {
-    store
-        .external_search_surfacing(acct, query, crate::store::SearchSort::Recent, 50)
-        .unwrap()
+/// One agent search as the door runs it, in its two halves.
+struct Found {
+    /// What the caller is shown.
+    hits: Vec<crate::types::SearchHit>,
+    /// What the door would ask an access check for: this crate's secret.
+    pending_archive: Vec<i64>,
 }
 
-fn hit_ids(found: &crate::store::ExternalSearch) -> Vec<i64> {
+fn agent_search(store: &SqliteStore, acct: AccountId, query: &str) -> Found {
+    Found {
+        hits: store
+            .external_search(acct, query, crate::store::SearchSort::Recent, 50)
+            .unwrap(),
+        pending_archive: store
+            .archive_surface_candidates(acct, query, &Default::default(), true)
+            .unwrap(),
+    }
+}
+
+fn hit_ids(found: &Found) -> Vec<i64> {
     found.hits.iter().map(|hit| hit.id).collect()
 }
 
@@ -874,10 +927,20 @@ fn a_thread_of_only_unassessed_archive_rows_is_not_found() {
         Err(CoreError::NotFound)
     ));
     assert!(agent_search(&store, acct, "heron").hits.is_empty());
-    // Opening it by name is the explicit request that buys its check.
+    // THE READ ITSELF BUYS NOTHING for an archive row: `thread_view` is also
+    // what a reply target is checked with, and it carries no ceiling.
+    assert_eq!(jobs(&store, old), 0);
+    // The door's explicit open is the request that buys its check, as a
+    // surfacing job inside the surfacing caps.
+    assert_eq!(
+        store
+            .request_thread_access(acct, "t-alone", Default::default())
+            .unwrap(),
+        vec![old]
+    );
     assert_eq!(
         job_rows(&store, old),
-        vec![("access".into(), "source_access".into(), "queued".into())]
+        vec![("access".into(), "archive_access".into(), "queued".into())]
     );
 
     // Once that check has run, a later surfacing request is not a reason to
@@ -886,9 +949,15 @@ fn a_thread_of_only_unassessed_archive_rows_is_not_found() {
     store
         .enqueue_agent_triage(acct, old, "archive_access", false)
         .unwrap();
+    assert!(
+        store
+            .request_thread_access(acct, "t-alone", Default::default())
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         job_rows(&store, old),
-        vec![("access".into(), "source_access".into(), "completed".into())]
+        vec![("access".into(), "archive_access".into(), "completed".into())]
     );
 }
 
@@ -921,9 +990,9 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
     let found = agent_search(&store, acct, "heron");
     assert!(found.hits.is_empty());
     assert_eq!(
-        found.pending_archive.len(),
-        12,
-        "the live pending row is not one"
+        found.pending_archive,
+        old[..10].to_vec(),
+        "no more than one call may queue, best match first, the newest of equals"
     );
     assert!(!found.pending_archive.contains(&live));
 
@@ -960,11 +1029,7 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
     let queued = store
         .request_archive_access(acct, &found.pending_archive, Default::default(), Utc::now())
         .unwrap();
-    assert_eq!(
-        queued,
-        found.pending_archive[..10].to_vec(),
-        "cap, in rank order"
-    );
+    assert_eq!(queued, found.pending_archive, "in rank order");
     for id in &queued {
         assert_eq!(
             job_rows(&store, *id),
@@ -972,9 +1037,15 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
         );
         assert_eq!(state(&store, *id), (1, "pending".into()));
     }
-    for id in &found.pending_archive[10..] {
+    for id in &old[10..] {
         assert_eq!(jobs(&store, *id), 0);
     }
+    // The next search asks about the ones nobody has asked about yet. A row
+    // already queued never takes a place a fresh match could have.
+    assert_eq!(
+        agent_search(&store, acct, "heron").pending_archive,
+        old[10..].to_vec()
+    );
     assert_eq!(
         store
             .archive_access_progress(acct, &queued, Utc::now())
@@ -1029,9 +1100,10 @@ fn surfacing_queues_one_background_access_job_per_archive_match_capped_and_once(
     );
     assert_eq!(jobs(&store, parked), 1);
     assert!(
-        agent_search(&store, acct, "heron")
+        !agent_search(&store, acct, "heron")
             .pending_archive
-            .contains(&parked)
+            .contains(&parked),
+        "and not chosen again either"
     );
 
     // Failed for good: the same.
@@ -1090,7 +1162,10 @@ fn a_surfaced_archive_row_is_returned_once_allowed_and_never_once_restricted() {
     run_access_check(&store, acct, fine, false);
     let found = agent_search(&store, acct, "heron");
     assert_eq!(hit_ids(&found), vec![fine]);
-    assert_eq!(found.pending_archive, vec![secret]);
+    assert!(
+        found.pending_archive.is_empty(),
+        "the other is already asked"
+    );
     assert_eq!(
         store
             .archive_access_progress(acct, &[fine, secret], Utc::now())
@@ -1410,8 +1485,13 @@ async fn a_vector_only_neighbour_never_queues_an_access_check() {
             archive_days: 365,
             ..Default::default()
         },
+        Some(crate::store::archive_surface::KeywordMatch {
+            text: "osprey migration".into(),
+            filter: Default::default(),
+            include_sent: true,
+        }),
         move |store: &SqliteStore| {
-            store.external_search_surfacing(
+            store.external_search(
                 acct,
                 "osprey migration",
                 crate::store::SearchSort::Recent,
@@ -1428,7 +1508,7 @@ async fn a_vector_only_neighbour_never_queues_an_access_check() {
     // A keyword match among them is still surfaced: the leg, not the tier.
     assert_eq!(
         agent_search(&store, acct, "ledger").pending_archive.len(),
-        50
+        crate::store::ARCHIVE_SURFACE_CAP
     );
 }
 
@@ -1643,36 +1723,40 @@ fn a_failed_archive_check_is_asked_for_again_after_a_day() {
     );
     live_allowed(&store, &triaged(acct, "g-live", "t-mix").subject("osprey"));
     assert_eq!(
-        store.request_thread_access(acct, "t-mix").unwrap(),
+        store.request_thread_access(acct, "t-mix", caps).unwrap(),
         vec![sibling]
     );
     let job = store
         .claim_agent_job(acct, "access", Utc::now(), 120)
         .unwrap()
         .unwrap();
-    assert_eq!(job.trigger, "source_access");
+    assert_eq!(job.trigger, "archive_access");
     assert!(store.fail_agent_job(&job, "attempts_exhausted").unwrap());
     assert!(
         store
-            .request_thread_access(acct, "t-mix")
+            .request_thread_access(acct, "t-mix", caps)
             .unwrap()
             .is_empty()
     );
+    // A failed check from before thread opens were capped carries the old
+    // trigger. Revived, it is a surfacing job like any other: counted by the
+    // outstanding ceiling and charged to the daily sub-cap.
     store
         .lock()
         .unwrap()
         .execute(
-            "UPDATE agent_triage_jobs SET available_at=?2 WHERE message_id=?1",
+            "UPDATE agent_triage_jobs SET available_at=?2,trigger='source_access'
+             WHERE message_id=?1",
             params![sibling, days_ago(2).to_rfc3339()],
         )
         .unwrap();
     assert_eq!(
-        store.request_thread_access(acct, "t-mix").unwrap(),
+        store.request_thread_access(acct, "t-mix", caps).unwrap(),
         vec![sibling]
     );
     assert_eq!(
         job_rows(&store, sibling),
-        vec![("access".into(), "source_access".into(), "queued".into())]
+        vec![("access".into(), "archive_access".into(), "queued".into())]
     );
     // A restricted row is a verdict, not a failure: never asked again.
     access(&store, sibling, "restricted");
@@ -1686,9 +1770,150 @@ fn a_failed_archive_check_is_asked_for_again_after_a_day() {
         .unwrap();
     assert!(
         store
-            .request_thread_access(acct, "t-mix")
+            .request_thread_access(acct, "t-mix", caps)
             .unwrap()
             .is_empty()
+    );
+}
+
+/// Every job on `ids`, as (trigger, state).
+fn triggers(store: &SqliteStore, ids: &[i64]) -> Vec<(String, String)> {
+    ids.iter()
+        .flat_map(|id| job_rows(store, *id))
+        .map(|(_, trigger, state)| (trigger, state))
+        .collect()
+}
+
+/// S1. A THREAD OPEN OBEYS THE SURFACING CEILINGS. Thread ids are cheap (every
+/// search hit hands one over), so an open that queued its archive siblings
+/// outside the caps was the caps' way round: eight per call, call after call,
+/// thread after thread, each one a model call out of the background budget.
+#[test]
+fn a_thread_open_queues_archive_siblings_inside_every_surfacing_ceiling() {
+    use crate::store::{
+        ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX, ArchiveAccessCaps,
+        BACKGROUND_BUDGET_KEY,
+    };
+    let caps = ArchiveAccessCaps::default();
+    let day = Utc::now().format("%Y-%m-%d").to_string();
+    let thread_rows = |store: &SqliteStore, acct, threads: usize, each: usize| -> Vec<i64> {
+        let mut ids = Vec::new();
+        for t in 0..threads {
+            for m in 0..each {
+                ids.push(archive(
+                    store,
+                    &triaged(acct, &format!("g-{t}-{m}"), &format!("thread-{t}"))
+                        .subject("heron ledger")
+                        .received_at(days_ago(200 + m as i64)),
+                ));
+            }
+        }
+        ids
+    };
+    // Open every thread until it has nothing more to give.
+    let open_all = |store: &SqliteStore, acct, threads: usize, caps| -> usize {
+        let mut queued = 0;
+        for t in 0..threads {
+            loop {
+                let got = store
+                    .request_thread_access(acct, &format!("thread-{t}"), caps)
+                    .unwrap();
+                assert!(got.len() <= 8, "never more than eight for one open");
+                if got.is_empty() {
+                    break;
+                }
+                queued += got.len();
+                assert!(queued <= 100, "a thread open that never runs dry");
+            }
+        }
+        queued
+    };
+
+    // The outstanding ceiling: thirty threads of twenty, and twenty jobs.
+    let (store, acct) = fresh();
+    let ids = thread_rows(&store, acct, 30, 20);
+    assert_eq!(
+        store
+            .request_thread_access(acct, "thread-0", caps)
+            .unwrap()
+            .len(),
+        8,
+        "the newest eight of one thread"
+    );
+    assert_eq!(
+        open_all(&store, acct, 30, caps),
+        ARCHIVE_ACCESS_OUTSTANDING_MAX as usize - 8
+    );
+    let queued = triggers(&store, &ids);
+    assert_eq!(queued.len(), ARCHIVE_ACCESS_OUTSTANDING_MAX as usize);
+    assert!(
+        queued
+            .iter()
+            .all(|row| row == &("archive_access".to_string(), "queued".to_string())),
+        "every one a surfacing job, so the worker charges the sub-cap: {queued:?}"
+    );
+    // The same ceiling a search draws on: nothing is left for one.
+    assert!(
+        store
+            .request_archive_access(acct, &ids, caps, Utc::now())
+            .unwrap()
+            .is_empty()
+    );
+    // And the read every tool makes after the open queues nothing at all.
+    for t in 0..30 {
+        let _ = store.thread_view(acct, &format!("thread-{t}"));
+    }
+    assert_eq!(
+        triggers(&store, &ids).len(),
+        ARCHIVE_ACCESS_OUTSTANDING_MAX as usize
+    );
+
+    // The daily sub-cap: five a day, two spent, so three.
+    let (store, acct) = fresh();
+    let ids = thread_rows(&store, acct, 3, 20);
+    let small = ArchiveAccessCaps { daily: 5, ..caps };
+    let limits = vec![(ARCHIVE_ACCESS_BUDGET_KEY.to_string(), 5)];
+    for _ in 0..2 {
+        assert!(store.reserve_agent_budget(acct, &day, &limits).unwrap());
+    }
+    assert_eq!(open_all(&store, acct, 3, small), 3);
+    assert_eq!(triggers(&store, &ids).len(), 3);
+
+    // A spent background budget: every check would park, so none is queued.
+    let (store, acct) = fresh();
+    let ids = thread_rows(&store, acct, 30, 20);
+    let background = vec![(BACKGROUND_BUDGET_KEY.to_string(), caps.background_daily)];
+    for _ in 0..caps.background_daily {
+        assert!(store.reserve_agent_budget(acct, &day, &background).unwrap());
+    }
+    assert_eq!(open_all(&store, acct, 30, caps), 0);
+    for t in 0..30 {
+        let _ = store.thread_view(acct, &format!("thread-{t}"));
+    }
+    assert!(triggers(&store, &ids).is_empty());
+
+    // A LIVE sibling is not archive mail and is asked for as it always was,
+    // spent budget or not; the archive row beside it still is not.
+    let old = archive(
+        &store,
+        &triaged(acct, "g-mixed-old", "t-mixed").received_at(days_ago(300)),
+    );
+    let live = triaged(acct, "g-mixed-live", "t-mixed").ingest(&store);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM agent_triage_jobs WHERE message_id=?1",
+            params![live],
+        )
+        .unwrap();
+    assert_eq!(
+        store.request_thread_access(acct, "t-mixed", caps).unwrap(),
+        vec![live]
+    );
+    assert_eq!(
+        triggers(&store, &[live, old]),
+        vec![("source_access".to_string(), "queued".to_string())]
     );
 }
 
@@ -2052,12 +2277,50 @@ fn a_filing_correction_promotes_and_a_seal_does_not() {
     assert_eq!(jobs(&store, seal), 0);
 }
 
-/// B10. A PROMOTED ROW IS LIVE, SO THE STRICT GUARD APPLIES. While it was an
+/// Run the one queued triage job for `message` to a committed decision that
+/// says the mail is fine to read, through the worker's own claim and commit.
+fn run_triage_allowing(store: &SqliteStore, acct: AccountId, message: i64) {
+    // Other rows' queued work is not this test's subject; set it aside.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_triage_jobs SET state='completed'
+             WHERE message_id!=?1 AND state='queued'",
+            params![message],
+        )
+        .unwrap();
+    let job = store
+        .claim_agent_job(acct, "triage", Utc::now(), 120)
+        .unwrap()
+        .expect("a triage job is queued");
+    assert_eq!(job.message_id, message);
+    assert_eq!(job.kind, "triage", "a promoted row gets a full triage");
+    let context = store.load_agent_context(&job).unwrap();
+    let decision = verdict(message);
+    assert!(!decision.external_access.restricted);
+    assert_eq!(
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &decision,
+                std::slice::from_ref(&context.message.source)
+            )
+            .unwrap(),
+        crate::store::agent_triage::AgentCommitOutcome::Applied
+    );
+}
+
+/// B10 + S4. A PROMOTED ROW IS LIVE, FOR BETTER AND WORSE. While it was an
 /// unassessed archive ancestor its thread stayed open with it omitted; once
 /// promoted and still pending, it closes the thread like any live pending
-/// row. And promotion never turns a 'restricted' into anything else.
+/// row. AND IT IS RE-JUDGED LIKE ANY LIVE ROW: the triage that promotion
+/// queues writes access from its own decision, so a row a model had marked
+/// 'restricted' is 'restricted' only until that triage commits. What survives
+/// promotion and every later triage is the OWNER'S seal, and nothing else.
 #[test]
-fn a_promoted_pending_row_closes_its_thread_and_a_restricted_one_stays_restricted() {
+fn a_promoted_row_is_rejudged_like_live_mail_and_only_an_owner_seal_is_permanent() {
     let (store, acct) = store();
     let old = archive(
         &store,
@@ -2096,14 +2359,20 @@ fn a_promoted_pending_row_closes_its_thread_and_a_restricted_one_stays_restricte
         "nor is the promoted row itself surfaced as one"
     );
 
-    // Restricted before, restricted after, by either promoting path.
+    // A MODEL'S 'restricted', by either promoting path: still restricted the
+    // moment after promotion, and whatever the queued triage says once it
+    // has run. Here it says the mail is fine, and the row opens.
     for by_correction in [false, true] {
         let key = format!("r{by_correction}");
         let secret = archive(
             &store,
             &triaged(acct, &key, &key).received_at(days_ago(200)),
         );
-        access(&store, secret, "restricted");
+        store
+            .request_archive_access(acct, &[secret], Default::default(), Utc::now())
+            .unwrap();
+        run_access_check(&store, acct, secret, true);
+        assert_eq!(state(&store, secret).1, "restricted");
         if by_correction {
             store
                 .correct_agent_triage(
@@ -2118,12 +2387,121 @@ fn a_promoted_pending_row_closes_its_thread_and_a_restricted_one_stays_restricte
             store.retriage_reset(acct, Some(secret), 7).unwrap();
         }
         assert!(!is_archive(&store, secret));
-        assert_eq!(state(&store, secret), (1, "restricted".into()));
+        assert_eq!(
+            state(&store, secret).1,
+            "restricted",
+            "{key}: not yet re-judged"
+        );
         assert!(matches!(
             store.thread_view(acct, &key),
             Err(CoreError::NotFound)
         ));
+        run_triage_allowing(&store, acct, secret);
+        assert_eq!(
+            state(&store, secret).1,
+            "allowed",
+            "{key}: the triage's verdict replaced the access check's"
+        );
+        assert_eq!(store.thread_view(acct, &key).unwrap().messages.len(), 1);
     }
+
+    // THE OWNER'S SEAL. Sealing an archive row neither promotes it nor queues
+    // anything; promoted afterwards and triaged by a model that would have
+    // let it through, it stays closed.
+    for by_correction in [false, true] {
+        let key = format!("s{by_correction}");
+        let sealed = archive(
+            &store,
+            &triaged(acct, &key, &key).received_at(days_ago(200)),
+        );
+        store
+            .correct_agent_triage(
+                acct,
+                sealed,
+                "external_access",
+                &serde_json::json!(true),
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(is_archive(&store, sealed));
+        assert_eq!(jobs(&store, sealed), 0);
+        if by_correction {
+            store
+                .correct_agent_triage(
+                    acct,
+                    sealed,
+                    "show_in_fye",
+                    &serde_json::json!(true),
+                    Utc::now(),
+                )
+                .unwrap();
+        } else {
+            store.retriage_reset(acct, Some(sealed), 7).unwrap();
+        }
+        assert!(!is_archive(&store, sealed));
+        run_triage_allowing(&store, acct, sealed);
+        assert!(
+            matches!(store.thread_view(acct, &key), Err(CoreError::NotFound)),
+            "{key}: an owner seal outlives promotion and re-triage"
+        );
+        assert!(!store.external_thread_allowed(acct, &key).unwrap());
+    }
+}
+
+/// S4. THE OWNER'S OWN OLD MAIL IS NEVER PROMOTED. Naming a sent archive
+/// message for re-triage, with no live inbound message in its thread to stand
+/// for it, used to promote the sent row and queue a check on it: live and
+/// pending, it then closed a thread whose other archive rows the agent could
+/// read. It does nothing now, by either promoting path.
+#[test]
+fn the_owners_own_archive_mail_is_never_promoted() {
+    let (store, acct) = store();
+    let theirs = archive(
+        &store,
+        &triaged(acct, "g-theirs", "t-conv")
+            .from("pat@old.example")
+            .received_at(days_ago(210)),
+    );
+    allow(&store, theirs);
+    let mine = archive(
+        &store,
+        &triaged(acct, "g-mine", "t-conv")
+            .from("me@example.com")
+            .is_sent(true)
+            .received_at(days_ago(200)),
+    );
+    let readable = |store: &SqliteStore| -> Vec<i64> {
+        store
+            .thread_view(acct, "t-conv")
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| m.id)
+            .collect()
+    };
+    assert_eq!(readable(&store), vec![theirs]);
+
+    assert_eq!(store.retriage_reset(acct, Some(mine), 7).unwrap(), 0);
+    assert!(is_archive(&store, mine) && is_archive(&store, theirs));
+    assert_eq!(jobs(&store, mine) + jobs(&store, theirs), 0);
+    assert_eq!(readable(&store), vec![theirs], "the thread stays open");
+
+    store
+        .correct_agent_triage(
+            acct,
+            mine,
+            "show_in_fye",
+            &serde_json::json!(true),
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(is_archive(&store, mine));
+    assert_eq!(jobs(&store, mine), 0);
+    assert_eq!(readable(&store), vec![theirs]);
+
+    // An INBOUND archive message named the same way is still promoted.
+    assert_eq!(store.retriage_reset(acct, Some(theirs), 7).unwrap(), 1);
+    assert!(!is_archive(&store, theirs));
 }
 
 /// B10. Whatever trigger reaches a row that is STILL in the archive, the job
@@ -2421,8 +2799,10 @@ fn archive_ingest_never_renames_a_sender() {
     assert_eq!(name("zed@old.example").as_deref(), Some("Zed Recent"));
 }
 
-/// B5. The recall window stops at its ceiling: readable mail ranked below a
-/// wall of hidden mail deeper than the ceiling is not dug for.
+/// B5. The recall loop stops at its ceiling. The fetch here is the HUMAN
+/// keyword page on purpose, so the window fills with rows the authority then
+/// refuses: the loop's own arithmetic, whatever a real external leg would
+/// have kept out of it (see `hidden_mail_never_takes_a_place_...` below).
 #[test]
 fn the_external_recall_window_stops_at_its_ceiling() {
     assert_eq!(crate::store::EXTERNAL_RECALL_MAX, 4096);
@@ -2460,25 +2840,428 @@ fn the_external_recall_window_stops_at_its_ceiling() {
                     0,
                 )?;
                 let full = hits.len() == window;
-                Ok((
-                    hits.into_iter()
-                        .map(|hit| crate::store::LeggedHit {
-                            hit,
-                            keyword: true,
-                            vector: false,
-                        })
-                        .collect(),
-                    full,
-                ))
+                Ok((hits, full))
             })
             .unwrap();
         (found, windows)
     };
     let (capped, windows) = search(8);
-    assert!(capped.hits.is_empty(), "the ceiling was reached first");
-    assert_eq!(capped.pending_archive.len(), 8);
+    assert!(capped.is_empty(), "the ceiling was reached first");
     assert_eq!(windows, vec![2, 4, 8], "doubling, and no further");
     let (reached, windows) = search(64);
-    assert_eq!(hit_ids(&reached), vec![deep]);
+    assert_eq!(
+        reached.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        vec![deep]
+    );
     assert_eq!(windows, vec![2, 4, 8, 16, 32]);
+}
+
+// ---- fix round 2: hidden mail and the recall window (S2) ---------------------
+
+/// The owner's seal on one message.
+fn owner_seal(store: &SqliteStore, acct: AccountId, message: i64) {
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_triage_corrections(account_id,message_id,field,value_json,source_revision,updated_at)
+             VALUES(?1,?2,'external_access','true',1,?3)",
+            params![acct, message, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+}
+
+/// Record that `message`'s decision consumed `source` at `revision`.
+fn depends_on(store: &SqliteStore, acct: AccountId, message: i64, source: i64, revision: i64) {
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_decision_sources(account_id,message_id,source_message_id,source_revision)
+             VALUES(?1,?2,?3,?4)",
+            params![acct, message, source, revision],
+        )
+        .unwrap();
+}
+
+/// (prefilter, authority) for one message: the clause the external recall
+/// legs carry, and the full check every candidate then goes through.
+fn prefilter_and_authority(store: &SqliteStore, acct: AccountId, message: i64) -> (bool, bool) {
+    let conn = store.lock().unwrap();
+    let prefilter: bool = conn
+        .query_row(
+            concat!(
+                "SELECT ",
+                external_candidate_sql!(),
+                " FROM messages m WHERE m.account_id=?1 AND m.id=?2"
+            ),
+            params![acct, message],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let thread: String = conn
+        .query_row(
+            "SELECT thread_id FROM messages WHERE id=?1",
+            params![message],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let authority = super::super::messages::external_message_allowed_conn(&conn, acct, message)
+        .unwrap()
+        && super::super::messages::thread_guard_and_subject(&conn, acct, &thread).is_ok();
+    (prefilter, authority)
+}
+
+/// S2. THE PREFILTER IS A NECESSARY CONDITION AND NOT THE AUTHORITY. Over one
+/// row of every kind: whatever the authority lets through, the prefilter lets
+/// through (or a readable row would silently vanish from search); and the rows
+/// it lets through that the authority refuses are exactly the dependency
+/// cases it says it leaves alone. If the authority is ever loosened, the first
+/// half of this fails, which is the point.
+#[test]
+fn the_external_prefilter_is_implied_by_the_authority() {
+    let (store, acct) = store();
+    let live =
+        |gmail: &str, thread: &str| triaged(acct, gmail, thread).body("osprey").ingest(&store);
+    let old = |gmail: &str, thread: &str| {
+        archive(
+            &store,
+            &triaged(acct, gmail, thread)
+                .body("osprey")
+                .received_at(days_ago(200)),
+        )
+    };
+    let mut expect: Vec<(&str, i64, (bool, bool))> = Vec::new();
+
+    let id = live("g-a", "t-a");
+    allow(&store, id);
+    expect.push(("live, allowed", id, (true, true)));
+    expect.push(("live, pending", live("g-b", "t-b"), (false, false)));
+    expect.push(("archive, unassessed", old("g-c", "t-c"), (false, false)));
+    let id = old("g-c2", "t-c2");
+    allow(&store, id);
+    expect.push(("archive, allowed", id, (true, true)));
+    let id = live("g-d", "t-d");
+    allow(&store, id);
+    owner_seal(&store, acct, id);
+    expect.push(("allowed, then sealed by the owner", id, (false, false)));
+    let id = live("g-e", "t-e");
+    access(&store, id, "restricted");
+    expect.push(("restricted", id, (false, false)));
+
+    // Thread mates.
+    let id = live("g-f1", "t-f");
+    allow(&store, id);
+    let mate = live("g-f2", "t-f");
+    access(&store, mate, "restricted");
+    expect.push(("allowed beside a restricted sibling", id, (false, false)));
+    let id = live("g-g1", "t-g");
+    allow(&store, id);
+    old("g-g2", "t-g");
+    expect.push((
+        "allowed beside an unassessed archive sibling",
+        id,
+        (true, true),
+    ));
+    let id = live("g-h1", "t-h");
+    allow(&store, id);
+    let mate = old("g-h2", "t-h");
+    owner_seal(&store, acct, mate);
+    expect.push((
+        "allowed beside an owner-sealed archive sibling",
+        id,
+        (false, false),
+    ));
+    let id = live("g-k1", "t-k");
+    allow(&store, id);
+    live("g-k2", "t-k");
+    expect.push(("allowed beside a live pending sibling", id, (false, false)));
+
+    // What the prefilter cannot say: the decision's own sources.
+    let source = live("g-src", "t-src");
+    let id = live("g-i", "t-i");
+    allow(&store, id);
+    depends_on(&store, acct, id, source, 1);
+    expect.push(("allowed, resting on a pending source", id, (true, false)));
+    let fine = live("g-j0", "t-j0");
+    allow(&store, fine);
+    let id = live("g-j1", "t-j");
+    allow(&store, id);
+    let mate = live("g-j2", "t-j");
+    allow(&store, mate);
+    depends_on(&store, acct, mate, fine, 99);
+    expect.push((
+        "allowed, a sibling rests on a changed source",
+        id,
+        (true, false),
+    ));
+    expect.push(("allowed, resting on a changed source", mate, (true, false)));
+
+    for (what, id, pair) in &expect {
+        assert_eq!(prefilter_and_authority(&store, acct, *id), *pair, "{what}");
+    }
+    // And over every row in the fixture, the ones above and their mates.
+    let all: Vec<i64> = store
+        .lock()
+        .unwrap()
+        .prepare("SELECT id FROM messages WHERE account_id=?1")
+        .unwrap()
+        .query_map(params![acct], |row| row.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert!(all.len() > expect.len());
+    for id in all {
+        let (prefilter, authority) = prefilter_and_authority(&store, acct, id);
+        assert!(
+            prefilter || !authority,
+            "message {id}: readable, yet filtered out"
+        );
+    }
+
+    // A row the prefilter passes and the authority refuses is not returned,
+    // by any leg, and the readable row ranked below it still is.
+    let found = store
+        .external_search(acct, "osprey", crate::store::SearchSort::BestMatch, 50)
+        .unwrap();
+    let mut ids: Vec<i64> = found.iter().map(|hit| hit.id).collect();
+    ids.sort_unstable();
+    let mut readable: Vec<i64> = expect
+        .iter()
+        .filter(|(_, _, pair)| pair.1)
+        .map(|(_, id, _)| *id)
+        .chain([fine])
+        .collect();
+    readable.sort_unstable();
+    assert_eq!(ids, readable);
+}
+
+/// Every external search this store can run, as the JSON a door would send.
+///
+/// One kind of query is left out because the property does not hold for it:
+/// several words, where rows match different ones. bm25 weighs each word by
+/// how many documents in the WHOLE index carry it, hidden mail included, so
+/// the order of readable rows that match different words can move with it.
+fn every_external_search(store: &SqliteStore, acct: AccountId) -> serde_json::Value {
+    use crate::store::{ExternalSearchMode, SearchFilter, SearchSort};
+    let mut out = serde_json::Map::new();
+    let modes: &[ExternalSearchMode] = if store.embedder().is_some() {
+        &[
+            ExternalSearchMode::Hybrid,
+            ExternalSearchMode::Semantic,
+            ExternalSearchMode::Keyword,
+        ]
+    } else {
+        &[ExternalSearchMode::Hybrid, ExternalSearchMode::Keyword]
+    };
+    let from = SearchFilter {
+        from: Some("zed".into()),
+        ..Default::default()
+    };
+    for mode in modes {
+        for sort in [SearchSort::Recent, SearchSort::BestMatch] {
+            for limit in [1usize, 3, 50] {
+                for (text, filter) in [
+                    ("heron", SearchFilter::default()),
+                    ("heron ledger", SearchFilter::default()),
+                    ("heron", from.clone()),
+                    ("", from.clone()),
+                ] {
+                    if text.is_empty() && *mode != ExternalSearchMode::Keyword {
+                        continue;
+                    }
+                    let hits = store
+                        .external_search_filtered(acct, text, &filter, sort, *mode, limit)
+                        .unwrap();
+                    out.insert(
+                        format!("{mode:?}/{sort:?}/{limit}/{text}/{:?}", filter.from),
+                        serde_json::to_value(&hits).unwrap(),
+                    );
+                }
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// S2. HIDDEN MAIL NEVER SHAPES AN EXTERNAL SEARCH. Readable rows first, and
+/// every search recorded; then a mailbox's worth of mail the caller may not be
+/// shown, most of it a better match for the same words: unassessed archive
+/// rows, a restricted row, a live pending one, a sealed one, a readable-looking
+/// row in a closed thread. Every search again: the same rows, in the same
+/// order, byte for byte, in every mode, sort and page size.
+#[test]
+fn hidden_mail_never_takes_a_place_in_an_external_search() {
+    use crate::embed::StubEmbedder;
+    for with_embedder in [false, true] {
+        let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
+        let (store, acct) = if with_embedder {
+            store_with_embedder(embedder.clone())
+        } else {
+            store()
+        };
+        let mut n = 0;
+        let mut add = |subject: &str, body: &str, days: i64, old: bool| -> i64 {
+            n += 1;
+            let builder = triaged(acct, &format!("g-{n}"), &format!("t-{n}"))
+                .from("zed@old.example")
+                .subject(subject)
+                .body(body)
+                .received_at(days_ago(days));
+            let id = if old {
+                archive(&store, &builder)
+            } else {
+                builder.ingest(&store)
+            };
+            if with_embedder {
+                embed_and_store(&store, embedder.as_ref(), acct, id, subject, body);
+            }
+            id
+        };
+        let filler = "lorem ipsum dolor sit amet ".repeat(20);
+        let mut readable = Vec::new();
+        for i in 0..6 {
+            readable.push(add(
+                &format!("heron survey {i}"),
+                &format!("the heron ledger for week {i}"),
+                3 + i,
+                false,
+            ));
+            readable.push(add(
+                &format!("quarterly notes {i}"),
+                &format!("{filler} heron {filler} kingfisher {i}"),
+                120 + i,
+                true,
+            ));
+        }
+        for id in &readable {
+            allow(&store, *id);
+        }
+        let before = every_external_search(&store, acct);
+        let shown = |value: &serde_json::Value, key: &str| value[key].as_array().unwrap().len();
+        let key = "Hybrid/BestMatch/50/heron/None";
+        assert_eq!(shown(&before, key), readable.len(), "the fixture is found");
+        assert_eq!(shown(&before, "Keyword/Recent/3/heron ledger/None"), 3);
+        assert_eq!(
+            shown(&before, "Keyword/Recent/50//Some(\"zed\")"),
+            readable.len()
+        );
+
+        // The hidden mailbox.
+        for i in 0..150 {
+            add(
+                "heron heron ledger",
+                "heron heron heron ledger kingfisher survey",
+                1 + i % 300,
+                true,
+            );
+        }
+        let restricted = add("heron ledger survey", "heron kingfisher", 1, false);
+        access(&store, restricted, "restricted");
+        add("heron ledger survey", "heron kingfisher pending", 1, false);
+        let sealed = add("heron ledger survey", "heron kingfisher sealed", 1, false);
+        allow(&store, sealed);
+        owner_seal(&store, acct, sealed);
+        // Allowed on its face, in a thread a restricted sibling closes.
+        let closed = triaged(acct, "g-closed-1", "t-closed")
+            .from("zed@old.example")
+            .subject("heron ledger survey")
+            .body("heron kingfisher closed")
+            .ingest(&store);
+        allow(&store, closed);
+        let closer = triaged(acct, "g-closed-2", "t-closed")
+            .from("zed@old.example")
+            .subject("unrelated")
+            .ingest(&store);
+        access(&store, closer, "restricted");
+        // Allowed on its face, resting on a source nobody has cleared: the
+        // one kind the prefilter passes. It costs a wider window, never a
+        // different answer.
+        for i in 0..4 {
+            let stale = add("heron ledger survey", "heron kingfisher stale", 1, false);
+            allow(&store, stale);
+            depends_on(&store, acct, stale, restricted, 1 + i);
+        }
+
+        let after = every_external_search(&store, acct);
+        let (before, after) = (before.as_object().unwrap(), after.as_object().unwrap());
+        assert!(before.len() >= 40);
+        for (search, hits) in before {
+            assert_eq!(
+                &after[search], hits,
+                "{search} (embedder: {with_embedder}) changed with mail the caller cannot read"
+            );
+        }
+    }
+}
+
+/// S2. THE DISPLACEMENT AND THE CLOCK. One readable row that mentions a word
+/// once, under more unreadable rows that say it better than the old recall
+/// ceiling could hold: it is still found. And a word only unreadable mail
+/// says costs about what a word nobody says does, because none of those rows
+/// is fetched, checked or hydrated; the choosing of ten to ask about is one
+/// bounded query.
+#[test]
+fn a_wall_of_unreadable_matches_neither_hides_a_readable_one_nor_slows_the_search() {
+    let (store, acct) = store();
+    let filler = "lorem ipsum dolor sit amet ".repeat(60);
+    let readable = archive(
+        &store,
+        &triaged(acct, "g-readable", "t-readable")
+            .subject("quarterly notes")
+            .body(&format!("{filler} heron {filler} kingfisher"))
+            .received_at(days_ago(200)),
+    );
+    allow(&store, readable);
+    let hidden = crate::store::EXTERNAL_RECALL_MAX + 104;
+    for i in 0..hidden {
+        archive(
+            &store,
+            &triaged(acct, &format!("g-h-{i}"), &format!("t-h-{i}"))
+                .subject("heron heron bittern")
+                .body("heron heron heron bittern")
+                .received_at(days_ago(100)),
+        );
+    }
+    let search = |query: &str| -> (Vec<i64>, usize, std::time::Duration) {
+        let started = std::time::Instant::now();
+        let hits = store
+            .external_search(acct, query, crate::store::SearchSort::BestMatch, 5)
+            .unwrap();
+        let pending = store
+            .archive_surface_candidates(acct, query, &Default::default(), true)
+            .unwrap();
+        (
+            hits.iter().map(|hit| hit.id).collect(),
+            pending.len(),
+            started.elapsed(),
+        )
+    };
+    // Warm the statement and page caches before anything is timed.
+    search("heron");
+    let (found, pending, displaced) = search("heron");
+    assert_eq!(
+        found,
+        vec![readable],
+        "not pushed out by mail it cannot see"
+    );
+    assert_eq!(pending, crate::store::ARCHIVE_SURFACE_CAP);
+    let (found, pending, hidden_only) = search("bittern");
+    assert!(found.is_empty());
+    assert_eq!(pending, crate::store::ARCHIVE_SURFACE_CAP);
+    let (found, pending, nothing) = search("zzyzx");
+    assert!(found.is_empty());
+    assert_eq!(pending, 0);
+    eprintln!(
+        "S2 latency over {hidden} hidden matches: readable+hidden {displaced:?}, \
+         hidden only {hidden_only:?}, no match {nothing:?}"
+    );
+    // Generous: the old loop took over a second here in a debug build, in
+    // thirteen doublings and some eight thousand per-row checks.
+    for elapsed in [displaced, hidden_only] {
+        assert!(
+            elapsed < std::time::Duration::from_millis(400),
+            "a search over hidden matches took {elapsed:?}"
+        );
+    }
 }

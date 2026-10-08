@@ -64,10 +64,92 @@ pub(crate) mod agent_budget;
 /// sealed by hand, and any NON-archive pending row all still close the thread.
 macro_rules! archive_unassessed_sql {
     () => {
-        "(m.is_archive=1 AND (a.access IS NULL OR a.access='pending')
+        archive_unassessed_sql_as!("m", "a")
+    };
+}
+/// [`archive_unassessed_sql!`] over any pair of aliases, so a subquery about a
+/// SIBLING row can ask the same question in the same words. One definition:
+/// the omission must not mean two things.
+macro_rules! archive_unassessed_sql_as {
+    ($m:literal, $a:literal) => {
+        concat!(
+            "(",
+            $m,
+            ".is_archive=1 AND (",
+            $a,
+            ".access IS NULL OR ",
+            $a,
+            ".access='pending')
            AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections c
-               WHERE c.account_id=m.account_id AND c.message_id=m.id
+               WHERE c.account_id=",
+            $m,
+            ".account_id AND c.message_id=",
+            $m,
+            ".id
                  AND c.field='external_access' AND c.value_json='true'))"
+        )
+    };
+}
+/// An unassessed archive row an external caller may still BUY a check for:
+/// not spam, and nothing queued, running or finished at its revision. That
+/// leaves the rows never asked about and the ones whose check FAILED (which
+/// `revive_failed_archive_access` puts back once the failure is a day old).
+/// Same aliases as [`archive_unassessed_sql!`]. The search that picks ten
+/// matches to ask about and the thread open that picks eight siblings both
+/// use it, so a row already parked never takes a place a fresh one could.
+macro_rules! archive_askable_sql {
+    () => {
+        concat!(
+            "(m.is_spam=0 AND ",
+            archive_unassessed_sql!(),
+            " AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs j
+                 WHERE j.account_id=m.account_id AND j.message_id=m.id
+                   AND j.kind IN ('triage','access') AND j.state!='failed'
+                   AND j.input_revision=COALESCE(a.revision,1)))"
+        )
+    };
+}
+/// THE EXTERNAL SEARCH PREFILTER, over alias `m`: a cheap NECESSARY condition
+/// for an external reader to be shown a row, written so a recall leg can carry
+/// it in its own WHERE. IT AUTHORIZES NOTHING. The authority is
+/// `messages::external_message_allowed_conn` plus
+/// `messages::thread_guard_and_subject`, and every candidate that passes this
+/// still goes through both before a field of it leaves the store.
+///
+/// What it is for: a row an external reader cannot be shown must not take a
+/// place in a recall window, or which readable rows come back (and in what
+/// order, and how fast) becomes a function of mail the caller may not read.
+/// Three terms, each implied by the authority and none of them the whole of it:
+/// 1. the row's own assessment is `allowed`;
+/// 2. the owner has not sealed it;
+/// 3. no sibling closes its thread on its face: a sibling the thread guard
+///    counts (so not an unassessed archive row) that is itself not `allowed`
+///    or is owner-sealed.
+///
+/// What it leaves to the authority: the recursive dependency check (a decision
+/// that consumed a source since restricted, changed or deleted), on the row
+/// and on every sibling. `the_external_prefilter_is_implied_by_the_authority`
+/// in tests/archive.rs holds "necessary" over a fixture of every case; if the
+/// authority ever loosens, that test is what says this must follow.
+macro_rules! external_candidate_sql {
+    () => {
+        concat!(
+            "(EXISTS(SELECT 1 FROM agent_message_state xa WHERE xa.account_id=m.account_id
+                 AND xa.message_id=m.id AND xa.access='allowed')
+              AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections xc
+                 WHERE xc.account_id=m.account_id AND xc.message_id=m.id
+                   AND xc.field='external_access' AND xc.value_json='true')
+              AND NOT EXISTS(SELECT 1 FROM messages s
+                 LEFT JOIN agent_message_state sa
+                   ON sa.account_id=s.account_id AND sa.message_id=s.id
+                 WHERE s.account_id=m.account_id AND s.thread_id=m.thread_id AND s.id!=m.id
+                   AND NOT ",
+            archive_unassessed_sql_as!("s", "sa"),
+            " AND (sa.access IS NULL OR sa.access!='allowed'
+                     OR EXISTS(SELECT 1 FROM agent_triage_corrections sc
+                         WHERE sc.account_id=s.account_id AND sc.message_id=s.id
+                           AND sc.field='external_access' AND sc.value_json='true'))))"
+        )
     };
 }
 mod agent_deliveries;
@@ -103,7 +185,7 @@ pub use self::agent_triage::{
     ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
 };
 use self::migrate::migrate;
-pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearch};
+pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
 
 use std::path::Path;
 use std::sync::{Mutex, Once, RwLock};
@@ -313,6 +395,14 @@ impl SqliteStore {
     /// The attached event notifier, if any. Cheap clone of the sender.
     pub fn event_notifier(&self) -> Option<tokio::sync::broadcast::Sender<i64>> {
         self.event_tx.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Run raw SQL on the store's connection. For a test outside this module
+    /// that has to break the store on purpose (a trigger that refuses one
+    /// row); nothing in the daemon has a use for it.
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &str) {
+        self.lock().unwrap().execute_batch(sql).unwrap();
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {

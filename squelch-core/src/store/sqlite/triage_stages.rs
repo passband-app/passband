@@ -366,19 +366,20 @@ impl SqliteStore {
         // answer the human with nothing.
         let ids = match message_id {
             Some(id) => {
-                let named: Option<(String, bool)> = tx
+                let named: Option<(String, bool, bool)> = tx
                     .query_row(
                         concat!(
                             "SELECT m.thread_id,",
                             own_mail_sql!(),
-                            " AND m.is_spam=0 FROM messages m WHERE m.account_id=?1 AND m.id=?2"
+                            " AND m.is_spam=0,m.is_archive
+                             FROM messages m WHERE m.account_id=?1 AND m.id=?2"
                         ),
                         params![account_id, id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
                 let inbound: Option<i64> = match &named {
-                    Some((thread, true)) if !thread.is_empty() => tx
+                    Some((thread, true, _)) if !thread.is_empty() => tx
                         .query_row(
                             concat!(
                                 "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2
@@ -396,7 +397,16 @@ impl SqliteStore {
                         .optional()?,
                     _ => None,
                 };
-                named.map(|_| inbound.unwrap_or(id)).into_iter().collect()
+                // With no live inbound message to stand for it, own mail is
+                // enqueued as itself, UNLESS IT IS IN THE ARCHIVE: the
+                // owner's old sent mail is never promoted and never queued,
+                // so naming it does nothing at all.
+                named
+                    .and_then(|(_, own, archived)| {
+                        inbound.or_else(|| (!(own && archived)).then_some(id))
+                    })
+                    .into_iter()
+                    .collect()
             }
             None => {
                 let mut stmt = tx.prepare(concat!(

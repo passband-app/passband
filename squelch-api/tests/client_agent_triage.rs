@@ -433,25 +433,156 @@ async fn the_agent_routes_omit_unassessed_archive_mail_and_search_surfaces_it() 
     }
 }
 
-/// B1. With no sync engine attached the search queues the check and SAYS
-/// NOTHING: a query that matched unassessed archive mail gets the same bytes
-/// back as one that matched nothing, in every mode, phrase and operator.
+/// Every job on `ids`, in every state.
+fn job_count(h: &Harness, ids: &[i64]) -> usize {
+    ids.iter()
+        .map(|id| {
+            h.store.agent_diagnostics(h.acct, *id).unwrap()["jobs"]
+                .as_array()
+                .unwrap()
+                .len()
+        })
+        .sum()
+}
+
+/// B1 + S2. THE SEARCH SAYS NOTHING ABOUT MAIL IT MAY NOT SHOW. Readable mail
+/// first, live and old, and every search recorded; then fifteen unassessed
+/// archive rows that match the same words better. Every search again, twice
+/// (never asked about, then queued and beyond the cap): the same items in the
+/// same order, byte for byte, in every mode, page size, phrase and operator.
+/// A mailbox with nothing readable in it cannot show a readable row being
+/// displaced or reordered, which is why this one has some.
 #[tokio::test]
 async fn agent_search_says_nothing_about_unassessed_archive_matches() {
+    use squelch_core::triage::access::AccessDecision;
     let (state, store, acct) = state_with(|_, _| {});
     let h = Harness {
         app: squelch_api::router(state.with_archive_days(365)),
         store,
         acct,
     };
+    for i in 0..3 {
+        let mut live = msg(
+            h.acct,
+            &format!("g-live-{i}"),
+            &format!("t-live-{i}"),
+            &format!("heron ledger {i}"),
+            "heron ledger memo",
+        );
+        live.from_addr = "zed@old.example".into();
+        live.received_at = Utc::now() - chrono::Duration::days(i + 1);
+        let id = h.store.upsert_message(&live).unwrap();
+        assess(&h, id, false);
+    }
+    let cleared: Vec<i64> = (0..2)
+        .map(|i| {
+            old_mail(
+                &h,
+                &format!("g-ok-{i}"),
+                &format!("t-ok-{i}"),
+                "heron count",
+            )
+        })
+        .collect();
+    assert_eq!(
+        h.store
+            .request_archive_access(h.acct, &cleared, Default::default(), Utc::now())
+            .unwrap()
+            .len(),
+        2
+    );
+    while let Some(job) = h
+        .store
+        .claim_agent_job(h.acct, "access", Utc::now(), 120)
+        .unwrap()
+    {
+        let original = h.store.load_agent_access_message(&job).unwrap();
+        let decision = AccessDecision {
+            restricted: false,
+            reason: "test".into(),
+        };
+        h.store
+            .commit_agent_access(&job, &original, &decision, &serde_json::json!({}))
+            .unwrap();
+    }
+    // Word, phrase, sender operator, date operator, operators alone, and a
+    // word nothing says.
+    //
+    // NOT HERE, AND NOT CLAIMED: a query of several words where no readable
+    // row has all of them. Its any-term ranking is bm25, whose term weights
+    // come from how many documents in the WHOLE index carry each word, so
+    // which readable row leads can shift with how common a word is in mail
+    // the caller cannot read. FTS5 keeps one set of statistics; see the
+    // accepted residuals in docs/SECURITY.md.
+    let queries = [
+        "heron",
+        "%22heron%20ledger%22",
+        "heron%20from:zed",
+        "heron%20after:2020-01-01",
+        "from:zed@old.example",
+        "after:2020-01-01",
+        "zzyzx",
+    ];
+    async fn all(h: &Harness, queries: &[&str]) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for q in queries {
+            for mode in ["keyword", "hybrid"] {
+                for limit in [2, 30] {
+                    let started = std::time::Instant::now();
+                    let (status, found) = get(
+                        h,
+                        &format!("/client/agent/search?q={q}&mode={mode}&limit={limit}"),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK, "q={q}");
+                    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+                    out.push(found);
+                }
+            }
+        }
+        out
+    }
+    let before = all(&h, &queries).await;
+    assert_eq!(
+        before[1]["items"].as_array().unwrap().len(),
+        5,
+        "{}",
+        before[1]
+    );
+    assert_eq!(before[0]["items"].as_array().unwrap().len(), 2);
+
     let mut old = Vec::new();
     for i in 0..15 {
         old.push(old_mail(
             &h,
             &format!("g-{i}"),
             &format!("t-{i}"),
-            "heron ledger",
+            "heron ledger heron count",
         ));
+    }
+    for round in 0..2 {
+        let after = all(&h, &queries).await;
+        for (index, (was, is)) in before.iter().zip(&after).enumerate() {
+            assert_eq!(
+                was, is,
+                "search {index}, round {round}, tells the caller about unread mail"
+            );
+        }
+    }
+    let queued = job_count(&h, &old);
+    assert!(queued > 0, "the matches really were surfaced");
+    assert!(queued <= 15, "and never twice");
+
+    // Nothing readable at all: the same bytes as a search that matched
+    // nothing, spelled out.
+    let (state, store, acct) = state_with(|_, _| {});
+    let h = Harness {
+        app: squelch_api::router(state.with_archive_days(365)),
+        store,
+        acct,
+    };
+    for i in 0..3 {
+        old_mail(&h, &format!("g-{i}"), &format!("t-{i}"), "heron ledger");
     }
     let (_, nothing) = get(&h, "/client/agent/search?q=zzyzx&mode=keyword").await;
     assert_eq!(
@@ -469,35 +600,10 @@ async fn agent_search_says_nothing_about_unassessed_archive_matches() {
             },
         })
     );
-    // Word, phrase, sender operator, date operator, sender alone; twice each,
-    // so the queued and the beyond-the-cap states are both covered.
-    for q in [
-        "heron",
-        "%22heron%20ledger%22",
-        "heron%20from:zed",
-        "from:zed@old.example",
-        "heron%20after:2020-01-01",
-    ] {
-        for _ in 0..2 {
-            let started = std::time::Instant::now();
-            let (status, found) =
-                get(&h, &format!("/client/agent/search?q={q}&mode=keyword")).await;
-            assert_eq!(status, StatusCode::OK);
-            assert!(started.elapsed() < std::time::Duration::from_secs(5));
-            assert_eq!(found, nothing, "q={q} tells the caller about unread mail");
-        }
+    for q in ["heron", "from:zed@old.example", "heron%20from:zed"] {
+        let (_, found) = get(&h, &format!("/client/agent/search?q={q}&mode=keyword")).await;
+        assert_eq!(found, nothing, "q={q}");
     }
-    let queued: usize = old
-        .iter()
-        .map(|id| {
-            h.store.agent_diagnostics(h.acct, *id).unwrap()["jobs"]
-                .as_array()
-                .unwrap()
-                .len()
-        })
-        .sum();
-    assert!(queued > 0, "the matches really were surfaced");
-    assert!(queued <= 15, "and never twice");
 
     // Archive off: no horizon at all, and still nothing about the matches.
     let off = harness(|_, _| {});
@@ -507,6 +613,49 @@ async fn agent_search_says_nothing_about_unassessed_archive_matches() {
         found,
         serde_json::json!({"items": [], "match_kind": "keyword", "sort": "recent"})
     );
+}
+
+/// S3. A SENDER OR A DATE RANGE IS NOT A KEYWORD MATCH. A query of operators
+/// alone runs no MATCH, so it buys no access check: otherwise the door could
+/// be walked through the archive one sender or one month at a time, on mail
+/// that matched nothing anybody was looking for. With a word beside them the
+/// operators narrow what is bought, exactly as they narrow what is returned.
+#[tokio::test]
+async fn a_filter_only_agent_search_buys_no_access_checks() {
+    let (state, store, acct) = state_with(|_, _| {});
+    let h = Harness {
+        app: squelch_api::router(state.with_archive_days(365)),
+        store,
+        acct,
+    };
+    let old: Vec<i64> = (0..5)
+        .map(|i| old_mail(&h, &format!("g-{i}"), &format!("t-{i}"), "heron ledger"))
+        .collect();
+    for q in [
+        "from:zed@old.example",
+        "before:2030-01-01",
+        "from:zed%20after:2020-01-01%20before:2030-01-01",
+    ] {
+        for mode in ["keyword", "hybrid", "semantic"] {
+            let (status, found) = get(&h, &format!("/client/agent/search?q={q}&mode={mode}")).await;
+            assert_eq!(status, StatusCode::OK, "q={q}");
+            assert_eq!(found["items"], serde_json::json!([]));
+        }
+    }
+    assert_eq!(job_count(&h, &old), 0, "operators alone matched no word");
+
+    // A word, narrowed to a sender who wrote none of it: still nothing.
+    let (_, _) = get(
+        &h,
+        "/client/agent/search?q=heron%20from:nobody&mode=keyword",
+    )
+    .await;
+    assert_eq!(job_count(&h, &old), 0);
+    // The word and the sender who did: every match is asked about, once.
+    for _ in 0..2 {
+        let (_, _) = get(&h, "/client/agent/search?q=heron%20from:zed&mode=keyword").await;
+    }
+    assert_eq!(job_count(&h, &old), 5);
 }
 
 /// A lane that leases every check and never finishes one.

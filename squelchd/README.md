@@ -34,8 +34,6 @@ Config comes from `~/.config/squelch/config.toml` (override with `--config`) plu
 | `SQUELCH_DB_PATH` | SQLite path | `~/.local/share/squelch/squelch.db` |
 | `SQUELCH_POLL_SECS` | Gmail poll interval | `45` |
 | `SQUELCH_FETCH_CONCURRENCY` | `messages.get` calls in flight while a window of mail is fetched (first backfill, catch-up, history walk); each is a raw body in memory, and the Gmail budget caps the gain past 2 | `2` |
-| `SQUELCH_ARCHIVE_DAYS` | how many days back mail is kept findable by search, same value as `[sync] archive_days`; mail older than the backfill window is fetched once by a slow background walk with no model call, and `0` turns that off. Clamped to 7300. Archive attachments are kept as name and size only (no bytes), the walk fetches at most 30 messages a minute, and a hosted tenant gets `0` unless the warden sets `SQUELCH_WARDEN_ARCHIVE_DAYS` | `365` |
-| `SQUELCH_ARCHIVE_MIN_FREE_MB` | the archive walk stores nothing while the database's filesystem has less than this many MiB free (or its free space cannot be read), same value as `[sync] archive_min_free_mb`; `0` turns the check off | `2048` |
 | `SQUELCH_MCP_ALLOWED_HOSTS` | extra Host values when fronted by a proxy | — |
 | `SQUELCH_MCP_OAUTH_ISSUER` | OAuth issuer for the agent door; set together with the next one | unset (agent door open) |
 | `SQUELCH_MCP_PUBLIC_URL` | this daemon's public `/mcp` URL, the token audience | unset (agent door open) |
@@ -44,6 +42,8 @@ Config comes from `~/.config/squelch/config.toml` (override with `--config`) plu
 | `SQUELCH_EMBED_MODEL` | semantic-recall weights, same value as `[embed] model` | `Xenova/bge-small-en-v1.5` |
 | `SQUELCH_CRED_BACKEND` | `keyring` or `file` | `keyring` on macOS, `file` on Linux |
 | `SQUELCH_CREDENTIALS_PATH` | where the `file` backend writes, mode 0600 | `~/.config/squelch/credentials.json` |
+
+**Older mail (the archive).** Mail older than the backfill window is fetched once by a slow background walk and kept findable by search and openable in the reader, with no model call when it is stored. It is on by default, on every deployment, and has no environment variable; three config-file keys tune it. `[sync] archive_days` (default `365`, clamped to 7300, `0` turns it off) is how far back it reaches. `[sync] archive_min_free_mb` (default `2048`, `0` turns the check off) is the disk floor: the walk stores nothing while the filesystem the database lives on has less than this many MiB free, or while free space cannot be read, and it is checked before every batch. `[triage.agent] archive_access_daily_cap` (default `50`) is how many access checks a day agent searches and thread opens may buy on that mail. Archive attachments are kept as name and size only (no bytes), and the walk fetches at most 30 messages a minute. On `/metrics`, `squelchd_archive_walked_to_timestamp_seconds` and `squelchd_archive_covered_to_timestamp_seconds` are how far back and how far forward it has got, `squelchd_archive_held{reason=...}` is 1 for whatever is holding it off (`poll`, `window`, `embedder`, `disk`, `clock`, `quota_day`), and `squelchd_archive_skipped_messages_total` counts messages it stepped over (each is logged by Gmail id and error kind).
 
 The listener defaults to loopback and never silently widens. To expose it beyond the machine, front it with a reverse proxy (e.g. `tailscale serve --bg 8848`) and set `SQUELCH_MCP_ALLOWED_HOSTS`.
 

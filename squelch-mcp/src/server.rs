@@ -20,7 +20,8 @@ use squelch_core::config::ShipmentListPolicy;
 use squelch_core::error::CoreError;
 use squelch_core::store::agent_triage::AgentTriageStore;
 use squelch_core::store::archive_surface::{
-    ArchiveHorizon, ArchiveSurfacing, SurfaceWait, await_thread_access, search_with_surfacing,
+    ArchiveHorizon, ArchiveSurfacing, KeywordMatch, SurfaceWait, await_thread_access,
+    search_with_surfacing,
 };
 use squelch_core::store::{NewAuditEntry, SearchSort, SqliteStore, Store};
 use squelch_core::triage::agent_config::RankingConfig;
@@ -1225,25 +1226,33 @@ impl SquelchServer {
             None => SearchSort::default(),
         };
 
-        // Search expands its recall window until access filtering leaves the
-        // requested number of readable results, or the corpus is exhausted.
+        // The search fetches only rows this door may be shown, and expands
+        // its recall window until the requested number survive the full
+        // access check, or the corpus is exhausted.
         //
-        // ASSESS ON SURFACING: archive mail that matched but has never had an
-        // access check gets one queued here (keyword matches only, at most
-        // ten, best-ranked first), and the search runs again after a short
-        // wait. What is still unchecked is not reported in any form: this
-        // door never learns it.
+        // ASSESS ON SURFACING, BEFORE THE SEARCH: archive mail the keyword
+        // leg matches that has never had an access check gets one queued (at
+        // most ten, best match first), the door waits a short while, and the
+        // search then runs once. What is still unchecked is not reported in
+        // any form: this door never learns it.
         let account_id = self.account_id;
         let query = query.to_string();
         let surfacing = self
             .archive_surfacing
             .clone()
             .capped(SurfaceWait::MCP_DEADLINE);
+        let keyword = KeywordMatch {
+            text: query.clone(),
+            filter: Default::default(),
+            // The hybrid keyword leg recalls the owner's sent mail too.
+            include_sent: true,
+        };
         let (hits, horizon) = search_with_surfacing(
             &self.store,
             account_id,
             &surfacing,
-            move |store: &SqliteStore| store.external_search_surfacing(account_id, &query, sort, k),
+            Some(keyword),
+            move |store: &SqliteStore| store.external_search(account_id, &query, sort, k),
         )
         .await
         .map_err(Self::map_err)?;
@@ -3324,6 +3333,73 @@ mod tests {
     async fn a_search_response_never_depends_on_unassessed_archive_mail() {
         let store = Arc::new(SqliteStore::open_in_memory().unwrap());
         let account = store.ensure_account("me@localhost").unwrap();
+        // READABLE MAIL FIRST, live and old, matching the same words the
+        // hidden mail will. An oracle test over a mailbox with nothing
+        // readable in it compares empty with empty and cannot see a readable
+        // row being displaced, reordered or renumbered by a hidden one.
+        for i in 0..3 {
+            let id = seed(
+                &store,
+                account,
+                &format!("live{i}"),
+                &format!("heron ledger {i}"),
+            );
+            decide(&store, account, id, false, None);
+        }
+        let readable_old: Vec<i64> = (0..3)
+            .map(|i| {
+                seed_old(
+                    &store,
+                    account,
+                    &format!("r{i}"),
+                    &format!("gr{i}"),
+                    &format!("heron count {i}"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            store
+                .request_archive_access(account, &readable_old, Default::default(), Utc::now())
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(drain_access(&store, account, Some(false)), 3);
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(archive_on());
+        // (Not a several-word query no readable row fully matches: bm25
+        // weighs words by how common they are across the whole index. See
+        // the accepted residuals in docs/SECURITY.md.)
+        let queries = ["heron", "\"heron ledger\"", "zed", "zzyzx"];
+        // Every query under both sorts and two page sizes: the whole response,
+        // which is every result's fields, their order and their `relevance`.
+        async fn all(server: &SquelchServer, queries: &[&str]) -> Vec<serde_json::Value> {
+            let mut out = Vec::new();
+            for query in queries {
+                for sort in [None, Some("best_match")] {
+                    for k in [2, 50] {
+                        out.push(values(
+                            &server
+                                .search_mail(Parameters(SearchMailParams {
+                                    query: (*query).into(),
+                                    k: Some(k),
+                                    sort: sort.map(str::to_string),
+                                }))
+                                .await
+                                .unwrap(),
+                        ));
+                    }
+                }
+            }
+            out
+        }
+        let before = all(&server, &queries).await;
+        assert_eq!(before[1]["results"].as_array().unwrap().len(), 6);
+        assert_eq!(before[1]["results"][5]["relevance"], 6);
+        assert_eq!(before[0]["results"].as_array().unwrap().len(), 2);
+
+        // The hidden mail: fifteen old rows that say the same words better.
         let mut old = Vec::new();
         for i in 0..15 {
             old.push(seed_old(
@@ -3331,25 +3407,18 @@ mod tests {
                 account,
                 &format!("t{i}"),
                 &format!("g{i}"),
-                "heron ledger",
+                "heron ledger heron count",
             ));
         }
-        let server = SquelchServer::new(store.clone(), "me@localhost")
-            .unwrap()
-            .with_archive_surfacing(archive_on());
-
-        // Fifteen matches: ten queued by this call, five past the cap.
-        assert_says_nothing(&server, "heron").await;
-        // Queued; and the phrase and the sender are no more of an oracle.
-        assert_says_nothing(&server, "\"heron ledger\"").await;
-        assert_says_nothing(&server, "zed").await;
+        // Never asked about; then, as these very searches queue them: queued,
+        // and five past the cap.
+        assert_eq!(all(&server, &queries).await, before);
+        assert_eq!(all(&server, &queries).await, before);
         // Parked on the daily budget.
         assert!(drain_access(&store, account, None) > 0);
-        assert_says_nothing(&server, "heron").await;
+        assert_eq!(all(&server, &queries).await, before);
         // Restricted, every one of them.
-        store
-            .request_archive_access(account, &old, Default::default(), Utc::now())
-            .unwrap();
+        let mut restricted = 0;
         for _ in 0..3 {
             let _ = search_response(&server, "heron").await;
             while let Some(job) = store
@@ -3369,12 +3438,31 @@ mod tests {
                 store
                     .commit_agent_access(&job, &original, &decision, &serde_json::json!({}))
                     .unwrap();
+                restricted += 1;
             }
         }
-        assert_says_nothing(&server, "heron").await;
+        assert_eq!(restricted, 15, "every hidden row reached a verdict");
+        assert_eq!(all(&server, &queries).await, before);
 
-        // The whole response, spelled out: results, a date, and a horizon
-        // that is the same for every query.
+        // The whole response for a word only hidden mail says, spelled out:
+        // no results, a date, and a horizon that is the same for every query.
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        for i in 0..15 {
+            seed_old(
+                &store,
+                account,
+                &format!("t{i}"),
+                &format!("g{i}"),
+                "heron ledger",
+            );
+        }
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(archive_on());
+        assert_says_nothing(&server, "heron").await;
+        assert_says_nothing(&server, "\"heron ledger\"").await;
+        assert_says_nothing(&server, "zed").await;
         let target = (Utc::now() - chrono::Duration::days(365))
             .format("%Y-%m-%d")
             .to_string();
@@ -3556,6 +3644,11 @@ mod tests {
     /// an archive row before and after it is cleared: the row is still in the
     /// archive, and no triage job was ever queued for it. The tool list is
     /// asserted so a new tool cannot arrive without being added here.
+    ///
+    /// The two write tools reach a recording mailer here, which reads no
+    /// mail. Their real path (the daemon's mailer and its reply-target read)
+    /// is driven in squelch-api/tests/agent_write.rs,
+    /// `a_reply_targeted_write_queues_no_work_on_archive_mail_and_promotes_none`.
     #[tokio::test]
     async fn no_agent_door_tool_can_promote_an_archive_row() {
         let store = Arc::new(SqliteStore::open_in_memory().unwrap());
@@ -3625,10 +3718,14 @@ mod tests {
             let _ = server.send_email(Parameters(send)).await;
 
             assert!(is_archive(&store, account, old), "round {round}");
+            // EXACTLY ONE JOB, the capped surfacing check the first search
+            // bought, in both rounds. Not "no triage job": an empty list
+            // would pass that, and so would a second check.
             let jobs = store.agent_diagnostics(account, old).unwrap();
-            for job in jobs["jobs"].as_array().unwrap() {
-                assert_eq!(job["kind"], "access", "round {round}: {job}");
-            }
+            let jobs = jobs["jobs"].as_array().unwrap();
+            assert_eq!(jobs.len(), 1, "round {round}: {jobs:?}");
+            assert_eq!(jobs[0]["kind"], "access", "round {round}");
+            assert_eq!(jobs[0]["trigger"], "archive_access", "round {round}");
             // Second round: the same calls at a row the door may now read.
             drain_access(&store, account, Some(false));
         }

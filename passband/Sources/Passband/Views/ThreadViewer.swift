@@ -1365,9 +1365,16 @@ struct ThreadViewer: View {
         }
         hold.aim {
             index == newestIndex && !handScrolling && !parkedOnNewest
-        } scroll: {
+        } scroll: { attempt in
             if map.frames[newestIndex] == nil {
-                proxy.scrollTo(Self.columnId, anchor: .bottom)
+                // Every other try is aimed a little short of the end.
+                // Arriving at the end can leave the stack with NO card laid
+                // out, and asking for the end again is then asking for where
+                // the scroll already is: nothing moves, so nothing is laid
+                // out. A different offset is what makes it look again.
+                let short = attempt.isMultiple(of: 2)
+                proxy.scrollTo(
+                    Self.columnId, anchor: short ? UnitPoint(x: 0.5, y: 0.99) : .bottom)
             } else {
                 proxy.scrollTo(newestIndex, anchor: .top)
             }
@@ -4312,14 +4319,16 @@ private final class LandingHold {
 
     /// Scroll until `off` stops being true. One loop at a time: every card
     /// that moves asks, and they all move at once.
-    func aim(while off: @escaping @MainActor () -> Bool, scroll: @escaping @MainActor () -> Void) {
+    func aim(
+        while off: @escaping @MainActor () -> Bool, scroll: @escaping @MainActor (Int) -> Void
+    ) {
         guard live, aiming == nil else { return }
         aiming = Task { @MainActor in
             // Next turn, not inside the layout pass that reported the frame.
             await Task.yield()
             while !Task.isCancelled, live, off(), spent < Self.budget {
                 spent += 1
-                scroll()
+                scroll(spent)
                 do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
             }
             // A cancelled loop was ended by `end`, which may already have

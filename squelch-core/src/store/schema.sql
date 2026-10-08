@@ -1333,6 +1333,11 @@ CREATE INDEX IF NOT EXISTS idx_message_opens_token ON message_opens(token);
 -- A CHANGED platform or version only replaces the stored one after it has been
 -- quiet for an hour (`CLIENT_CHANGE_THROTTLE_SECS`), which is what stops a
 -- token holder minting a metric series per request.
+--
+-- `client_action_at` is the last time that app DID something with this token:
+-- a successful write on the client door (see `note_client_action`). Narrower
+-- than `client_seen_at`, which an open app moves by polling. NULL until the
+-- first one, and it is read with `client_platform`, so it says which app acted.
 CREATE TABLE IF NOT EXISTS device_tokens (
     id           INTEGER PRIMARY KEY,
     account_id   INTEGER NOT NULL,   -- -> accounts.id
@@ -1345,7 +1350,8 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     revoked_at   TEXT,
     client_platform TEXT,
     client_version  TEXT,
-    client_seen_at  TEXT
+    client_seen_at  TEXT,
+    client_action_at TEXT
 );
 
 -- `token list` reads exactly "every token for my account".

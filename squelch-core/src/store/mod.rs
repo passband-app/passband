@@ -629,6 +629,15 @@ pub struct ClientSeen {
     pub seen_at: DateTime<Utc>,
 }
 
+/// One platform and the last time any of this account's devices acted as it.
+/// See
+/// [`SqliteStore::client_actions_seen`](sqlite::SqliteStore::client_actions_seen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientActed {
+    pub platform: ClientPlatform,
+    pub acted_at: DateTime<Utc>,
+}
+
 /// A device token at the ONE moment its plaintext exists.
 ///
 /// Returned by [`SqliteStore::issue_device_token`](sqlite::SqliteStore::issue_device_token)

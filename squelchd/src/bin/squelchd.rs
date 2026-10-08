@@ -1950,6 +1950,7 @@ async fn gather_store_metrics(
         // Platform and version only, already folded: two phones on one build
         // are one entry, and nothing that names a device comes back.
         let clients = store.client_versions_seen(account_id)?;
+        let client_actions = store.client_actions_seen(account_id)?;
         Ok::<_, squelch_core::CoreError>(squelch_core::metrics::StoreSnapshot {
             llm_cost_usd: squelch_core::metrics::estimate_cost_usd(&llm, &config),
             stats,
@@ -1958,6 +1959,7 @@ async fn gather_store_metrics(
             wal_bytes,
             devices_paired,
             clients,
+            client_actions,
             triage_jobs: store.triage_job_counts(account_id)?,
             triage_budget: store.daily_budget_status(
                 account_id,

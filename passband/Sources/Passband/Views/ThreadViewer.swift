@@ -878,6 +878,8 @@ struct ThreadViewer: View {
                             FrameHeights.shared.using(width: width)
                         }
                         .readerColumn()
+                        // The column itself, as a scroll target: see `holdNewest`.
+                        .id(Self.columnId)
                         // INSIDE the scroll content deliberately: an overlay on the
                         // ScrollView itself would sit above it and eat the wheel
                         // wherever it covers, and the pointer parks in the gutter.
@@ -1198,13 +1200,24 @@ struct ThreadViewer: View {
     /// PUT THE NEWEST BACK when layout, not the reader, took it away. Asked by
     /// every card whose frame moves, because the newest cannot ask for itself:
     /// shoved far enough it is recycled by the stack and stops reporting.
+    ///
+    /// A RECYCLED CARD CANNOT BE SCROLLED TO: its `.id` is gone with it, and a
+    /// `scrollTo` naming it does nothing at all. The column is always there,
+    /// and its end is where the newest lives, so that is the first step: it
+    /// brings the card back, and the next pass can aim at the card itself.
     private func holdNewest(_ proxy: ScrollViewProxy) {
         hold.aim {
             index == newestIndex && !handScrolling && !parkedOnNewest
         } scroll: {
-            proxy.scrollTo(newestIndex, anchor: .top)
+            if map.frames[newestIndex] == nil {
+                proxy.scrollTo(Self.columnId, anchor: .bottom)
+            } else {
+                proxy.scrollTo(newestIndex, anchor: .top)
+            }
         }
     }
+
+    private static let columnId = "reader-column"
 
     /// Whether the newest message's top edge is still sitting at the top of the
     /// window — that is, whether the reader is where the landing put them. Read

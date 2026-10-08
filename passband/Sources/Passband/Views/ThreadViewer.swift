@@ -851,8 +851,11 @@ struct ThreadViewer: View {
                                 .onGeometryChange(for: CGRect.self) {
                                     $0.frame(in: .scrollView)
                                 } action: { frame in
+                                    let mounting = map.frames[i] == nil
                                     map.note(i, frame: frame)
                                     holdNewest(proxy)
+                                    // A card arriving is the window moving.
+                                    if mounting { renderAhead() }
                                     if i == index { acknowledgeDisplayedMessage(id: m.id, frame: frame) }
                                     if i == newestIndex { newestHeight = frame.height }
                                 }
@@ -1218,6 +1221,31 @@ struct ThreadViewer: View {
     }
 
     private static let columnId = "reader-column"
+
+    /// HAVE THE NEXT MESSAGES DRAWN BEFORE THE SCROLL REACHES THEM (see
+    /// `FramePrewarmer.ahead`). Asked each time a card mounts, which is as
+    /// often as the answer changes.
+    ///
+    /// MORE ABOVE THAN BELOW, and above first: the reader opens at the end of
+    /// the thread, so up is the way nearly every scroll goes. Five in all,
+    /// inside the six the pool keeps for mail that has been read.
+    ///
+    /// Only mail the pool may hold at all (`cache_allowed`), and only what is
+    /// not already drawn. "Drawn" is judged within a few windows of here: the
+    /// map can keep a frame for a card the stack laid out once, far away, and
+    /// let go of without saying so.
+    private func renderAhead() {
+        guard thread?.cache_allowed == true, styleReady, viewportHeight > 0 else { return }
+        let near = map.frames.filter {
+            $0.value.maxY > -2 * viewportHeight && $0.value.minY < 3 * viewportHeight
+        }
+        let visible = near.filter { $0.value.maxY > 0 && $0.value.minY < viewportHeight }.keys
+        guard let top = visible.min(), let bottom = visible.max() else { return }
+        let wanted = [top - 1, bottom + 1, top - 2, bottom + 2, top - 3].filter {
+            messages.indices.contains($0) && near[$0] == nil
+        }
+        FramePrewarmer.shared.ahead(wanted.map { messages[$0] }, style: style, width: bodyWidth)
+    }
 
     /// Whether the newest message's top edge is still sitting at the top of the
     /// window — that is, whether the reader is where the landing put them. Read

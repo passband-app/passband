@@ -836,6 +836,9 @@ enum UnsubscribeMethod: String, LenientRawEnum {
     case auto
     /// Done by reading the sender's page and, at most, pressing its one button.
     case page
+    /// Done in a remote browser the daemon steered through the sender's page:
+    /// a preference center switched off, a form filled in.
+    case agent
     static var unknownFallback: UnsubscribeMethod { .browser }
 }
 
@@ -884,7 +887,9 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     var status: UnsubStatus? = nil
     /// The ORIGINAL link, for `needs_you`.
     var status_url: String? = nil
-    /// choose_topics | needs_browser | link_error | unclear, for `needs_you`.
+    /// choose_topics | needs_browser | link_error | unclear, and from the
+    /// daemon's browser sign_in | captcha | check_email | your_call, for
+    /// `needs_you`. Copy for each is `UnsubscribeTray.why`.
     var status_reason: String? = nil
     var status_at: String? = nil
     /// The smart block the daemon has worked out for this sender, and whether

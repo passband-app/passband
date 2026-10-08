@@ -204,6 +204,14 @@ data:
   SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
   SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
   SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
+  # OPTIONAL. The automatic unsubscribe's browser rung: the Secret (key
+  # `api-key`) holding the fleet's Browserbase API key, handed to every tenant
+  # daemon as an optional SQUELCH_BROWSERBASE_API_KEY reference. Leave it out
+  # and no tenant has the rung. With it, a tenant still needs the hidden
+  # feature `unsub_browser` ticked on /admin/features. Create the Secret first:
+  #   kubectl -n <tenants namespace> create secret generic browserbase \
+  #     --from-literal=api-key=bb_live_...
+  # SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME: "browserbase"
   # 3. EDIT ME. The control plane's origin, handed to every tenant daemon as
   # SQUELCH_CONSOLE_SSO_URL. It is what puts "Continue with Google" on a tenant's
   # own /console login page: Google forbids wildcard redirect URIs, so a

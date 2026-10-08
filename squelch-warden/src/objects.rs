@@ -169,6 +169,11 @@ pub const OAUTH_CLIENT_SECRET_KEY: &str = "client_secret";
 /// a log line or this process's memory.
 pub const RELAY_TOKEN_KEY: &str = "token";
 
+/// Key inside the fleet's Browserbase Secret
+/// ([`crate::config::Config::browserbase_secret_name`]): the API key the
+/// automatic unsubscribe's browser rung rents its remote browser with.
+pub const BROWSERBASE_API_KEY_KEY: &str = "api-key";
+
 /// Annotation on the pod template carrying the SHA-256 of the credential
 /// ciphertext this pod was rolled for.
 ///
@@ -1497,6 +1502,19 @@ fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
         ));
     }
 
+    // The automatic unsubscribe's browser rung, present only when the operator
+    // named the Secret. OPTIONAL for the LLM keys' reason: a missing Secret
+    // must leave the variable unset rather than hold every tenant in
+    // CreateContainerConfigError. Unset, the daemon has no browser to rent and
+    // unsubscribes exactly as it did before the rung existed.
+    if let Some(secret) = &config.browserbase_secret_name {
+        env.push(from_optional_secret(
+            "SQUELCH_BROWSERBASE_API_KEY",
+            secret.clone(),
+            BROWSERBASE_API_KEY_KEY,
+        ));
+    }
+
     // The APNs relay block, present only when the operator configured one, and
     // byte-identical-when-unset for the LLM block's reason. Without
     // SQUELCH_RELAY_URL the daemon never spawns its pusher, which is why no
@@ -1907,6 +1925,30 @@ mod tests {
         );
         // And the relay turns on nothing of the LLM block's.
         assert!(!plain.contains_key("SQUELCH_ANTHROPIC_BASE_URL"));
+    }
+
+    /// The Browserbase key is absent unless its Secret is named, and then it
+    /// is an optional reference, never a value in the pod spec.
+    #[test]
+    fn the_browserbase_key_reaches_the_pod_only_as_an_optional_secret_reference() {
+        let c = test_config();
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let env = pod.containers[0].env.clone().unwrap();
+        assert!(env.iter().all(|e| e.name != "SQUELCH_BROWSERBASE_API_KEY"));
+
+        let mut c = test_config();
+        c.browserbase_secret_name = Some("browserbase".to_string());
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let env = pod.containers[0].env.clone().unwrap();
+        let var = env
+            .iter()
+            .find(|e| e.name == "SQUELCH_BROWSERBASE_API_KEY")
+            .unwrap();
+        assert!(var.value.is_none(), "the key is never inline");
+        let from = var.value_from.clone().unwrap().secret_key_ref.unwrap();
+        assert_eq!(from.name, "browserbase");
+        assert_eq!(from.key, BROWSERBASE_API_KEY_KEY);
+        assert_eq!(from.optional, Some(true));
     }
 
     /// The full relay set: the topic lands under the daemon's real name, the

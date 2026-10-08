@@ -408,6 +408,17 @@ pub struct Config {
     /// [`Config::namespace`].
     /// See [`DEFAULT_RELAY_SECRET_NAME`].
     pub relay_secret_name: String,
+    /// Secret holding the fleet's Browserbase API key (key `api-key`), in
+    /// [`Config::namespace`], handed on as an optional
+    /// `SQUELCH_BROWSERBASE_API_KEY` reference. `None` (the default) renders
+    /// nothing: byte-identical pods to a warden that never heard of it, and
+    /// daemons whose automatic unsubscribe has no browser rung.
+    ///
+    /// ONE KEY, EVERY TENANT, the same custody as the OAuth client: a tenant
+    /// cannot read its own pod's environment, and the key rents browsers and
+    /// nothing else. Having it is necessary and not sufficient; a tenant also
+    /// needs the hidden feature `unsub_browser`.
+    pub browserbase_secret_name: Option<String>,
     /// The APNs topic tenant daemons push under, handed on as
     /// `SQUELCH_RELAY_TOPIC`. Refused at boot without [`Config::relay_url`].
     ///
@@ -459,6 +470,7 @@ impl std::fmt::Debug for Config {
             // Secret's NAME, and the kubelet resolves the value into the pod.
             .field("relay_url", &self.relay_url)
             .field("relay_secret_name", &self.relay_secret_name)
+            .field("browserbase_secret_name", &self.browserbase_secret_name)
             .field("relay_topic", &self.relay_topic)
             .finish()
     }
@@ -770,6 +782,12 @@ impl Config {
                 "the relay is remote and its bearer must never cross the wire in the clear",
             )?),
         };
+        // Optional, and a NAME when present: unset must stay unset rather than
+        // fall back to a default, because the block's absence is the off switch.
+        let browserbase_secret_name = match var(get, "SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME") {
+            None => None,
+            Some(_) => Some(name_var(get, "SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME", "")?),
+        };
         let relay_topic = env_value_var(get, "SQUELCH_WARDEN_RELAY_TOPIC")?;
         // Same posture as the LLM tuning vars: a topic the pods never receive
         // is an operator believing their tenants push under it.
@@ -888,6 +906,7 @@ impl Config {
                 DEFAULT_RELAY_SECRET_NAME,
             )?,
             relay_topic,
+            browserbase_secret_name,
         })
     }
 
@@ -1734,6 +1753,12 @@ mod tests {
         assert_eq!(c.relay_topic.as_deref(), Some("app.passband.client.ios"));
         // Nothing about the relay turns the LLM block on, or the reverse.
         assert!(c.llm_base_url.is_none());
+
+        // The browser key's Secret is off unless named, and a name is a name.
+        assert!(c.browserbase_secret_name.is_none());
+        let c = with("SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME", "browserbase").unwrap();
+        assert_eq!(c.browserbase_secret_name.as_deref(), Some("browserbase"));
+        assert!(with("SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME", "Not A Name").is_err());
 
         // The URL alone is a complete configuration; the topic is an override.
         let c = with("SQUELCH_WARDEN_RELAY_URL", "https://relay.squelch.sh").unwrap();

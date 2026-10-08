@@ -96,7 +96,7 @@ pub fn test_config() -> Config {
         relay_url: None,
         relay_secret_name: DEFAULT_RELAY_SECRET_NAME.to_string(),
         relay_topic: None,
-        browserbase_secret_name: None,
+        browserbase_secret_name: crate::config::DEFAULT_BROWSERBASE_SECRET_NAME.to_string(),
     }
 }
 

@@ -122,11 +122,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # `cargo test` links one binary per test target (fifty-odd here), each
-      # carrying the whole dependency tree, ONNX included. With the default
-      # bfd linker that is the long tail of the test build; mold links the same
-      # binaries in a fraction of the time. make-default (the action's default)
-      # puts it on PATH as `ld`, so no RUSTFLAGS change and the rust-cache key
-      # stays what it was.
+      # carrying the whole dependency tree, ONNX included. mold links them in a
+      # fraction of bfd's time; measured on the test build it was worth 0-40 s
+      # of a ~3.5 min step, inside run-to-run noise, and costs 2 s to install.
+      # make-default (the action's default) puts it on PATH as `ld`, so no
+      # RUSTFLAGS change and the rust-cache key stays what it was.
       - uses: rui314/setup-mold@v1
 
       # BEFORE clippy on purpose: a formatting diff is the cheapest possible

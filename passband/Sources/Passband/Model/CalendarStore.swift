@@ -449,7 +449,7 @@ extension AppStore {
         let rule = EventPaneTravel.composer(
             open: eventPaneOpen, parked: calendarEditorParked, touched: eventDraftTouched)
         guard rule.allow else {
-            pushToast("Save or close the event first")
+            pushToast(EventPaneRules.composerRefusedText(calendarPaneState))
             return false
         }
         if rule.closePane { closeEventEditor() }
@@ -533,20 +533,20 @@ extension AppStore {
     /// on offer for this draft, and a control that is not on offer saves
     /// nothing at all.
     ///
-    /// AN ANSWER THAT NEVER CAME (504, `CalendarWrite.uncertainStatus`):
-    /// Google may have made the change. The page reloads to find out
-    /// (`settleUncertain`); seen, the pane closes as a success. Not seen,
-    /// the pane FREEZES (`EventPaneState.uncertain`): read-only, the draft
-    /// showing, and only "check again", "send again" (the same body) and
-    /// "close" on offer. An edited draft is never sent under the same id.
+    /// AN ANSWER THAT MAY HAVE HAPPENED (`CalendarWrite.verdict`: anything
+    /// but a definite "nothing happened"): Google may have made the change.
+    /// The page reloads to find out (`settleUncertain`); seen, the pane
+    /// closes as a success. Not seen, the pane FREEZES
+    /// (`EventPaneState.uncertain`): read-only, the draft showing, and only
+    /// "check again", "send again" (the same body) and "close" on offer. An
+    /// edited draft is never sent under the same id. Only a definite
+    /// refusal gives the fields back.
     ///
     /// AN ANSWER FOR NOBODY: one landing after the gate closed or the account
     /// changed (`CalendarWriteTicket`) is dropped whole, analytics included.
     @discardableResult
     func saveEvent(_ draft: EventDraft, _ request: CalendarEditorRequest, via control: SaveControl) async -> Bool {
-        guard request.epoch == epoch, !calendarWriting, calendarEditor?.id == request.id,
-            calendarPaneState.fieldsEditable
-        else { return false }
+        guard EventPaneRules.maySave(paneFacts(request)) else { return false }
         let now = Date()
         let cal = Calendar.current
         let plan = guestPlan(draft, request)
@@ -580,9 +580,7 @@ extension AppStore {
     /// same create id with it. Never the draft as it now stands.
     @discardableResult
     func sendEventAgain(_ request: CalendarEditorRequest) async -> Bool {
-        guard request.epoch == epoch, !calendarWriting, calendarEditor?.id == request.id,
-            calendarPaneState == .uncertain, let sent = calendarPaneSent
-        else { return false }
+        guard let sent = EventPaneRules.again(paneFacts(request), sent: calendarPaneSent) else { return false }
         return await sendPaneWrite(sent, request, plan: nil, event: .sendAgain)
     }
 
@@ -591,9 +589,7 @@ extension AppStore {
     /// pane closes as a success; not seen, it stays frozen.
     @discardableResult
     func checkEventAgain(_ request: CalendarEditorRequest) async -> Bool {
-        guard request.epoch == epoch, !calendarWriting, calendarEditor?.id == request.id,
-            calendarPaneState == .uncertain, let sent = calendarPaneSent
-        else { return false }
+        guard let sent = EventPaneRules.again(paneFacts(request), sent: calendarPaneSent) else { return false }
         let ticket = calendarTicket
         calendarPaneState = calendarPaneState.next(.checkAgain)
         calendarWriting = true
@@ -601,6 +597,13 @@ extension AppStore {
         guard calendarLands(ticket) else { return false }
         let seen = await settleUncertain(ticket, sayUnseen: false) { sent.found(in: $0) != nil }
         return paneSettled(seen, sent, request)
+    }
+
+    /// The pane as `EventPaneRules` judges it.
+    private func paneFacts(_ request: CalendarEditorRequest) -> EventPaneRules.Pane {
+        EventPaneRules.Pane(
+            isOpen: EventPaneRules.applies(open: calendarEditor?.id, sentFrom: request.id),
+            sameAccount: request.epoch == epoch, writing: calendarWriting, state: calendarPaneState)
     }
 
     /// One send from the pane, first or again, and where it leaves the pane.
@@ -643,23 +646,16 @@ extension AppStore {
             return true
         } catch {
             guard calendarLands(ticket) else { return false }
-            if writeStatus(error) == CalendarWrite.uncertainStatus {
-                let seen = await settleUncertain(ticket, sayUnseen: false) { sent.found(in: $0) != nil }
+            let verdict = CalendarWrite.verdict(of: error)
+            guard let refused = EventPaneRules.failureEvent(verdict) else {
+                let seen = await settleUncertain(ticket, sayUnseen: false, saying: CalendarWrite.settlingText(verdict)) {
+                    sent.found(in: $0) != nil
+                }
                 return paneSettled(seen, sent, request)
             }
             calendarWriting = false
-            paneMoved(.refused, request)
-            if again {
-                pushToast(CalendarWrite.resendRefusedText, .error)
-            } else {
-                let action: CalendarWriteAction = sent.isEdit ? .edit : .create
-                let guests: Bool
-                switch sent {
-                case .create(let body, _): guests = !(body.guests ?? []).isEmpty
-                case .edit(_, let patch, _): guests = patch.guests != nil
-                }
-                pushToast(CalendarWrite.failureText(status: writeStatus(error), action, guests: guests), .error)
-            }
+            paneMoved(refused, request)
+            if let text = EventPaneRules.refusalText(verdict, sent, again: again) { pushToast(text, .error) }
             return false
         }
     }
@@ -679,7 +675,7 @@ extension AppStore {
     /// The pane's state moved by `event`, only while that pane is still the
     /// open one: a pane closed while its write was out keeps no state.
     private func paneMoved(_ event: EventPaneState.Event, _ request: CalendarEditorRequest) {
-        guard calendarEditor?.id == request.id else { return }
+        guard EventPaneRules.applies(open: calendarEditor?.id, sentFrom: request.id) else { return }
         calendarPaneState = calendarPaneState.next(event)
     }
 
@@ -691,9 +687,10 @@ extension AppStore {
     /// more toast (a pane says it on itself, frozen). Either way the lock is
     /// released, unless the answer has stopped being anybody's.
     private func settleUncertain(
-        _ ticket: CalendarWriteTicket, sayUnseen: Bool = true, seen: (TimelineFeed?) -> Bool
+        _ ticket: CalendarWriteTicket, sayUnseen: Bool = true, saying: String = CalendarWrite.uncertainText,
+        seen: (TimelineFeed?) -> Bool
     ) async -> Bool {
-        pushToast(CalendarWrite.uncertainText)
+        pushToast(saying)
         for _ in 0..<3 {
             try? await Task.sleep(for: .seconds(2))
             guard calendarLands(ticket) else { return false }
@@ -779,15 +776,21 @@ extension AppStore {
             return true
         } catch {
             guard calendarLands(ticket) else { return false }
-            if writeStatus(error) == CalendarWrite.uncertainStatus {
+            let verdict = CalendarWrite.verdict(of: error)
+            switch verdict {
+            case .mayHaveHappened:
                 guard await settleUncertain(ticket, seen: { CalendarWrite.gone(event, from: $0) }) else {
                     return false
                 }
                 eventDeleted(event)
                 return true
+            case .notSent:
+                calendarWriting = false
+                pushToast(CalendarWrite.failureText(nil, .delete), .error)
+            case .refused(let refusal):
+                calendarWriting = false
+                pushToast(CalendarWrite.failureText(refusal, .delete), .error)
             }
-            calendarWriting = false
-            pushToast(CalendarWrite.failureText(status: writeStatus(error), .delete), .error)
             return false
         }
     }
@@ -802,10 +805,6 @@ extension AppStore {
         if calendarEditor?.event.map(Agenda.itemId) == Agenda.itemId(event) { closeEventEditor() }
         pushToast("Deleted from Google Calendar", .success)
     }
-
-    /// The status a refusal is worded by (`CalendarWrite.status`): a wait
-    /// that ran out is the 504 and is settled, never "nothing was saved".
-    private func writeStatus(_ error: Error) -> Int { CalendarWrite.status(of: error) }
 
     // MARK: - the connect card
 

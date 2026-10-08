@@ -3238,6 +3238,7 @@ async fn every_write_is_403_when_calendar_is_not_granted() {
         eprintln!("403 not granted {method}: {answer}");
         assert_eq!(status, StatusCode::FORBIDDEN, "{method}");
         assert_eq!(answer["error"], "Google Calendar is not connected");
+        assert_eq!(answer["code"], "not_granted");
     }
     assert!(writes(&w).is_empty());
     assert!(
@@ -3271,6 +3272,7 @@ async fn an_event_that_is_not_the_users_own_cannot_be_changed() {
                 answer["error"],
                 "this event cannot be changed from Passband"
             );
+            assert_eq!(answer["code"], "not_editable");
         }
         assert_eq!(served(&w, id).await, before);
     }
@@ -3305,7 +3307,7 @@ async fn an_unknown_event_is_404() {
     ] {
         let (status, answer, _) = send(&w.app, method, &uri, body).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}: {answer}");
-        assert_eq!(answer, json!({"error": "not found"}));
+        assert_eq!(answer, json!({"error": "not found", "code": "not_found"}));
     }
     assert!(writes(&w).is_empty());
     assert!(
@@ -3345,7 +3347,8 @@ async fn a_google_failure_leaves_every_row_as_it_was() {
             assert_eq!(code, StatusCode::BAD_GATEWAY, "{status} {method}");
             assert_eq!(
                 answer,
-                json!({"error": "Google Calendar did not accept the change"})
+                json!({"error": "Google Calendar did not accept the change",
+                       "code": "google_refused"})
             );
             assert_eq!(w.events().await, before, "{status} {method} changed a row");
         }
@@ -3357,7 +3360,8 @@ async fn a_google_failure_leaves_every_row_as_it_was() {
         )
     );
     // Google said yes but with an event the daemon cannot read: nothing is
-    // stored, and the answer says the change happened.
+    // stored, and the answer says the change happened: a 504 the app holds
+    // the pane on (verify4 X1), never the 502 a refusal is.
     w.google().write_fail = None;
     w.google().write_raw = Some(r#"{"id": "x", "status": "cancelled"}"#.into());
     let (code, answer, _) = send(
@@ -3367,10 +3371,11 @@ async fn a_google_failure_leaves_every_row_as_it_was() {
         Some(json!({"title": "Odd"})),
     )
     .await;
-    assert_eq!(code, StatusCode::BAD_GATEWAY);
+    assert_eq!(code, StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(
-        answer["error"],
-        "Google Calendar saved the change, but its answer could not be read"
+        answer,
+        json!({"error": "Google Calendar saved the change, but its answer could not be read",
+               "code": "uncertain"})
     );
     assert_eq!(w.events().await, before);
     assert_eq!(
@@ -4590,6 +4595,7 @@ async fn an_invitation_whose_organizer_does_not_read_is_not_the_users() {
             answer["error"],
             "this event cannot be changed from Passband"
         );
+        assert_eq!(answer["code"], "not_editable");
     }
     assert!(
         writes(&w).is_empty(),
@@ -4616,7 +4622,7 @@ async fn telling_guests_is_refused_on_a_calendar_the_user_only_writes_to() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
     assert_eq!(
         answer,
-        json!({"error": "guests can only be told about changes on your own calendar"})
+        json!({"error": "guests can only be told about changes on your own calendar", "code": "cannot_notify"})
     );
     let (status, answer, _) = send(&w.app, "DELETE", &format!("{uri}?notify=true"), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
@@ -4624,6 +4630,7 @@ async fn telling_guests_is_refused_on_a_calendar_the_user_only_writes_to() {
         answer["error"],
         "guests can only be told about changes on your own calendar"
     );
+    assert_eq!(answer["code"], "cannot_notify");
     assert!(writes(&w).is_empty(), "nobody reached");
     assert!(served(&w, "team-1").await.is_some());
     assert_eq!(
@@ -4688,7 +4695,7 @@ async fn a_body_with_two_notify_keys_is_refused_and_reaches_nobody() {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             body_json(resp).await,
-            json!({"error": "notify must be true or false"})
+            json!({"error": "notify must be true or false", "code": "invalid"})
         );
     }
     assert!(writes(&w).is_empty());
@@ -4703,8 +4710,7 @@ async fn a_body_with_two_notify_keys_is_refused_and_reaches_nobody() {
 async fn a_write_whose_answer_is_lost_is_a_504_that_says_it_may_have_happened() {
     let (w, start) = write_world("lost-answer").await;
     w.google().lose_answers = true;
-    let uncertain =
-        json!({"error": "Google Calendar may have made this change; refresh before trying again"});
+    let uncertain = json!({"error": "Google Calendar may have made this change; refresh before trying again", "code": "uncertain"});
     let create = json!({"calendar_id": "primary", "title": "Maybe", "start": rfc(start),
                         "end": rfc(start + Duration::hours(1)), "all_day": false});
     for (method, uri, body) in [
@@ -4748,7 +4754,7 @@ async fn a_write_whose_answer_is_lost_is_a_504_that_says_it_may_have_happened() 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(
         answer,
-        json!({"error": "Google Calendar did not accept the change"})
+        json!({"error": "Google Calendar did not accept the change", "code": "google_refused"})
     );
 }
 
@@ -4847,8 +4853,7 @@ async fn a_write_past_its_deadline_is_a_504_and_kicks_a_sync() {
     .await;
     assert!(!kicked(&w).await, "nothing kicked before");
     w.google().answer_delay = Some(StdDuration::from_secs(3));
-    let uncertain =
-        json!({"error": "Google Calendar may have made this change; refresh before trying again"});
+    let uncertain = json!({"error": "Google Calendar may have made this change; refresh before trying again", "code": "uncertain"});
     let create = json!({"calendar_id": "primary", "title": "Slow", "start": rfc(start),
                         "end": rfc(start + Duration::hours(1)), "all_day": false});
     for (method, uri, body) in [
@@ -5013,7 +5018,7 @@ async fn a_bad_or_spent_create_id_is_refused_and_reaches_nobody() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
         assert_eq!(
             answer,
-            json!({"error": "id must be 5 to 1024 characters, each a lowercase letter a to v or a digit"})
+            json!({"error": "id must be 5 to 1024 characters, each a lowercase letter a to v or a digit", "code": "invalid"})
         );
     }
     assert!(writes(&w).is_empty() && w.google().reads.is_empty());
@@ -5036,7 +5041,7 @@ async fn a_bad_or_spent_create_id_is_refused_and_reaches_nobody() {
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     assert_eq!(
         answer,
-        json!({"error": "that event was already created and has since been deleted"})
+        json!({"error": "that event was already created and has since been deleted", "code": "already_deleted"})
     );
     assert!(writes(&w).is_empty(), "nothing inserted");
 }
@@ -5056,7 +5061,7 @@ async fn a_delete_404_on_a_calendar_no_longer_listed_is_refused() {
     assert_eq!(status, StatusCode::GONE, "{answer}");
     assert_eq!(
         answer,
-        json!({"error": "that calendar is no longer available to you"})
+        json!({"error": "that calendar is no longer available to you", "code": "calendar_gone"})
     );
     assert_eq!(w.google().list_gets, [TEAM]);
     assert!(
@@ -5087,7 +5092,8 @@ async fn a_write_that_never_connects_is_a_502_and_kicks_nothing() {
         state.with_calendar_api_base("http://127.0.0.1:9")
     })
     .await;
-    let refused = json!({"error": "Google Calendar did not accept the change"});
+    let refused =
+        json!({"error": "Google Calendar did not accept the change", "code": "google_refused"});
     let create = json!({"calendar_id": "primary", "title": "Nowhere", "start": rfc(start),
                         "end": rfc(start + Duration::hours(1)), "all_day": false});
     for (method, uri, body) in [
@@ -5136,7 +5142,7 @@ async fn a_create_whose_id_holds_a_different_event_is_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
-    let in_use = json!({"error": "that event id is already used for a different event"});
+    let in_use = json!({"error": "that event id is already used for a different event", "code": "id_in_use"});
     type Change<'a> = (&'a str, &'a dyn Fn(&mut Value));
     let changed: [Change; 5] = [
         ("title", &|r| r["title"] = json!("Supper")),
@@ -5236,7 +5242,7 @@ async fn a_second_create_with_an_id_in_flight_is_refused_without_google() {
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     assert_eq!(
         answer,
-        json!({"error": "that event is already being created"})
+        json!({"error": "that event is already being created", "code": "already_creating"})
     );
     assert_eq!(w.google().reads.len(), reads_before, "Google was not read");
     assert_eq!(
@@ -5296,7 +5302,7 @@ async fn a_delete_404_on_a_calendar_the_user_only_reads_now_is_refused() {
     assert_eq!(status, StatusCode::GONE, "{answer}");
     assert_eq!(
         answer,
-        json!({"error": "that calendar is no longer available to you"})
+        json!({"error": "that calendar is no longer available to you", "code": "calendar_gone"})
     );
     assert!(
         served(&w, "team-1").await.is_some(),
@@ -5324,7 +5330,7 @@ async fn a_delete_404_whose_list_read_fails_deletes_nothing() {
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{failure}: {answer}");
         assert_eq!(
             answer,
-            json!({"error": "Google Calendar did not accept the change"})
+            json!({"error": "Google Calendar did not accept the change", "code": "google_refused"})
         );
         assert!(served(&w, "team-1").await.is_some(), "{failure}: row kept");
         assert_eq!(
@@ -5383,4 +5389,83 @@ async fn turning_the_flag_off_mid_pass_stops_at_the_next_calendar() {
     w.google().delay_page = None;
     assert_eq!(w.pass().await, PassOutcome::Synced);
     assert!(w.google().requests.iter().any(|(c, _)| c == TEAM));
+}
+
+/// EVERY REFUSAL NAMES ITS KIND (verify4 X1): each of the daemon's own
+/// refusals before Google carries its `code`, with its status, from the
+/// closed list in docs/CALENDAR.md §8. The app keys on these codes to decide
+/// that nothing happened; the rest (`google_refused`, `uncertain`, the 409s,
+/// `calendar_gone`, `not_granted`) are pinned where those answers are tested.
+#[tokio::test]
+async fn every_refusal_before_google_names_its_code() {
+    let (w, start) = guest_world("codes").await;
+    let create = |calendar: &str, guests: Value| {
+        json!({"calendar_id": calendar, "title": "x", "start": rfc(start),
+               "end": rfc(start + Duration::hours(1)), "all_day": false, "guests": guests})
+    };
+    let cases = [
+        (
+            "POST",
+            "/client/calendar/events".to_string(),
+            Some(json!({})),
+            StatusCode::BAD_REQUEST,
+            "invalid",
+        ),
+        (
+            "POST",
+            "/client/calendar/events".to_string(),
+            Some(create("nope@example.com", json!([]))),
+            StatusCode::BAD_REQUEST,
+            "unknown_calendar",
+        ),
+        (
+            "POST",
+            "/client/calendar/events".to_string(),
+            Some(create(HOLIDAYS, json!([]))),
+            StatusCode::BAD_REQUEST,
+            "read_only",
+        ),
+        (
+            "POST",
+            "/client/calendar/events".to_string(),
+            Some(create(TEAM, json!([SAM]))),
+            StatusCode::BAD_REQUEST,
+            "cannot_invite",
+        ),
+        (
+            "PATCH",
+            event_uri(PRIMARY, "big"),
+            Some(json!({"guests": [SAM]})),
+            StatusCode::BAD_REQUEST,
+            "guests_read_only",
+        ),
+        (
+            "PATCH",
+            event_uri(TEAM, "team-1"),
+            Some(json!({"title": "x", "notify": true})),
+            StatusCode::BAD_REQUEST,
+            "cannot_notify",
+        ),
+        (
+            "PATCH",
+            event_uri(PRIMARY, "invite"),
+            Some(json!({"title": "x"})),
+            StatusCode::FORBIDDEN,
+            "not_editable",
+        ),
+        (
+            "DELETE",
+            event_uri(PRIMARY, "nope"),
+            None,
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+    ];
+    for (method, uri, body, status, code) in cases {
+        let (got, answer, _) = send(&w.app, method, &uri, body).await;
+        assert_eq!(got, status, "{code}: {answer}");
+        assert_eq!(answer["code"], code, "{answer}");
+        assert!(answer["error"].is_string(), "the human message stays");
+    }
+    assert!(writes(&w).is_empty(), "nothing reached Google");
 }

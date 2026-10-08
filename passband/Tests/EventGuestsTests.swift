@@ -504,11 +504,11 @@ struct EventGuestsTests {
         expect(CalendarWrite.deleteQuery(notify: true)["notify"] == "true", "a told one says notify=true")
 
         expect(
-            CalendarWrite.failureText(status: 400, .create, guests: true).contains("guests")
-                && !CalendarWrite.failureText(status: 400, .create).contains("guests"),
+            CalendarWrite.failureText(.invalid, .create, guests: true).contains("guests")
+                && !CalendarWrite.failureText(.invalid, .create).contains("guests"),
             "a refused write that named guests says to check them, and only then")
         expect(
-            CalendarWrite.failureText(status: 400, .edit, guests: true)
+            CalendarWrite.failureText(.invalid, .edit, guests: true)
                 == "Passband could not save that event. Check the times, the calendar and the guests.",
             "the fixed sentence")
 

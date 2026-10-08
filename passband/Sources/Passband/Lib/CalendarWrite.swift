@@ -178,13 +178,7 @@ enum CalendarWrite {
         return f
     }
 
-    // MARK: an answer that never came (504)
-
-    /// The daemon's word for "Google was asked and the answer was lost": a
-    /// timeout or a dropped connection after the request went out. Google
-    /// may well have made the change (and emailed the guests), so it is NOT
-    /// a refusal and the same control must not simply be pressed again.
-    static let uncertainStatus = 504
+    // MARK: an answer that may not be the whole story
 
     /// Said at once, while the page reloads to find out.
     static let uncertainText = "Google may have made this change. Refreshing…"
@@ -212,16 +206,34 @@ enum CalendarWrite {
         UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
     }
 
-    /// The status a failed write is judged by: its HTTP status, or 0 for a
-    /// request that never reached the daemon, or -1 for anything that is
-    /// not a status at all (an answer of the wrong shape). A wait that ran
-    /// out, or a connection lost mid-request, may have reached the daemon,
-    /// which goes on with the write without the app: that is the 504 "may
-    /// have happened", settled against the page, never "nothing was saved".
-    static func status(of error: Error) -> Int {
-        guard let api = error as? APIError else { return -1 }
-        if api.kind == .network { return api.mayHaveArrived ? uncertainStatus : 0 }
-        return api.status == 0 ? -1 : api.status
+    /// Said when the daemon refused a create because the same one is still
+    /// being sent (`already_creating`): the pane holds, since that send may
+    /// yet make the event.
+    static let stillSendingText = "This event is still being sent. Check again in a moment."
+
+    /// WHAT A FAILED WRITE SAYS HAPPENED AT GOOGLE (verify4 X1). Unlocking
+    /// the pane is allowed ONLY on a definite "nothing happened": the
+    /// daemon's own refusal before any Google call, or Google's own
+    /// refusal, each named by its `code` from the closed list
+    /// (`CalendarRefusal`) AND carried with that code's own status. A
+    /// request that never left the app is the other definite case.
+    /// Everything else may have happened: a 504, any 500, a 502 without
+    /// `google_refused` (a proxy's own page), an unknown code, no code, a
+    /// 2xx that would not decode, a transport failure after the request may
+    /// have left, and `already_creating` (another send of the same create is
+    /// still out and may make it). When in doubt, it may have happened.
+    static func verdict(of error: Error) -> CalendarWriteVerdict {
+        guard let api = error as? APIError else { return .mayHaveHappened(code: nil) }
+        if api.kind == .network { return api.mayHaveArrived ? .mayHaveHappened(code: nil) : .notSent }
+        guard let code = api.code, let refusal = CalendarRefusal(rawValue: code), refusal.status == api.status
+        else { return .mayHaveHappened(code: api.code) }
+        return .refused(refusal)
+    }
+
+    /// The toast while a write that may have happened is settled against
+    /// the page.
+    static func settlingText(_ verdict: CalendarWriteVerdict) -> String {
+        verdict == .mayHaveHappened(code: CalendarRefusal.alreadyCreatingCode) ? stillSendingText : uncertainText
     }
 
     /// What a delete tells the guests, from the question's answer and the
@@ -271,8 +283,8 @@ enum CalendarWrite {
     /// Text the way the daemon stores what Google holds, as near as the
     /// app can say it: control, bidi and invisible characters out (the
     /// daemon's `plain`), whitespace runs collapsed, trimmed. Used only to
-    /// recognise a create's title when no event carries its id (`made`);
-    /// an edit is never judged by it (`edited`).
+    /// recognise a create's title when no event carries its id (`made`),
+    /// and to read an uncertain edit's text fields back (`edited`).
     static func laundered(_ s: String) -> String {
         let invisible: Set<UInt32> = [0x061C, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x200E, 0x200F]
         let kept = s.unicodeScalars.filter { u in
@@ -310,38 +322,58 @@ enum CalendarWrite {
     /// write made. First THE event with the body's id on the calendar written
     /// to, whatever its title came back as. When no event carries the id (no
     /// id was sent, or a calendar daemon older than ids ignored it and let
-    /// Google pick one): a new event on that calendar at that start whose
-    /// title, laundered as the daemon launders it, is the one sent.
+    /// Google pick one), the fallback (verify4 X3) takes only an event that
+    /// could be nobody else's: on that calendar, not in the page before the
+    /// send, the user's own (`editable`, which the daemon gives only an
+    /// event the user organizes on a calendar they write to, and no guest
+    /// named as another organizer), the same all-day flag, start AND end,
+    /// and the title, laundered as the daemon launders it. Someone else's
+    /// invitation with the same title at the same time is not it.
     static func made(_ body: EventWrite, before: Set<String>, in feed: TimelineFeed?) -> TimelineEvent? {
         let events = feed?.events ?? []
         if let id = body.id, let byId = events.first(where: { $0.calendar_id == body.calendar_id && $0.id == id }) {
             return byId
         }
         return events.first {
-            $0.calendar_id == body.calendar_id && !before.contains(key($0))
+            $0.calendar_id == body.calendar_id && !before.contains(key($0)) && ownedByUser($0)
+                && $0.all_day == body.all_day
                 && laundered($0.title ?? "") == laundered(body.title) && sameTime($0.start, body.start)
+                && sameTime(servedEnd($0), body.end)
         }
     }
 
+    /// The user organizes it, as the daemon judges (`editable`), and no
+    /// guest is named as another organizer.
+    static func ownedByUser(_ e: TimelineEvent) -> Bool {
+        e.editable == true && !(e.guests ?? []).contains { $0.organizer == true && $0.isSelf != true }
+    }
+
+    /// An event's end as a body names it: a one-day all-day event is served
+    /// with no end, its last day being its start.
+    static func servedEnd(_ e: TimelineEvent) -> String? { e.end ?? (e.all_day ? e.start : nil) }
+
     /// After an uncertain edit: the event as the reloaded feed has it, once
-    /// EVERY field the edit changed is SEEN to have moved there from the
-    /// original event. The daemon launders text on the way back in (links
-    /// cut down, markup out, a length cap), which the app does not copy, so a
-    /// text field is judged only by whether it moved: the served title,
-    /// place or notes now differ from what was served before. Times, the
-    /// all-day flag and the guests come back exactly, so they must also read
-    /// as sent. Anything the edit did not touch (a guest's answer, the
-    /// colour) is not looked at.
+    /// EVERY field the edit changed reads there AS SENT. Times, the all-day
+    /// flag and the guests come back exactly. A text field (title, place,
+    /// notes) counts only when the served value equals what was typed after
+    /// `laundered` (whitespace collapsed, invisible characters out): a field
+    /// that MOVED to something else is not this edit (verify4 X2: someone
+    /// else's change, or this user's own earlier edit, landing meanwhile)
+    /// and leaves the answer unknown. So does text the daemon rewrites in
+    /// ways the app does not copy (a link cut down, markup out, the cap):
+    /// the pane stays frozen and is closed by hand, which is safe. Anything
+    /// the edit did not touch (a guest's answer, the colour) is not looked
+    /// at.
     ///
-    /// Nil is "not confirmed": while any changed field has not moved, while
-    /// nothing the edit changed can be observed at all (a change that
-    /// vanished under cleaning), or when the event is gone. With the pane
-    /// frozen (`EventPaneState`) that answer is always safe.
+    /// Nil is "not confirmed": while any changed field does not read as
+    /// sent, while nothing the edit changed can be observed at all, or when
+    /// the event is gone. With the pane frozen (`EventPaneState`) that
+    /// answer is always safe.
     static func edited(_ original: TimelineEvent, _ patch: EventPatch, in feed: TimelineFeed?) -> TimelineEvent? {
         guard let now = (feed?.events ?? []).first(where: { key($0) == key(original) }) else { return nil }
         var seen = 0
-        if patch.title != nil {
-            guard now.title != original.title else { return nil }
+        if let title = patch.title, laundered(title) != laundered(original.title ?? "") {
+            guard laundered(now.title ?? "") == laundered(title) else { return nil }
             seen += 1
         }
         if let allDay = patch.all_day, allDay != original.all_day {
@@ -353,11 +385,8 @@ enum CalendarWrite {
             seen += 1
         }
         if let end = patch.end {
-            // A one-day all-day event is served with no end: its last day is
-            // its start.
-            let served = { (e: TimelineEvent) in e.end ?? (e.all_day ? e.start : nil) }
-            if !sameTime(end, served(original)) {
-                guard sameTime(served(now), end) else { return nil }
+            if !sameTime(end, servedEnd(original)) {
+                guard sameTime(servedEnd(now), end) else { return nil }
                 seen += 1
             }
         }
@@ -371,8 +400,9 @@ enum CalendarWrite {
             case .clear?:
                 guard had else { continue }
                 guard (held ?? "").isEmpty else { return nil }
-            case .set?:
-                guard held != was else { return nil }
+            case .set(let text)?:
+                guard laundered(text) != laundered(was ?? "") else { continue }
+                guard laundered(held ?? "") == laundered(text) else { return nil }
             }
             seen += 1
         }
@@ -396,48 +426,108 @@ enum CalendarWrite {
         return !events.contains { key($0) == key(event) }
     }
 
-    /// A refusal, as one quiet toast. Fixed sentences: the daemon's own error
-    /// text is for logs, and none of this echoes what was typed. `status` 0
-    /// is a request that never reached the daemon.
+    /// A definite refusal, as one quiet toast. Fixed sentences, one per
+    /// code: the daemon's own error text is for logs, and none of this
+    /// echoes what was typed. Nil is a request that never left the app.
     ///
-    /// `guests` says the write named guests: the daemon's 400 then may be
-    /// about one of them, and the sentence says where to look.
-    static func failureText(status: Int, _ action: CalendarWriteAction, guests: Bool = false) -> String {
+    /// `guests` says the write named guests: the daemon's `invalid` then may
+    /// be about one of them, and the sentence says where to look.
+    static func failureText(_ refusal: CalendarRefusal?, _ action: CalendarWriteAction, guests: Bool = false) -> String {
         let deleting = action == .delete
-        switch status {
-        case 0:
-            return deleting
-                ? "Could not reach your Passband server, so the event was not deleted."
-                : "Could not reach your Passband server, so nothing was saved."
-        case 400:
+        let nothing = deleting ? "so the event was not deleted." : "so nothing was saved."
+        switch refusal {
+        case nil:
+            return "Could not reach your Passband server, \(nothing)"
+        case .invalid:
             return deleting
                 ? "Passband could not delete that event."
                 : (guests
                     ? "Passband could not save that event. Check the times, the calendar and the guests."
                     : "Passband could not save that event. Check the times and the calendar.")
-        case 403:
+        case .unknownCalendar:
+            return "Passband does not read that calendar, \(nothing)"
+        case .readOnly:
+            return "That calendar is read-only, \(nothing)"
+        case .cannotInvite:
+            return "Guests can only be added on your own calendar, so nothing was saved."
+        case .guestsReadOnly:
+            return "This event's guests cannot be changed from Passband, so nothing was saved."
+        case .cannotNotify:
+            return "Guests can only be told about changes on your own calendar, \(nothing)"
+        case .notGranted:
+            return "Google Calendar is not connected, \(nothing)"
+        case .notEditable:
             return "That calendar does not let you change its events."
-        case 404:
-            return action == .create
-                ? "This Passband server cannot create events yet."
-                : "That event is no longer on your calendar."
-        case 409:
-            return action == .create
-                ? "That event was already added and then deleted. Close this and start a new one."
-                : (deleting ? "Could not delete the event." : "Could not save the event.")
-        case 410:
-            return deleting
-                ? "That calendar is no longer available to you, so nothing was deleted."
-                : "That calendar is no longer available to you, so nothing was saved."
-        case 502:
+        case .notFound:
+            return "That event is no longer on your calendar."
+        case .idInUse:
+            return "Passband could not save this event under its id. Close this and start a new one."
+        case .alreadyDeleted:
+            return "That event was already added and then deleted. Close this and start a new one."
+        case .calendarGone:
+            return "That calendar is no longer available to you, \(deleting ? "so nothing was deleted." : nothing)"
+        case .googleRefused:
             return deleting
                 ? "Google Calendar refused, so the event was not deleted."
                 : "Google Calendar refused the change, so nothing was saved."
-        case uncertainStatus:
-            return uncertainText
-        default:
-            return deleting ? "Could not delete the event." : "Could not save the event."
         }
+    }
+}
+
+/// THE DAEMON'S CLOSED LIST of definite refusals (docs/CALENDAR.md section
+/// 8, "What a refusal says"): each is a write nothing of which reached
+/// Google, or one Google itself refused, and each comes with its own
+/// status. A code not on this list, or this list's code with another
+/// status, is not a refusal (`CalendarWrite.verdict`).
+enum CalendarRefusal: String, CaseIterable, Hashable, Sendable {
+    case invalid
+    case unknownCalendar = "unknown_calendar"
+    case readOnly = "read_only"
+    case cannotInvite = "cannot_invite"
+    case guestsReadOnly = "guests_read_only"
+    case cannotNotify = "cannot_notify"
+    case notGranted = "not_granted"
+    case notEditable = "not_editable"
+    case notFound = "not_found"
+    case idInUse = "id_in_use"
+    case alreadyDeleted = "already_deleted"
+    case calendarGone = "calendar_gone"
+    case googleRefused = "google_refused"
+
+    /// The status the daemon sends this code with.
+    var status: Int {
+        switch self {
+        case .invalid, .unknownCalendar, .readOnly, .cannotInvite, .guestsReadOnly, .cannotNotify: 400
+        case .notGranted, .notEditable: 403
+        case .notFound: 404
+        case .idInUse, .alreadyDeleted: 409
+        case .calendarGone: 410
+        case .googleRefused: 502
+        }
+    }
+
+    /// The daemon's other codes, which are NOT refusals: Google may have
+    /// made the change. Named here only so the tests can say so.
+    static let alreadyCreatingCode = "already_creating"
+    static let uncertainCode = "uncertain"
+    static let internalCode = "internal"
+}
+
+/// `CalendarWrite.verdict`: what a failed write says about Google.
+enum CalendarWriteVerdict: Hashable, Sendable {
+    /// The request never left the app.
+    case notSent
+    /// A definite refusal: nothing of this send reached Google, or Google
+    /// refused it.
+    case refused(CalendarRefusal)
+    /// Google may have made the change. `code`: the daemon's, when it named
+    /// one (an unknown code included).
+    case mayHaveHappened(code: String?)
+
+    /// The pane holds and the page is checked; never "nothing was saved".
+    var mayHaveHappened: Bool {
+        if case .mayHaveHappened = self { return true }
+        return false
     }
 }
 
@@ -568,5 +658,73 @@ enum EventPaneState: Hashable, Sendable {
     /// more.
     static func sendAgainLabel(_ sent: SentWrite) -> String {
         sent.isEdit && sent.tellsGuests ? "send again, guests may be told twice" : "send again"
+    }
+}
+
+/// THE STORE'S DECISIONS ABOUT THE PANE, pure (verify4 X5): what may be
+/// sent, what an answer may move, and what is said. `CalendarStore` asks
+/// these and does only the I/O.
+enum EventPaneRules {
+    /// The pane as the store holds it when a control is pressed.
+    struct Pane: Hashable, Sendable {
+        /// The pane's request is the open one (`calendarEditor?.id`).
+        var isOpen: Bool
+        /// It is the account on screen (`request.epoch == epoch`).
+        var sameAccount: Bool
+        /// A write is already out (`calendarWriting`).
+        var writing: Bool
+        var state: EventPaneState
+    }
+
+    /// `saveEvent` may run: the open pane, this account, nothing out, and
+    /// fields that are the user's. Never from a frozen pane.
+    static func maySave(_ pane: Pane) -> Bool {
+        pane.isOpen && pane.sameAccount && !pane.writing && pane.state.fieldsEditable
+    }
+
+    /// What "send again" and "check again" work from: EXACTLY what was sent
+    /// first, and only from a frozen pane with nothing out. Nil: nothing is
+    /// sent, nothing is checked. Never the draft.
+    static func again(_ pane: Pane, sent: SentWrite?) -> SentWrite? {
+        guard pane.isOpen, pane.sameAccount, !pane.writing, pane.state == .uncertain else { return nil }
+        return sent
+    }
+
+    /// An answer may move the pane only while the pane that sent it is
+    /// still the open one: a pane closed (or replaced) while its write was
+    /// out keeps no state from it.
+    static func applies(open: UUID?, sentFrom request: UUID) -> Bool { open == request }
+
+    /// After a failed send: the pane's event, or nil when the write may have
+    /// happened and is settled against the page first (it ends `.unsure` or
+    /// `.answered`, never `.refused`).
+    static func failureEvent(_ verdict: CalendarWriteVerdict) -> EventPaneState.Event? {
+        verdict.mayHaveHappened ? nil : .refused
+    }
+
+    /// The toast for a failed send that did NOT happen. `again`: sent from
+    /// the frozen pane, which stays frozen, since the FIRST send may still
+    /// have worked.
+    static func refusalText(_ verdict: CalendarWriteVerdict, _ sent: SentWrite, again: Bool) -> String? {
+        let refusal: CalendarRefusal?
+        switch verdict {
+        case .mayHaveHappened: return nil
+        case .notSent: refusal = nil
+        case .refused(let r): refusal = r
+        }
+        if again { return CalendarWrite.resendRefusedText }
+        switch sent {
+        case .create(let body, _):
+            return CalendarWrite.failureText(refusal, .create, guests: !(body.guests ?? []).isEmpty)
+        case .edit(_, let patch, _):
+            return CalendarWrite.failureText(refusal, .edit, guests: patch.guests != nil)
+        }
+    }
+
+    /// The line a composer is refused with over a pane that holds it. Only
+    /// an editable pane can be saved; any other (sending, frozen) can only
+    /// be closed.
+    static func composerRefusedText(_ state: EventPaneState) -> String {
+        state.fieldsEditable ? "Save or close the event first" : "Close the event first"
     }
 }

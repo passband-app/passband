@@ -38,12 +38,19 @@ struct APIError: Error, Sendable {
     /// that never got there (refused, no route, bad address). Only ever true
     /// with `kind == .network`.
     var mayHaveArrived = false
+    /// The daemon's machine-readable name for the refusal, the body's
+    /// `code`, where the route serves one (the calendar writes:
+    /// `CalendarRefusal`). Nil when the body had none, or was not JSON.
+    var code: String?
 
-    init(_ kind: APIErrorKind, _ status: Int, _ message: String, guardKinds: [String]? = nil) {
+    init(
+        _ kind: APIErrorKind, _ status: Int, _ message: String, guardKinds: [String]? = nil, code: String? = nil
+    ) {
         self.kind = kind
         self.status = status
         self.message = message
         self.guardKinds = guardKinds
+        self.code = code
     }
 
     /// A transport failure as the client reports it: never the URL or the

@@ -173,17 +173,20 @@ actor APIClient {
             throw APIError.transport(error)
         }
         guard let http = response as? HTTPURLResponse else {
-            throw APIError(.network, 0, "cannot reach squelch server")
+            // Something answered: the request got somewhere.
+            var out = APIError(.network, 0, "cannot reach squelch server")
+            out.mayHaveArrived = true
+            throw out
         }
         guard (200..<300).contains(http.statusCode) else {
             let kind = APIErrorKind.forStatus(http.statusCode)
             var message = "request failed (\(http.statusCode))"
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let err = obj["error"] as? String {
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            if let err = obj?["error"] as? String {
                 message = err
             }
             let guards = kind == .guardBlocked ? parseGuardKinds(message) : nil
-            throw APIError(kind, http.statusCode, message, guardKinds: guards)
+            throw APIError(kind, http.statusCode, message, guardKinds: guards, code: obj?["code"] as? String)
         }
         return (data, http)
     }

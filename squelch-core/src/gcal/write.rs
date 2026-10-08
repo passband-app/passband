@@ -522,15 +522,22 @@ pub fn insert_body(event: &NewEvent) -> Result<Value, Invalid> {
 }
 
 /// Whether `found`, the event Google already holds under a create's own id,
-/// is the event THIS create would make: the same title (both laundered the
-/// way every stored event is, by reading the create's own insert body back
-/// through [`super::read_written_event`]), start, end, all-day flag, and the
-/// same guests (case folded, the calendar's own entry and the organizer's
-/// left out). Only then may a create naming an id be answered with an event
-/// already there; anything else under that id is a different event, and the
-/// create is refused rather than answered with it. A guest list Google cut
-/// short cannot be shown to match, so it does not. The calendar is the
-/// caller's: `found` was read from the calendar the create names.
+/// is the event THIS create would make: the same title, location and notes
+/// (each laundered the way every stored event is, by reading the create's
+/// own insert body back through [`super::read_written_event`]), start, end,
+/// all-day flag, and the same guests (case folded, the calendar's own entry
+/// and the organizer's left out). Only then may a create naming an id be
+/// answered with an event already there; anything else under that id is a
+/// different event, and the create is refused rather than answered with it.
+/// A guest list Google cut short cannot be shown to match, so it does not.
+/// The calendar is the caller's: `found` was read from the calendar the
+/// create names.
+///
+/// NOT COMPARED: `notify`. Google's event does not say whether its guests
+/// were mailed, so a create that asks for invitations can be answered by an
+/// event made without them. The app never sends that: a create is sent
+/// again only from a frozen pane, and only as the exact body it first sent
+/// (docs/CALENDAR.md section 8), so a resend never changes `notify`.
 pub fn is_same_create(draft: &NewEvent, found: &EventRow, calendar_zone: Option<&str>) -> bool {
     let Ok(mut body) = insert_body(draft) else {
         return false;
@@ -549,6 +556,8 @@ pub fn is_same_create(draft: &NewEvent, found: &EventRow, calendar_zone: Option<
         .collect();
     !found.guests_truncated
         && want.summary == found.summary
+        && want.location == found.location
+        && want.description == found.description
         && want.start == found.start
         && want.end == found.end
         && want.all_day() == found.all_day()
@@ -1199,5 +1208,60 @@ mod tests {
             e.as_object_mut().unwrap().remove("attendees");
         });
         assert!(!is_same_create(&day, &shorter, None), "one day, not two");
+    }
+
+    /// THE PLACE AND THE NOTES COUNT TOO (verify4 X4): the same id with the
+    /// same title and times but another location or notes is a different
+    /// event, both sides laundered alike.
+    #[test]
+    fn an_event_under_a_creates_id_must_have_its_place_and_notes() {
+        let draft = create(|b| {
+            b["location"] = json!(" Cafe\u{200B}  Rose ");
+            b["description"] = json!("Bring the map");
+            b["id"] = json!("abcdef0123");
+        })
+        .unwrap();
+        let google = |edit: &dyn Fn(&mut Value)| {
+            let mut event = json!({
+                "id": "abcdef0123", "status": "confirmed",
+                "summary": "Dinner",
+                "location": draft.location,
+                "description": draft.description,
+                "start": {"dateTime": "2026-10-05T23:00:00Z"},
+                "end": {"dateTime": "2026-10-06T01:00:00Z"},
+                "organizer": {"email": "me@example.com", "self": true},
+            });
+            edit(&mut event);
+            super::super::read_written_event(&event, None).unwrap()
+        };
+        let same = |edit: &dyn Fn(&mut Value)| is_same_create(&draft, &google(edit), None);
+        assert!(same(&|_| {}), "the event this create makes");
+        assert!(
+            same(&|e| e["location"] = json!("Cafe Rose")),
+            "the place as the daemon launders it"
+        );
+        assert!(
+            !same(&|e| e["location"] = json!("Cafe Lily")),
+            "another place"
+        );
+        assert!(
+            !same(&|e| {
+                e.as_object_mut().unwrap().remove("location");
+            }),
+            "no place"
+        );
+        assert!(
+            !same(&|e| e["description"] = json!("Bring the cake")),
+            "other notes"
+        );
+        assert!(
+            !same(&|e| {
+                e.as_object_mut().unwrap().remove("description");
+            }),
+            "no notes"
+        );
+        // A create with no place is not answered by an event that has one.
+        let bare = create(|b| b["id"] = json!("abcdef0123")).unwrap();
+        assert!(!is_same_create(&bare, &google(&|_| {}), None));
     }
 }

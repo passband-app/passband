@@ -52,6 +52,11 @@ struct EventDraftTests {
         anUncertainCreateFallsBackWhenNoEventHasTheId()
         anUncertainEditIsJudgedByWhatMoved()
         aResponseThatCameBackMayHaveArrived()
+        each409SaysItsOwnThing()
+        theVerdictKeysOnTheCode()
+        anEditSettlesOnlyOnWhatWasTyped()
+        aCreateFallbackIsTheUsersOwnNewEvent()
+        theStoresPaneDecisions()
         theWave3WireDecodes()
 
         if failures > 0 {
@@ -483,31 +488,45 @@ struct EventDraftTests {
     }
 
     static func refusalsAreFixedSentences() {
-        let all = [0, 400, 401, 403, 404, 500, 502, -1].flatMap { status in
-            [CalendarWriteAction.create, .edit, .delete].map { CalendarWrite.failureText(status: status, $0) }
+        let all = ([nil] + CalendarRefusal.allCases.map { Optional($0) }).flatMap { refusal in
+            [CalendarWriteAction.create, .edit, .delete].map { CalendarWrite.failureText(refusal, $0) }
         }
         expect(all.allSatisfy { !$0.isEmpty && !$0.contains("\u{2014}") }, "every refusal says something, no em dash")
-        expect(CalendarWrite.failureText(status: 404, .edit) == "That event is no longer on your calendar.",
-               "a 404 on an edit: gone")
-        expect(CalendarWrite.failureText(status: 404, .create) != CalendarWrite.failureText(status: 404, .edit),
-               "a 404 on create is an older server, not a missing event")
-        expect(CalendarWrite.failureText(status: 502, .delete).contains("not deleted"), "a refused delete says so")
-        expect(CalendarWrite.failureText(status: 0, .create).contains("nothing was saved"),
+        expect(CalendarWrite.failureText(.notFound, .edit) == "That event is no longer on your calendar.",
+               "not_found on an edit: gone")
+        expect(CalendarWrite.failureText(.googleRefused, .delete).contains("not deleted"), "a refused delete says so")
+        expect(CalendarWrite.failureText(nil, .create).contains("nothing was saved"),
                "an unreachable server: nothing was saved")
+        expect(CalendarWrite.failureText(nil, .delete).contains("not deleted"), "nor deleted")
+        expect(Set(CalendarRefusal.allCases.map { CalendarWrite.failureText($0, .create) }).count
+               == CalendarRefusal.allCases.count, "one sentence per code on a create")
+    }
+
+    /// verify4 X6: each 409 says its own thing, and none of them claims a
+    /// deletion that did not happen.
+    static func each409SaysItsOwnThing() {
+        let inUse = CalendarWrite.failureText(.idInUse, .create)
+        let deleted = CalendarWrite.failureText(.alreadyDeleted, .create)
+        expect(inUse != deleted, "id in use and already deleted are two sentences")
+        expect(!inUse.contains("deleted"), "id in use never says deleted")
+        expect(deleted.contains("already added and then deleted"), "already deleted says so")
+        expect(CalendarWrite.settlingText(.mayHaveHappened(code: "already_creating")) == CalendarWrite.stillSendingText,
+               "already creating: still being sent, and the pane holds")
+        expect(CalendarWrite.settlingText(.mayHaveHappened(code: "uncertain")) == CalendarWrite.uncertainText,
+               "any other may-have: the usual line")
+        for text in [inUse, deleted, CalendarWrite.stillSendingText] {
+            expect(!text.contains("\u{2014}"), "no em dash: \(text)")
+        }
     }
 
     /// A 504 (fix round 1, B5): Google was asked and the answer was lost, so
     /// it is not a refusal, and the pane closes only when the reloaded page
     /// shows the change.
     static func anUncertainWriteIsSettledByTheFeed() {
-        expect(CalendarWrite.uncertainStatus == 504, "the daemon's uncertain answer is a 504")
-        for action in [CalendarWriteAction.create, .edit, .delete] {
-            expect(
-                CalendarWrite.failureText(status: 504, action) == "Google may have made this change. Refreshing…",
-                "a 504 is never worded as a refusal")
-        }
-        expect(CalendarWrite.failureText(status: 502, .edit) != CalendarWrite.failureText(status: 504, .edit),
-               "a definite refusal stays its own sentence")
+        let lost = APIError(.server, 504, "x", code: "uncertain")
+        expect(CalendarWrite.verdict(of: lost) == .mayHaveHappened(code: "uncertain"), "a 504 may have happened")
+        expect(CalendarWrite.settlingText(CalendarWrite.verdict(of: lost)) == "Google may have made this change. Refreshing…",
+               "a 504 is never worded as a refusal")
 
         let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00")
         let before = TimelineFeed(events: [a])
@@ -555,18 +574,70 @@ struct EventDraftTests {
         for code in [URLError.Code.timedOut, .networkConnectionLost] {
             let e = APIError.transport(URLError(code))
             expect(e.kind == .network && e.mayHaveArrived, "\(code): may have arrived")
-            expect(CalendarWrite.status(of: e) == CalendarWrite.uncertainStatus, "\(code): settled as a 504")
-            expect(!CalendarWrite.failureText(status: CalendarWrite.status(of: e), .create).contains("nothing was saved"),
-                   "\(code): never 'nothing was saved'")
+            expect(CalendarWrite.verdict(of: e) == .mayHaveHappened(code: nil), "\(code): settled, may have happened")
         }
         for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .notConnectedToInternet] {
             let e = APIError.transport(URLError(code))
-            expect(!e.mayHaveArrived && CalendarWrite.status(of: e) == 0, "\(code): never got there")
+            expect(!e.mayHaveArrived && CalendarWrite.verdict(of: e) == .notSent, "\(code): never got there")
         }
-        expect(CalendarWrite.status(of: APIError(.server, 502, "x")) == 502, "a status is itself")
-        expect(CalendarWrite.status(of: APIError(.network, 0, "client not configured")) == 0,
+        expect(CalendarWrite.verdict(of: APIError(.network, 0, "client not configured")) == .notSent,
                "a request never built is unsent")
-        expect(CalendarWrite.status(of: URLError(.badURL)) == -1, "not an APIError: not a status")
+        expect(CalendarWrite.verdict(of: URLError(.badURL)) == .mayHaveHappened(code: nil),
+               "not an APIError: may have happened")
+    }
+
+    /// verify4 X1: UNLOCK ONLY ON A DEFINITE "NOTHING HAPPENED". The verdict
+    /// keys on the daemon's code, and the code must come with its own
+    /// status. Everything else freezes the pane.
+    static func theVerdictKeysOnTheCode() {
+        let statuses: [String: Int] = [
+            "invalid": 400, "unknown_calendar": 400, "read_only": 400, "cannot_invite": 400,
+            "guests_read_only": 400, "cannot_notify": 400, "not_granted": 403, "not_editable": 403,
+            "not_found": 404, "id_in_use": 409, "already_deleted": 409, "calendar_gone": 410,
+            "google_refused": 502,
+        ]
+        expect(Set(CalendarRefusal.allCases.map(\.rawValue)) == Set(statuses.keys), "the closed list, whole")
+        for refusal in CalendarRefusal.allCases {
+            let status = statuses[refusal.rawValue] ?? -1
+            expect(refusal.status == status, "\(refusal.rawValue) comes with \(status)")
+            let e = APIError(APIErrorKind.forStatus(status), status, "msg", code: refusal.rawValue)
+            expect(CalendarWrite.verdict(of: e) == .refused(refusal), "\(refusal.rawValue): nothing happened")
+            expect(EventPaneRules.failureEvent(CalendarWrite.verdict(of: e)) == .refused,
+                   "\(refusal.rawValue): the pane is the user's again")
+            // The same code with any other status is not that refusal.
+            for other in [200, 400, 403, 404, 409, 410, 500, 502, 504] where other != status {
+                let odd = APIError(APIErrorKind.forStatus(other), other, "msg", code: refusal.rawValue)
+                expect(CalendarWrite.verdict(of: odd).mayHaveHappened,
+                       "\(refusal.rawValue) with \(other): may have happened")
+            }
+        }
+        // May have happened: every status without a code, and the daemon's
+        // own may-have codes.
+        for status in [400, 403, 404, 409, 410, 500, 502, 503, 504] {
+            let bare = APIError(APIErrorKind.forStatus(status), status, "request failed (\(status))")
+            expect(CalendarWrite.verdict(of: bare) == .mayHaveHappened(code: nil), "\(status) with no code: freeze")
+        }
+        let unsure: [(String, Int)] = [("uncertain", 504), ("internal", 500), ("already_creating", 409),
+                                       ("something_new", 400), ("google_refused_later", 502), ("", 400)]
+        for (code, status) in unsure {
+            let e = APIError(APIErrorKind.forStatus(status), status, "msg", code: code)
+            expect(CalendarWrite.verdict(of: e) == .mayHaveHappened(code: code), "\(code) \(status): freeze")
+            expect(EventPaneRules.failureEvent(CalendarWrite.verdict(of: e)) == nil, "\(code): settled, not refused")
+        }
+        expect(CalendarRefusal(rawValue: CalendarRefusal.alreadyCreatingCode) == nil
+               && CalendarRefusal(rawValue: CalendarRefusal.uncertainCode) == nil
+               && CalendarRefusal(rawValue: CalendarRefusal.internalCode) == nil,
+               "the daemon's may-have codes are not refusals")
+        // A 2xx the app could not decode, and a proxy's own page.
+        expect(CalendarWrite.verdict(of: APIError(.unknown, 0, "unexpected response shape")).mayHaveHappened,
+               "an answer that would not decode: freeze")
+        expect(CalendarWrite.verdict(of: APIError(.server, 502, "request failed (502)")).mayHaveHappened,
+               "a bare 502: freeze")
+        expect(CalendarWrite.verdict(of: APIError(.server, 500, "internal error")).mayHaveHappened,
+               "a 500: freeze")
+        var something = APIError(.network, 0, "cannot reach squelch server")
+        something.mayHaveArrived = true
+        expect(CalendarWrite.verdict(of: something).mayHaveHappened, "a response of no known kind: freeze")
     }
 
     /// verify2 V2: the app names the new event's id, and an uncertain create
@@ -600,7 +671,7 @@ struct EventDraftTests {
         let laundered = event("g1", title: "Lunch with Sam https://x.test/a?pwd=1", start: body.start, end: body.end)
         expect(CalendarWrite.made(plain, before: [], in: TimelineFeed(events: [laundered]))?.id == "g1",
                "no id: the title compares laundered")
-        expect(CalendarWrite.failureText(status: 409, .create).contains("already added"),
+        expect(CalendarWrite.failureText(.alreadyDeleted, .create).contains("already added"),
                "a spent id says the event was made and deleted")
     }
 
@@ -637,8 +708,11 @@ struct EventDraftTests {
         expect(CalendarWrite.edited(a, place, in: TimelineFeed(events: [placed])) == nil,
                "a cleared note still there is not it")
         placed.description = nil
+        expect(CalendarWrite.edited(a, place, in: TimelineFeed(events: [placed])) == nil,
+               "verify4 X2: a link cut to host and path is not what was typed: unknown, the pane stays frozen")
+        placed.location = "Zoom  https://www.zoom.us/j/1?pwd=abc"
         expect(CalendarWrite.edited(a, place, in: TimelineFeed(events: [placed])) != nil,
-               "a link comes back cut to host and path")
+               "the place as typed, whitespace aside, and the note cleared: this edit")
 
         let invite = EventPatch(guests: ["Sam@x.test"])
         var invited = a
@@ -671,7 +745,7 @@ struct EventDraftTests {
                "nobody to tell: silent")
         expect(!CalendarWrite.cannotTellText.contains("\u{2014}") && CalendarWrite.cannotTellText.contains("not deleted"),
                "the refusal says nothing was deleted")
-        expect(CalendarWrite.failureText(status: 410, .delete).contains("nothing was deleted"),
+        expect(CalendarWrite.failureText(.calendarGone, .delete).contains("nothing was deleted"),
                "a lost calendar is not 'deleted'")
     }
 
@@ -840,18 +914,23 @@ struct EventDraftTests {
     static func anUncertainEditIsJudgedByWhatMoved() {
         let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00",
                       location: "zoom.us/j/1", description: "Old")
-        // W4: the daemon cuts a link the app would not have: applied, and
-        // seen to have moved.
+        // W4, as verify4 X2 left it: the daemon cuts a link the app would
+        // not have. The served text is not what was typed, so it is NOT
+        // confirmed: the pane stays frozen and is closed by hand. Unknown,
+        // never a false success.
         let link = EventPatch(location: .set("Zoom:https://zoom.us/j/2?pwd=abc"))
         var applied = a
         applied.location = "Zoom:zoom.us/j/2"
-        expect(CalendarWrite.edited(a, link, in: TimelineFeed(events: [applied])) != nil,
-               "W4: a link cleaned differently is still seen to have moved")
+        expect(CalendarWrite.edited(a, link, in: TimelineFeed(events: [applied])) == nil,
+               "W4/X2: a link cleaned differently is unknown, not confirmed")
         let notes = EventPatch(description: .set("a <b>bold</b> &amp; c"))
         var noted = a
         noted.description = "a bold & c"
+        expect(CalendarWrite.edited(a, notes, in: TimelineFeed(events: [noted])) == nil,
+               "W4/X2: notes with markup, cleaned, are unknown")
+        noted.description = "  a <b>bold</b>\u{200B} &amp;   c "
         expect(CalendarWrite.edited(a, notes, in: TimelineFeed(events: [noted])) != nil,
-               "W4: notes with markup, cleaned, moved")
+               "notes as typed, whitespace aside, are this edit")
         // W5: a change that vanishes under cleaning (only the passcode) is
         // never claimed, applied or not.
         let passcode = EventPatch(location: .set("https://zoom.us/j/1?pwd=NEW"))
@@ -886,8 +965,156 @@ struct EventDraftTests {
     static func aResponseThatCameBackMayHaveArrived() {
         for code in [URLError.Code.badServerResponse, .cannotParseResponse, .zeroByteResource] {
             let e = APIError.transport(URLError(code))
-            expect(e.mayHaveArrived && CalendarWrite.status(of: e) == CalendarWrite.uncertainStatus,
+            expect(e.mayHaveArrived && CalendarWrite.verdict(of: e).mayHaveHappened,
                    "\(code): may have arrived")
+        }
+    }
+
+    /// verify4 X2: a text field the edit changed counts only when it reads
+    /// as typed. The reviewer's three cases.
+    static func anEditSettlesOnlyOnWhatWasTyped() {
+        let a = event("a", title: "Dinner", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00",
+                      location: "Kitchen", description: "Old")
+        // A) retitled Dinner -> Supper; a co-editor's "Lunch" landed instead.
+        var lunch = a
+        lunch.title = "Lunch"
+        expect(CalendarWrite.edited(a, EventPatch(title: "Supper"), in: TimelineFeed(events: [lunch])) == nil,
+               "A: the title moved to something else: unknown")
+        var supper = a
+        supper.title = "  Supper "
+        expect(CalendarWrite.edited(a, EventPatch(title: "Supper"), in: TimelineFeed(events: [supper])) != nil,
+               "A: the title as typed, whitespace aside: confirmed")
+        // B) two uncertain edits: pane 1 (A -> B) frozen and closed, pane 2
+        // opened on the stale page (still A) typed C; the page now shows B.
+        var first = a
+        first.title = "B"
+        expect(CalendarWrite.edited(a, EventPatch(title: "C"), in: TimelineFeed(events: [first])) == nil,
+               "B: the first edit landing is not the second")
+        // C) the same for the place.
+        var elsewhere = a
+        elsewhere.location = "Garden"
+        expect(CalendarWrite.edited(a, EventPatch(location: .set("Porch")), in: TimelineFeed(events: [elsewhere])) == nil,
+               "C: the place moved elsewhere: unknown")
+        var porch = a
+        porch.location = "Porch"
+        expect(CalendarWrite.edited(a, EventPatch(location: .set("Porch")), in: TimelineFeed(events: [porch])) != nil,
+               "C: the place as typed: confirmed")
+        // A title edit and a time edit together: both must read as sent.
+        let both = EventPatch(title: "Supper", start: "2026-10-08T11:00:00-07:00", end: "2026-10-08T12:00:00-07:00")
+        var half = a
+        half.title = "Supper"
+        expect(CalendarWrite.edited(a, both, in: TimelineFeed(events: [half])) == nil, "the times not moved yet")
+        half.start = "2026-10-08T11:00:00-07:00"
+        half.end = "2026-10-08T12:00:00-07:00"
+        expect(CalendarWrite.edited(a, both, in: TimelineFeed(events: [half])) != nil, "both as sent")
+    }
+
+    /// verify4 X3: when no event carries the create's id, only the user's
+    /// own new event at that calendar, title, start AND end is taken for it.
+    static func aCreateFallbackIsTheUsersOwnNewEvent() {
+        var body = EventWrite(
+            calendar_id: "primary", title: "Dinner", start: "2026-10-08T19:00:00-07:00",
+            end: "2026-10-08T21:00:00-07:00", all_day: false, location: nil, description: nil)
+        body.id = "ourid0000"
+        // Sam's invitation: same calendar, title and start, new since the
+        // send, but Sam's (not editable here, Sam the organizer).
+        var sams = event("sam1", title: "Dinner", start: body.start, end: body.end, editable: false)
+        sams.organizer = "sam@x.test"
+        sams.guests = [
+            TimelineGuest(email: "sam@x.test", name: nil, response: .accepted, organizer: true, isSelf: nil),
+            TimelineGuest(email: "me@x.test", name: nil, response: .pending, organizer: nil, isSelf: true),
+        ]
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [sams])) == nil,
+               "someone else's Dinner at the same start is not it")
+        var samsEditable = sams
+        samsEditable.editable = true
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [samsEditable])) == nil,
+               "nor when a guest is named as another organizer")
+        let short = event("g1", title: "Dinner", start: body.start, end: "2026-10-08T20:00:00-07:00")
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [short])) == nil,
+               "another end is not it")
+        let mine = event("g2", title: "Dinner", start: body.start, end: "2026-10-09T04:00:00Z")
+        expect(CalendarWrite.made(body, before: [], in: TimelineFeed(events: [sams, mine]))?.id == "g2",
+               "the user's own, at that start and end: it")
+        expect(CalendarWrite.made(body, before: [CalendarWrite.key(mine)], in: TimelineFeed(events: [mine])) == nil,
+               "there before the send: not it")
+        var day = EventWrite(
+            calendar_id: "primary", title: "Trip", start: "2026-10-08", end: "2026-10-08", all_day: true,
+            location: nil, description: nil)
+        day.id = "ourid0001"
+        let oneDay = event("g3", title: "Trip", start: "2026-10-08", end: nil, allDay: true)
+        expect(CalendarWrite.made(day, before: [], in: TimelineFeed(events: [oneDay]))?.id == "g3",
+               "a one-day all-day event is served with no end")
+        let timed = event("g4", title: "Trip", start: "2026-10-08", end: "2026-10-08")
+        expect(CalendarWrite.made(day, before: [], in: TimelineFeed(events: [timed])) == nil,
+               "not all-day: not it")
+    }
+
+    /// verify4 X5: the store's pane decisions, pure.
+    static func theStoresPaneDecisions() {
+        typealias P = EventPaneRules.Pane
+        let open = P(isOpen: true, sameAccount: true, writing: false, state: .editing)
+        expect(EventPaneRules.maySave(open), "the open, editable pane saves")
+        for state in [EventPaneState.sending(again: false), .sending(again: true), .uncertain, .confirmed] {
+            var p = open
+            p.state = state
+            expect(!EventPaneRules.maySave(p), "\(state): saveEvent does not run")
+        }
+        for broken in [P(isOpen: false, sameAccount: true, writing: false, state: .editing),
+                       P(isOpen: true, sameAccount: false, writing: false, state: .editing),
+                       P(isOpen: true, sameAccount: true, writing: true, state: .editing)] {
+            expect(!EventPaneRules.maySave(broken), "\(broken): saveEvent does not run")
+        }
+
+        let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00")
+        let sent = SentWrite.edit(a, EventPatch(title: "Sent"), notify: true)
+        let frozen = P(isOpen: true, sameAccount: true, writing: false, state: .uncertain)
+        expect(EventPaneRules.again(frozen, sent: sent) == sent, "send again sends exactly what was sent")
+        expect(EventPaneRules.again(frozen, sent: nil) == nil, "nothing sent: nothing to send again")
+        for state in [EventPaneState.editing, .sending(again: false), .sending(again: true), .confirmed] {
+            var p = frozen
+            p.state = state
+            expect(EventPaneRules.again(p, sent: sent) == nil, "\(state): no send again, no check again")
+        }
+        for broken in [P(isOpen: false, sameAccount: true, writing: false, state: .uncertain),
+                       P(isOpen: true, sameAccount: false, writing: false, state: .uncertain),
+                       P(isOpen: true, sameAccount: true, writing: true, state: .uncertain)] {
+            expect(EventPaneRules.again(broken, sent: sent) == nil, "\(broken): no send again")
+        }
+
+        let mine = UUID(), other = UUID()
+        expect(EventPaneRules.applies(open: mine, sentFrom: mine), "the pane that sent it: the answer applies")
+        expect(!EventPaneRules.applies(open: other, sentFrom: mine), "another pane: a late answer moves nothing")
+        expect(!EventPaneRules.applies(open: nil, sentFrom: mine), "closed: a late answer moves nothing")
+
+        let body = EventWrite(
+            calendar_id: "primary", title: "x", start: "2026-10-08T19:45:00-07:00",
+            end: "2026-10-08T21:00:00-07:00", all_day: false, location: nil, description: nil, guests: ["s@x.test"])
+        let create = CalendarWrite.createWrite(body, notify: true, createId: "abcde12345", before: [])
+        expect(EventPaneRules.refusalText(.refused(.invalid), create, again: false)
+               == CalendarWrite.failureText(.invalid, .create, guests: true), "a create's refusal names the guests")
+        expect(EventPaneRules.refusalText(.notSent, sent, again: false) == CalendarWrite.failureText(nil, .edit),
+               "never sent: says so")
+        expect(EventPaneRules.refusalText(.refused(.googleRefused), sent, again: true) == CalendarWrite.resendRefusedText,
+               "a refused resend: the first may still have worked")
+        expect(EventPaneRules.refusalText(.mayHaveHappened(code: nil), sent, again: false) == nil,
+               "may have happened: no refusal toast")
+
+        // The thaw is only on a definite refusal: a first send's 500, bare
+        // 502 or undecodable 2xx leaves the pane frozen.
+        for e in [APIError(.server, 500, "internal error", code: "internal"), APIError(.server, 502, "bad gateway"),
+                  APIError(.unknown, 0, "unexpected response shape"),
+                  APIError(.server, 504, "saved, unreadable", code: "uncertain")] {
+            let verdict = CalendarWrite.verdict(of: e)
+            expect(EventPaneRules.failureEvent(verdict) == nil, "\(e.status) \(e.code ?? "-"): no thaw")
+            let state = EventPaneState.sending(again: false).next(.unsure)
+            expect(state == .uncertain && !state.fieldsEditable, "settled unseen, it freezes")
+        }
+
+        expect(EventPaneRules.composerRefusedText(.editing) == "Save or close the event first", "editable: save or close")
+        for state in [EventPaneState.uncertain, .sending(again: true), .sending(again: false)] {
+            expect(EventPaneRules.composerRefusedText(state) == "Close the event first",
+                   "\(state): a pane that cannot be saved is not offered as one")
         }
     }
 

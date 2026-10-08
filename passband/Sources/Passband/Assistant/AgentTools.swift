@@ -147,7 +147,7 @@ enum AgentTools {
             case .labelMessage: return await labelMessage(input, gate)
             case .sendEmail: return await sendEmail(input, gate)
             case .unsubscribeSender: return await unsubscribeSender(input, gate)
-            case .createCalendarEvent: return createCalendarEvent(input)
+            case .createCalendarEvent: return await createCalendarEvent(input)
             case .productHelp: return productHelp(input, calendar: calendar)
             case .listShortcuts: return listShortcuts(calendar: calendar)
             case .findSetting: return findSetting(input)
@@ -451,14 +451,22 @@ enum AgentTools {
     /// (or "add and invite N") is the user's own press. A proposal that does
     /// not check out, or a pane already holding something, is an error the
     /// model can relay or correct, and nothing on screen changes.
+    ///
+    /// THE ONE THING IT MAY ASK THE DAEMON is the calendar feed itself, once,
+    /// when there is none (verify7 E12): the feed is otherwise loaded only by
+    /// the Calendar page, and "put this on my calendar" asked from an email
+    /// before that page was ever opened used to be answered "no calendar,
+    /// connect Google Calendar". It is the page's own read
+    /// (`refreshCalendar`), and it writes nothing.
     @MainActor
-    private static func createCalendarEvent(_ input: [String: JSONValue]) -> ToolOutcome {
+    private static func createCalendarEvent(_ input: [String: JSONValue]) async -> ToolOutcome {
         let store = AppStore.shared
         let proposal: EventProposal
         switch EventProposals.read(input) {
         case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
         case .success(let read): proposal = read
         }
+        if EventProposals.mustLoad(feed: store.calendarFeed) { await store.refreshCalendar() }
         let draft: EventDraft
         switch EventProposals.draft(
             proposal, feed: store.calendarFeed, owner: store.calendarAccountEmail, today: Date(),
@@ -467,12 +475,13 @@ enum AgentTools {
         case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
         case .success(let made): draft = made
         }
-        if let refusal = store.proposeEvent(draft) {
-            return failure(refusal, summary: "event not drafted")
+        switch store.proposeEvent(draft) {
+        case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
+        case .success(let landing):
+            return ok(
+                ["status": "drafted_not_saved", "message": EventProposals.draftedText(landing)],
+                summary: "drafted \(quoted(proposal.title))")
         }
-        return ok(
-            ["status": "drafted_not_saved", "message": EventProposals.draftedText],
-            summary: "drafted \(quoted(proposal.title))")
     }
 
     // MARK: - help (the app's own tables)
@@ -1004,12 +1013,13 @@ enum AgentTools {
             anyone was invited. You cannot read the calendar, and you cannot edit or \
             delete events. If the result says an event is already open, relay that and \
             stop. Only propose guests the user asked for. There is no notes or description \
-            field, on purpose: the title is the only text you supply, and the user types \
-            any notes themselves.
+            field, on purpose: the title and the place are the only text you supply, one \
+            line each, and the user types any notes themselves. A field this tool does \
+            not list is refused, not ignored.
             """,
         input_schema: .init(
             properties: [
-                "title": .init(type: "string", description: "The event's title, 200 characters at most."),
+                "title": .init(type: "string", description: "The event's title: one line, 200 characters at most."),
                 "start": .init(
                     type: "string",
                     description:
@@ -1024,7 +1034,9 @@ enum AgentTools {
                 "calendar": .init(
                     type: "string",
                     description: "Which of the user's calendars, by name. Leave out for their primary calendar."),
-                "location": .init(type: "string", description: "Where, as plain text."),
+                "location": .init(
+                    type: "string",
+                    description: "Where: a place name or an address, one line, 200 characters at most."),
                 "guests": .init(
                     type: "array",
                     description:

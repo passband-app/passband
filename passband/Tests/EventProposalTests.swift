@@ -33,6 +33,8 @@ struct EventProposalTests {
         guestsAreRealGuestsWhereTheyMayBe()
         aBadProposalIsAnErrorNotAHalfFilledPane()
         theAssistantWritesNoNotes()
+        theTitleAndThePlaceAreOneShortLine()
+        itNeverTakesTheScreenFromSomebody()
         aPaneInUseRefuses()
         whatTheModelIsTold()
 
@@ -185,8 +187,10 @@ struct EventProposalTests {
             == ["a@b.co", "c@d.co"], "a lone string of guests is split")
         expect(reads(["title": .string("x"), "start": .string("2026-10-09"), "guests": .null])?.guests.isEmpty == true,
                "a null guest list is none")
-        expect(reads(["title": .string("x"), "start": .string("2026-10-09"), "unknown": .string("y")]) != nil,
-               "a field it has never heard of is ignored")
+        expect(reads(["title": .string("x"), "start": .string("2026-10-09"), "unknown": .string("y")]) == nil,
+               "a field it has never heard of is refused, not ignored (verify7 E14)")
+        expect(reads(["title": .string("x"), "start": .string("2026-10-09"), "unknown": .null]) != nil,
+               "unless it holds nothing")
     }
 
     // MARK: the draft
@@ -255,7 +259,17 @@ struct EventProposalTests {
         expect(refusal(proposal(calendar: "Work")) == EventProposals.unknownCalendarText, "nor one that is not there")
         expect(!EventProposals.unknownCalendarText.contains("Family") && !EventProposals.unknownCalendarText.contains("Braelyn"),
                "the refusal names none of the user's calendars: the assistant does not read the calendar")
-        expect(refusal(proposal(), feed: nil) == EventProposals.noCalendarText, "no feed, no calendar")
+        // NO FEED IS NOT "NO CALENDAR" (verify7 E12): the feed is loaded by
+        // the Calendar page, so before that page was opened there is none,
+        // and the tool loads it once. Still none after that: the load failed.
+        expect(refusal(proposal(), feed: nil) == EventProposals.calendarUnreachableText,
+               "no feed is a calendar that could not be reached")
+        expect(refusal(proposal(), feed: nil) != EventProposals.noCalendarText
+            && !EventProposals.calendarUnreachableText.lowercased().contains("connect google"),
+               "and never an instruction to connect one")
+        expect(EventProposals.mustLoad(feed: nil), "with no feed the tool loads it before judging")
+        expect(!EventProposals.mustLoad(feed: feed) && !EventProposals.mustLoad(feed: TimelineFeed(ghosts: [], events: [])),
+               "a feed that is there is used as it is, even one that lists nothing")
         expect(refusal(proposal(), feed: TimelineFeed(ghosts: [], events: [])) == EventProposals.noCalendarText,
                "an older daemon lists none")
         var readOnly = TimelineFeed(ghosts: [], events: [])
@@ -294,7 +308,7 @@ struct EventProposalTests {
     /// Every one of these answers with words and makes NO draft.
     static func aBadProposalIsAnErrorNotAHalfFilledPane() {
         let bad: [(EventProposal, String)] = [
-            (proposal(String(repeating: "a", count: 201)), EventDraftProblem.titleTooLong.text),
+            (proposal(String(repeating: "a", count: 201)), EventProposals.longTitleText),
             (proposal(start: "friday at 4"), "start must be a date and time like 2026-10-09T16:00:00, or set all_day to true for a date"),
             (proposal(start: "2026-10-09T16:00:00", end: "later"), "end must be a date and time like 2026-10-09T17:00:00"),
             (proposal(start: "2026-10-09T16:00:00", end: "2026-10-09T15:00:00"), "the event must end after it starts"),
@@ -309,7 +323,11 @@ struct EventProposalTests {
         expect(made(proposal(String(repeating: "a", count: 200))) != nil, "200 characters of title is allowed")
         for text in [EventProposals.draftedText, EventProposals.paneBusyText, EventProposals.noCalendarText,
                      EventProposals.unknownCalendarText, EventProposals.cannotInviteText,
-                     EventProposals.questionOpenText, EventProposals.promptLine, EventProposals.noNotesText] {
+                     EventProposals.questionOpenText, EventProposals.promptLine, EventProposals.noNotesText,
+                     EventProposals.calendarUnreachableText, EventProposals.askClosedText,
+                     EventProposals.writingMailText, EventProposals.draftedParkedText,
+                     EventProposals.keysLockedText, EventProposals.longTitleText,
+                     EventProposals.longLocationText, EventProposals.unknownFieldText("x")] {
             expect(!text.contains("\u{2014}") && !text.contains("\u{2013}"), "no dash the house style forbids: \(text.prefix(24))")
         }
     }
@@ -356,9 +374,30 @@ struct EventProposalTests {
             if case .failure(let r) = EventProposals.read(i) { return r.text }
             return nil
         }
-        for key in ["notes", "description", "body", "details", "agenda"] {
+        for key in ["notes", "description", "body", "details", "agenda", "note", "summary", "message",
+                    "Notes", "DESCRIPTION", "Body", "Summary", "Message", "NOTE"] {
             expect(fails([key: .string("Looking forward to it")]) == EventProposals.noNotesText,
                    "\(key): refused, in words")
+        }
+        // ANY OTHER FIELD THE TOOL DOES NOT HAVE is refused by name (verify7
+        // E14): nothing is dropped in silence, so the model cannot tell the
+        // user something was saved that was not.
+        for key in ["comment", "attendees", "reminder", "Title", "url", "recurrence", "notes_for_guests"] {
+            let said = fails([key: .string("x")])
+            expect(said == EventProposals.unknownFieldText(key) && said?.contains("unknown field") == true,
+                   "\(key): an unknown field, said by name: \(said ?? "accepted!")")
+        }
+        expect(fails(["comment": .null]) == nil && fails(["comment": .string("")]) == nil,
+               "a key holding nothing carried nothing")
+        expect(fails(["attendees": .array([.string("a@b.co")])]) == EventProposals.unknownFieldText("attendees"),
+               "guests under another name are not quietly lost either")
+        expect(fails(["zzz": .string("x"), "notes": .string("y")]) == EventProposals.noNotesText,
+               "notes are refused as notes even beside another unknown key")
+        expect(EventProposals.unknownFieldText(String(repeating: "k", count: 500) + "\nsecond line").count < 220,
+               "a key is said back short and on one line")
+        expect(!EventProposals.unknownFieldText("a\nb").contains("\n"), "never with a line break of the model's")
+        for known in EventProposals.knownKeys {
+            expect(!EventProposals.notesKeys.contains(known), "\(known) is a field the tool has")
         }
         expect(fails(["notes": .number(3)]) == EventProposals.noNotesText, "notes of any type are refused")
         expect(fails(["notes": .null]) == nil && fails(["notes": .string("")]) == nil,
@@ -371,7 +410,83 @@ struct EventProposalTests {
         expect(d?.notes == "", "a proposal with guests opens with empty notes")
         expect(body(d)?.description == nil && body(d)?.guests == ["steven@example.com"],
                "so nothing the model wrote but the title can reach a guest")
-        expect(EventProposals.promptLine.contains("no notes or description"), "the prompt says so")
+        expect(EventProposals.promptLine.contains("no\n") || EventProposals.promptLine.contains("no notes or description"),
+               "the prompt says so")
+        expect(EventProposals.promptLine.contains("The title and the place are the only text you supply"),
+               "and that the title and the place are the only text it supplies")
+    }
+
+    /// verify7 D3 / E14: the title and the place are one line of at most 200
+    /// characters each, and over that is a refusal, never a trim.
+    static func theTitleAndThePlaceAreOneShortLine() {
+        let cap = EventProposals.maxLine
+        expect(cap == 200 && cap == EventForm.maxTitle, "the daemon's own cap")
+        expect(made(proposal(location: String(repeating: "p", count: cap)))?.location.count == cap,
+               "200 characters of place is allowed, whole")
+        expect(refusal(proposal(location: String(repeating: "p", count: cap + 1))) == EventProposals.longLocationText,
+               "201 is refused")
+        expect(made(proposal(location: String(repeating: "p", count: cap + 1))) == nil, "and makes no draft: not trimmed")
+        expect(refusal(proposal(location: String(repeating: "p", count: 7_199))) == EventProposals.longLocationText,
+               "the reviewer's 7,199 characters")
+        for place in ["Cafe\nSee https://evil.test", "Cafe\r\nRoom 2", "Cafe\tRoom 2", "Cafe\u{2028}Room", "Cafe\u{0}"] {
+            expect(refusal(proposal(location: place)) == EventProposals.longLocationText,
+                   "a place of more than one line is refused: \(place.debugDescription)")
+        }
+        for title in ["Multi\nline\ttitle", "Dinner\nwith a second line", "Dinner\tparty", "Dinner\u{2029}x"] {
+            expect(refusal(proposal(title)) == EventProposals.longTitleText,
+                   "a title of more than one line is refused: \(title.debugDescription)")
+            expect(made(proposal(title)) == nil, "and makes no draft")
+        }
+        expect(made(proposal("Dîner chez Zoé", location: "Café de Flore, 172 Bd Saint-Germain"))?.location
+            == "Café de Flore, 172 Bd Saint-Germain", "an ordinary place is kept exactly")
+        // Counted as the daemon counts (scalars), like the title.
+        expect(made(proposal(location: String(repeating: "é", count: cap))) != nil, "200 accented letters are 200")
+        // Through the call itself.
+        func call(_ extra: [String: JSONValue]) -> String? {
+            var i: [String: JSONValue] = ["title": .string("Dinner"), "start": .string("2026-10-09T19:00:00")]
+            for (k, v) in extra { i[k] = v }
+            switch EventProposals.read(i) {
+            case .failure(let r): return r.text
+            case .success(let p): return refusal(p)
+            }
+        }
+        expect(call(["location": .string(String(repeating: "p", count: 201))]) == EventProposals.longLocationText,
+               "a long place in a call is refused")
+        expect(call(["title": .string("a\nb")]) == EventProposals.longTitleText, "a two-line title in a call is refused")
+        expect(call(["location": .string("  Cafe  \n")]) == nil, "space and a line break around the place are not the place")
+    }
+
+    /// verify7 D2: when a proposal may be drafted, where its pane goes, and
+    /// what its keys do.
+    static func itNeverTakesTheScreenFromSomebody() {
+        func land(ask: Bool = true, writing: Bool = false, thread: Bool = false) -> Result<EventProposals.Landing, ProposalRefusal> {
+            EventProposals.landing(askBarOpen: ask, writingMail: writing, threadOpen: thread)
+        }
+        func text(_ r: Result<EventProposals.Landing, ProposalRefusal>) -> String? {
+            if case .failure(let refusal) = r { return refusal.text }
+            return nil
+        }
+        expect(land() == .success(.calendarPage), "the bar open, nothing being written: the Calendar page")
+        expect(text(land(ask: false)) == EventProposals.askClosedText,
+               "the bar closed (a citation clicked, \"edit in composer\"): refused")
+        expect(text(land(ask: false, thread: true)) == EventProposals.askClosedText, "whatever else is on screen")
+        expect(text(land(writing: true)) == EventProposals.writingMailText, "a typed-in composer is never closed")
+        expect(text(land(writing: true, thread: true)) == EventProposals.writingMailText, "nor a typed-in inline reply")
+        expect(text(land(ask: false, writing: true)) == EventProposals.askClosedText, "the bar is asked about first")
+        expect(land(thread: true) == .success(.parked), "an open email is not closed: the pane is parked")
+        expect(EventProposals.draftedText(.calendarPage) == EventProposals.draftedText, "what the model is told, on the page")
+        let parked = EventProposals.draftedText(.parked)
+        expect(parked.contains("waiting on the Calendar page") && parked.contains("Nothing has been added")
+            && parked.contains("nobody has been invited"), "and parked: where it waits, and what did not happen")
+        expect(EventProposals.askClosedText.contains("Nothing was drafted")
+            && EventProposals.writingMailText.contains("Nothing was drafted"), "a refusal says nothing was drafted")
+        // THE KEYS. ↵ and ⌘↵ on an untouched proposal do nothing.
+        expect(!EventProposals.keysMayAct(proposed: true, engaged: false),
+               "⌘↵ on a proposal nobody has clicked or typed in does nothing")
+        expect(EventProposals.keysMayAct(proposed: true, engaged: true), "once the user has, the keys are theirs")
+        expect(EventProposals.keysMayAct(proposed: false, engaged: false), "a pane the user opened is theirs from the start")
+        expect(EventProposals.keysMayAct(proposed: false, engaged: true), "always")
+        expect(EventProposals.keysLockedText.contains("click add"), "and the toast says what does work")
     }
 
     static func whatTheModelIsTold() {

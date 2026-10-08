@@ -14,12 +14,26 @@
 // when a pane already open refuses a new proposal, and which mailboxes are
 // offered the tool at all.
 //
-// THE TITLE IS THE ONLY PROSE IT SUPPLIES. The tool takes no notes and no
-// description: with guests on an event, Google emails its description to
-// them, and Passband never puts model-written prose in front of other
-// people. A call that sends notes anyway is refused in words, not quietly
-// trimmed, so the model does not tell the user they were saved; the notes
-// line of the pane it opens is always empty, for the user to type in.
+// THE TITLE AND THE PLACE ARE THE ONLY TEXT IT SUPPLIES, each one line of at
+// most 200 characters, and over that is a refusal the model can correct,
+// never a trim: with guests on an event Google emails both to them, and both
+// sit in one-line fields of the pane, where anything longer would be cut off
+// from the person about to press "add and invite". The tool takes no notes
+// and no description: Passband never puts model-written prose in front of
+// other people. A call that sends notes anyway, under any name a model
+// reaches for and in any case, is refused in words, and so is any other
+// field the tool does not have: nothing is dropped in silence, so the model
+// never tells the user something was saved that was not. The notes line of
+// the pane it opens is always empty, for the user to type in.
+//
+// IT NEVER TAKES THE SCREEN FROM SOMEBODY (verify7 D2). A proposal is drafted
+// only while the assistant's bar is open, which is where the person who
+// asked for it is; never over mail being written; and never by closing the
+// email being read (then it waits, parked, on the Calendar page). The pane
+// it opens does not take the keyboard, and does nothing on ↵ or ⌘↵ until
+// the user has clicked or typed in it: the keystroke that adds an event, or
+// invites its guests, is one made at this pane, having seen it. Modelled on
+// the agent door's `open_draft` (`ComposeState.keyboardSendLocked`).
 //
 // THE ASSISTANT DOES NOT READ THE CALENDAR. A proposal names a calendar or
 // leaves it to the primary one; a name that matches nothing is refused
@@ -86,6 +100,34 @@ enum EventProposals {
         + "the open event first, then try again."
     static let noCalendarText =
         "This mailbox has no calendar Passband can add events to. The user may need to connect Google Calendar on the Calendar page."
+    /// The calendar was asked for and did not answer. NOT "no calendar": a
+    /// user whose calendar is connected must not be told to connect it.
+    static let calendarUnreachableText =
+        "Passband could not reach the user's calendar just now, so nothing was drafted. This is not a sign "
+        + "that no calendar is connected. Tell the user it could not be reached, and try again if they ask."
+    /// The assistant's bar is not open: whoever asked is no longer at it.
+    static let askClosedText =
+        "Nothing was drafted: the assistant's bar is closed, and Passband opens an event draft only while "
+        + "the user is at it. Tell the user to ask again from the assistant's bar."
+    /// Mail is being written: it is never closed for a proposal.
+    static let writingMailText =
+        "Nothing was drafted: the user is in the middle of writing an email, and Passband does not close "
+        + "it to open an event. Ask them to send or close that email first, then try again."
+    /// Drafted, with an email open: the pane waits on the Calendar page.
+    static let draftedParkedText =
+        "The event is drafted and waiting on the Calendar page, behind the email the user is reading, "
+        + "which was left open. Nothing has been added to the calendar and nobody has been invited. Only "
+        + "the user can add it, with the event pane's own control. Tell them it is waiting on the Calendar "
+        + "page to review; do not say it was created or that anyone was invited."
+    /// ⌘↵ or ↵ on a proposed pane nobody has clicked or typed in.
+    static let keysLockedText = "Your assistant drafted this event. Read it, then click add."
+    static let longTitleText =
+        "The title must be one line of at most 200 characters. Shorten it and call again."
+    static let longLocationText =
+        "The location must be one line of at most 200 characters: a place name or an address, not a "
+        + "description. Shorten it and call again."
+    /// One-line text a proposal may carry: the daemon's own caps.
+    static let maxLine = 200
     static let unknownCalendarText =
         "No calendar the user can add events to has that name. Leave calendar out to use their primary calendar."
     static let cannotInviteText =
@@ -94,8 +136,21 @@ enum EventProposals {
         "This tool takes no notes or description: Passband does not put assistant-written text in an event, "
         + "because Google emails an event's description to its guests. Call it again without them, and tell "
         + "the user they can type notes in the event pane themselves."
-    /// The keys a model reaches for when it wants to write a description.
-    static let notesKeys: Set<String> = ["notes", "description", "body", "details", "agenda"]
+    /// The keys a model reaches for when it wants to write a description,
+    /// matched whatever their case.
+    static let notesKeys: Set<String> = [
+        "notes", "note", "description", "body", "details", "agenda", "summary", "message",
+    ]
+    /// Every field the tool has. Any other key with something in it is
+    /// refused by name.
+    static let knownKeys: Set<String> = ["title", "start", "end", "all_day", "calendar", "location", "guests"]
+
+    static func unknownFieldText(_ key: String) -> String {
+        // The key is the model's own text: said back short, on one line.
+        let name = String(key.unicodeScalars.filter { $0.properties.isAlphabetic || $0 == "_" }.prefix(40))
+        return "unknown field \"\(name)\": this tool takes only title, start, end, all_day, calendar, location and guests. "
+            + "Nothing was drafted. Call it again without that field."
+    }
     static let questionOpenText =
         "The Calendar page is asking the user a question. Ask them to answer it first, then try again."
 
@@ -104,7 +159,8 @@ enum EventProposals {
         - create_calendar_event drafts an event in Passband's event pane for the user to
           confirm. It adds nothing to their calendar and invites nobody; only the user
           can, by pressing the pane's own control. Say it is drafted, never that it exists.
-          It takes a title and no notes or description: you never write text into an event.
+          The title and the place are the only text you supply, one line each: it takes
+          no notes or description, and any other field is refused.
         """
 
     // MARK: reading the call
@@ -118,12 +174,18 @@ enum EventProposals {
             else { return nil }
             return v
         }
-        // Notes in any spelling: refused, never dropped in silence.
-        for key in notesKeys {
-            if let value = input[key], value != .null, value != .string("") {
-                return .failure(ProposalRefusal(text: noNotesText))
-            }
+        // NOTHING IS DROPPED IN SILENCE. Notes in any spelling and any case
+        // are refused as notes; any other key the tool does not have is
+        // refused by name. Sorted, so the same call gets the same answer. A
+        // key holding nothing (null, "") carried nothing and is let pass.
+        let extra = input.keys.sorted().filter { key in
+            guard !knownKeys.contains(key), let value = input[key] else { return false }
+            return value != .null && value != .string("")
         }
+        if extra.contains(where: { notesKeys.contains($0.lowercased()) }) {
+            return .failure(ProposalRefusal(text: noNotesText))
+        }
+        if let key = extra.first { return .failure(ProposalRefusal(text: unknownFieldText(key))) }
         guard let title = string("title") else { return .failure(ProposalRefusal(text: "missing title")) }
         guard let start = string("start") else { return .failure(ProposalRefusal(text: "missing start")) }
         var allDay = input["all_day"]?.boolValue
@@ -151,6 +213,15 @@ enum EventProposals {
                 calendar: string("calendar"), location: string("location"), guests: guests))
     }
 
+    /// One line, of at most `maxLine` characters as the daemon counts them:
+    /// no line break, tab or other control character anywhere in it.
+    static func oneLine(_ text: String) -> Bool {
+        EventForm.length(text) <= maxLine
+            && !text.unicodeScalars.contains {
+                CharacterSet.newlines.contains($0) || CharacterSet.controlCharacters.contains($0)
+            }
+    }
+
     // MARK: the draft
 
     /// "2026-10-09": a date and nothing else.
@@ -163,7 +234,14 @@ enum EventProposals {
     /// The calendar a proposal goes on: the primary writable one when none
     /// is named (or "primary" is), else the writable calendar with that id
     /// or, folded, that name.
+    ///
+    /// NO FEED IS NOT "NO CALENDAR" (verify7 E12). The feed is loaded by the
+    /// Calendar page, so before that page has been opened there is none; the
+    /// tool loads it once itself, and a nil feed after that is a load that
+    /// failed. "No calendar" is said only of a feed that arrived and lists
+    /// nothing writable.
     static func calendar(_ named: String?, feed: TimelineFeed?) -> Result<TimelineCalendar, ProposalRefusal> {
+        guard let feed else { return .failure(ProposalRefusal(text: calendarUnreachableText)) }
         let writable = CalendarWrite.writable(feed)
         guard let first = writable.first else { return .failure(ProposalRefusal(text: noCalendarText)) }
         guard let named, named.lowercased() != "primary" else { return .success(first) }
@@ -184,6 +262,11 @@ enum EventProposals {
     static func draft(
         _ p: EventProposal, feed: TimelineFeed?, owner: String?, today: Date, calendar: Calendar
     ) -> Result<EventDraft, ProposalRefusal> {
+        // THE ONLY TEXT THE MODEL SUPPLIES: one line each, capped, and over
+        // the cap is refused, never trimmed (verify7 D3, E14). Checked here,
+        // on the one road every proposal takes into a draft.
+        guard oneLine(p.title) else { return .failure(ProposalRefusal(text: longTitleText)) }
+        if let place = p.location, !oneLine(place) { return .failure(ProposalRefusal(text: longLocationText)) }
         let target: TimelineCalendar
         switch self.calendar(p.calendar, feed: feed) {
         case .failure(let refusal): return .failure(refusal)
@@ -266,6 +349,50 @@ enum EventProposals {
         }
         return .success(d)
     }
+
+    // MARK: the screen
+
+    /// Whether the feed has to be loaded before a proposal is judged: only
+    /// when there is none. A feed that is there, however old, is used as it
+    /// is (the daemon decides at the save).
+    static func mustLoad(feed: TimelineFeed?) -> Bool { feed == nil }
+
+    /// Where a proposal's pane goes.
+    enum Landing: Hashable, Sendable {
+        /// On the Calendar page, beside the month.
+        case calendarPage
+        /// Kept whole and not drawn, for the Calendar page to show when the
+        /// user goes there: an email is open, and it is not closed.
+        case parked
+    }
+
+    /// Whether a proposal may be drafted now, and where its pane goes.
+    ///
+    /// - The assistant's bar must be OPEN at this moment. A run goes on after
+    ///   the bar is closed (a citation clicked, "edit in composer"), and a
+    ///   tool call that lands then would change the page under somebody who
+    ///   is no longer looking at the assistant.
+    /// - Mail being written (a composer or an inline reply holding anything
+    ///   typed) is never closed for it.
+    /// - An open email is never closed for it: the pane is parked.
+    static func landing(askBarOpen: Bool, writingMail: Bool, threadOpen: Bool) -> Result<Landing, ProposalRefusal> {
+        guard askBarOpen else { return .failure(ProposalRefusal(text: askClosedText)) }
+        guard !writingMail else { return .failure(ProposalRefusal(text: writingMailText)) }
+        return .success(threadOpen ? .parked : .calendarPage)
+    }
+
+    /// What the model is told of a proposal that was drafted.
+    static func draftedText(_ landing: Landing) -> String {
+        landing == .parked ? draftedParkedText : draftedText
+    }
+
+    /// Whether ↵ and ⌘↵ may act on the pane, and whether it may take the
+    /// keyboard when it appears. A pane the ASSISTANT filled in does neither
+    /// until the user has clicked or typed inside it (`engaged`): a key
+    /// typed ahead, or meant for whatever was on screen a moment ago, must
+    /// not add an event or invite its guests. The pane's own button always
+    /// works: a click cannot be typed ahead.
+    static func keysMayAct(proposed: Bool, engaged: Bool) -> Bool { !proposed || engaged }
 
     // MARK: the pane
 

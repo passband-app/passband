@@ -129,6 +129,25 @@ enum EventPaneTravel {
         if open, touched { return (false, false) }
         return (true, true)
     }
+
+    /// AN AGENT'S DRAFT ASKING FOR THE SCREEN (the agent door's `open_draft`,
+    /// a `passband://draft` link; verify7 D5): whether an event pane counts
+    /// as something the user is WRITING, the way a typed-in composer does.
+    /// A pane with anything in it, one parked with something in it, and one
+    /// whose write is out or frozen all do. Then the draft waits in drafts
+    /// and Passband does not come forward: activating it under somebody
+    /// typing elsewhere would deliver their next ↵ or ⌘↵ to this pane.
+    static func heldByUser(exists: Bool, touched: Bool, parked: Bool, editable: Bool) -> Bool {
+        exists && (touched || parked || !editable)
+    }
+
+    /// Whether Passband may come to the front for an agent's draft: only
+    /// when nothing of the user's is being written AND the composer really
+    /// holds that draft. A request the composer refused brings nothing
+    /// forward: there would be nothing to show for it.
+    static func agentDraftMayComeForward(writing: Bool, composerHoldsIt: Bool) -> Bool {
+        !writing && composerHoldsIt
+    }
 }
 
 enum EventForm {
@@ -190,7 +209,7 @@ enum EventForm {
         out.date = dateText(day, today: today, calendar: calendar)
         let endText = trimmed(d.endDate)
         if !endText.isEmpty, let from = parseDate(d.date, today: today, calendar: calendar),
-            let last = parseDate(endText, today: today, calendar: calendar), last >= from
+            let last = parseEndDate(endText, from: from, today: today, calendar: calendar), last >= from
         {
             let length = calendar.dateComponents([.day], from: from, to: last).day ?? 0
             out.endDate = dateText(addDays(length, day, calendar), today: today, calendar: calendar)
@@ -279,7 +298,7 @@ enum EventForm {
         if d.allDay {
             var last = day
             if !endDateText.isEmpty {
-                guard let parsed = parseDate(endDateText, today: today, calendar: calendar) else {
+                guard let parsed = parseEndDate(endDateText, from: day, today: today, calendar: calendar) else {
                     return .failure(.badEndDate)
                 }
                 last = parsed
@@ -292,7 +311,7 @@ enum EventForm {
         guard let start = at(day, s.minutes, calendar) else { return .failure(.badDate) }
         var endDay = day
         if !endDateText.isEmpty {
-            guard let parsed = parseDate(endDateText, today: today, calendar: calendar) else {
+            guard let parsed = parseEndDate(endDateText, from: day, today: today, calendar: calendar) else {
                 return .failure(.badEndDate)
             }
             endDay = parsed
@@ -433,19 +452,38 @@ enum EventForm {
     /// What the card will save, under the fields: "Thu Oct 8, 7:45pm to
     /// 8:45pm", "Thu Oct 8, 10pm to 2am Fri", "Thu Oct 8, all day", "Wed Oct
     /// 14 to Mon Oct 19, all day".
-    static func summary(_ w: ResolvedWhen, calendar: Calendar) -> String {
-        let first = Agenda.format(w.start, "EEE MMM d", calendar)
-        if w.allDay {
-            if calendar.isDate(w.start, inSameDayAs: w.end) { return "\(first), all day" }
-            return "\(first) to \(Agenda.format(w.end, "EEE MMM d", calendar)), all day"
-        }
-        let start = Agenda.clock(w.start, calendar)
-        let end = Agenda.clock(w.end, calendar)
-        if calendar.isDate(w.start, inSameDayAs: w.end) { return "\(first), \(start) to \(end)" }
+    ///
+    /// THE YEAR IS SAID WHEN IT IS NOT THIS ONE. A date the assistant wrote
+    /// for last year, or a title that reached into the next ("Jan 6" typed in
+    /// October), reads "Wed Jan 6 2027": the line is where the user checks
+    /// what will be saved, and a missing year reads as this year. A start
+    /// that has already gone by ends the line with "in the past".
+    static func summary(_ w: ResolvedWhen, now: Date, calendar: Calendar) -> String {
+        let thisYear = calendar.component(.year, from: now)
         let startDay = calendar.startOfDay(for: w.start)
-        let nextDay = addDays(1, startDay, calendar)
-        let endPattern = calendar.isDate(w.end, inSameDayAs: nextDay) ? "EEE" : "EEE MMM d"
-        return "\(first), \(start) to \(end) \(Agenda.format(w.end, endPattern, calendar))"
+        let sameDay = calendar.isDate(w.start, inSameDayAs: w.end)
+        // A timed event ending the next day says only that day's name.
+        let nextDay = !w.allDay && calendar.isDate(w.end, inSameDayAs: addDays(1, startDay, calendar))
+        let endDated = !sameDay && !nextDay
+        let year =
+            calendar.component(.year, from: w.start) != thisYear
+            || (endDated && calendar.component(.year, from: w.end) != thisYear)
+        let dated = year ? "EEE MMM d yyyy" : "EEE MMM d"
+        let first = Agenda.format(w.start, dated, calendar)
+        var line: String
+        if w.allDay {
+            line = sameDay ? "\(first), all day" : "\(first) to \(Agenda.format(w.end, dated, calendar)), all day"
+        } else {
+            let start = Agenda.clock(w.start, calendar)
+            let end = Agenda.clock(w.end, calendar)
+            line =
+                sameDay
+                ? "\(first), \(start) to \(end)"
+                : "\(first), \(start) to \(end) \(Agenda.format(w.end, nextDay ? "EEE" : dated, calendar))"
+        }
+        // All day today has not gone by; a timed start earlier today has.
+        let past = w.allDay ? startDay < calendar.startOfDay(for: now) : w.start < now
+        return past ? line + ", in the past" : line
     }
 
     // MARK: parsing dates
@@ -513,6 +551,18 @@ enum EventForm {
         guard let candidate = make(thisYear, m, d, calendar) ?? make(thisYear + 1, m, d, calendar) else { return nil }
         if candidate < addDays(-92, today, calendar) { return make(thisYear + 1, m, d, calendar) }
         return candidate
+    }
+
+    /// A typed END day. As `parseDate`, except that a weekday alone is the
+    /// next one from the START day (that day included), not from today: an
+    /// event starting Mon Oct 19 and ending "tue" ends Tue Oct 20, not the
+    /// Tuesday of this week.
+    static func parseEndDate(_ raw: String, from start: Date, today: Date, calendar: Calendar) -> Date? {
+        let words = raw.lowercased().replacingOccurrences(of: ",", with: " ").split(whereSeparator: \.isWhitespace)
+        if words.count == 1, weekday(String(words[0])) != nil {
+            return parseDate(raw, today: start, calendar: calendar)
+        }
+        return parseDate(raw, today: today, calendar: calendar)
     }
 
     private static func make(_ y: Int, _ m: Int, _ d: Int, _ calendar: Calendar) -> Date? {

@@ -28,6 +28,9 @@ struct TitleParseTests {
 
     static func main() {
         thePhrase()
+        ledOrTrailing()
+        aDeadlineStaysInTheTitle()
+        aCorrectedWellKeepsItsWordsOut()
         days()
         times()
         ranges()
@@ -48,6 +51,8 @@ struct TitleParseTests {
         aSuggestionIsNotAGuest()
         answeringASuggestion()
         whatTheDaemonIsAsked()
+        aFailedLookupIsNotAnAnswer()
+        theKeyboardAndTheSuggestion()
         theWire()
 
         if failures > 0 {
@@ -118,7 +123,6 @@ struct TitleParseTests {
         let table: [(String, String)] = [
             ("dinner on friday", "Dinner | Oct 9 | - | "),
             ("dinner friday", "Dinner | Oct 9 | - | "),
-            ("Friday dinner", "dinner | Oct 9 | - | "),
             ("lunch today", "Lunch | Oct 5 | - | "),
             ("drinks tonight", "Drinks | Oct 5 | - | "),
             ("lunch tomorrow", "Lunch | Oct 6 | - | "),
@@ -130,7 +134,9 @@ struct TitleParseTests {
             ("review this thu", "Review | Oct 8 | - | "),
             ("review on mon", "Review | Oct 5 | - | "),
             ("review fri oct 16", "Review | Oct 16 | - | "),
-            ("gym sat", "Gym | Oct 10 | - | "),
+            ("gym sat 9am", "Gym | Oct 10 | 540 | "),
+            ("gym on sat", "Gym | Oct 10 | - | "),
+            ("gym fri", "Gym | Oct 9 | - | "),
             ("dentist, friday", "Dentist | Oct 9 | - | "),
             ("planning sept 3 2027", "Planning | Sep 3 | - | "),
         ]
@@ -157,10 +163,10 @@ struct TitleParseTests {
             ("standup 9.15am", "Standup | - | 555 | "),
             ("call at 4:30", "Call | - | 990 | "),
             ("call @ 16:30", "Call | - | 990 | "),
-            ("call 16:30", "Call | - | 990 | "),
+            ("call at 16:30", "Call | - | 990 | "),
             ("lunch at noon", "Lunch | - | 720 | "),
             ("lunch friday noon", "Lunch | Oct 9 | 720 | "),
-            ("4pm standup", "Standup | - | 960 | "),
+            ("at 4pm standup", "Standup | - | 960 | "),
             ("call 4 p.m.", "Call | - | 960 | "),
             ("dinner fri 7pm", "Dinner | Oct 9 | 1140 | "),
             ("dinner 7pm fri", "Dinner | Oct 9 | 1140 | "),
@@ -201,6 +207,19 @@ struct TitleParseTests {
             "from 4", "at", "on", "next steps", "this is it", "1930s film night",
             "call with friday crew", "dinner with may", "iphone 15 pm launch", "on 10/12/",
             "ship v2 by eod", "10/12 retro", "follow-up", "9-5 mindset",
+            // A DAY OR A TIME IS READ ONLY LED OR TRAILING (verify7 E3, E5,
+            // E6). The reviewer's probes, every one: a weekday, "today" or a
+            // date inside a name, at the front or in the middle of a title.
+            "Black Friday sale", "Good Friday service", "Taco Tuesday", "Super Bowl Sunday",
+            "Thursday Night Football", "USA Today interview", "Tonight Show taping",
+            "Tomorrow never dies screening", "Study for SAT", "Fun in the sun", "Newly wed", "prep SAT",
+            "March 4 Justice rally", "Jan 6 hearing", "Top 5 Mar picks", "Top 5 Mar",
+            "Meet 2 PM candidates", "Class 5 PM review", "Psalm 23:10 study", "Isaiah 14:12",
+            "Score 21:17 recap", "Romans 13:11-14", "Notes from 3 to 4 people", "Ages from 5 to 12 class",
+            "from 3 to 4", "dinner 7pm until late", "open until 9pm", "Sunday brunch", "Monday standup",
+            "Friday prep for launch", "Friday dinner", "4pm standup", "call 16:30", "gym sat",
+            "dinner fri oct 10", "dinner sat oct 9", "Dinner Friday", "DINNER FRIDAY",
+            "dinner (friday)", "launch 4:30", "USA Today", "friday dinner plans", "tomorrow people screening",
         ]
         for title in titles {
             let r = read(title)
@@ -214,17 +233,77 @@ struct TitleParseTests {
 
     /// Ambiguity resolves to doing nothing, each kind on its own.
     static func twoOfAKindIsNeither() {
-        let twoDays = read("friday planning for monday 4pm")
-        expect(twoDays.day == nil, "two different days: neither")
+        let twoDays = read("friday planning on monday 4pm")
+        expect(twoDays.day == nil, "two different days, one of them not even read: neither")
         expect(twoDays.start == 960, "the one time is still the time")
-        expect(twoDays.title == "Friday planning for monday", "and only its words come out: \(twoDays.title)")
+        expect(twoDays.title == "Friday planning on monday", "and only its words come out: \(twoDays.title)")
+        let blackFriday = read("Black Friday sale on saturday")
+        expect(blackFriday.day == nil && blackFriday.title == "Black Friday sale on saturday",
+               "a day inside a name still makes a second day an ambiguity")
         let twoTimes = read("move 3pm sync to 4pm friday")
         expect(twoTimes.start == nil && twoTimes.end == nil, "two different times: neither")
         expect(twoTimes.day == day("2026-10-09"), "the one day is still the day")
         expect(read("friday dinner on friday").day == day("2026-10-09"), "the same day said twice is that day")
-        expect(read("friday dinner on friday").title == "Dinner", "and both come out")
+        expect(read("friday dinner on friday").title == "Friday dinner", "and only the one that was led comes out")
+        let twice = read("dinner friday 4pm 4pm")
+        expect(twice.start == 960 && twice.day == day("2026-10-09") && twice.title == "Dinner",
+               "the same time said twice is that time: \(twice.title)")
         let both = read("3pm monday or 4pm tuesday")
         expect(!both.filled && both.title == "3pm monday or 4pm tuesday", "two of each: the title is left alone")
+    }
+
+    /// LED OR TRAILING (verify7 E3): where in the title a day or a time is
+    /// read, and the capital and all-capitals rules.
+    static func ledOrTrailing() {
+        let table: [(String, String)] = [
+            // The founder's phrase, with and without "on".
+            ("dinner with steven on friday 4pm", "Dinner with Steven | Oct 9 | 960 | steven"),
+            ("dinner with steven friday 4pm", "Dinner with Steven | Oct 9 | 960 | steven"),
+            ("Dinner with Steven Friday 4pm", "Dinner with Steven | Oct 9 | 960 | Steven"),
+            // Led, anywhere.
+            ("on friday dinner with steven", "Dinner with Steven | Oct 9 | - | steven"),
+            ("dinner on friday with steven", "Dinner with Steven | Oct 9 | - | steven"),
+            ("standup at 9:15 daily", "Standup daily | - | 555 | "),
+            ("notes from 3 to 4pm people", "Notes people | - | 900-960 | "),
+            ("this fri retro notes", "Retro notes | Oct 9 | - | "),
+            // A name's weekday is not read, and the time after it still is.
+            ("Taco Tuesday 4pm", "Taco Tuesday | - | 960 | "),
+            ("Black Friday sale on friday", "Black Friday sale | Oct 9 | - | "),
+            // A lead's own capital is not half a name.
+            ("Dinner On Friday", "Dinner | Oct 9 | - | "),
+            ("Next Friday dinner", "Dinner | Oct 16 | - | "),
+            // "the sun" is not a day, and the time after it still is one.
+            ("walk in the sun 4pm", "Walk in the sun | - | 960 | "),
+            // "sat", "sun", "wed" with something beside them.
+            ("hike sun 9am", "Hike | Oct 11 | 540 | "),
+            ("hike 9am wed", "Hike | Oct 7 | 540 | "),
+            ("hike sat oct 10", "Hike | Oct 10 | - | "),
+        ]
+        for (typed, want) in table {
+            expect(line(typed) == want, "\"\(typed)\" reads \(line(typed)), wanted \(want)")
+        }
+    }
+
+    /// A DAY THAT IS A DEADLINE OR A SUBJECT (verify7 E5): the day well is
+    /// filled, the title is left exactly as typed, no capital added.
+    static func aDeadlineStaysInTheTitle() {
+        let table: [(String, String)] = [
+            ("ship v2 by friday", "ship v2 by friday | Oct 9 | - | "),
+            ("prep for friday", "prep for friday | Oct 9 | - | "),
+            ("closed until friday", "closed until friday | Oct 9 | - | "),
+            ("pack before sat", "pack before sat | Oct 10 | - | "),
+            ("call after tomorrow", "call after tomorrow | Oct 6 | - | "),
+            ("ship v2 by next tue", "ship v2 by next tue | Oct 13 | - | "),
+            ("ship v2 by friday 4pm", "ship v2 by friday 4pm | Oct 9 | 960 | "),
+            ("submit by 5pm", "submit by 5pm | - | 1020 | "),
+            ("prep for friday review", "prep for friday review | Oct 9 | - | "),
+            // Only the deadline stays: a led time elsewhere still comes out.
+            ("at 4pm prep for friday", "Prep for friday | Oct 9 | 960 | "),
+        ]
+        for (typed, want) in table {
+            expect(line(typed) == want, "\"\(typed)\" reads \(line(typed)), wanted \(want)")
+        }
+        expect(read("ship v2 by friday").filled, "the day is filled though no word came out")
     }
 
     static func names() {
@@ -252,6 +331,10 @@ struct TitleParseTests {
 
     static func theSavedTitle() {
         expect(read("Dinner with Steven on Friday 4pm").title == "Dinner with Steven", "capitals typed are kept")
+        // THE CAPITAL IS DECIDED BY WHAT IS KEPT (verify7 E4): the word that
+        // had the capital went, so the title is not left without one.
+        expect(read("lunch on Friday").title == "Lunch", "the only capital came out with the day: \(read("lunch on Friday").title)")
+        expect(read("on Friday brunch at 4PM").title == "Brunch", "and at the front")
         expect(read("dinner with Steven on friday").title == "dinner with Steven",
                "one capital typed anywhere: the first letter is left as typed")
         expect(read("friday 4pm").title == "", "nothing but a day and a time leaves no title")
@@ -296,6 +379,43 @@ struct TitleParseTests {
 
     // MARK: the title in the form
 
+    /// verify7 E8: correcting one well never puts the words that came out of
+    /// the title back into it.
+    static func aCorrectedWellKeepsItsWordsOut() {
+        let base = typed(fresh(), "dinner friday 7pm")
+        expect(EventForm.savedTitle(base, today: now, calendar: cal) == "Dinner", "the title as first read")
+        // The commonest follow-up: the END time corrected.
+        var ended = base
+        ended.end = "9:30pm"
+        ended = EventForm.handSet(ended, .end)
+        expect(ended.start == "7pm" && ended.end == "9:30pm", "the start is still the title's 7pm")
+        expect(EventForm.savedTitle(ended, today: now, calendar: cal) == "Dinner",
+               "and \"7pm\" does not come back into the title: \(EventForm.savedTitle(ended, today: now, calendar: cal))")
+        expect(typed(ended, "dinner friday 7pm ").end == "9:30pm", "the hand-set end is still never overwritten")
+        // The day clicked on the grid.
+        let clicked = EventForm.moved(typed(fresh(), "dinner friday"), to: day("2026-10-20"), today: now, calendar: cal)
+        expect(EventForm.savedTitle(clicked, today: now, calendar: cal) == "Dinner",
+               "\"friday\" stays out after another day is clicked: \(EventForm.savedTitle(clicked, today: now, calendar: cal))")
+        // Words that say something NEW about a corrected field were never
+        // taken out, and are not now.
+        let retyped = typed(clicked, "dinner saturday")
+        expect(retyped.date == "Tue Oct 20", "the clicked day stays")
+        expect(EventForm.savedTitle(retyped, today: now, calendar: cal) == "dinner saturday",
+               "a new day word typed after the correction stays in the title")
+        let later = typed(ended, "dinner friday 8pm")
+        expect(later.start == "7pm" && EventForm.savedTitle(later, today: now, calendar: cal) == "Dinner 8pm",
+               "and so does a new time: \(EventForm.savedTitle(later, today: now, calendar: cal))")
+        // A well set by hand BEFORE the title said anything: its words stay.
+        var first = fresh()
+        first.date = "Oct 20"
+        first = EventForm.handSet(first, .date)
+        expect(EventForm.savedTitle(typed(first, "dinner friday"), today: now, calendar: cal) == "dinner friday",
+               "nothing was filled, so nothing comes out")
+        // The way back is unchanged: deleting the words restores what the
+        // title still owns.
+        expect(typed(ended, "dinner").date == "Mon Oct 5", "deleting the words still puts the day back")
+    }
+
     static func theTitleFillsTheWells() {
         let base = fresh()
         expect(base.titleRead.on && base.date == "Mon Oct 5" && base.start == "4pm" && base.end == "5pm",
@@ -313,7 +433,7 @@ struct TitleParseTests {
         let overnight = typed(base, "party sat 10pm-2am")
         expect(overnight.start == "10pm" && overnight.end == "2am", "an overnight range as it is said")
         if case .success(let w) = EventForm.when(overnight, today: now, calendar: cal) {
-            expect(EventForm.summary(w, calendar: cal) == "Sat Oct 10, 10pm to 2am Sun", "and it ends the next day")
+            expect(EventForm.summary(w, now: now, calendar: cal) == "Sat Oct 10, 10pm to 2am Sun", "and it ends the next day")
         } else {
             expect(false, "the overnight draft resolves")
         }
@@ -448,7 +568,7 @@ struct TitleParseTests {
                "and so does one AT the start")
         func summary(_ d: EventDraft) -> String {
             switch EventForm.when(d, today: now, calendar: cal) {
-            case .success(let w): return EventForm.summary(w, calendar: cal)
+            case .success(let w): return EventForm.summary(w, now: now, calendar: cal)
             case .failure(let p): return "problem: \(p)"
             }
         }
@@ -617,7 +737,63 @@ struct TitleParseTests {
         expect(EventGuests.queries(for: "Steven") == ["steven"], "one word, folded")
         expect(EventGuests.queries(for: "ana  Downtown") == ["ana downtown", "ana"], "two words, then the first alone")
         expect(EventGuests.queries(for: "  ").isEmpty, "nothing for nothing")
+        // The daemon refuses a name under two characters (verify7 D1), so
+        // none is asked.
+        expect(EventGuests.queries(for: "s").isEmpty, "one letter is not asked")
+        expect(EventGuests.queries(for: "s ng") == ["s ng"], "nor is a first word of one letter, alone")
+        expect(EventGuests.queries(for: "st") == ["st"], "two letters are a name")
         expect(EventGuests.nameKey(" Steven  NG ") == "steven ng", "a name's key is folded and single-spaced")
+    }
+
+    /// verify7 E9: a lookup that failed is not remembered as "nobody".
+    static func aFailedLookupIsNotAnAnswer() {
+        typealias Ask = EventGuests.NameAsk
+        expect(EventGuests.nameAnswer([.people([steven])]) == [steven], "somebody found is the answer")
+        expect(EventGuests.nameAnswer([.people([]), .people([ana])]) == [ana], "the second question's, when the first found nobody")
+        expect(EventGuests.nameAnswer([.people([])]) == [], "asked, nobody: remembered")
+        expect(EventGuests.nameAnswer([.people([]), .people([])]) == [], "both asked, nobody")
+        expect(EventGuests.nameAnswer([.failed]) == nil, "a failure is no answer: nothing is remembered")
+        expect(EventGuests.nameAnswer([.people([]), .failed]) == nil, "nobody and then a failure is still no answer")
+        expect(EventGuests.nameAnswer([.failed, .people([])]) == nil, "a failure and then nobody: the failed question might have found them")
+        expect(EventGuests.nameAnswer([.failed, .people([steven])]) == [steven], "somebody found after a failure is an answer")
+        expect(EventGuests.nameAnswer([.noRoute]) == [], "a daemon without the route is nobody, for good")
+        expect(EventGuests.nameAnswer([.failed, .noRoute]) == [], "and so after a failure")
+        expect(EventGuests.nameAnswer([]) == [], "nothing to ask is nobody")
+        expect(EventGuests.nameSettled(by: Ask.people([steven])) && EventGuests.nameSettled(by: Ask.noRoute),
+               "the questions stop at somebody, or at no route")
+        expect(!EventGuests.nameSettled(by: Ask.people([])) && !EventGuests.nameSettled(by: Ask.failed),
+               "and go on past nobody and past a failure")
+        // The pane's own bookkeeping: an unanswered name is still missing.
+        var remembered: [String: [NamedPerson]] = [:]
+        if let a = EventGuests.nameAnswer([.failed]) { remembered["steven"] = a }
+        expect(remembered["steven"] == nil, "so it is asked again")
+        let d = typed(fresh(), "dinner with steven friday")
+        expect(offer(d, people: remembered) == nil, "and nothing is offered meanwhile")
+    }
+
+    /// verify7 E10: where Tab goes, and what ↵ may add.
+    static func theKeyboardAndTheSuggestion() {
+        let settle = EventGuests.suggestionSettle
+        expect(!EventGuests.tabTakesSuggestion(caretInTitle: true, shownFor: nil), "nothing offered: Tab is the fields' own")
+        expect(!EventGuests.tabTakesSuggestion(caretInTitle: true, shownFor: 0),
+               "an answer landing as Tab is pressed does not move where Tab goes")
+        expect(!EventGuests.tabTakesSuggestion(caretInTitle: true, shownFor: settle - 0.01), "nor just before it has settled")
+        expect(EventGuests.tabTakesSuggestion(caretInTitle: true, shownFor: settle), "a box that has been there takes Tab")
+        expect(!EventGuests.tabTakesSuggestion(caretInTitle: false, shownFor: 60),
+               "with the caret already past the title, never")
+        expect(settle >= 0.5, "long enough to be seen")
+        // The keyboard stays on the box only for the same offer.
+        let d = typed(fresh(), "dinner with steven and ana friday")
+        let people = ["steven": [steven, stevenP], "ana": [ana]]
+        let first = offer(d, people: people)
+        let second = offer(EventGuests.accepting(steven, for: "steven", in: d), people: people)
+        expect(first?.name == "steven" && second?.name == "ana", "one name answered, the next offered")
+        expect(EventGuests.keyboardStays(was: first, now: first), "the same offer keeps the keyboard")
+        expect(!EventGuests.keyboardStays(was: first, now: second), "the next name's does not: Return must not add Ana unasked")
+        expect(!EventGuests.keyboardStays(was: first, now: nil), "an offer that went does not")
+        expect(!EventGuests.keyboardStays(was: nil, now: first), "one that just arrived never has it")
+        let swapped = offer(d, people: ["steven": [stevenP, steven], "ana": [ana]])
+        expect(!EventGuests.keyboardStays(was: first, now: swapped), "nor the same name with another person in front")
     }
 
     static func theWire() {

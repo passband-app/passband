@@ -30,6 +30,7 @@ struct EventDraftTests {
         anAllDayDraftToTheWireWithTheInclusiveEnd()
         validation()
         summaries()
+        anAgentsDraftDoesNotComeForwardOverAnEvent()
         newDrafts()
         sweptDrafts()
         aClickedDayMovesTheDraft()
@@ -235,10 +236,32 @@ struct EventDraftTests {
         expect(texts.allSatisfy { !$0.contains("\u{2014}") }, "and no em dash anywhere")
     }
 
+    /// verify7 D5: an agent's draft asking for the screen (`open_draft`, a
+    /// passband://draft link) against an event pane.
+    static func anAgentsDraftDoesNotComeForwardOverAnEvent() {
+        func held(_ exists: Bool, touched: Bool = false, parked: Bool = false, editable: Bool = true) -> Bool {
+            EventPaneTravel.heldByUser(exists: exists, touched: touched, parked: parked, editable: editable)
+        }
+        expect(!held(false), "no pane: nothing is being written")
+        expect(!held(false, touched: true, parked: true, editable: false), "whatever the leftovers say")
+        expect(!held(true), "an untouched pane on screen gives way, as it does to any composer")
+        expect(held(true, touched: true), "a pane with something typed in it is the user's writing")
+        expect(held(true, parked: true), "so is a parked one, though it is not on screen")
+        expect(held(true, editable: false), "and one whose write is out or frozen")
+        expect(held(true, touched: true, parked: true, editable: false), "all three")
+        expect(!EventPaneTravel.agentDraftMayComeForward(writing: true, composerHoldsIt: true),
+               "nothing comes forward over something being written")
+        expect(!EventPaneTravel.agentDraftMayComeForward(writing: false, composerHoldsIt: false),
+               "nor for a draft the composer did not take: there is nothing to show")
+        expect(!EventPaneTravel.agentDraftMayComeForward(writing: true, composerHoldsIt: false), "nor both")
+        expect(EventPaneTravel.agentDraftMayComeForward(writing: false, composerHoldsIt: true),
+               "only for a draft that is really in the composer, with nothing else being written")
+    }
+
     static func summaries() {
         func s(_ d: EventDraft) -> String? {
             if case .success(let w) = EventForm.when(d, today: now, calendar: cal) {
-                return EventForm.summary(w, calendar: cal)
+                return EventForm.summary(w, now: now, calendar: cal)
             }
             return nil
         }
@@ -249,6 +272,44 @@ struct EventDraftTests {
         expect(s(draft(allDay: true)) == "Thu Oct 8, all day", "one day")
         expect(s(draft(date: "Oct 14", allDay: true, endDate: "Oct 19")) == "Wed Oct 14 to Mon Oct 19, all day",
                "a run of days")
+        // THE YEAR, WHEN IT IS NOT THIS ONE, AND A START GONE BY (verify7
+        // E13). Now is Mon Oct 5 2026, 3:40pm.
+        func w(_ start: String, _ end: String, allDay: Bool = false) -> String {
+            EventForm.summary(
+                ResolvedWhen(allDay: allDay, start: allDay ? day(start) : at(start), end: allDay ? day(end) : at(end)),
+                now: now, calendar: cal)
+        }
+        expect(w("2027-01-06T12:00:00-08:00", "2027-01-06T13:00:00-08:00") == "Wed Jan 6 2027, 12pm to 1pm",
+               "next year is said")
+        expect(w("2020-01-09T12:00:00-08:00", "2020-01-09T13:00:00-08:00") == "Thu Jan 9 2020, 12pm to 1pm, in the past",
+               "a proposal for 2020 reads as 2020, and as gone")
+        expect(w("2026-10-09T12:00:00-07:00", "2027-10-09T12:00:00-07:00") == "Fri Oct 9 2026, 12pm to 12pm Sat Oct 9 2027",
+               "a year-long event says both years")
+        expect(w("2026-12-31T22:00:00-08:00", "2027-01-01T02:00:00-08:00") == "Thu Dec 31, 10pm to 2am Fri",
+               "new year's night is still a night")
+        expect(w("2026-12-30", "2027-01-02", allDay: true) == "Wed Dec 30 2026 to Sat Jan 2 2027, all day",
+               "a run of days over the year's end")
+        expect(w("2027-03-04", "2027-03-04", allDay: true) == "Thu Mar 4 2027, all day", "an all-day next year")
+        expect(w("2026-10-05T09:00:00-07:00", "2026-10-05T10:00:00-07:00") == "Mon Oct 5, 9am to 10am, in the past",
+               "this morning has gone by")
+        expect(w("2026-10-05T16:00:00-07:00", "2026-10-05T17:00:00-07:00") == "Mon Oct 5, 4pm to 5pm",
+               "later today has not")
+        expect(w("2026-10-01T09:00:00-07:00", "2026-10-01T10:00:00-07:00") == "Thu Oct 1, 9am to 10am, in the past",
+               "last week, this year: no year, but said")
+        expect(w("2026-10-05", "2026-10-05", allDay: true) == "Mon Oct 5, all day", "all day today has not gone by")
+        expect(w("2026-10-04", "2026-10-04", allDay: true) == "Sun Oct 4, all day, in the past", "all day yesterday has")
+        // A WEEKDAY IN THE END-DAY WELL IS READ FROM THE START (verify7 E16).
+        expect(s(draft(date: "Oct 19", start: "7pm", end: "9pm", endDate: "tue")) == "Mon Oct 19, 7pm to 9pm Tue",
+               "an event starting Mon Oct 19 that ends \"tue\" ends the Tuesday after it")
+        expect(s(draft(date: "Oct 19", start: "7pm", end: "9pm", endDate: "mon")) == "Mon Oct 19, 7pm to 9pm",
+               "the start's own weekday is the start day")
+        expect(s(draft(date: "Oct 19", allDay: true, endDate: "friday")) == "Mon Oct 19 to Fri Oct 23, all day",
+               "and the same for a last day")
+        expect(s(draft(date: "Oct 19", start: "7pm", end: "9pm", endDate: "Oct 21")) == "Mon Oct 19, 7pm to 9pm Wed Oct 21",
+               "a date is a date, whatever the start")
+        var run = draft(date: "Oct 19", start: "7pm", end: "9pm", endDate: "wed")
+        run = EventForm.moved(run, to: day("2026-10-26"), today: now, calendar: cal)
+        expect(run.endDate == "Wed Oct 28", "a clicked day carries a weekday end day by its length from the start: \(run.endDate)")
     }
 
     static func newDrafts() {

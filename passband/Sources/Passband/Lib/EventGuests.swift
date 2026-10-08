@@ -599,10 +599,87 @@ extension EventGuests {
 
     /// What the daemon is asked for a typed name, most specific first: the
     /// name as typed, then its first word alone ("ana downtown" is Ana).
+    ///
+    /// NOTHING UNDER TWO CHARACTERS is asked: the daemon refuses it (400),
+    /// since one letter matches a large part of anybody's contacts.
     static func queries(for name: String) -> [String] {
         let words = nameKey(name).split(separator: " ").map(String.init)
         guard let first = words.first else { return [] }
-        return words.count > 1 ? [words.joined(separator: " "), first] : [first]
+        let all = words.count > 1 ? [words.joined(separator: " "), first] : [first]
+        return all.filter { $0.count >= minQuery }
+    }
+
+    static let minQuery = 2
+
+    /// How one question to the daemon about a name came out.
+    enum NameAsk: Hashable, Sendable {
+        case people([NamedPerson])
+        /// The network, a 500: no answer at all.
+        case failed
+        /// A daemon older than the route: there will never be an answer.
+        case noRoute
+    }
+
+    /// What a name's questions (`queries(for:)`, in order) add up to: the
+    /// people to remember for it, or NIL when nothing should be remembered
+    /// and the name is asked again the next time the names change.
+    ///
+    /// A FAILURE IS NOT "NOBODY" (verify7 E9). One dropped request used to be
+    /// stored as an empty answer, and the name was never asked again for the
+    /// life of the pane. Now the first question that found somebody is the
+    /// answer; a daemon without the route is nobody, for good; and with
+    /// nobody found, any question that failed leaves the name unanswered.
+    static func nameAnswer(_ asks: [NameAsk]) -> [NamedPerson]? {
+        var failed = false
+        for ask in asks {
+            switch ask {
+            case .people(let found) where !found.isEmpty: return found
+            case .people: continue
+            case .noRoute: return []
+            case .failed: failed = true
+            }
+        }
+        return failed ? nil : []
+    }
+
+    /// Whether the questions can stop here: somebody was found, or the route
+    /// is not there.
+    static func nameSettled(by ask: NameAsk) -> Bool {
+        switch ask {
+        case .people(let found): !found.isEmpty
+        case .noRoute: true
+        case .failed: false
+        }
+    }
+
+    // MARK: the keyboard and the suggestion
+
+    /// How long a suggestion has to have been on screen before Tab from the
+    /// title lands on it.
+    static let suggestionSettle: TimeInterval = 0.75
+
+    /// Whether Tab pressed in the title goes to the suggestion box (true) or
+    /// on to the day, as it does with nothing offered (false).
+    ///
+    /// A LATE ANSWER DOES NOT MOVE WHERE TAB GOES (verify7 E10). The lookup
+    /// answers behind the pane, whenever it answers; a person tabbing out of
+    /// the title at that moment is going to the day well, and would land
+    /// instead on a box they have not seen, where ↵ makes somebody a guest.
+    /// So the box takes Tab only once it has been showing for
+    /// `suggestionSettle`, and only from the title: with the caret already
+    /// past it, Tab is the fields' own whatever arrives.
+    static func tabTakesSuggestion(caretInTitle: Bool, shownFor: TimeInterval?) -> Bool {
+        guard caretInTitle, let shownFor else { return false }
+        return shownFor >= suggestionSettle
+    }
+
+    /// Whether the keyboard, which is on the suggestion box, may stay there
+    /// when the offer changes. Only while it is the SAME name's offer: when
+    /// one name is answered and the next person is offered in its place, ↵
+    /// must not add somebody the user never tabbed to.
+    static func keyboardStays(was: GuestSuggestion?, now: GuestSuggestion?) -> Bool {
+        guard let was, let now else { return false }
+        return nameKey(was.name) == nameKey(now.name) && was.best == now.best
     }
 }
 

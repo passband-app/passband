@@ -750,6 +750,14 @@ final class AppStore {
     /// the draft are kept, the pane is not drawn, and coming back to the
     /// Calendar page brings it back as it was (`parkEventEditor`).
     var calendarEditorParked = false
+    /// The pane on screen (or parked) was filled in by THE ASSISTANT, not by
+    /// the user's hands (`proposeEvent`). While it is, and until
+    /// `calendarPaneEngaged`, the pane takes no keyboard and ↵ / ⌘↵ do
+    /// nothing in it (`EventProposals.keysMayAct`). Reset with the pane.
+    var calendarPaneProposed = false
+    /// The user has clicked or typed inside a proposed pane: its keys are
+    /// theirs from here.
+    var calendarPaneEngaged = false
     /// When the last full zone refresh COMPLETED. nil = never loaded. OUT of
     /// the observed struct: it is a TTL stamp, and stamping it invalidated
     /// every zone view once per pass whether or not a row had changed.
@@ -4684,20 +4692,33 @@ final class AppStore {
             }
             // Already the one on screen, or already on its way out.
             guard !isInert(draft), !isHeld(draft) else { return }
-            let writing = [compose, inlineReply].compactMap { $0 }.contains { open in
-                // An agent's draft nobody has touched is not somebody writing.
-                if open.fromAgent, let id = open.draftId, let row = rows.first(where: { $0.id == id }),
-                    row.body == open.body, open.attachments.isEmpty
-                {
-                    return false
-                }
-                return DraftSaver.hasContent(open) || !open.attachments.isEmpty
-            }
+            // Mail being written, OR AN EVENT (verify7 D5): a pane with
+            // something in it, parked or frozen, is the user's writing too.
+            // Coming forward over it would hand a typed-ahead ↵ or ⌘↵ to a
+            // pane that adds an event and can invite its guests.
+            let writing = mailBeingWritten(agentRows: rows) || eventPaneHeldByUser
             guard !writing else {
                 pushToast("Your agent left a draft. It is in your drafts when you are done here.")
                 return
             }
             openDraft(draft)
+            // NOTHING COMES FORWARD FOR A DRAFT THE COMPOSER DID NOT TAKE.
+            // `openDraft` can decline (the composer refused, the parent gone)
+            // and a forward opens only after a fetch.
+            lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+            var holds = agentDraftOnScreen(draft)
+            if !holds, draft.forward_of_message_id != nil {
+                for _ in 0..<12 where !holds {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard e == epoch else { return }
+                    holds = agentDraftOnScreen(draft)
+                    lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+                }
+            }
+            // Asked again after any wait: an event may have been started.
+            guard
+                EventPaneTravel.agentDraftMayComeForward(writing: eventPaneHeldByUser, composerHoldsIt: holds)
+            else { return }
             // Marked on whichever slot the draft landed in. A reply restores
             // into the inline composer a moment later, so the mark is set
             // again once that fetch has had time to fill it.
@@ -4711,6 +4732,36 @@ final class AppStore {
             lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
             MainWindow.find()?.makeFirstResponder(nil)
         #endif
+    }
+
+    /// A composer or an inline reply holds something somebody typed. The one
+    /// that does not count is an agent's draft still exactly as the agent
+    /// left it (known only with the drafts list in hand: `agentRows`), which
+    /// the next request may replace. Shared by the agent door's `open_draft`
+    /// and the assistant's event proposal (`proposeEvent`): neither ever
+    /// closes mail that is being written.
+    func mailBeingWritten(agentRows rows: [DraftView]? = nil) -> Bool {
+        [compose, inlineReply].compactMap { $0 }.contains { open in
+            // An agent's draft nobody has touched is not somebody writing.
+            if open.fromAgent, let id = open.draftId, let row = rows?.first(where: { $0.id == id }),
+                row.body == open.body, open.attachments.isEmpty
+            {
+                return false
+            }
+            return DraftSaver.hasContent(open) || !open.attachments.isEmpty
+        }
+    }
+
+    /// The composer (or, for a reply, the reader its inline composer fills
+    /// into) really holds this draft.
+    private func agentDraftOnScreen(_ draft: DraftView) -> Bool {
+        if draft.forward_of_message_id != nil {
+            return compose?.forwardOfMessageId == draft.forward_of_message_id && compose?.page != .drafts
+        }
+        if draft.reply_to_message_id != nil {
+            return threadId != nil && threadId == draft.thread_id
+        }
+        return compose?.draftId == draft.id
     }
 
     /// Set `keyboardSendLocked` on the composer holding this draft: the pane,

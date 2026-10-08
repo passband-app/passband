@@ -144,6 +144,26 @@ struct WeekGridTests {
         let fall = WeekGrid.days(from: day("2026-10-26"), calendar: cal)
         expect(fall[6] == day("2026-11-01") && fall[6].timeIntervalSince(fall[5]) == 86_400,
                "Nov 1 starts 24 hours after Oct 31, and is 25 hours long")
+        // THE CHANGE IN THE MIDDLE OF THE WEEK (verify7 E19). The weeks above
+        // start on Monday, so the clock changes on their LAST day and no day
+        // after it is ever worked out: days stepped by 24 hours pass them. A
+        // Sunday-first week starts ON the change, and every later day is
+        // wrong by an hour unless the days are calendar days.
+        let sundays = calendar(firstWeekday: 1)
+        for (start, hours) in [("2026-11-01", 169), ("2027-03-14", 167)] {
+            let first = WeekGrid.weekStart(day(start, sundays), calendar: sundays)
+            let days = WeekGrid.days(from: first, calendar: sundays)
+            expect(first == day(start, sundays), "\(start): a Sunday-first week starts on the change")
+            expect(days.allSatisfy { sundays.startOfDay(for: $0) == $0 },
+                   "\(start): every day after the change is still a local midnight")
+            expect(days.map { sundays.component(.day, from: $0) } == (0..<7).map { sundays.component(.day, from: first) + $0 },
+                   "\(start): seven consecutive dates")
+            expect(days[1].timeIntervalSince(days[0]) == Double(hours - 144) * 3600,
+                   "\(start): the first day is \(hours - 144) hours long")
+            let end = MonthGrid.addDays(7, to: first, sundays)
+            expect(end.timeIntervalSince(first) == Double(hours) * 3600, "\(start): the week is \(hours) hours")
+            expect(days[6] == MonthGrid.addDays(-1, to: end, sundays), "\(start): its last day is the day before the next week")
+        }
     }
 
     /// The page asks the daemon for the place's MONTH; the week it shows has

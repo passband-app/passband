@@ -10,33 +10,69 @@ use super::*;
 use std::collections::HashSet;
 
 /// Name-matched people one `people_named` lookup probes `messages` for, taken
-/// most recently written to first. The probe is an index seek and a sort of
-/// one sender's mail, under the store's one connection mutex.
+/// most recently written to first. Each probe is an index seek over one
+/// sender's mail, under the store's one connection mutex.
 const PEOPLE_PROBE_CAP: usize = 50;
 
-/// One person's inbound mail that may speak for them, newest first: not sent,
-/// not spam, NOT SEALED by the test calendar ghosts use ([`ELIGIBLE`]: the
-/// access review allowed it and the stored decision names no auth kind), not
-/// sealed by the retired `triage.sensitivity` column either (rows from before
-/// the agent pipeline), and only mail that PASSED sender authentication (`auth_pass = 1`: a NULL
-/// reads as no, the column's own rule in schema.sql).
+/// One person's inbound mail that may speak for them: not sent, not spam, NOT
+/// SEALED by the test calendar ghosts use ([`ELIGIBLE`]: the access review
+/// allowed it and the stored decision names no auth kind), not sealed by the
+/// retired `triage.sensitivity` column either (rows from before the agent
+/// pipeline), and only mail that PASSED sender authentication (`auth_pass =
+/// 1`: a NULL reads as no, the column's own rule in schema.sql).
 ///
 /// `INDEXED BY` on purpose, as in `rules::SENDER_RULE_DIGEST_SQL`: without
-/// statistics the planner reads `ORDER BY received_at DESC` as a reason to
-/// walk the whole account newest first.
-fn people_probe_sql() -> String {
+/// statistics the planner may walk the whole account instead of one sender.
+const PEOPLE_PROBE_FROM: &str = "FROM messages m INDEXED BY idx_messages_from_nocase";
+
+fn people_probe_where() -> String {
     format!(
-        "SELECT m.received_at, m.from_name
-         FROM messages m INDEXED BY idx_messages_from_nocase
-         {ELIGIBLE_JOINS}
+        "{ELIGIBLE_JOINS}
          LEFT JOIN triage t ON t.message_id = m.id AND t.account_id = m.account_id
          WHERE m.account_id = ?1
            AND m.from_addr = ?2 COLLATE NOCASE
            AND {ELIGIBLE}
            AND m.auth_pass = 1
-           AND COALESCE(t.sensitivity, 'normal') != 'sealed'
-         ORDER BY m.received_at DESC"
+           AND COALESCE(t.sensitivity, 'normal') != 'sealed'"
     )
+}
+
+/// WHEN a person last wrote, for somebody whose name the user's own Sent mail
+/// already gave: one aggregate, NO SORT. (It was `ORDER BY received_at DESC`
+/// read for its first row, which put every one of the sender's messages
+/// through a temp b-tree first: verify7 D1.)
+fn people_last_received_sql() -> String {
+    format!(
+        "SELECT MAX(m.received_at) {PEOPLE_PROBE_FROM} {}",
+        people_probe_where()
+    )
+}
+
+/// The same mail row by row and in no order, for somebody with no stored
+/// name: the newest received_at, the newest name, and whether any of it is
+/// list mail are all found in one pass in Rust, so there is still no sort.
+fn people_names_sql() -> String {
+    format!(
+        "SELECT m.received_at, m.from_name,
+                m.list_unsubscribe IS NOT NULL AND m.list_unsubscribe != ''
+         {PEOPLE_PROBE_FROM} {}",
+        people_probe_where()
+    )
+}
+
+/// A From name that is somebody speaking THROUGH an address, not the name of
+/// the address: `"Steven Ng via Team" <team@googlegroups.com>`, `"Steven from
+/// Acme" <support@acme.com>`, `"Steven Ng (via Slack)"`. A list or a help
+/// desk the user once wrote to must not be offered as the person "Steven"
+/// (verify7 D4).
+fn list_shaped(name: &str) -> bool {
+    let words = name_words(name);
+    // After the first word: somebody whose given name is "Via" is a person.
+    // Brackets are dropped by `name_words`, so "(via Slack)" is caught too.
+    words
+        .iter()
+        .skip(1)
+        .any(|w| matches!(w.as_str(), "via" | "from" | "at"))
 }
 
 /// A name as lowercase words, split on whitespace, with the punctuation around
@@ -147,8 +183,13 @@ impl SqliteStore {
     ///   writing under a matching name. Never the account's own address.
     /// * The name is the one the user's own Sent mail used
     ///   (`contacts.display_name`). Without one, the newest name on that
-    ///   address's own readable mail ([`people_probe_sql`]); without that, the
+    ///   address's own readable mail ([`people_names_sql`]); without that, the
     ///   address's local part, and the answer carries no name.
+    /// * An address with no stored name whose readable mail is LIST-SHAPED is
+    ///   not offered at all: any of it carries `List-Unsubscribe`, or a From
+    ///   name that is somebody speaking through the address
+    ///   ([`list_shaped`]: "Steven Ng via Team", "Steven from Acme"). A group
+    ///   or a help desk the user once wrote to is not the person "Steven".
     /// * Order: two-way first, by the OLDER of the last mail each way (an
     ///   exchange is as recent as its older half); then people only written
     ///   to, by when; ties by address.
@@ -241,38 +282,59 @@ impl SqliteStore {
             }
         }
 
-        let mut probe = conn.prepare(&people_probe_sql())?;
+        let mut last_received = conn.prepare(&people_last_received_sql())?;
+        let mut their_names = conn.prepare(&people_names_sql())?;
         let mut people: Vec<Candidate> = Vec::new();
         for mut c in candidates {
-            let mut from_name: Option<String> = None;
-            let mut rows = probe.query(params![account_id, c.addr])?;
-            let mut first = true;
+            if c.name.is_some() {
+                // Named by the user's own Sent mail: only when they last
+                // wrote is wanted, and their mail's names and shape are never
+                // read.
+                let newest: Option<String> =
+                    last_received.query_row(params![account_id, c.addr], |r| r.get(0))?;
+                c.last_received = lenient_dt(newest);
+                people.push(c);
+                continue;
+            }
+            // NO STORED NAME: the newest name on their own readable mail
+            // speaks for them, unless that mail is a list's or a desk's.
+            // Compared as text, as the ORDER BY this replaces compared them.
+            let mut newest: Option<String> = None;
+            let mut newest_named: Option<(String, String)> = None;
+            let mut relayed = false;
+            let mut rows = their_names.query(params![account_id, c.addr])?;
             while let Some(r) = rows.next()? {
-                if first {
-                    c.last_received = lenient_dt(r.get(0)?);
-                    first = false;
-                }
-                if c.name.is_some() {
-                    break;
-                }
+                let at = r.get::<_, Option<String>>(0)?.unwrap_or_default();
                 let theirs = r
                     .get::<_, Option<String>>(1)?
                     .map(|n| n.trim().to_string())
                     .filter(|n| !n.is_empty());
-                if theirs.is_some() {
-                    from_name = theirs;
-                    break;
+                if r.get::<_, bool>(2)? || theirs.as_deref().is_some_and(list_shaped) {
+                    relayed = true;
+                }
+                if let Some(name) = theirs
+                    && newest_named.as_ref().is_none_or(|(when, _)| at > *when)
+                {
+                    newest_named = Some((at.clone(), name));
+                }
+                if newest.as_ref().is_none_or(|when| at > *when) {
+                    newest = Some(at);
                 }
             }
             drop(rows);
-            if c.name.is_none() {
-                match from_name {
-                    Some(n) if words_match(&query, &n) => c.name = Some(n),
-                    // They have a name, and it is not the one typed.
-                    Some(_) => continue,
-                    None if local_part_matches(&query, &c.addr) => {}
-                    None => continue,
-                }
+            // An address that carries other people's names (a list, a relay,
+            // a help desk) is offered by the name the user's own Sent mail
+            // gave it, or not at all: here there is none.
+            if relayed {
+                continue;
+            }
+            c.last_received = lenient_dt(newest);
+            match newest_named {
+                Some((_, n)) if words_match(&query, &n) => c.name = Some(n),
+                // They have a name, and it is not the one typed.
+                Some(_) => continue,
+                None if local_part_matches(&query, &c.addr) => {}
+                None => continue,
             }
             people.push(c);
         }
@@ -503,6 +565,22 @@ mod tests {
         id
     }
 
+    /// The sender directory's newest name for `addr`, as ingest leaves it:
+    /// what makes a contact with no stored name worth a probe.
+    fn seen_as(store: &SqliteStore, acct: AccountId, addr: &str, name: &str) {
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO senders(account_id,addr,display_name,msg_count,first_seen,
+                                     last_received_at)
+                 VALUES(?1,?2,?3,1,?4,?4)
+                 ON CONFLICT DO UPDATE SET display_name=excluded.display_name",
+                params![acct, addr, name, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+    }
+
     fn spoil(store: &SqliteStore, sql: &str, id: i64) {
         assert_eq!(store.lock().unwrap().execute(sql, params![id]).unwrap(), 1);
     }
@@ -612,6 +690,178 @@ mod tests {
             )
             .unwrap();
         assert_eq!(named(&store, acct, "steven"), ["steven.zero@evil.test"]);
+    }
+
+    /// verify7 D4, the reviewer's cases. Each address has been written to (so
+    /// it is a candidate) and has NO stored name (ingest seeds contacts
+    /// without one), and its newest inbound From name starts with "Steven".
+    #[test]
+    fn a_list_or_a_desk_is_not_offered_under_the_name_of_whoever_posted() {
+        let relays = [
+            ("team@googlegroups.com", "Steven Ng via Team"),
+            ("support@acme.com", "Steven from Acme"),
+            ("notify@slack.test", "Steven Ng (via Slack)"),
+            ("hello@shop.test", "Steven at Shop"),
+        ];
+        for (addr, name) in relays {
+            let (store, acct) =
+                store_with(&[wrote_to(addr, None, 1), wrote_to("real@x.com", None, 30)]);
+            inbound(&store, acct, addr, Some(name), 0);
+            seen_as(&store, acct, addr, name);
+            inbound(&store, acct, "real@x.com", Some("Steven Real"), 20);
+            seen_as(&store, acct, "real@x.com", "Steven Real");
+            assert_eq!(named(&store, acct, "steven"), ["real@x.com"], "{name:?}");
+        }
+        // An OLDER list-shaped name is enough: the address relays, whoever
+        // posted last.
+        let (store, acct) = store_with(&[wrote_to("team@googlegroups.com", None, 1)]);
+        inbound(
+            &store,
+            acct,
+            "team@googlegroups.com",
+            Some("Ana via Team"),
+            9,
+        );
+        inbound(&store, acct, "team@googlegroups.com", Some("Steven Ng"), 0);
+        seen_as(&store, acct, "team@googlegroups.com", "Steven Ng");
+        assert!(named(&store, acct, "steven").is_empty());
+        // A bulk sender, known by its List-Unsubscribe header, under a plain
+        // name.
+        let (store, acct) = store_with(&[wrote_to("news@list.test", None, 1)]);
+        let id = inbound(&store, acct, "news@list.test", Some("Steven Ng"), 0);
+        seen_as(&store, acct, "news@list.test", "Steven Ng");
+        assert_eq!(named(&store, acct, "steven"), ["news@list.test"]);
+        spoil(
+            &store,
+            "UPDATE messages SET list_unsubscribe='<mailto:u@list.test>' WHERE id=?1",
+            id,
+        );
+        assert!(named(&store, acct, "steven").is_empty());
+        // And not by its local part either: "or not at all".
+        let (store, acct) = store_with(&[wrote_to("steven@lists.test", None, 1)]);
+        inbound(&store, acct, "steven@lists.test", Some("Ana via Steven"), 0);
+        assert!(named(&store, acct, "steven").is_empty());
+        // The name the user's OWN Sent mail gave the address still stands.
+        let (store, acct) =
+            store_with(&[wrote_to("team@googlegroups.com", Some("Steven's Team"), 1)]);
+        inbound(
+            &store,
+            acct,
+            "team@googlegroups.com",
+            Some("Ana via Team"),
+            0,
+        );
+        assert_eq!(named(&store, acct, "steven"), ["team@googlegroups.com"]);
+        // Mail that does not count (spam here) does not make a relay of
+        // anybody: an attacker cannot hide a real contact by forging a list.
+        let (store, acct) = store_with(&[wrote_to("real@x.com", None, 1)]);
+        inbound(&store, acct, "real@x.com", Some("Steven Real"), 3);
+        seen_as(&store, acct, "real@x.com", "Steven Real");
+        let forged = inbound(&store, acct, "real@x.com", Some("Steven via List"), 0);
+        spoil(
+            &store,
+            "UPDATE messages SET auth_pass=0 WHERE id=?1",
+            forged,
+        );
+        assert_eq!(named(&store, acct, "steven"), ["real@x.com"]);
+    }
+
+    #[test]
+    fn list_shapes() {
+        for relayed in [
+            "Steven Ng via Team",
+            "Steven from Acme",
+            "Steven Ng (via Slack)",
+            "\"Steven Ng\" VIA Team",
+            "Steven at Shop",
+        ] {
+            assert!(list_shaped(relayed), "{relayed:?}");
+        }
+        for person in [
+            "Steven Ng",
+            "Via Ferrata",
+            "From Russia",
+            "Steven Viator",
+            "Steven",
+        ] {
+            assert!(!list_shaped(person), "{person:?}");
+        }
+    }
+
+    /// verify7 D1: neither probe sorts. The old one read `ORDER BY
+    /// received_at DESC` for its first row, a temp b-tree over every message
+    /// the sender ever sent.
+    #[test]
+    fn the_probes_seek_one_sender_and_never_sort() {
+        let (store, acct) = store_with(&[]);
+        let conn = store.lock().unwrap();
+        for sql in [people_last_received_sql(), people_names_sql()] {
+            let plan: Vec<String> = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params![acct, "a@x.com"], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            let plan = plan.join(" | ");
+            assert!(plan.contains("idx_messages_from_nocase"), "{plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+            assert!(!plan.contains("SCAN m"), "{plan}");
+            assert!(!sql.contains("ORDER BY"), "{sql}");
+        }
+    }
+
+    /// The newest name and the newest mail are still the newest, with no
+    /// ORDER BY to say so: rows inserted oldest-last.
+    #[test]
+    fn the_newest_name_and_the_newest_mail_are_found_without_a_sort() {
+        let (store, acct) = store_with(&[
+            wrote_to("s@x.com", None, 1),
+            wrote_to("other@x.com", Some("Steven Other"), 3),
+        ]);
+        inbound(&store, acct, "s@x.com", Some("Steven New"), 5);
+        seen_as(&store, acct, "s@x.com", "Steven New");
+        inbound(&store, acct, "s@x.com", Some("Bob Old"), 40);
+        inbound(&store, acct, "s@x.com", None, 1);
+        inbound(&store, acct, "other@x.com", Some("x"), 2);
+        inbound(&store, acct, "other@x.com", Some("x"), 60);
+        let people = store.people_named(acct, "steven", 3).unwrap();
+        // s: sent 1 day ago, last received 1 day ago (the nameless newest
+        // mail, the LAST row read, not the first): older half 1. other: sent
+        // 3, last received 2: older half 3. Were s's first row (5 days ago)
+        // taken for its newest, other would come first.
+        assert_eq!(
+            people,
+            [
+                PersonNamed {
+                    addr: "s@x.com".into(),
+                    display_name: Some("Steven New".into()),
+                },
+                PersonNamed {
+                    addr: "other@x.com".into(),
+                    display_name: Some("Steven Other".into()),
+                },
+            ]
+        );
+        // The older name is not the one typed, even though it is there.
+        assert!(named(&store, acct, "bob").is_empty());
+    }
+
+    /// For somebody with a stored name the aggregate is the NEWEST mail, not
+    /// the oldest and not the first inserted.
+    #[test]
+    fn a_named_persons_last_mail_is_their_newest() {
+        let (store, acct) = store_with(&[
+            wrote_to("a@x.com", Some("Steven A"), 1),
+            wrote_to("b@x.com", Some("Steven B"), 1),
+        ]);
+        inbound(&store, acct, "a@x.com", None, 50);
+        inbound(&store, acct, "a@x.com", None, 2);
+        inbound(&store, acct, "a@x.com", None, 30);
+        inbound(&store, acct, "b@x.com", None, 10);
+        // a: older half 2. b: older half 10. By a's oldest mail (50) b would
+        // lead.
+        assert_eq!(named(&store, acct, "steven"), ["a@x.com", "b@x.com"]);
     }
 
     #[test]

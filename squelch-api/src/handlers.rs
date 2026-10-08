@@ -2905,33 +2905,40 @@ pub struct CalendarPeopleView {
 const CALENDAR_PEOPLE_LIMIT: u32 = 3;
 /// A given name longer than this is not a given name.
 const CALENDAR_PEOPLE_NAME_MAX: usize = 64;
+/// And one shorter than this is not asked about: one letter matches a large
+/// part of anybody's contacts, and every match is a probe of that person's
+/// mail under the store's one mutex. The client asks for nothing shorter.
+const CALENDAR_PEOPLE_NAME_MIN: usize = 2;
 
 /// `GET /client/calendar/people?name=steven`: up to three people the user has
 /// WRITTEN TO whose name starts with the typed words, best first (see
-/// `SqliteStore::people_named` for who qualifies and the order). A name that
-/// is empty, too long or an address answers the empty list, never an error
-/// and never the input.
+/// `SqliteStore::people_named` for who qualifies and the order). A name
+/// shorter than two characters (empty included) is a 400 with a fixed body; one
+/// that is too long or an address answers the empty list. Neither says
+/// anything of the input.
 pub async fn get_calendar_people(
     State(state): State<ApiState>,
     Query(params): Query<CalendarPeopleQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let name = params.name.trim().to_string();
-    let people =
-        if name.is_empty() || name.chars().count() > CALENDAR_PEOPLE_NAME_MAX || name.contains('@')
-        {
-            Vec::new()
-        } else {
-            store_call(&state, move |store, account_id| {
-                store.people_named(account_id, &name, CALENDAR_PEOPLE_LIMIT)
-            })
-            .await?
-            .into_iter()
-            .map(|p| CalendarPersonView {
-                addr: p.addr,
-                name: p.display_name,
-            })
-            .collect()
-        };
+    let length = name.chars().count();
+    if length < CALENDAR_PEOPLE_NAME_MIN {
+        return Err(ApiError::bad_request("name is too short"));
+    }
+    let people = if length > CALENDAR_PEOPLE_NAME_MAX || name.contains('@') {
+        Vec::new()
+    } else {
+        store_call(&state, move |store, account_id| {
+            store.people_named(account_id, &name, CALENDAR_PEOPLE_LIMIT)
+        })
+        .await?
+        .into_iter()
+        .map(|p| CalendarPersonView {
+            addr: p.addr,
+            name: p.display_name,
+        })
+        .collect()
+    };
     Ok((no_store(), Json(CalendarPeopleView { people })))
 }
 

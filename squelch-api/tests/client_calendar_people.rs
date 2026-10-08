@@ -111,9 +111,9 @@ async fn somebody_who_only_wrote_to_the_user_is_not_suggested() {
     );
 }
 
-/// Empty, over-long and address-shaped names answer the empty list: 200, not
-/// an error, and nothing of the input. Each bad name here is one a person in
-/// the store WOULD match, so the refusal is the handler's.
+/// Over-long and address-shaped names answer the empty list: 200, not an
+/// error, and nothing of the input. Each bad name here is one a person in the
+/// store WOULD match, so the refusal is the handler's.
 #[tokio::test]
 async fn a_name_that_is_not_a_name_answers_nobody() {
     let long = "x".repeat(65);
@@ -132,12 +132,9 @@ async fn a_name_that_is_not_a_name_answers_nobody() {
         );
     });
     for uri in [
-        PEOPLE.to_string(),
-        format!("{PEOPLE}?name="),
-        format!("{PEOPLE}?name=%20%20"),
         format!("{PEOPLE}?name={long}"),
         format!("{PEOPLE}?name=steven%40x.com"),
-        format!("{PEOPLE}?name=%40"),
+        format!("{PEOPLE}?name=s%40"),
     ] {
         let resp = h.app.clone().oneshot(authed("GET", &uri)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "{uri}");
@@ -252,4 +249,30 @@ async fn the_agent_door_has_no_people_route() {
     // The route itself is there, so the 404s above are the door's.
     let (status, _) = get(&h.app, &format!("{PEOPLE}?name=steven")).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// A name under two characters is refused before the store is asked (verify7
+/// D1): one letter matches a large part of anybody's contacts and each match
+/// is a probe of that person's mail. 400, a fixed body, nothing of the input.
+/// "s" WOULD match every Steven in the store, so the refusal is the handler's.
+#[tokio::test]
+async fn a_name_under_two_characters_is_a_400() {
+    let h = calendar_harness(stevens);
+    for uri in [
+        PEOPLE.to_string(),
+        format!("{PEOPLE}?name="),
+        format!("{PEOPLE}?name=%20%20"),
+        format!("{PEOPLE}?name=s"),
+        format!("{PEOPLE}?name=%20S%20"),
+        format!("{PEOPLE}?name=%40"),
+        format!("{PEOPLE}?name=%C3%A9"),
+    ] {
+        let (status, body) = get(&h.app, &uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(body, json!({ "error": "name is too short" }), "{uri}");
+    }
+    // Two characters are a name.
+    let (status, body) = get(&h.app, &format!("{PEOPLE}?name=st")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["people"].as_array().map(Vec::len), Some(3));
 }

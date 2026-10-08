@@ -305,6 +305,12 @@ private struct ShellWatchers: View {
                     store.returnParkedEventEditor()
                 }
             }
+            // A proposal made while an email was open over the Calendar page
+            // itself is parked without the page ever changing: it comes back
+            // when the email closes.
+            .onChange(of: store.threadId) { _, thread in
+                if thread == nil, store.activeView == .calendar { store.returnParkedEventEditor() }
+            }
             .onChange(of: store.lastRefresh) { old, new in
                 if old == nil, new != nil {
                     store.tour.maybeStart()

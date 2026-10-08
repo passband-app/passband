@@ -49,8 +49,10 @@
 // before the start) and is drawn dim; typed into, it is the user's and stops
 // following.
 //
-// KEYS. Tab from the title goes to a suggestion that is showing; ↵ on it adds
-// the guest, ⌫ or x dismisses it.
+// KEYS. Tab from the title goes to a suggestion that has been showing for a
+// moment (an answer landing as Tab is pressed does not move where Tab goes);
+// ↵ on it adds the guest, ⌫ or x dismisses it. A suggestion becomes a guest
+// only by its checkmark or by ↵ with the keyboard on it.
 // ⌘↵ presses the footer's main control from anywhere in the pane. ↵
 // saves from a single-line field ONLY when the save tells nobody; it also
 // picks a highlighted place or contact, makes a typed address a guest, and is
@@ -87,6 +89,9 @@
         /// The keyboard is on the guest suggestion (Tab from the title). No
         /// text field has the caret while it is.
         @State private var onSuggestion = false
+        /// When the suggestion now showing came up: Tab takes it only once
+        /// it has been there to be seen (`EventGuests.tabTakesSuggestion`).
+        @State private var suggestionSince: Date?
         @FocusState private var focus: Field?
 
         private enum Field: Hashable {
@@ -139,8 +144,13 @@
             }
             // The suggestion went (answered, or its name deleted): the
             // keyboard goes back to the title it came from.
-            .onChange(of: suggestion) { _, now in
-                if now == nil, onSuggestion {
+            // Another offer in its place (the next name's): the same, so ↵
+            // never adds somebody the keyboard was not put on.
+            .onChange(of: suggestion) { was, now in
+                if was?.name != now?.name || was?.best != now?.best {
+                    suggestionSince = now == nil ? nil : Date()
+                }
+                if onSuggestion, !EventGuests.keyboardStays(was: was, now: now) {
                     onSuggestion = false
                     focus = .title
                 }
@@ -149,10 +159,13 @@
                 let lookup = PlaceLookup(provider: MapKitPlaces())
                 lookup.write = { text in patch { $0.location = text } }
                 places = lookup
-                // Not from under the assistant's field: a pane it proposed
-                // opens while the ask bar still has the keyboard.
-                if !store.modalOverlayOpen { focus = .title }
+                // Not from under the assistant's field, and NEVER for a pane
+                // the assistant filled in: it takes the keyboard only when
+                // the user clicks into it (`EventProposals.keysMayAct`).
+                if !store.modalOverlayOpen, keysAreTheUsers { focus = .title }
             }
+            // A click anywhere in a proposed pane makes its keys the user's.
+            .simultaneousGesture(TapGesture().onEnded { store.engageProposedPane() })
             .onDisappear { places?.stop() }
             // A click elsewhere defocuses the line; a list about text the
             // caret has left must not linger.
@@ -160,6 +173,10 @@
                 if now != .location { places?.dismiss() }
                 // A caret anywhere is off the suggestion.
                 if now != nil { onSuggestion = false }
+                // A caret put in a field BY A CLICK is the user in the pane
+                // (a text field takes the click before the tap gesture above
+                // sees it). Never by Tab: that can be typed ahead.
+                if now != nil, NSApp.currentEvent?.type == .leftMouseDown { store.engageProposedPane() }
             }
         }
 
@@ -472,7 +489,7 @@
             let tone: Color
             switch EventForm.when(draft, today: now, calendar: cal) {
             case .success(let w):
-                (text, tone) = (EventForm.summary(w, calendar: cal), Palette.inkFaint)
+                (text, tone) = (EventForm.summary(w, now: now, calendar: cal), Palette.inkFaint)
             case .failure(let p):
                 (text, tone) = (p.text, Palette.warn)
             }
@@ -617,31 +634,35 @@
         /// Ask the daemon who each name in the title most likely is, the name
         /// as typed first and then its first word. Behind the pane: a daemon
         /// without the route, or one that knows nobody of that name, leaves
-        /// an empty answer and no suggestion; a failure is asked again the
-        /// next time the names change.
+        /// an empty answer and no suggestion; a failure is not an answer
+        /// (`EventGuests.nameAnswer`) and is asked again the next time the
+        /// names change.
         private func lookUpNames(_ names: [String]) async {
             let missing = names.filter { namedPeople[$0] == nil }
             guard !missing.isEmpty else { return }
             // A beat, so "with st", "with ste", "with stev" are one question.
             try? await Task.sleep(for: .milliseconds(450))
             for name in missing {
-                var found: [NamedPerson] = []
+                var asks: [EventGuests.NameAsk] = []
                 for query in EventGuests.queries(for: name) {
                     guard !Task.isCancelled else { return }
+                    let ask: EventGuests.NameAsk
                     do {
-                        found = try await APIClient.shared.calendarPeople(named: query)
+                        ask = .people(try await APIClient.shared.calendarPeople(named: query))
                     } catch {
-                        // Cancelled mid-flight, or the network: not an answer.
+                        // Cancelled mid-flight: not an answer.
                         if Task.isCancelled { return }
                         // A daemon older than the route: nobody to offer.
-                        if (error as? APIError)?.kind == .notFound { break }
-                        found = []
-                        continue
+                        // Anything else (the network, a 500) is no answer.
+                        ask = (error as? APIError)?.kind == .notFound ? .noRoute : .failed
                     }
-                    if !found.isEmpty { break }
+                    asks.append(ask)
+                    if EventGuests.nameSettled(by: ask) { break }
                 }
                 guard !Task.isCancelled else { return }
-                namedPeople[name] = found
+                // A failure is not stored, so the name is still missing and
+                // is asked again the next time the names change.
+                if let answer = EventGuests.nameAnswer(asks) { namedPeople[name] = answer }
             }
         }
 
@@ -906,7 +927,14 @@
                         focus = .date
                         return true
                     }
-                    guard focus == .title else { return false }
+                    // Only from the title, and only onto a box that has been
+                    // there to be seen: an answer that lands as Tab is
+                    // pressed does not change where Tab goes.
+                    guard
+                        EventGuests.tabTakesSuggestion(
+                            caretInTitle: focus == .title,
+                            shownFor: suggestionSince.map { Date().timeIntervalSince($0) })
+                    else { return false }
                     // The order matters: dropping the caret clears the flag.
                     focus = nil
                     DispatchQueue.main.async { onSuggestion = true }
@@ -950,6 +978,12 @@
                 // card), whose field the chord was typed into.
                 KeyBinding(declining: "Enter", "save", meta: true, allowInInput: true) {
                     guard !store.modalOverlayOpen else { return false }
+                    // A pane the assistant filled in and nobody has clicked
+                    // or typed in: the chord does nothing. The button does.
+                    guard keysAreTheUsers else {
+                        store.noteProposedPaneLocked()
+                        return true
+                    }
                     switch state.action(.commandEnter) {
                     case .editingRules: break
                     case .checkAgain:
@@ -974,6 +1008,11 @@
                 // a click on the control that says so does that.
                 KeyBinding(declining: "Enter", "save", allowInInput: true) {
                     guard !store.modalOverlayOpen else { return false }
+                    // As ⌘↵: nothing, on an untouched proposal.
+                    guard keysAreTheUsers else {
+                        store.noteProposedPaneLocked()
+                        return true
+                    }
                     // FROZEN, or a write out: ↵ does nothing at all.
                     guard state.action(.enter) == .editingRules else { return true }
                     // On the suggestion: the checkmark. Adding a guest is
@@ -1116,7 +1155,20 @@
                 var next = store.calendarDraft
             else { return }
             mutate(&next)
-            if next != store.calendarDraft { store.calendarDraft = next }
+            if next != store.calendarDraft {
+                store.calendarDraft = next
+                // Every write through here is the user's hand in the pane
+                // (a field typed in, a chip or a checkmark clicked): a
+                // proposed pane's keys are theirs from here.
+                store.engageProposedPane()
+            }
+        }
+
+        /// ↵ and ⌘↵ act, and the pane may take the keyboard: always, except
+        /// in a pane the assistant filled in that nobody has clicked or
+        /// typed in yet.
+        private var keysAreTheUsers: Bool {
+            EventProposals.keysMayAct(proposed: store.calendarPaneProposed, engaged: store.calendarPaneEngaged)
         }
     }
 

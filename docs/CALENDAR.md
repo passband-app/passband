@@ -672,16 +672,32 @@ should be able to type 'dinner with steven on friday 4pm'"):
   the words that named the day and time ("Dinner with Steven": a name
   after "with" typed in lower case gets its capital, one the user
   capitalised or mixed is left alone, and the first letter gets one only
-  when the user typed no capital at all). Accepting a suggested guest does
+  when the words that are kept hold no capital; a title nothing came out of
+  is saved exactly as typed). Accepting a suggested guest does
   not rewrite the title. It never fights the user: a well
   typed into, or a day clicked on the grid, is never written again; deleting
   the words puts back what was there; Esc in the title, or `⌘Z`, takes the
   title as typed. Ambiguity resolves to nothing: a bare number is never a
-  time ("meet at 4"), the word after "with" is never a day or time ("call
-  with 4pm people"), a month needs its day number ("May day parade"), a
-  three-letter weekday needs a neighbour that says it is one, and two
-  different days or two different times are neither. "next tue" is next
-  week's Tuesday by the user's own weeks. An edit's title is never read.
+  time ("meet at 4", "from 3 to 4 people"), the word after "with" is never a
+  day or time ("call with 4pm people"), a month needs its day number ("May
+  day parade"), and two different days or two different times anywhere in
+  the title are neither. A day or a time is read only when it is LED ("on
+  friday", "this fri", "next tue", "at 4:30", "from 4 to 5:30") or is in the
+  title's trailing run, where every later word is a day or time word too
+  ("dinner with steven friday 4pm"): "Black Friday sale", "Friday dinner"
+  and "4pm standup" are titles. A clock needs its am or pm, or a lead and a
+  colon ("Isaiah 14:12" is a verse). A weekday in capitals ("SAT"), or with
+  a capital after another capitalised word ("Taco Tuesday", "USA Today"), is
+  a name; "sun", "sat" and "wed" unled need a time or a date beside them; a
+  weekday and a date that disagree ("fri oct 10", a Saturday) are neither. A
+  deadline ("ship v2 by friday", "prep for friday": led by for, by, before,
+  after or until) fills the day and leaves the title exactly as typed. The
+  saved title's capital is decided by the words that are kept, and
+  correcting a well by hand never puts the words it replaced back into the
+  title. "next tue" is next week's Tuesday by the user's own weeks. An
+  edit's title is never read. The line under the wells prints the year when
+  it is not this one and ends "in the past" when the start has gone by; a
+  weekday typed in the end-day well is read from the start day.
 - **A guest suggested, not added.** For each "with <name>" the client asks
   the daemon who that most likely is (`GET /client/calendar/people`, §8) and
   shows the best answer on the guests line in a dashed box: name, address, a
@@ -689,8 +705,12 @@ should be able to type 'dinner with steven on friday 4pm'"):
   a guest until the checkmark: it is not in the draft's guests, does not
   change the save control, and is sent nowhere. A dismissed or accepted
   name is not offered again in that pane, and nothing is offered on a
-  calendar that may not invite. `Tab` from the title moves to the box; `↵`
-  there adds, `⌫` or `x` dismisses, Esc goes back to the title.
+  calendar that may not invite. `Tab` from the title moves to the box once
+  it has been showing for a moment (an answer landing as Tab is pressed does
+  not move where Tab goes); `↵` there adds, `⌫` or `x` dismisses, Esc goes
+  back to the title, and the keyboard leaves the box when the offer changes
+  to somebody else. A lookup that failed is not remembered as "nobody": the
+  name is asked again the next time the names change.
 - **The assistant drafts events** (§10).
 
 **Keymap as built.** `1` to `6` the rail (Calendar `2` while offered), `⇧C`
@@ -1451,8 +1471,15 @@ the event pane's guest suggestion (§5). No model is involved.
 - **Nothing is added.** The client shows the answer as a suggestion; a guest
   exists only after the user's checkmark, and Google emails nobody without
   the save control that says so (above).
-- Empty, over-long or address-like input answers an empty list. The agent
-  door, `/mcp` and the assistant have no such route.
+- **A list or a desk is not a person.** A contact with no name from the
+  user's own sent mail is named by its newest readable From name; when any
+  of that mail carries `List-Unsubscribe`, or a From name shaped like
+  "Steven Ng via Team" or "Steven from Acme", the address is not offered at
+  all.
+- A name under two characters is a 400 (the client asks for nothing
+  shorter); over-long or address-like input answers an empty list. The
+  probes do not sort: `MAX(received_at)` per sender. The agent door, `/mcp`
+  and the assistant have no such route.
 
 ### Location lookup (BUILT in wave 4, client only)
 
@@ -1558,13 +1585,29 @@ give the assistant the ability to create events." It has ONE calendar tool,
 calendar by name, a location and guest addresses), and the tool writes
 nothing:
 
-- **The title is the only prose it supplies.** There is no notes or
+- **The title and the place are the only text the assistant supplies.**
+  Each is one line of at most 200 characters, and over that (or with a line
+  break in it) the call is refused, not trimmed. There is no notes or
   description parameter. With guests on an event, Google emails its
-  description to them, and Passband never puts model-written prose in front
-  of other people (§13). A call that sends notes anyway (`notes`,
-  `description`, `body`, `details`, `agenda`) is refused in words rather
-  than trimmed, so the model cannot report them as saved; the pane's notes
-  line always opens empty, for the user to type in.
+  description and place to them, and Passband never puts model-written prose
+  in front of other people (§13). A call that sends notes anyway (`notes`,
+  `note`, `description`, `body`, `details`, `agenda`, `summary`, `message`,
+  in any case) is refused in words rather than dropped, and so is any other
+  field the tool does not list ("unknown field"), so the model cannot report
+  as saved something that was not; the pane's notes line always opens empty,
+  for the user to type in.
+- **It never takes the screen or the keyboard from somebody.** It is refused
+  unless the assistant's bar is open at that moment (a run goes on after the
+  bar closes), and while mail is being written: a typed-in composer or
+  inline reply is never closed for it. An email being read is not closed
+  either: the pane is parked and waits on the Calendar page. A proposed pane
+  never takes the caret, and `↵` and `⌘↵` do nothing in it until the user
+  has clicked or typed inside it; its button always works.
+- **It loads the calendar once if nothing has.** The feed is otherwise
+  loaded only by the Calendar page, so "put this on my calendar" asked from
+  an email first reads it (`refreshCalendar`). "No calendar" is said only of
+  a feed that arrived with nothing writable; a load that failed says the
+  calendar could not be reached.
 
 - It reads the proposal, checks it by the event pane's own rules
   (`EventProposals.draft`, which ends in `EventForm.wire`), and opens the

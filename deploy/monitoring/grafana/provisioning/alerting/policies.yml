@@ -1,14 +1,25 @@
 # Everything to Slack. One receiver, so the tree is one node.
 #
-# Grouped by alert name so a box-wide failure (every tenant's sync going stale
-# at once) arrives as ONE message listing them, not eight. Re-sent every 4h while
-# it stays firing, which is loud enough to not be forgotten overnight and quiet
-# enough to not be muted.
+# ONE MESSAGE PER STATE CHANGE, asked for on 2026-10-08: a tenant going stale
+# says so once, its recovery says so once, and nothing in between. Two settings
+# make that true and either one alone does not:
+#
+# - `group_by: ['...']` is every label, so each alert instance is its own
+#   group. Grouped by alert name, a second tenant going stale re-sent the whole
+#   list, the first tenant included, and so did every recovery. The price is
+#   that a box-wide failure arrives as one message per tenant rather than one.
+# - `repeat_interval` is the reminder for an alert that is still firing. It
+#   was 4h, which is six messages a day for a tenant whose Google token died
+#   and who has not reconnected. A year is "never". The notification log is
+#   what remembers a message was sent, and its default 5d retention would
+#   bring the reminder back every five days, so Dockerfile.grafana raises
+#   GF_UNIFIED_ALERTING_NOTIFICATION_LOG_RETENTION past this. Keep that one
+#   the larger of the two.
 apiVersion: 1
 policies:
   - orgId: 1
     receiver: slack
-    group_by: ['alertname']
+    group_by: ['...']
     group_wait: 30s
     group_interval: 5m
-    repeat_interval: 4h
+    repeat_interval: 52w

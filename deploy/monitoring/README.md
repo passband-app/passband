@@ -277,7 +277,7 @@ through an incoming webhook.
 |---|---|---|
 | Tenants quota near full | any `tenants` ResourceQuota dimension is at 80% or more | 15m |
 | Tenant has no running pod | a tenant Deployment wants a pod and has none available | 10m |
-| Tenant mail sync stale | `time() - squelchd_sync_last_success_timestamp_seconds > 900` | 15m |
+| Tenant mail sync stale | a tenant's freshest `squelchd_sync_last_success_timestamp_seconds` is over 900s old | 15m |
 | carrier memory high | the box is 85% or more used (`1 - MemAvailable / MemTotal`) | 2m |
 | carrier metrics missing | no kube-state-metrics series from carrier for 10 minutes | 5m |
 
@@ -289,6 +289,13 @@ for k3s and no swap the RAM is the only wall, so this fires before a global OOM
 rather than after one. The last is what makes the others trustworthy: every rule
 reads series the carrier agent remote-writes, so they go quiet together when it
 stops, and the others treat NoData as OK so that only this one says so.
+
+Slack hears about a state change and nothing else: one message when an alert
+starts firing, one when it resolves, no reminders while it stays firing
+(`policies.yml` has the two settings that takes). The sync alert is one series
+per tenant rather than per pod, so a pod restart does not resolve and re-fire a
+tenant who was stale throughout. What is still firing right now is in Grafana
+under Alerting, not in the channel's scrollback.
 
 **`SLACK_ALERTS_WEBHOOK_URL` must be set on the Grafana service before any
 change to these files deploys.** Grafana exits at startup when the Slack

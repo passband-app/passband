@@ -98,6 +98,16 @@ groups:
       # The one README.md has recommended since the metrics shipped: a pod can
       # be Running, Ready and stuck since Tuesday, and only the daemon knows.
       # A timestamp of 0 (never synced since start) fires too, on purpose.
+      #
+      # ONE SERIES PER TENANT, NOT PER POD. The raw series carries `instance`,
+      # the pod IP, so every pod restart was a new alert: the old pod's series
+      # vanished ("resolved"), the new pod's started at 0, and 15 minutes later
+      # a tenant who had been stale the whole time was announced as stale
+      # again. A daemon roll did that to every stale tenant at once (2026-10-08,
+      # three in half an hour). `max by` drops the pod from the identity and
+      # takes the freshest sync any of the tenant's pods has reported;
+      # `last_over_time` holds the old pod's last value across the gap before
+      # the new pod is scraped, so the alert neither resolves nor restarts.
       - uid: tenant-sync-stale
         title: Tenant mail sync stale
         condition: C
@@ -119,7 +129,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: time() - squelchd_sync_last_success_timestamp_seconds
+              expr: time() - max by (cluster, tenant) (last_over_time(squelchd_sync_last_success_timestamp_seconds[10m]))
           - refId: C
             datasourceUid: __expr__
             model:

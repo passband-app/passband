@@ -156,6 +156,10 @@ private struct UnsubscribeCard: View {
         case "choose_topics": "Their page asks which emails to stop."
         case "needs_browser": "Their page only works in a browser."
         case "link_error": "Their link didn't work from here."
+        case "sign_in": "Their page wants you to sign in first."
+        case "captcha": "Their page wants to check you're human."
+        case "check_email": "They emailed you a link to confirm."
+        case "your_call": "Their page asks something only you can answer."
         default: "We couldn't confirm it went through."
         }
     }

@@ -198,12 +198,14 @@ pub fn parse_output(out: &UnsubPageOutput, forms: usize) -> Result<PageVerdict, 
 /// small call, and the NOTIFY model: this is one short page, read once.
 #[derive(Clone)]
 pub struct UnsubPageClient {
-    http: reqwest::Client,
-    url: String,
-    api_key: String,
-    provider: Stage2Provider,
-    model: String,
-    effort: Option<String>,
+    // `pub(super)` for the browser agent (`super::unsub_agent`), which makes
+    // its calls with the same key, model and transport.
+    pub(super) http: reqwest::Client,
+    pub(super) url: String,
+    pub(super) api_key: String,
+    pub(super) provider: Stage2Provider,
+    pub(super) model: String,
+    pub(super) effort: Option<String>,
 }
 
 impl std::fmt::Debug for UnsubPageClient {

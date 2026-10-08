@@ -799,6 +799,57 @@ it. That move is what the guard below exists for.
 - **The link stays out of logs and the audit.** Audit rows carry the sender and the
   verdict; transport errors are reduced to their kind before they can be printed.
 
+**The browser rung** (`squelch-api/src/unsub_browser.rs`, `unsub_cdp.rs`,
+`squelch-core/src/triage/unsub_agent.rs`). Everything above describes the plain
+reader, which holds on every daemon. A daemon that was given a Browserbase key
+(every hosted tenant; a self-host only if it brings its own) has one more
+rung: a page the reader gave up on for a reason a real browser could fix
+(`choose_topics`, `needs_browser`, `unclear`; never a dead link) is opened in a
+rented remote browser that the notify model steers. On that rung the "one
+action, nothing typed" rule above is deliberately replaced by this one:
+
+- **The page's scripts never run near the daemon.** The browser is Browserbase's,
+  on their network, reached over one WebSocket. Nothing the page executes can
+  reach the daemon, its volume, its loopback doors or its neighbours. The same
+  per-hop URL check the fetcher uses still decides whether a link is handed over
+  at all.
+- **The agent has a closed vocabulary, enforced on the page and not in the
+  prompt** (`unsub_browser::permit`). Press a link or button, turn a checkbox,
+  radio or switch on or off, choose a select's option, fill an email field. Every
+  action names a control by number, and the number is checked against the
+  controls the daemon itself found, kind included. A short list of labels is
+  never pressed whoever asks: resubscribe, undo, sign in, create or delete an
+  account, download, buy.
+- **Exactly one string can be typed**, the address the mail was sent to
+  (`unsub_job::address_to_type`: the account's address, or its plus address when
+  that is what the message was addressed to), and only into a field that is for
+  an email address. The model's answer carries no text of its own: there is no
+  action that types what the model says, and no free-text field in its output
+  for a page to have it fill in. A password, a name or a card number cannot be
+  entered because nothing can enter one.
+- **What the model reads is what a person would see.** The page is read from an
+  isolated JavaScript world the page's own scripts cannot see into. Text that is
+  in the markup but not on screen (hidden, collapsed, clipped, off the page) is
+  not read, because the agent's "done" is taken from this text. The page's own
+  square brackets are rewritten, so it cannot draw a control that is not there.
+  It goes to the model inside the usual fence.
+- **Bounded and billed.** Eight steps a job, sixteen actions a step, 100 seconds
+  on top of the plain ladder, two browsers at once, a daily cap on steps, and
+  usage under `unsub_agent`. A step that changes nothing twice ends the job.
+- **A person is asked when a person is what the page wants.** A sign-in, a
+  captcha (sessions are created with captcha solving OFF), a confirmation link
+  sent by mail, a question only the user can answer: each ends the job as
+  `needs_you` with that reason and the original link.
+- **Failure of the machinery changes nothing.** No browser to rent, a dropped
+  socket, the model's cap: the outcome is whatever the plain reader had already
+  decided.
+- **What Browserbase learns.** The unsubscribe link (which already names the
+  recipient to the sender), the page it leads to, and the address if a form asks
+  for it. Sessions are created with recording and logging off. No mail, no
+  credentials and no other mailbox data are reachable from the rung; it has no
+  route to the store at all. Browserbase is a subprocessor for every hosted
+  mailbox.
+
 **What a maintainer must not break.**
 - Do not build a second outbound client for sender-chosen URLs, or call
   `reqwest` directly on one: `Fetcher` is the guard, and a client without it is an
@@ -808,6 +859,14 @@ it. That move is what the guard below exists for.
   sender's choice at every hop, so there is no site an address could be safely
   typed into, and the account's primary address is not necessarily the one the
   list knows.
+- Do not give the browser agent a way to type anything but the one address, and
+  do not add a free-text field to its output. The vocabulary is the fence.
+- Do not move a check out of `permit` and into the prompt. The prompt is advice
+  to a model reading a hostile page; `permit` is what actually happens.
+- Do not run the browser inside a tenant pod or on a self-host's own machine
+  without first giving it the fetcher's network guard: a real browser loads
+  subresources and runs scripts, and the public-only resolver covers neither.
+- Do not turn session recording, logging or captcha solving on.
 - `needs_you` sends the user to the ORIGINAL link, not a post-redirect hop that may
   depend on this job's cookies.
 

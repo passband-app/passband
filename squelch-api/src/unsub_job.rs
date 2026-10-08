@@ -20,6 +20,14 @@
 //!        - it is a preference center, an app shell, a bot wall, an error, or
 //!          anything we cannot read with confidence: hand the ORIGINAL link to
 //!          the user (`needs_you`).
+//!   3. The browser, on a daemon that has a Browserbase key
+//!      ([`crate::unsub_browser`]). A page the
+//!      reader gave up on for a reason a real browser could fix (it wants a
+//!      choice made, a script run, the address typed) is opened in a rented
+//!      remote browser that a small model steers, a few actions at most. It
+//!      ends the same two ways, with more precise reasons for the user when a
+//!      person really is what the page wants: a sign-in, a captcha, a
+//!      confirmation link sent by mail.
 //!
 //! The original link and not the last redirect hop, because preference centers
 //! often set a session cookie on the first hop that this job's jar holds and the
@@ -29,7 +37,7 @@
 //!
 //! A job ends in exactly one ledger write ([`Store::finish_unsubscribe_job`]):
 //! `done` or `needs_you`. A daemon that dies mid-job leaves `running`, which the
-//! next listing reaps into `needs_you` (see [`UnsubJobs::reap`]).
+//! next listing reaps into `needs_you` (see [`reap`]).
 //!
 //! [`Store::finish_unsubscribe_job`]: squelch_core::store::Store::finish_unsubscribe_job
 
@@ -39,19 +47,31 @@ use std::time::Duration;
 
 use chrono::Utc;
 use squelch_core::store::Store;
+use squelch_core::triage::llm::Usage;
+use squelch_core::triage::unsub_agent::{self, Observation, Raise, Step};
 use squelch_core::triage::unsub_page::{self, PageDigest, PageVerdict, UnsubPageClient};
 
 use crate::handlers::{audit_action, store_call};
 use crate::state::ApiState;
+use crate::unsub_browser::{self, Browserbase, Decide, Driven, Errand};
+use crate::unsub_cdp::{Cdp, CdpPage};
 use crate::unsub_fetch::{FetchError, Fetched, Fetcher};
 use crate::unsub_html::{self, Page};
 
 /// Jobs in flight at once, per daemon. Each is a handful of requests to a
 /// stranger's site; this only bounds what a burst of `u` presses can open.
 const CONCURRENCY: usize = 4;
-/// The whole job, every hop and the model call included. Past it the user gets
-/// the link: a tray that spins for a minute is worse than one more click.
+/// The plain ladder (one-click, then the page), every hop and the model call
+/// included, and the wait for a slot. Past it the job is treated as a page
+/// nobody could read.
 const JOB_BUDGET: Duration = Duration::from_secs(45);
+/// The browser rung, on top: the wait for a browser, renting it, every step,
+/// and giving it back. A tray that spins this long is the price of not being
+/// asked; it is paid only by pages that would otherwise have asked.
+const BROWSER_BUDGET: Duration = Duration::from_secs(100);
+/// Inside [`BROWSER_BUDGET`]: the drive itself, leaving room to release the
+/// browser when the drive is what ran out of time.
+const DRIVE_BUDGET: Duration = Duration::from_secs(85);
 
 /// What the job starts from.
 #[derive(Debug, Clone)]
@@ -133,6 +153,16 @@ pub(crate) enum NeedsYou {
     LinkError,
     /// We could not tell, or the one action we took did not say done.
     Unclear,
+    // The browser rung's reasons: what a page turned out to want, once
+    // something could actually look at it.
+    /// The page wants the user logged in.
+    SignIn,
+    /// A captcha or a bot wall, seen in a real browser.
+    Captcha,
+    /// The sender mailed a confirmation link the user has to click.
+    CheckEmail,
+    /// The page asks something only the user knows or can decide.
+    YourCall,
 }
 
 impl NeedsYou {
@@ -142,13 +172,17 @@ impl NeedsYou {
             NeedsYou::NeedsBrowser => "needs_browser",
             NeedsYou::LinkError => "link_error",
             NeedsYou::Unclear => "unclear",
+            NeedsYou::SignIn => "sign_in",
+            NeedsYou::Captcha => "captcha",
+            NeedsYou::CheckEmail => "check_email",
+            NeedsYou::YourCall => "your_call",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// Done, and how: `one_click` or `page`.
+    /// Done, and how: `one_click`, `page` or `agent`.
     Done(&'static str),
     NeedsYou(NeedsYou),
 }
@@ -163,6 +197,9 @@ pub(crate) struct UnsubJobs {
     /// TEST HOOK: lets the fetcher reach loopback. Never set in production.
     pub(crate) allow_local: bool,
     pub(crate) page_reader: Option<Arc<UnsubPageClient>>,
+    /// Where the browser rung rents its browser. `None` (no key) and the rung
+    /// does not exist on this daemon.
+    pub(crate) browser: Option<Arc<Browserbase>>,
 }
 
 impl Default for UnsubJobs {
@@ -172,6 +209,7 @@ impl Default for UnsubJobs {
             slots: Arc::new(tokio::sync::Semaphore::new(CONCURRENCY)),
             allow_local: false,
             page_reader: None,
+            browser: None,
         }
     }
 }
@@ -203,11 +241,15 @@ impl UnsubJobs {
 /// Start a job for `sender`, or join the one already running. Writes the
 /// `running` row BEFORE spawning, so a listing right after this returns already
 /// shows it.
+///
+/// `email` is the address this mail was sent to ([`address_to_type`]): the one
+/// string the browser rung may type, should a form ask who is unsubscribing.
 pub(crate) async fn start(
     state: &ApiState,
     sender: String,
     message_id: i64,
     plan: Plan,
+    email: String,
 ) -> Result<(), crate::error::ApiError> {
     if !state.unsub.claim(&sender) {
         return Ok(());
@@ -230,17 +272,25 @@ pub(crate) async fn start(
         // input finding a bug) is a JoinError here, not a lost settle: the row
         // must never be left `running` with the sender claimed until restart.
         let inner = state.clone();
+        let who = sender.clone();
         let work = tokio::spawn(async move {
             let job = async {
                 let _slot = inner.unsub.slots.clone().acquire_owned().await;
                 run(&inner, &plan).await
             };
-            tokio::time::timeout(JOB_BUDGET, job).await
+            // The slot is given back before the browser rung: that one waits
+            // on its own, scarcer, count.
+            let plain = tokio::time::timeout(JOB_BUDGET, job)
+                .await
+                .unwrap_or(Outcome::NeedsYou(NeedsYou::Unclear));
+            let errand = Errand {
+                url: plan.url(),
+                sender: &who,
+                email: &email,
+            };
+            escalate(&inner, &errand, plain).await
         });
-        let outcome = match work.await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) | Err(_) => Outcome::NeedsYou(NeedsYou::Unclear),
-        };
+        let outcome = work.await.unwrap_or(Outcome::NeedsYou(NeedsYou::Unclear));
         settle(&state, &sender, outcome).await;
         state.unsub.release(&sender);
     });
@@ -271,7 +321,129 @@ async fn settle(state: &ApiState, sender: &str, outcome: Outcome) {
     .await;
 }
 
-/// The ladder. Infallible: every failure is a [`NeedsYou`].
+/// The address a form should be given when it asks who is unsubscribing: the
+/// one this mail was SENT TO, when that is plainly the user's own.
+///
+/// The account's address is the default and is what nearly every sender has.
+/// The exception worth getting right is a plus address (`me+shop@…`): the
+/// sender's list holds THAT string, and a form given the bare address answers
+/// "not subscribed" or, worse, signs the bare one up. Nothing looser is
+/// matched: a `To:` that is somebody else's list address or an alias we cannot
+/// vouch for is never typed anywhere.
+pub(crate) fn address_to_type(account_email: &str, to_addrs: Option<&str>) -> String {
+    let account = account_email.trim().to_ascii_lowercase();
+    let Some((local, domain)) = account.split_once('@') else {
+        return account;
+    };
+    let base = local.split('+').next().unwrap_or(local);
+    to_addrs
+        .map(squelch_core::sync::ingest::parse_stored_recipients)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| a.trim().to_ascii_lowercase())
+        .find(|a| {
+            a.split_once('@').is_some_and(|(l, d)| {
+                d == domain
+                    && l.split_once('+')
+                        .is_some_and(|(b, tag)| b == base && !tag.is_empty())
+            })
+        })
+        .unwrap_or(account)
+}
+
+/// Can a real browser plausibly finish what the plain reader could not?
+/// A dead link stays dead in any browser; everything else the reader gives up
+/// on is exactly what the browser rung is for.
+fn worth_a_browser(why: NeedsYou) -> bool {
+    matches!(
+        why,
+        NeedsYou::ChooseTopics | NeedsYou::NeedsBrowser | NeedsYou::Unclear
+    )
+}
+
+/// The browser rung. Takes the plain ladder's outcome and returns it untouched
+/// unless every condition for a browser holds; then the outcome is the
+/// browser's, EXCEPT when the machinery itself fails (no browser to rent, a
+/// dropped socket, the model's cap), where the reader's own reason still
+/// stands. Infallible and bounded by [`BROWSER_BUDGET`].
+async fn escalate(state: &ApiState, errand: &Errand<'_>, plain: Outcome) -> Outcome {
+    let Outcome::NeedsYou(why) = plain else {
+        return plain;
+    };
+    if !worth_a_browser(why) {
+        return plain;
+    }
+    let (Some(browser), Some(model)) =
+        (state.unsub.browser.clone(), state.unsub.page_reader.clone())
+    else {
+        return plain;
+    };
+    // The browser is not on our network, so this is not the SSRF guard it is
+    // for the fetcher. It keeps the rule the same on every rung: a link that
+    // points at a private name or an odd port is not one we follow.
+    let ok = url::Url::parse(errand.url)
+        .is_ok_and(|u| crate::unsub_fetch::check_url(&u, state.unsub.allow_local).is_ok());
+    if !ok {
+        return plain;
+    }
+
+    let rung = async {
+        let _slot = browser.slots.clone().acquire_owned().await;
+        let session = browser.open().await?;
+        let decider = ModelDecider {
+            state,
+            client: &model,
+        };
+        let driven = tokio::time::timeout(DRIVE_BUDGET, async {
+            let cdp = Cdp::connect(&session.connect_url).await.ok()?;
+            let mut page = CdpPage::attach(cdp).await.ok()?;
+            Some(unsub_browser::drive(&mut page, &decider, errand).await)
+        })
+        .await
+        .ok()
+        .flatten();
+        browser.release(&session).await;
+        driven
+    };
+    match tokio::time::timeout(BROWSER_BUDGET, rung).await {
+        Ok(Some(Driven::Done)) => Outcome::Done("agent"),
+        Ok(Some(Driven::Raise(raise))) => Outcome::NeedsYou(match raise {
+            Raise::SignIn => NeedsYou::SignIn,
+            Raise::Captcha => NeedsYou::Captcha,
+            Raise::CheckEmail => NeedsYou::CheckEmail,
+            Raise::YourCall => NeedsYou::YourCall,
+            Raise::Broken => NeedsYou::LinkError,
+            // The agent could not say more than the reader already had.
+            Raise::Unclear => why,
+        }),
+        Ok(Some(Driven::Lost)) | Ok(None) | Err(_) => plain,
+    }
+}
+
+/// The model, as the browser rung's decider: one capped, billed call a step.
+struct ModelDecider<'a> {
+    state: &'a ApiState,
+    client: &'a UnsubPageClient,
+}
+
+impl Decide for ModelDecider<'_> {
+    async fn decide(&self, observation: &Observation<'_>) -> Option<Step> {
+        if !under_cap(
+            self.state,
+            unsub_agent::USAGE_CATEGORY,
+            unsub_agent::DAILY_CAP,
+        )
+        .await
+        {
+            return None;
+        }
+        let (step, usage) = unsub_agent::next_step(self.client, observation).await;
+        bill(self.state, unsub_agent::USAGE_CATEGORY, usage).await;
+        Some(step)
+    }
+}
+
+/// The plain ladder. Infallible: every failure is a [`NeedsYou`].
 pub(crate) async fn run(state: &ApiState, plan: &Plan) -> Outcome {
     let Ok(fetcher) = Fetcher::new(state.unsub.allow_local) else {
         return Outcome::NeedsYou(NeedsYou::Unclear);
@@ -427,21 +599,7 @@ async fn verdict_after_submit(state: &ApiState, page_url: &url::Url, page: &Page
 
 async fn ask_model(state: &ApiState, page_url: &url::Url, page: &Page) -> Option<PageVerdict> {
     let client = state.unsub.page_reader.clone()?;
-    let under_cap = store_call(state, |store, account_id| {
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let spent: u64 = store
-            .list_usage_by_category(account_id, 1)?
-            .into_iter()
-            .filter(|(c, _)| c == unsub_page::USAGE_CATEGORY)
-            .flat_map(|(_, days)| days)
-            .filter(|d| d.day == today)
-            .map(|d| d.calls)
-            .sum();
-        Ok(spent < u64::from(unsub_page::DAILY_CAP))
-    })
-    .await
-    .unwrap_or(false);
-    if !under_cap {
+    if !under_cap(state, unsub_page::USAGE_CATEGORY, unsub_page::DAILY_CAP).await {
         return None;
     }
     let forms = page.describe_actions();
@@ -456,24 +614,46 @@ async fn ask_model(state: &ApiState, page_url: &url::Url, page: &Page) -> Option
         },
     )
     .await;
-    if let Some(u) = usage {
-        let _ = store_call(state, move |store, account_id| {
-            let day = Utc::now().format("%Y-%m-%d").to_string();
-            if let Err(e) =
-                store.extract_bump_usage(account_id, &day, unsub_page::USAGE_CATEGORY, u.into())
-            {
-                eprintln!("squelch: unsubscribe page usage ledger bump failed ({e})");
-            }
-            Ok(())
-        })
-        .await;
-    }
+    bill(state, unsub_page::USAGE_CATEGORY, usage).await;
     Some(verdict)
 }
 
+/// Has this account made fewer than `cap` calls under `category` today? A
+/// ledger that cannot be read is a cap reached: the fallback is the user's
+/// browser, which is never wrong.
+async fn under_cap(state: &ApiState, category: &'static str, cap: u32) -> bool {
+    store_call(state, move |store, account_id| {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let spent: u64 = store
+            .list_usage_by_category(account_id, 1)?
+            .into_iter()
+            .filter(|(c, _)| c == category)
+            .flat_map(|(_, days)| days)
+            .filter(|d| d.day == today)
+            .map(|d| d.calls)
+            .sum();
+        Ok(spent < u64::from(cap))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Record one model call's usage under `category`.
+async fn bill(state: &ApiState, category: &'static str, usage: Option<Usage>) {
+    let Some(u) = usage else { return };
+    let _ = store_call(state, move |store, account_id| {
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        if let Err(e) = store.extract_bump_usage(account_id, &day, category, u.into()) {
+            eprintln!("squelch: unsubscribe {category} usage ledger bump failed ({e})");
+        }
+        Ok(())
+    })
+    .await;
+}
+
 /// A `running` row older than this cannot belong to a live job: every job
-/// settles inside [`JOB_BUDGET`], slot wait included.
-const REAP_AFTER: Duration = Duration::from_secs(120);
+/// settles inside [`JOB_BUDGET`] plus [`BROWSER_BUDGET`], slot waits included.
+const REAP_AFTER: Duration = Duration::from_secs(180);
 
 /// Reap rows orphaned by a restart. Called from the listing. Only rows past
 /// [`REAP_AFTER`] AND not owned in this process: the age test is what makes it
@@ -606,5 +786,447 @@ mod tests {
         let out = run(&prod, &Plan::OneClick(url)).await;
         assert_eq!(out, Outcome::NeedsYou(NeedsYou::LinkError));
         assert!(hits.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_address_typed_is_the_one_the_mail_was_sent_to_when_it_is_plainly_ours() {
+        let me = "Me@Example.com";
+        assert_eq!(address_to_type(me, None), "me@example.com");
+        assert_eq!(
+            address_to_type(me, Some("me@example.com")),
+            "me@example.com"
+        );
+        assert_eq!(
+            address_to_type(me, Some("Shop <ME+Shop@example.com>")),
+            "me+shop@example.com",
+            "the list holds the plus address, so that is what a form must be given"
+        );
+        // Nothing looser: not somebody else's list address, not another
+        // domain's lookalike, not a different person at ours.
+        for to in [
+            "subscribers@shop.example",
+            "me+shop@evil.example",
+            "meow+shop@example.com",
+            "me+@example.com",
+            "other@example.com",
+        ] {
+            assert_eq!(address_to_type(me, Some(to)), "me@example.com", "{to}");
+        }
+    }
+
+    // ---- the browser rung ---------------------------------------------------
+
+    use axum::extract::State;
+    use squelch_core::config::Stage2Provider;
+
+    /// A stand-in for Browserbase's API. `connect` is what a rented session's
+    /// `connectUrl` will be; `None` answers 429, an account out of browsers.
+    async fn browserbase(connect: Option<String>) -> (Browserbase, Arc<Mutex<Vec<String>>>) {
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let app = axum::Router::new()
+            .route(
+                "/v1/sessions",
+                post(move |State(h): State<Arc<Mutex<Vec<String>>>>| async move {
+                    h.lock().unwrap().push("create".to_string());
+                    match connect {
+                        Some(url) => (
+                            StatusCode::CREATED,
+                            axum::Json(serde_json::json!({ "id": "s1", "connectUrl": url })),
+                        ),
+                        None => (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            axum::Json(serde_json::json!({})),
+                        ),
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions/{id}",
+                post(
+                    |State(h): State<Arc<Mutex<Vec<String>>>>, body: String| async move {
+                        h.lock().unwrap().push(format!("update {body}"));
+                        axum::Json(serde_json::json!({}))
+                    },
+                ),
+            )
+            .with_state(hits.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let bb = Browserbase::new("bb_key".into(), None, None)
+            .unwrap()
+            .with_api_base(&format!("http://{addr}"));
+        (bb, hits)
+    }
+
+    /// A sender whose page is a preference center drawn by script: the plain
+    /// reader sees an empty shell, a browser sees two ticked topics, an email
+    /// field and a save button that posts with `fetch`.
+    async fn prefs_site() -> (String, Arc<Mutex<Vec<String>>>) {
+        const PAGE: &str = r#"<!doctype html><html><head><title>Preferences</title></head><body>
+<noscript>Please enable JavaScript to manage your preferences.</noscript><div id="app"></div>
+<script>
+document.getElementById('app').innerHTML = `
+  <h1>Email preferences</h1>
+  <label><input type="checkbox" id="deals" checked> Weekly deals</label>
+  <label><input type="checkbox" id="news" checked> Product news</label>
+  <input type="email" id="em" placeholder="Email address">
+  <button id="save">Save preferences</button>`;
+document.getElementById('save').addEventListener('click', async () => {
+  await fetch('/save', { method: 'POST', body: JSON.stringify({
+    deals: document.getElementById('deals').checked,
+    news: document.getElementById('news').checked,
+    email: document.getElementById('em').value }) });
+  document.getElementById('app').innerHTML = '<h1>Your preferences have been saved.</h1>';
+});
+</script></body></html>"#;
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let app = axum::Router::new()
+            .route(
+                "/prefs",
+                axum::routing::get(|| async { axum::response::Html(PAGE) }),
+            )
+            .route(
+                "/save",
+                post(
+                    |State(h): State<Arc<Mutex<Vec<String>>>>, body: String| async move {
+                        h.lock().unwrap().push(body);
+                        "ok"
+                    },
+                ),
+            )
+            .with_state(hits.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}/prefs"), hits)
+    }
+
+    fn strings(v: &serde_json::Value, out: &mut String) {
+        match v {
+            serde_json::Value::String(s) => {
+                out.push_str(s);
+                out.push('\n');
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            serde_json::Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+
+    /// A model endpoint that plays both parts off the REAL prompts: asked to
+    /// classify a page it says "preferences"; asked for an agent step it reads
+    /// the controls out of the page it was sent, switches every ticked topic
+    /// off, fills the email field and presses save, then says done once the
+    /// page says saved.
+    async fn model() -> String {
+        async fn answer(body: String) -> impl axum::response::IntoResponse {
+            let req: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let mut text = String::new();
+            strings(&req, &mut text);
+            let verdict = if !text.contains("You finish an email unsubscribe") {
+                serde_json::json!({ "verdict": "preferences", "form": -1 })
+            } else {
+                let page = text
+                    .rsplit("-----BEGIN UNTRUSTED UNSUBSCRIBE PAGE-----")
+                    .next()
+                    .and_then(|fenced| fenced.split("\npage:\n").nth(1))
+                    // The system prompt follows in this dump, with example
+                    // controls of its own: stop at the fence.
+                    .and_then(|page| page.split("-----END UNTRUSTED").next())
+                    .unwrap_or_default();
+                if page.contains("have been saved") {
+                    serde_json::json!({ "status": "done", "reason": "none", "actions": [] })
+                } else {
+                    let mut actions = Vec::new();
+                    let refs = |pattern: &str| -> Vec<i64> {
+                        regex::Regex::new(pattern)
+                            .unwrap()
+                            .captures_iter(page)
+                            .map(|c| c[1].parse().unwrap())
+                            .collect()
+                    };
+                    for r in refs(r"\[(\d+) checkbox on ") {
+                        actions.push(
+                            serde_json::json!({ "action": "uncheck", "ref": r, "option": -1 }),
+                        );
+                    }
+                    for r in refs(r"\[(\d+) email ") {
+                        actions.push(
+                            serde_json::json!({ "action": "fill_email", "ref": r, "option": -1 }),
+                        );
+                    }
+                    for r in refs(r#"\[(\d+) button "Save"#) {
+                        actions
+                            .push(serde_json::json!({ "action": "click", "ref": r, "option": -1 }));
+                    }
+                    serde_json::json!({ "status": "act", "reason": "none", "actions": actions })
+                }
+            };
+            let body = serde_json::json!({
+                "content": [{ "type": "text", "text": verdict.to_string() }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 900, "output_tokens": 40 },
+            })
+            .to_string();
+            ([("content-type", "application/json")], body)
+        }
+        let app = axum::Router::new().fallback(answer);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn rung_state(
+        bb: Option<Browserbase>,
+        model: Option<String>,
+    ) -> (ApiState, Arc<SqliteStore>, i64) {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        let mut state = ApiState::new(store.clone(), acct, "t")
+            .with_unsub_fetch_allow_local(true)
+            .with_unsub_browser(bb);
+        if let Some(url) = model {
+            state = state.with_unsub_page_reader(Some(UnsubPageClient::new(
+                reqwest::Client::new(),
+                url,
+                "sk-test",
+                Stage2Provider::Anthropic,
+                "claude-haiku-4-5",
+                None,
+            )));
+        }
+        (state, store, acct)
+    }
+
+    fn errand(url: &str) -> Errand<'_> {
+        Errand {
+            url,
+            sender: "news@shop.example",
+            email: "me+shop@example.com",
+        }
+    }
+
+    #[tokio::test]
+    async fn no_browser_is_rented_without_the_key_a_model_and_a_reason_to() {
+        let stuck = Outcome::NeedsYou(NeedsYou::ChooseTopics);
+        let url = "http://127.0.0.1:9/prefs";
+
+        // A model, but this daemon has no key.
+        let (state, ..) = rung_state(None, Some(model().await));
+        assert_eq!(escalate(&state, &errand(url), stuck).await, stuck);
+
+        // A key, but no model to steer with.
+        let (bb, hits) = browserbase(None).await;
+        let (state, ..) = rung_state(Some(bb), None);
+        assert_eq!(escalate(&state, &errand(url), stuck).await, stuck);
+        assert!(hits.lock().unwrap().is_empty(), "no model");
+
+        // Everything in place, and outcomes a browser cannot improve on.
+        let (bb, hits) = browserbase(None).await;
+        let (state, ..) = rung_state(Some(bb), Some(model().await));
+        for settled in [
+            Outcome::Done("one_click"),
+            Outcome::Done("page"),
+            Outcome::NeedsYou(NeedsYou::LinkError),
+        ] {
+            assert_eq!(escalate(&state, &errand(url), settled).await, settled);
+        }
+        assert!(hits.lock().unwrap().is_empty(), "nothing to fix");
+    }
+
+    #[tokio::test]
+    async fn a_link_the_fetcher_would_refuse_is_not_handed_to_a_browser_either() {
+        let (bb, hits) = browserbase(None).await;
+        let (state, ..) = rung_state(Some(bb), Some(model().await));
+        // Production: no test hook, so loopback is refused.
+        let state = state.with_unsub_fetch_allow_local(false);
+        let stuck = Outcome::NeedsYou(NeedsYou::NeedsBrowser);
+        for url in [
+            "http://127.0.0.1:8848/client/stats",
+            "http://router.lan/",
+            "file:///etc/passwd",
+            "https://shop.example:8443/u",
+        ] {
+            assert_eq!(escalate(&state, &errand(url), stuck).await, stuck, "{url}");
+        }
+        assert!(hits.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_browser_that_cannot_be_rented_leaves_the_readers_reason_standing() {
+        let (bb, hits) = browserbase(None).await;
+        let (state, ..) = rung_state(Some(bb), Some(model().await));
+        let stuck = Outcome::NeedsYou(NeedsYou::ChooseTopics);
+        assert_eq!(
+            escalate(&state, &errand("http://127.0.0.1:9/prefs"), stuck).await,
+            stuck
+        );
+        assert_eq!(
+            hits.lock().unwrap().clone(),
+            ["create"],
+            "asked once, not retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rented_browser_that_never_answers_is_given_back_and_the_reason_stands() {
+        // A session whose connect URL goes nowhere.
+        let (bb, hits) = browserbase(Some("ws://127.0.0.1:9/devtools/browser/x".into())).await;
+        let (state, ..) = rung_state(Some(bb), Some(model().await));
+        let stuck = Outcome::NeedsYou(NeedsYou::NeedsBrowser);
+        assert_eq!(
+            escalate(&state, &errand("http://127.0.0.1:9/prefs"), stuck).await,
+            stuck
+        );
+        let hits = hits.lock().unwrap().clone();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(hits[1].contains("REQUEST_RELEASE"), "{hits:?}");
+    }
+
+    /// THE WHOLE RUNG, with a real browser standing in for the rented one: the
+    /// plain reader gives up on a script-drawn preference center, and the
+    /// agent finishes it. Needs a local Chrome, so ignored by default:
+    /// `cargo test -p squelch-api unsub_job -- --ignored --test-threads=1`.
+    #[tokio::test]
+    #[ignore = "needs a local Chrome"]
+    async fn a_page_the_reader_gives_up_on_is_finished_in_a_browser() {
+        let chrome = crate::unsub_cdp::tests::chrome().await;
+        let (url, saves) = prefs_site().await;
+        let (bb, rented) = browserbase(Some(chrome.ws.clone())).await;
+        let (state, store, acct) = rung_state(Some(bb), Some(model().await));
+
+        let plain = run(&state, &Plan::Page(url.clone())).await;
+        assert!(
+            matches!(plain, Outcome::NeedsYou(_)),
+            "the plain reader cannot finish this page: {plain:?}"
+        );
+        assert!(saves.lock().unwrap().is_empty());
+
+        let out = escalate(&state, &errand(&url), plain).await;
+        assert_eq!(out, Outcome::Done("agent"));
+
+        let saves = saves.lock().unwrap().clone();
+        assert_eq!(saves.len(), 1, "{saves:?}");
+        let sent: serde_json::Value = serde_json::from_str(&saves[0]).unwrap();
+        assert_eq!(
+            sent,
+            serde_json::json!({ "deals": false, "news": false, "email": "me+shop@example.com" })
+        );
+        let rented = rented.lock().unwrap().clone();
+        assert_eq!(
+            rented.len(),
+            2,
+            "one browser, rented and given back: {rented:?}"
+        );
+        assert!(rented[1].contains("REQUEST_RELEASE"));
+
+        // Two steps (act, then done), billed under the agent's own category.
+        let usage = store.list_usage_by_category(acct, 1).unwrap();
+        let steps: u64 = usage
+            .iter()
+            .filter(|(c, _)| c == unsub_agent::USAGE_CATEGORY)
+            .flat_map(|(_, days)| days)
+            .map(|d| d.calls)
+            .sum();
+        assert_eq!(steps, 2, "{usage:?}");
+    }
+
+    /// THE PROMPT AGAINST A REAL MODEL, on the awkward preference center the
+    /// driver's own tests use (a hidden native checkbox, an ARIA switch, a
+    /// decoy "Resubscribe", a `confirm()`, a save that is a `fetch`). Spends a
+    /// few small-model calls, so it runs only by hand:
+    /// `ANTHROPIC_API_KEY=... cargo test -p squelch-api live_model -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs a local Chrome and ANTHROPIC_API_KEY; spends real tokens"]
+    async fn live_model_works_a_preference_center_end_to_end() {
+        struct Live(UnsubPageClient);
+        impl Decide for Live {
+            async fn decide(&self, o: &Observation<'_>) -> Option<Step> {
+                eprintln!(
+                    "--- step {} sees ---\n{}\nhistory: {:?}",
+                    o.step, o.page, o.history
+                );
+                let (step, usage) = unsub_agent::next_step(&self.0, o).await;
+                eprintln!("--- model says: {step:?} (usage {usage:?})");
+                Some(step)
+            }
+        }
+        let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY");
+        let model = std::env::var("SQUELCH_NOTIFY_MODEL")
+            .unwrap_or_else(|_| squelch_core::config::Config::default().notify.model);
+        let client = UnsubPageClient::new(
+            reqwest::Client::new(),
+            squelch_core::triage::llm::provider_url(Stage2Provider::Anthropic),
+            key,
+            Stage2Provider::Anthropic,
+            model,
+            squelch_core::config::Config::default().notify.effort,
+        );
+        let chrome = crate::unsub_cdp::tests::chrome().await;
+        let (base, hits) = crate::unsub_cdp::tests::site().await;
+        let mut page = CdpPage::attach(Cdp::connect(&chrome.ws).await.unwrap())
+            .await
+            .unwrap();
+        let url = format!("{base}/prefs");
+        let out = unsub_browser::drive(&mut page, &Live(client), &errand(&url)).await;
+        let hits = hits.lock().unwrap().clone();
+        eprintln!("outcome {out:?}, site saw {hits:?}");
+        assert_eq!(out, Driven::Done);
+        assert_eq!(hits.len(), 1, "one save and no resubscribe: {hits:?}");
+        let sent: serde_json::Value =
+            serde_json::from_str(hits[0].strip_prefix("save ").unwrap()).unwrap();
+        assert_eq!(sent["deals"], false);
+        assert_eq!(sent["news"], false);
+        assert_eq!(sent["partners"], "false");
+    }
+
+    /// ONE REAL LINK, THROUGH THE REAL BROWSER AND THE REAL MODEL, with every
+    /// step printed: what the agent was shown and what it answered. For
+    /// working out why a particular sender's page ended the way it did. The
+    /// link is a credential of the recipient's, so it comes from the
+    /// environment and is never printed.
+    /// `UNSUB_URL=... cargo test -p squelch-api live_link -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs UNSUB_URL, a Browserbase key and ANTHROPIC_API_KEY; acts on a real page"]
+    async fn live_link_is_driven_with_every_step_shown() {
+        struct Live(UnsubPageClient);
+        impl Decide for Live {
+            async fn decide(&self, o: &Observation<'_>) -> Option<Step> {
+                eprintln!(
+                    "--- step {} on {} ({}) ---\n{}\nhistory: {:?}",
+                    o.step, o.host, o.title, o.page, o.history
+                );
+                let (step, _) = unsub_agent::next_step(&self.0, o).await;
+                eprintln!("--- model says: {step:?}");
+                Some(step)
+            }
+        }
+        let url = std::env::var("UNSUB_URL").expect("UNSUB_URL");
+        let email = std::env::var("UNSUB_EMAIL").unwrap_or_else(|_| "me@example.com".into());
+        let client = UnsubPageClient::new(
+            reqwest::Client::new(),
+            squelch_core::triage::llm::provider_url(Stage2Provider::Anthropic),
+            std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY"),
+            Stage2Provider::Anthropic,
+            squelch_core::config::Config::default().notify.model,
+            squelch_core::config::Config::default().notify.effort,
+        );
+        let bb = Browserbase::from_env().expect("a Browserbase key");
+        let session = bb.open().await.expect("a session was rented");
+        let out = async {
+            let cdp = Cdp::connect(&session.connect_url).await.ok()?;
+            let mut page = CdpPage::attach(cdp).await.ok()?;
+            let errand = Errand {
+                url: &url,
+                sender: "the sender",
+                email: &email,
+            };
+            Some(unsub_browser::drive(&mut page, &Live(client), &errand).await)
+        }
+        .await;
+        bb.release(&session).await;
+        eprintln!("outcome: {out:?}");
     }
 }

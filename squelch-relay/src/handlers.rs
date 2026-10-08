@@ -45,7 +45,7 @@ const BATCH_BUDGET: Duration = Duration::from_secs(30);
 
 /// The generic fallback alert, shown when the Notification Service Extension
 /// cannot reach the user's daemon to fetch real content. It must say nothing.
-const ALERT_TITLE: &str = "squelch";
+const ALERT_TITLE: &str = "Passband";
 const ALERT_BODY: &str = "New mail surfaced";
 
 /// Open-token bounds. The alphabet is URL-safe base64 without padding, so a
@@ -545,7 +545,7 @@ mod tests {
     fn payload_is_content_free_and_forwards_the_event_id() {
         let v = parse(base(json!([hex(64)]))).unwrap();
         let p: serde_json::Value = serde_json::from_slice(&v.payload).unwrap();
-        assert_eq!(p["aps"]["alert"]["title"], "squelch");
+        assert_eq!(p["aps"]["alert"]["title"], "Passband");
         assert_eq!(p["aps"]["alert"]["body"], "New mail surfaced");
         assert_eq!(p["aps"]["mutable-content"], 1);
         assert_eq!(p["aps"]["sound"], "default");

@@ -43,6 +43,11 @@ tokio-util = "0.7"
 reqwest = { workspace = true, features = ["stream", "cookies"] }
 # Url joining and form encoding for the automatic unsubscribe's fetcher.
 url = { workspace = true }
+# The automatic unsubscribe's browser rung speaks the Chrome DevTools Protocol
+# to a rented remote browser over one WebSocket (src/unsub_cdp.rs). rustls with
+# webpki roots, matching reqwest; `futures` for the socket's split halves.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+futures = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
 # Markdown → HTML for the send path's multipart/alternative body. `html` only;

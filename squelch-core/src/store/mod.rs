@@ -407,6 +407,9 @@ pub struct MessageUnsub {
     /// Gmail filed it as spam. Never unsubscribed from automatically: fetching
     /// a spammer's link tells them the address is live.
     pub is_spam: bool,
+    /// The stored `To:` line, for telling which of the user's addresses this
+    /// mail was sent to (a plus address, usually) when a form asks.
+    pub to_addrs: Option<String>,
 }
 
 /// A row to append to the human-door audit log.

@@ -435,32 +435,55 @@ final class Notifier {
 
 /// The center's delegate, retained by `Notifier.shared`.
 ///
-/// Deliberately NOT main-actor isolated: these callbacks are protocol
-/// requirements with no isolation of their own, so each method hops to the main
-/// actor carrying a plain `String?` — `[AnyHashable: Any]` is not Sendable and
-/// must be read on this side.
+/// COMPLETION-HANDLER METHODS, NOT THE ASYNC OVERLOADS. The async forms of
+/// these two requirements are nonisolated, so Swift runs them on the global
+/// executor and calls the system's completion handler from a background
+/// thread. AppKit tolerates that; UIKit does not — it raises "Call must be
+/// made on main thread" and a tapped banner killed the phone app on launch.
+/// The completion forms are delivered on the main queue, so each method reads
+/// the payload, does its main-actor work, and answers, all on that queue.
+///
+/// Not main-actor isolated as a class: the protocol has no isolation of its
+/// own, and an isolated conformance would trap rather than recover if a
+/// callback ever arrived elsewhere. `onMain` hops instead.
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter, willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        let route = notification.request.content.userInfo[EventBanner.routeKey] as? String
-        let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
-        let (active, visible) = await MainActor.run {
-            #if os(macOS)
-                (NSApp.isActive, MainWindow.find()?.isVisible == true)
-            #else
-                // Off macOS the banner always wins until there is a real
-                // foreground check: a suppressed notification is a lost one.
-                (false, false)
-            #endif
+    /// Run `work` on the main actor: inline when already on the main thread
+    /// (the documented case), otherwise queued there rather than trapping.
+    private func onMain(_ work: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(work)
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated(work) }
         }
-        return Notifier.presentation(
-            appActive: active, windowVisible: visible, isTest: route == EventBanner.testRoute, isAuth: isAuth)
     }
 
     func userNotificationCenter(
-        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
-    ) async {
+        _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+        withCompletionHandler completionHandler:
+            @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        let route = notification.request.content.userInfo[EventBanner.routeKey] as? String
+        let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
+        nonisolated(unsafe) let done = completionHandler
+        onMain {
+            #if os(macOS)
+                let (active, visible) = (NSApp.isActive, MainWindow.find()?.isVisible == true)
+            #else
+                // Off macOS the banner always wins until there is a real
+                // foreground check: a suppressed notification is a lost one.
+                let (active, visible) = (false, false)
+            #endif
+            done(
+                Notifier.presentation(
+                    appActive: active, windowVisible: visible,
+                    isTest: route == EventBanner.testRoute, isAuth: isAuth))
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
         let userInfo = response.notification.request.content.userInfo
         let threadId = userInfo[EventBanner.threadKey] as? String
         let messageId = (userInfo[EventBanner.messageKey] as? Int)
@@ -474,7 +497,10 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         // one would front the app and then do nothing.
         let route = userInfo[EventBanner.routeKey] as? String
         let unresolved = EventBanner.unresolvedPush(userInfo["event_id"] as? String)
-        await MainActor.run {
+        nonisolated(unsafe) let done = completionHandler
+        onMain {
+            // Answered once the tap is routed, whichever branch returns.
+            defer { done() }
             if route == EventBanner.updateRoute {
                 Notifier.shared.front()
                 // A banner from before a quit: this launch has no card yet, and

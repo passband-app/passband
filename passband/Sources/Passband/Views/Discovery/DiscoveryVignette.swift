@@ -338,7 +338,7 @@ enum VignetteParts {
 
 /// FLOW MODE: mail going past one at a time. Two `E`s each finish the email in
 /// front (a check draws on, the card lifts away through the top, the next one
-/// steps up), then a `⇧S` sets one aside to the left, unfinished and unjudged.
+/// steps up), then an `S` sets one aside to the left, unfinished and unjudged.
 /// Three moves, three card designs, so the deck is back where it began.
 enum FlowVignette: VignetteScene {
     private enum Kind { case done, skip }
@@ -415,6 +415,6 @@ enum FlowVignette: VignetteScene {
         let doneDown = events.filter { $0.kind == .done }.map { VignetteMotion.press(t, at: $0.at) }.max() ?? 0
         let skipDown = events.filter { $0.kind == .skip }.map { VignetteMotion.press(t, at: $0.at) }.max() ?? 0
         VignetteParts.keycap(&ctx, "E", origin: CGPoint(x: 128, y: 22), pressed: doneDown)
-        VignetteParts.keycap(&ctx, "⇧S", origin: CGPoint(x: 124, y: 52), width: 30, pressed: skipDown)
+        VignetteParts.keycap(&ctx, "S", origin: CGPoint(x: 128, y: 52), pressed: skipDown)
     }
 }

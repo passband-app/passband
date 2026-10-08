@@ -2050,6 +2050,11 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// Persist the archive walk's cursor after a fully ingested chunk.
     fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()>;
 
+    /// Whether the stored row `message_id` is an archive row. What a live
+    /// ingest asks after [`Store::ingest_message`] hands back an id, to tell a
+    /// row it wrote from an archive row it left alone.
+    fn message_is_archive(&self, account_id: AccountId, message_id: i64) -> Result<bool>;
+
     /// Which of `gmail_msg_ids` this account already stores, in any tier. The
     /// walk lists a chunk and fetches only what this does not return, so a
     /// re-listed chunk costs no `messages.get`.

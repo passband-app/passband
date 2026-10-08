@@ -890,6 +890,10 @@ impl Store for SqliteStore {
         self.archive_walked_to(account_id)
     }
 
+    fn message_is_archive(&self, account_id: AccountId, message_id: i64) -> Result<bool> {
+        self.message_is_archive(account_id, message_id)
+    }
+
     fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()> {
         self.set_archive_walked_to(account_id, walked_to)
     }

@@ -799,6 +799,8 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// the gauge is for display, and control flow hung off a display value
     /// comes back to bite when the display changes.
     window_in_flight: AtomicBool,
+    /// The archive walk's waits. [`ArchivePace::default`] outside the tests.
+    archive_pace: ArchivePace,
     /// Shared cooldown after provider failure. Rejected configuration must not
     /// trigger one request per queued message or consume message retry attempts.
     agent_retry_after: AtomicI64,
@@ -878,6 +880,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             poll_healthy: AtomicBool::new(false),
             polled_ok: AtomicBool::new(false),
             window_in_flight: AtomicBool::new(false),
+            archive_pace: ArchivePace::default(),
             agent_retry_after: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
@@ -1345,6 +1348,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     ) -> Result<()> {
         let mut refine_shutdown = shutdown.clone();
         let mut notify_shutdown = shutdown.clone();
+        let mut archive_shutdown = shutdown.clone();
         tokio::select! {
             polled = async {
                 if backfill_first {
@@ -1355,7 +1359,208 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             () = self.agent_notification_lane(&mut notify_shutdown) => Ok(()),
             // Only ever completes on shutdown; it has no error to report.
             () = self.refine_lane(&mut refine_shutdown) => Ok(()),
+            // The same: a Gmail error inside the walk is the walk's to wait
+            // out, never a reason to bounce the lifecycle.
+            () = self.archive_lane(&mut archive_shutdown) => Ok(()),
         }
+    }
+
+    /// THE ARCHIVE WALK: mail older than the backfill window, fetched once,
+    /// slowly, newest first, and stored to be found (see
+    /// [`Store::ingest_archive_message`]). One 7-day chunk at a time backwards
+    /// from the persisted cursor until it reaches `now - sync.archive_days`.
+    ///
+    /// No `Result`, for the refine lane's reason: this lane is no part of
+    /// "is the mailbox syncing", so nothing that goes wrong in it may end the
+    /// `select!`. An error is logged, waited out and the same chunk retried.
+    /// The poll lane stays the only future whose `Err` reaches [`Self::run`].
+    ///
+    /// CANCELLATION IS A RESUME. When the poll lane errors this future is
+    /// dropped at whatever await it is on. Each message is one synchronous
+    /// store transaction, so a row is either wholly there or absent; the
+    /// cursor only moves after a whole chunk, so the next lifecycle lists the
+    /// same chunk again, drops the ids already stored and fetches the rest. A
+    /// row cancelled between its commit and its vector write is picked up by
+    /// the refine lane's `backfill_missing_vectors`, like any other.
+    ///
+    /// It is idle until a poll has succeeded, for the same reason the refine
+    /// lane is (`poll_healthy`): a dead credential must not be retried by two
+    /// lanes. And it yields to a window of mail being fetched: a first
+    /// backfill or a catch-up is mail somebody is waiting for, and the two
+    /// would otherwise split one Gmail budget.
+    async fn archive_lane(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) {
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            let wait = match self.archive_walk_chunk(shutdown).await {
+                // Straight on to the next chunk; the rests are inside.
+                Ok(ArchiveStep::Walked) => Duration::ZERO,
+                Ok(ArchiveStep::Held) => self.archive_pace.held_recheck,
+                Ok(ArchiveStep::Done | ArchiveStep::Off) => self.archive_pace.done_recheck,
+                Err(e) => {
+                    // Error strings from this crate never carry secrets.
+                    eprintln!(
+                        "squelch: archive walk error ({e}); retrying in {}s",
+                        self.archive_pace.error_backoff.as_secs()
+                    );
+                    self.archive_pace.error_backoff
+                }
+            };
+            if !Self::archive_rest(wait, shutdown).await {
+                return;
+            }
+        }
+    }
+
+    /// Sleep `d` unless shutdown arrives first; `false` means it did.
+    async fn archive_rest(d: Duration, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+        if *shutdown.borrow() {
+            return false;
+        }
+        let sleep = tokio::time::sleep(d);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = &mut sleep => return true,
+                changed = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        return false;
+                    }
+                    // The sender is gone without ever saying stop: nothing
+                    // will wake this again, so the sleep is all that is left.
+                    if changed.is_err() {
+                        sleep.await;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// May the archive walk touch Gmail right now. See [`Self::archive_lane`].
+    fn archive_may_run(&self) -> bool {
+        self.poll_healthy.load(Ordering::Relaxed) && !self.window_in_flight.load(Ordering::Relaxed)
+    }
+
+    /// One chunk of the archive walk, or the reason there was none.
+    ///
+    /// LISTS ALL MAIL, with no `labelIds`: the archive is everything the
+    /// mailbox holds, read or filed, received or sent, and `is_sent` comes from
+    /// each message's own labels. Gmail leaves spam and trash out of a listing
+    /// unless asked for them; drafts and chats are excluded by the query.
+    ///
+    /// IDS ALREADY STORED ARE DROPPED BEFORE ANY FETCH. That is the quota
+    /// saving (a list call costs a quarter of one body) and it is the whole
+    /// resume mechanism: a chunk interrupted halfway is listed again and only
+    /// its unfetched half is paid for.
+    ///
+    /// `GmailRetry::None`: a quota refusal ends the chunk rather than being
+    /// slept on in place. The refusal has already slowed and paused the shared
+    /// budget for every caller; the walk's part is to get out of the queue for
+    /// [`ArchivePace::error_backoff`] and leave what budget there is to the
+    /// poll lane. Retrying in place (`CatchUp`) is for a window somebody is
+    /// waiting on, where losing position costs a re-list of thousands; here
+    /// position is the stored rows and costs nothing to recover.
+    ///
+    /// THE CURSOR MOVES LAST, after every id of the chunk is ingested, so an
+    /// error or a cancellation anywhere above leaves it where it was.
+    async fn archive_walk_chunk(
+        &self,
+        shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<ArchiveStep> {
+        let days = self.config.sync.archive_days;
+        if days == 0 {
+            return Ok(ArchiveStep::Off);
+        }
+        if !self.archive_may_run() {
+            return Ok(ArchiveStep::Held);
+        }
+        let pace = self.archive_pace;
+        // Relative to NOW, every chunk: a walk that finished last month is
+        // still finished, and one resumed after a week away has a week less to
+        // do at the far end.
+        let target = Utc::now() - ChronoDuration::days(i64::from(days));
+        let walked_to = match self.store.archive_walked_to(self.account_id)? {
+            Some(at) => at,
+            // FIRST USE. The walk starts where the backfill window ended, and
+            // the store leaves creating the row to the one caller that knows
+            // where that is.
+            None => {
+                let start = self.backfill_since();
+                self.store.set_archive_walked_to(self.account_id, start)?;
+                start
+            }
+        };
+        if walked_to <= target {
+            self.metrics.note_archive_walk(walked_to, true);
+            return Ok(ArchiveStep::Done);
+        }
+        self.metrics.note_archive_walk(walked_to, false);
+
+        let from = (walked_to - pace.chunk).max(target);
+        // Epoch seconds, which Gmail reads as exact instants (a bare date is a
+        // day in the ACCOUNT's timezone, which this daemon does not know). The
+        // lower bound is one second early so two neighbouring chunks overlap
+        // by that second whichever way Gmail rounds the boundary; the overlap
+        // costs nothing, because its ids are already stored.
+        let q = format!(
+            "after:{} before:{} -in:draft -in:chats",
+            from.timestamp() - 1,
+            walked_to.timestamp()
+        );
+        let mut burst = tokio::time::Instant::now();
+        let listed = self
+            .list_message_ids_in(None, Some(&q), None, GmailRetry::None)
+            .await?;
+        let stored = self.store.stored_gmail_msg_ids(self.account_id, &listed)?;
+        let ids: Vec<String> = listed
+            .into_iter()
+            .filter(|id| !stored.contains(id))
+            .collect();
+
+        let per_batch = pace.batch.max(1);
+        let batches = ids.len().div_ceil(per_batch);
+        for (i, batch) in ids.chunks(per_batch).enumerate() {
+            // Between batches, never inside one: a catch-up that starts now
+            // gets the budget back within one batch, and the rows this chunk
+            // has already stored are skipped when the walk comes back to it.
+            if !self.archive_may_run() {
+                return Ok(ArchiveStep::Held);
+            }
+            self.fetch_raw_and_ingest(
+                batch,
+                Mailbox::Inbox,
+                IngestOrigin::Archive,
+                GmailRetry::None,
+            )
+            .await?;
+            // The last batch's rest comes after the cursor is safe, below.
+            if i + 1 == batches {
+                break;
+            }
+            if !Self::archive_rest(burst.elapsed() * pace.rest_factor, shutdown).await {
+                return Ok(ArchiveStep::Held);
+            }
+            burst = tokio::time::Instant::now();
+        }
+
+        self.store.set_archive_walked_to(self.account_id, from)?;
+        self.metrics.note_archive_walk(from, from <= target);
+        // One line per chunk that fetched something: a count and a date,
+        // nothing of the mail. An empty week says nothing.
+        if !ids.is_empty() {
+            eprintln!(
+                "squelch: archive walk stored {} message(s), back to {}",
+                ids.len(),
+                from.format("%Y-%m-%d")
+            );
+        }
+        // A chunk is hundreds of raw bodies parsed and dropped; hand the pages
+        // back before the long rest rather than holding them through it.
+        crate::mem::trim_off_runtime().await;
+        Self::archive_rest(burst.elapsed() * pace.rest_factor, shutdown).await;
+        Ok(ArchiveStep::Walked)
     }
 
     /// Poll `history.list` every `poll_secs`, ingesting `messageAdded` INBOX
@@ -2331,15 +2536,37 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         cap: Option<usize>,
         retry: GmailRetry,
     ) -> Result<Vec<String>> {
+        self.list_message_ids_in(Some(label), q, cap, retry).await
+    }
+
+    /// The one paging loop behind every `messages.list` here. `label` is
+    /// `None` only for the archive walk, which lists ALL MAIL: no `labelIds`
+    /// at all, so read, filed and sent mail are in it, and Gmail itself leaves
+    /// spam and trash out.
+    async fn list_message_ids_in(
+        &self,
+        label: Option<&str>,
+        q: Option<&str>,
+        cap: Option<usize>,
+        retry: GmailRetry,
+    ) -> Result<Vec<String>> {
         let mut ids = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
-            let mut url = format!("{}/messages?labelIds={label}", self.api_base);
+            let mut params = Vec::new();
+            if let Some(label) = label {
+                params.push(format!("labelIds={label}"));
+            }
             if let Some(q) = q {
-                url.push_str(&format!("&q={}", urlencode(q)));
+                params.push(format!("q={}", urlencode(q)));
             }
             if let Some(tok) = &page_token {
-                url.push_str(&format!("&pageToken={tok}"));
+                params.push(format!("pageToken={tok}"));
+            }
+            let mut url = format!("{}/messages", self.api_base);
+            if !params.is_empty() {
+                url.push('?');
+                url.push_str(&params.join("&"));
             }
             let page: ListMessagesResp = self.get_json_with_retry(&url, retry).await?;
             ids.extend(page.messages.into_iter().map(|m| m.id));
@@ -2573,7 +2800,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             };
             id
         } else {
-            self.store.ingest_message(&triaged)?
+            let id = self.store.ingest_message(&triaged)?;
+            // A LIVE SIGHTING OF AN ARCHIVE ROW wrote nothing (the store keeps
+            // archive rows write-once), so there is nothing new to embed and
+            // nothing queued to wake the refine lane for. Without this the row
+            // was re-embedded and the lane poked on every overlap at the
+            // window's edge.
+            if self.store.message_is_archive(self.account_id, id)? {
+                return Ok(None);
+            }
+            id
         };
         // Embeddings are internal evidence. Agent search separately checks the
         // current access assessment before releasing results.
@@ -2894,8 +3130,66 @@ fn lifecycle_backoff(current: Duration, polled_ok: bool) -> Duration {
     if polled_ok { BACKOFF_START } else { current }
 }
 
+/// HOW THE ARCHIVE WALK SPENDS TIME. Its own struct, on the engine, so the
+/// tests can shrink every wait to nothing and assert on the wire instead of
+/// sleeping; production only ever builds [`ArchivePace::default`].
+#[derive(Clone, Copy)]
+struct ArchivePace {
+    /// How much mail one chunk lists: the cursor moves back this far per
+    /// persisted step. A week is small enough that a restart mid-chunk re-lists
+    /// little, and large enough that a year is about fifty list calls.
+    chunk: ChronoDuration,
+    /// Ids fetched between two rests, and between two looks at shutdown and
+    /// `window_in_flight`.
+    batch: usize,
+    /// After each burst the walk rests this many times the burst's own elapsed
+    /// time. 2 is a one-third duty cycle: whatever pace the shared
+    /// [`GmailBudget`] is currently allowing, the walk takes about a third of
+    /// it and the poll lane, the sweeps and the write door queue behind an
+    /// archive request at most a third of the time.
+    rest_factor: u32,
+    /// The wait after any error inside the walk before the same chunk is tried
+    /// again.
+    error_backoff: Duration,
+    /// How often an idle walk looks again while it is held off (no poll has
+    /// succeeded yet, or a window of mail is being fetched).
+    held_recheck: Duration,
+    /// How often a finished (or switched-off) walk looks again. The target is
+    /// `now - archive_days`, so a finished walk stays finished as time passes;
+    /// this exists so a lane that outlives a config change still notices.
+    done_recheck: Duration,
+}
+
+impl Default for ArchivePace {
+    fn default() -> Self {
+        Self {
+            chunk: ChronoDuration::days(7),
+            batch: 25,
+            rest_factor: 2,
+            error_backoff: Duration::from_secs(5 * 60),
+            held_recheck: Duration::from_secs(30),
+            done_recheck: Duration::from_secs(60 * 60),
+        }
+    }
+}
+
+/// What one call of [`SyncEngine::archive_walk_chunk`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveStep {
+    /// A chunk was listed, ingested and the cursor moved back over it.
+    Walked,
+    /// Not now: no poll has succeeded yet, a window of mail is being fetched,
+    /// or shutdown arrived mid-chunk. Nothing was persisted.
+    Held,
+    /// The cursor has reached `now - archive_days`.
+    Done,
+    /// `sync.archive_days` is 0.
+    Off,
+}
+
 /// Only backfills/catch-up retain a request across quota pauses. Poll helpers,
-/// spam browsing and metadata sweeps leave retry scheduling to their caller.
+/// spam browsing, metadata sweeps and the archive walk leave retry scheduling
+/// to their caller.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GmailRetry {
     None,
@@ -3844,6 +4138,14 @@ mod tests {
         /// two timestamps the engine wrote, which is the only deterministic way
         /// to tell a per-message clock from a per-batch one.
         slow: HashMap<String, Duration>,
+        /// ALL MAIL, for a `messages.list` with no `labelIds` (the archive
+        /// walk): `(internalDate in unix seconds, id)`, served by the `after:`
+        /// and `before:` bounds of the request's `q`.
+        all_mail: Vec<(i64, String)>,
+        /// How many label-less listings still answer 500 before one succeeds.
+        all_mail_failures: usize,
+        /// The `q` of every `messages.list` served, as `(labelIds, q)`.
+        list_queries: Vec<(String, String)>,
         /// Every call this mock served, in order, as `verb:key`.
         seen: Vec<String>,
     }
@@ -3873,6 +4175,23 @@ mod tests {
                 labels.iter().map(|s| s.to_string()).collect(),
             );
             self
+        }
+        /// One message that is in no listing by label, only in all mail,
+        /// dated `at`: what the archive walk exists to find.
+        fn old_mail(&self, id: &str, at: DateTime<Utc>, eml: String) -> &Self {
+            let mut st = self.0.lock().unwrap();
+            st.all_mail.push((at.timestamp(), id.to_string()));
+            st.bodies.insert(id.to_string(), eml);
+            self
+        }
+        /// The `q` of each listing served for `label` (`""` is all mail).
+        fn queries(&self, label: &str) -> Vec<String> {
+            let st = self.0.lock().unwrap();
+            st.list_queries
+                .iter()
+                .filter(|(l, _)| l == label)
+                .map(|(_, q)| q.clone())
+                .collect()
         }
         /// Make `messages.get` for `id` take `d` before it answers.
         fn slow_body(&self, id: &str, d: Duration) -> &Self {
@@ -3957,14 +4276,41 @@ mod tests {
     async fn mock_messages_list(
         State(g): State<MockGmail>,
         Query(q): Query<HashMap<String, String>>,
-    ) -> Json<Value> {
-        let label = q.get("labelIds").cloned().unwrap_or_default();
+    ) -> Response {
+        let query = q.get("q").cloned().unwrap_or_default();
         let mut st = g.0.lock().unwrap();
-        st.seen.push(format!("list:{label}"));
-        let ids = st.listing.get(&label).cloned().unwrap_or_default();
+        let ids = match q.get("labelIds") {
+            Some(label) => {
+                st.seen.push(format!("list:{label}"));
+                st.list_queries.push((label.clone(), query));
+                st.listing.get(label).cloned().unwrap_or_default()
+            }
+            // No label at all: all mail, narrowed only by the query's bounds.
+            None => {
+                st.seen.push("list-all".to_string());
+                st.list_queries.push((String::new(), query.clone()));
+                if st.all_mail_failures > 0 {
+                    st.all_mail_failures -= 1;
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+                let bound = |name: &str| {
+                    query
+                        .split_whitespace()
+                        .find_map(|term| term.strip_prefix(name)?.parse::<i64>().ok())
+                };
+                let (after, before) = (bound("after:"), bound("before:"));
+                st.all_mail
+                    .iter()
+                    .filter(|(at, _)| after.is_none_or(|a| *at >= a))
+                    .filter(|(at, _)| before.is_none_or(|b| *at < b))
+                    .map(|(_, id)| id.clone())
+                    .collect()
+            }
+        };
         Json(json!({
             "messages": ids.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
         }))
+        .into_response()
     }
 
     async fn mock_message_get(
@@ -6461,6 +6807,564 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    // ---- the archive walk ---------------------------------------------------
+
+    /// Every wait in the walk shrunk to nothing, so these tests assert on the
+    /// wire and the store instead of sleeping.
+    fn instant_pace() -> ArchivePace {
+        ArchivePace {
+            rest_factor: 0,
+            error_backoff: Duration::from_millis(10),
+            held_recheck: Duration::from_millis(5),
+            ..ArchivePace::default()
+        }
+    }
+
+    /// An engine whose poll has "succeeded" and whose walk does not rest.
+    fn archive_engine(
+        store: Arc<SqliteStore>,
+        acct: AccountId,
+        base: &str,
+        archive_days: u32,
+    ) -> SyncEngine<SqliteStore, FixedToken> {
+        let mut config = Config::default();
+        config.sync.archive_days = archive_days;
+        let mut eng = engine_with_config(store, acct, base, config);
+        eng.archive_pace = instant_pace();
+        eng.poll_healthy.store(true, Ordering::Relaxed);
+        eng
+    }
+
+    /// A shutdown channel nobody fires. The sender is returned to be held: a
+    /// dropped one reads as "changed" forever.
+    fn never_shutdown() -> (
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::watch::Receiver<bool>,
+    ) {
+        tokio::sync::watch::channel(false)
+    }
+
+    /// A whole-second instant `days` ago, so it survives the cursor's round
+    /// trip and the query's epoch seconds exactly.
+    fn days_ago(days: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp((Utc::now() - ChronoDuration::days(days)).timestamp(), 0).unwrap()
+    }
+
+    fn archive_q(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+        format!(
+            "after:{} before:{} -in:draft -in:chats",
+            from.timestamp() - 1,
+            to.timestamp()
+        )
+    }
+
+    /// THE WALK, end to end: mail older than the backfill window, in no label
+    /// the live paths list, lands as archive rows (received and sent alike)
+    /// with no model work behind any of them, and the walk then reports done.
+    #[tokio::test]
+    async fn the_archive_walk_stores_old_mail_as_archive_rows_and_queues_nothing() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.old_mail("g-old-in", days_ago(40), alert_eml(days_ago(40)));
+        g.old_mail(
+            "g-old-out",
+            days_ago(55),
+            sent_eml(days_ago(55), "alice@friends.com", "the lease"),
+        );
+        g.message_labels("g-old-out", &["SENT"]);
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 60);
+        let (_tx, mut rx) = never_shutdown();
+
+        let mut steps = 0;
+        while eng.archive_walk_chunk(&mut rx).await.unwrap() == ArchiveStep::Walked {
+            steps += 1;
+            assert!(steps < 20, "the walk must reach its target");
+        }
+        // 30 days of backfill to 60 days of archive, a week at a time.
+        assert_eq!(steps, 5);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Done
+        );
+
+        for (gmail_id, sent) in [("g-old-in", false), ("g-old-out", true)] {
+            let view = store.thread_view_with_html(acct, gmail_id).unwrap();
+            assert_eq!(view.messages.len(), 1, "{gmail_id} is openable");
+            assert!(
+                store.message_is_archive(acct, view.messages[0].id).unwrap(),
+                "{gmail_id} is an archive row"
+            );
+            assert_eq!(
+                view.messages[0].is_sent, sent,
+                "{gmail_id}: its own labels decide"
+            );
+        }
+        for kind in ["investigation", "notification"] {
+            assert!(
+                store
+                    .claim_agent_job(acct, kind, Utc::now(), 120)
+                    .unwrap()
+                    .is_none(),
+                "no {kind} job for a year of old mail"
+            );
+        }
+        // A contact is someone the user writes to NOW; the archive seeds none.
+        assert!(!store.is_known_contact(acct, "alice@friends.com").unwrap());
+        // Its own gauges, and not the catch-up's.
+        let (at, complete) = eng.metrics.archive_walk().unwrap();
+        assert!(complete);
+        assert!(at <= days_ago(60).timestamp() + 5);
+        assert_eq!(eng.metrics.catchup_progress(), None);
+    }
+
+    /// ON THE WIRE: all mail, so no `labelIds`, bounded to exactly one week
+    /// back from the cursor in epoch seconds, drafts and chats excluded.
+    #[tokio::test]
+    async fn the_archive_listing_carries_no_label_and_one_week_of_bounds() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.seen(), vec!["list-all"], "one listing, with no labelIds");
+        assert_eq!(
+            g.queries(""),
+            vec![archive_q(cursor - ChronoDuration::days(7), cursor)]
+        );
+    }
+
+    /// THE QUOTA SAVING AND THE RESUME: an id the store already holds, from
+    /// the live window or from an earlier pass over this chunk, is never
+    /// fetched again.
+    #[tokio::test]
+    async fn the_archive_walk_does_not_fetch_ids_it_already_holds() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-have", at, alert_eml(at));
+        g.old_mail("g-new", at, alert_eml(at));
+        let base = serve_mock(g.clone()).await;
+        ingest_into(
+            &store,
+            acct,
+            &fixture(acct, "g-have", &alert_eml(at), false),
+            at,
+        );
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+
+        eng.archive_walk_chunk(&mut rx).await.unwrap();
+        assert_eq!(g.calls("get:g-have"), 0, "already stored, so not fetched");
+        assert_eq!(g.calls("get:g-new"), 1);
+        let have = store.thread_view_with_html(acct, "g-have").unwrap();
+        assert!(
+            !store.message_is_archive(acct, have.messages[0].id).unwrap(),
+            "and a live row is never demoted"
+        );
+    }
+
+    /// THE CURSOR: created at the backfill window's edge on first use, moved
+    /// back one chunk per fully ingested chunk, and picked up by the next run
+    /// (a new engine over the same store) without re-fetching anything.
+    #[tokio::test]
+    async fn the_archive_cursor_is_persisted_per_chunk_and_resumed() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.old_mail("g-week1", days_ago(33), alert_eml(days_ago(33)));
+        g.old_mail("g-week2", days_ago(40), alert_eml(days_ago(40)));
+        let base = serve_mock(g.clone()).await;
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(store.archive_walked_to(acct).unwrap(), None);
+        let first = archive_engine(store.clone(), acct, &base, 365);
+        // The row is written on first use, before the first listing, so a walk
+        // whose first chunk fails still has a fixed place to start from.
+        g.0.lock().unwrap().all_mail_failures = 1;
+        assert!(first.archive_walk_chunk(&mut rx).await.is_err());
+        let start = store.archive_walked_to(acct).unwrap().unwrap();
+        assert!(
+            (start - (Utc::now() - ChronoDuration::days(30)))
+                .num_seconds()
+                .abs()
+                < 30,
+            "created at the backfill window's edge, got {start}"
+        );
+        assert_eq!(
+            first.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        let walked = store.archive_walked_to(acct).unwrap().unwrap();
+        let expected = Utc::now() - ChronoDuration::days(30 + 7);
+        assert!(
+            (walked - expected).num_seconds().abs() < 30,
+            "one chunk back from the backfill window's edge, got {walked}"
+        );
+        assert_eq!(g.calls("get:g-week1"), 1);
+        assert_eq!(g.calls("get:g-week2"), 0, "the next chunk's mail");
+
+        // A restart: nothing of the first engine survives but the store.
+        let second = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(
+            second.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(
+            g.queries("")[2],
+            archive_q(walked - ChronoDuration::days(7), walked),
+            "the second run starts where the first one stopped"
+        );
+        assert_eq!(g.calls("get:g-week1"), 1, "not fetched a second time");
+        assert_eq!(g.calls("get:g-week2"), 1);
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap().unwrap(),
+            walked - ChronoDuration::days(7)
+        );
+    }
+
+    /// THE FAR END: the last chunk is cut at `now - archive_days` rather than
+    /// running a week past it, and a finished walk asks Gmail nothing.
+    #[tokio::test]
+    async fn the_archive_walk_stops_at_its_target() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        // Past the target: listed by nothing, so never fetched.
+        g.old_mail("g-too-old", days_ago(44), alert_eml(days_ago(44)));
+        let base = serve_mock(g.clone()).await;
+        // 30 days of backfill, 40 of archive: one whole week and one of three days.
+        let eng = archive_engine(store.clone(), acct, &base, 40);
+        let (_tx, mut rx) = never_shutdown();
+
+        for _ in 0..2 {
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Walked
+            );
+        }
+        let walked = store.archive_walked_to(acct).unwrap().unwrap();
+        let target = Utc::now() - ChronoDuration::days(40);
+        assert!(
+            (walked - target).num_seconds().abs() < 30,
+            "the cursor stops at the target, got {walked}"
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Done
+            );
+        }
+        assert_eq!(g.calls("list-all"), 2, "a finished walk lists nothing");
+        assert_eq!(g.calls("get:g-too-old"), 0);
+        assert_eq!(eng.metrics.archive_walk().map(|(_, done)| done), Some(true));
+
+        // RAISING archive_days resumes it from the same cursor.
+        let wider = archive_engine(store.clone(), acct, &base, 60);
+        assert_eq!(
+            wider.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-too-old"), 1);
+    }
+
+    /// `archive_days = 0` IS OFF: no listing, no cursor row, no gauge.
+    #[tokio::test]
+    async fn an_archive_of_zero_days_does_nothing() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.old_mail("g-old", days_ago(40), alert_eml(days_ago(40)));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 0);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Off
+        );
+        assert!(g.seen().is_empty(), "saw {:?}", g.seen());
+        assert_eq!(store.archive_walked_to(acct).unwrap(), None);
+        assert_eq!(eng.metrics.archive_walk(), None);
+    }
+
+    /// THE WALK YIELDS. Before a poll has succeeded and while a window of mail
+    /// is being fetched it asks Gmail nothing; and a window that opens in the
+    /// middle of a chunk stops the chunk at the next batch boundary with the
+    /// cursor where it was.
+    #[tokio::test]
+    async fn the_archive_walk_holds_off_while_a_window_is_in_flight() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-a", at, alert_eml(at));
+        g.old_mail("g-b", at, alert_eml(at));
+        // The first batch takes long enough that its rest (twice its elapsed
+        // time) is a window the test can reliably land a flag in.
+        g.slow_body("g-a", Duration::from_millis(60));
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.archive_pace.batch = 1;
+        eng.archive_pace.rest_factor = 2;
+        let (_tx, mut rx) = never_shutdown();
+
+        eng.poll_healthy.store(false, Ordering::Relaxed);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held,
+            "no poll has succeeded"
+        );
+        eng.poll_healthy.store(true, Ordering::Relaxed);
+        eng.window_in_flight.store(true, Ordering::Relaxed);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held,
+            "a catch-up is running"
+        );
+        assert!(
+            g.seen().is_empty(),
+            "held means off the wire: {:?}",
+            g.seen()
+        );
+
+        // Now mid-chunk: the window opens while the walk rests after g-a.
+        eng.window_in_flight.store(false, Ordering::Relaxed);
+        let (step, ()) = tokio::join!(eng.archive_walk_chunk(&mut rx), async {
+            while g.calls("get:g-a") == 0 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            eng.window_in_flight.store(true, Ordering::Relaxed);
+        });
+        assert_eq!(step.unwrap(), ArchiveStep::Held);
+        assert_eq!(g.calls("get:g-b"), 0, "the second batch was not started");
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor),
+            "an unfinished chunk does not move the cursor"
+        );
+
+        // The window closes; the chunk is finished from where it stopped.
+        eng.window_in_flight.store(false, Ordering::Relaxed);
+        eng.archive_pace.rest_factor = 0;
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-a"), 1);
+        assert_eq!(g.calls("get:g-b"), 1);
+    }
+
+    /// THE DUTY CYCLE: a burst of work is followed by a rest of twice its own
+    /// length, so the walk holds about a third of whatever the shared budget
+    /// allows. Measured on a real clock because the fetch is real I/O.
+    #[tokio::test]
+    async fn the_archive_walk_rests_twice_as_long_as_it_worked() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        for id in ["g-slow-a", "g-slow-b"] {
+            g.old_mail(id, at, alert_eml(at));
+            g.slow_body(id, Duration::from_millis(50));
+        }
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        // Two batches, so both rests are in the measurement: the one between
+        // batches and the one after the cursor is written.
+        eng.archive_pace.batch = 1;
+        eng.archive_pace.rest_factor = 2;
+        let (_tx, mut rx) = never_shutdown();
+
+        let started = std::time::Instant::now();
+        eng.archive_walk_chunk(&mut rx).await.unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "twice 50ms of work, each followed by at least 100ms of rest, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A GMAIL ERROR MID-CHUNK leaves the cursor where it was, keeps what was
+    /// already ingested, and the retry pays only for the rest.
+    #[tokio::test]
+    async fn a_gmail_error_in_the_archive_walk_does_not_advance_the_cursor() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-ok", at, alert_eml(at));
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-bad".to_string(),
+            std::collections::VecDeque::from([(500, "backendError".to_string())]),
+        );
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor - ChronoDuration::days(7))
+        );
+        assert_eq!(
+            g.calls("get:g-ok"),
+            1,
+            "ingested before the error, not re-fetched"
+        );
+        assert_eq!(g.calls("get:g-bad"), 2);
+    }
+
+    /// THE LANE, inside the real `select!`: a Gmail error in the walk is waited
+    /// out and retried by the walk, and the lifecycle neither ends nor errors
+    /// for it. It ends here because the test says stop, with `Ok`.
+    #[tokio::test]
+    async fn a_failing_archive_walk_does_not_bounce_the_lifecycle() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.old_mail("g-old", at, alert_eml(at));
+        g.0.lock().unwrap().all_mail_failures = 2;
+        let base = serve_mock(g.clone()).await;
+        // 47 days: the one chunk under test and then done, so the lane goes
+        // quiet instead of walking a year of empty weeks behind the assertions.
+        let mut eng = archive_engine(store.clone(), acct, &base, 47);
+        // The lane must earn this from the poll lane, as in production.
+        eng.poll_healthy.store(false, Ordering::Relaxed);
+        eng.archive_pace.done_recheck = Duration::from_secs(3600);
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+
+        let (lifecycle, landed) = tokio::join!(eng.run_lanes(&mut rx, false), async {
+            let landed = tokio::time::timeout(Duration::from_secs(10), async {
+                while g.calls("get:g-old") == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_ok();
+            tx.send(true).unwrap();
+            landed
+        });
+        assert!(
+            lifecycle.is_ok(),
+            "the walk's errors are not the lifecycle's"
+        );
+        assert!(
+            landed,
+            "the walk retried past two failed listings: {:?}",
+            g.seen()
+        );
+        assert_eq!(g.calls("list-all"), 3);
+        assert!(
+            g.at("history:INBOX") < g.at("list-all"),
+            "the walk waited for a poll to succeed: {:?}",
+            g.seen()
+        );
+    }
+
+    /// `archive_days` IS ITS OWN WINDOW. The catch-up and spam listings, and
+    /// the instant the backfill, cutover and heal measure from, are the same
+    /// whether the archive is off, a year or a decade.
+    #[tokio::test]
+    async fn archive_days_moves_no_other_window() {
+        let mut wire = Vec::new();
+        for archive_days in [0, 365, 3650] {
+            let (store, acct) = store_at_cursor(None);
+            let g = MockGmail::default();
+            g.listing(LABEL_INBOX, &[]);
+            g.listing(LABEL_SENT, &[]);
+            g.listing(LABEL_SPAM, &[]);
+            g.profile(900);
+            let base = serve_mock(g.clone()).await;
+            let eng = archive_engine(store.clone(), acct, &base, archive_days);
+            // No cursor, so this poll is a catch-up over the backfill window.
+            eng.poll_once().await.unwrap();
+            eng.sync_spam_window().await.unwrap();
+            let since = eng.backfill_since();
+            assert!(
+                (since - (Utc::now() - ChronoDuration::days(30)))
+                    .num_seconds()
+                    .abs()
+                    < 30
+            );
+            assert!(g.queries("").is_empty(), "none of these list all mail");
+            wire.push((
+                g.queries(LABEL_INBOX),
+                g.queries(LABEL_SENT),
+                g.queries(LABEL_SPAM),
+            ));
+        }
+        let thirty = vec!["newer_than:30d".to_string()];
+        for seen in &wire {
+            assert_eq!(seen, &(thirty.clone(), thirty.clone(), thirty.clone()));
+        }
+    }
+
+    /// A LIVE PATH RE-SEEING AN ARCHIVE ROW is a true no-op: the store writes
+    /// nothing, and the engine neither re-embeds the row nor wakes the refine
+    /// lane for work that was never queued.
+    #[tokio::test]
+    async fn a_live_sighting_of_an_archive_row_embeds_nothing_and_wakes_no_lane() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.body("g-old", alert_eml(Utc::now()));
+        g.body("g-live", alert_eml(Utc::now()));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        let poked = || tokio::time::timeout(Duration::ZERO, eng.refine_wake.notified());
+        let fetch = |id: &str, origin| {
+            let ids = [id.to_string()];
+            let eng = &eng;
+            async move {
+                eng.fetch_raw_and_ingest(&ids, Mailbox::Inbox, origin, GmailRetry::None)
+                    .await
+                    .unwrap()
+            }
+        };
+        fetch("g-old", IngestOrigin::Archive).await;
+
+        // A catch-up overlapping the archive's edge finds the same id.
+        assert_eq!(fetch("g-old", IngestOrigin::Incremental).await, 1);
+        assert!(poked().await.is_err(), "nothing was queued to wake for");
+        let raw = alert_eml(Utc::now());
+        assert!(
+            eng.ingest_one(
+                &fixture(acct, "g-old", &raw, false),
+                &[],
+                Utc::now(),
+                IngestOrigin::Incremental,
+            )
+            .unwrap()
+            .is_none(),
+            "no embed text for a row this call did not write"
+        );
+
+        // The control: a row the live path DID write is embedded and wakes it.
+        assert_eq!(fetch("g-live", IngestOrigin::Incremental).await, 1);
+        assert!(poked().await.is_ok());
     }
 
     /// THE BOARD FILLS WHILE THE DOWNLOAD IS STILL GOING. A first run used to

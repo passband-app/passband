@@ -327,6 +327,12 @@ data:
   # dropping it and handing the heap back. Unset, the daemon's own default (600)
   # applies; this is the OFF SWITCH (0 = never unload) if the reaper misbehaves.
   # SQUELCH_WARDEN_EMBED_IDLE_UNLOAD_SECS: "0"
+  # How many days back a tenant daemon keeps mail findable by search: mail
+  # older than the 30-day backfill is fetched once by a slow background walk
+  # and stored with no model call. Unset, the daemon's own default (365)
+  # applies; 0 switches the walk off. Like every value here it lands on the pod
+  # spec, so setting it costs each tenant one restart.
+  # SQUELCH_WARDEN_ARCHIVE_DAYS: "365"
   # Moves the whole fleet's embedding model without cutting a new daemon image;
   # unset means the daemon's own pin, which is Xenova/bge-small-en-v1.5.
   #

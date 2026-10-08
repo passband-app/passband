@@ -34,6 +34,7 @@ Config comes from `~/.config/squelch/config.toml` (override with `--config`) plu
 | `SQUELCH_DB_PATH` | SQLite path | `~/.local/share/squelch/squelch.db` |
 | `SQUELCH_POLL_SECS` | Gmail poll interval | `45` |
 | `SQUELCH_FETCH_CONCURRENCY` | `messages.get` calls in flight while a window of mail is fetched (first backfill, catch-up, history walk); each is a raw body in memory, and the Gmail budget caps the gain past 2 | `2` |
+| `SQUELCH_ARCHIVE_DAYS` | how many days back mail is kept findable by search, same value as `[sync] archive_days`; mail older than the backfill window is fetched once by a slow background walk with no model call, and `0` turns that off | `365` |
 | `SQUELCH_MCP_ALLOWED_HOSTS` | extra Host values when fronted by a proxy | — |
 | `SQUELCH_MCP_OAUTH_ISSUER` | OAuth issuer for the agent door; set together with the next one | unset (agent door open) |
 | `SQUELCH_MCP_PUBLIC_URL` | this daemon's public `/mcp` URL, the token audience | unset (agent door open) |

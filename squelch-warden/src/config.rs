@@ -376,6 +376,13 @@ pub struct Config {
     /// unless the warden renders it. `0` pins the session in memory, which is
     /// the off switch if the reaper ever misbehaves in production.
     pub embed_idle_unload_secs: Option<u64>,
+    /// How many days back tenant daemons keep searchable archive mail, passed
+    /// on as `SQUELCH_ARCHIVE_DAYS`. Unset leaves the daemon's own default
+    /// (365). An option for the same reason as the knob above: the tenant env
+    /// is a CLOSED list, so without this the fleet's archive depth could only
+    /// be changed, or the walk switched off, by cutting an image. `0` is that
+    /// off switch and has to survive as a value.
+    pub archive_days: Option<u32>,
     /// The OAuth authorization server tenant daemons trust for the AGENT door,
     /// from `SQUELCH_WARDEN_MCP_OAUTH_ISSUER`. Absent, the agent door stays
     /// unpublished and the render is byte-identical to a warden that never
@@ -454,6 +461,7 @@ impl std::fmt::Debug for Config {
             .field("llm_stage1_daily_cap", &self.llm_stage1_daily_cap)
             .field("llm_stage2_daily_cap", &self.llm_stage2_daily_cap)
             .field("embed_idle_unload_secs", &self.embed_idle_unload_secs)
+            .field("archive_days", &self.archive_days)
             .field("mcp_oauth_issuer", &self.mcp_oauth_issuer)
             // The relay bearer is not a field at all: the warden holds only the
             // Secret's NAME, and the kubelet resolves the value into the pod.
@@ -795,6 +803,15 @@ impl Config {
             }
         };
 
+        let archive_days = match var(get, "SQUELCH_WARDEN_ARCHIVE_DAYS") {
+            None => None,
+            Some(value) => Some(value.parse::<u32>().map_err(|e| {
+                ConfigError::invalid(format!(
+                    "invalid SQUELCH_WARDEN_ARCHIVE_DAYS `{value}`: {e}"
+                ))
+            })?),
+        };
+
         let mcp_oauth_issuer = match var(get, "SQUELCH_WARDEN_MCP_OAUTH_ISSUER") {
             None => None,
             Some(raw) => Some(canonical_mcp_oauth_issuer(&raw)?),
@@ -880,6 +897,7 @@ impl Config {
             llm_stage1_daily_cap,
             llm_stage2_daily_cap,
             embed_idle_unload_secs,
+            archive_days,
             mcp_oauth_issuer,
             relay_url,
             relay_secret_name: name_var(
@@ -1280,6 +1298,8 @@ mod tests {
         assert!(c.console_sso_url.is_none());
         // Unset means the tenant daemon keeps its own idle-unload default.
         assert!(c.embed_idle_unload_secs.is_none());
+        // Unset means the tenant daemon keeps its own archive depth.
+        assert!(c.archive_days.is_none());
         // The LLM env feature is off unless the operator turns it on.
         assert!(c.llm_base_url.is_none());
         assert!(c.llm_stage1_model.is_none());
@@ -1644,6 +1664,24 @@ mod tests {
         vars.insert(
             "SQUELCH_WARDEN_EMBED_IDLE_UNLOAD_SECS".to_string(),
             "ten minutes".to_string(),
+        );
+        assert!(load(&vars).is_err(), "a bad value is a refusal to boot");
+    }
+
+    /// The archive depth parses as a number of days, and `0` survives as
+    /// `Some(0)`: it switches the walk off, which is not the same as unset.
+    #[test]
+    fn the_archive_depth_parses_and_zero_is_a_value() {
+        let mut vars = required();
+        vars.insert("SQUELCH_WARDEN_ARCHIVE_DAYS".to_string(), "730".to_string());
+        assert_eq!(load(&vars).unwrap().archive_days, Some(730));
+
+        vars.insert("SQUELCH_WARDEN_ARCHIVE_DAYS".to_string(), "0".to_string());
+        assert_eq!(load(&vars).unwrap().archive_days, Some(0));
+
+        vars.insert(
+            "SQUELCH_WARDEN_ARCHIVE_DAYS".to_string(),
+            "a year".to_string(),
         );
         assert!(load(&vars).is_err(), "a bad value is a refusal to boot");
     }

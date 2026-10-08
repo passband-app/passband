@@ -1279,6 +1279,22 @@ impl SqliteStore {
         .map_err(Into::into)
     }
 
+    pub(super) fn message_is_archive(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let is_archive: Option<bool> = conn
+            .query_row(
+                "SELECT is_archive FROM messages WHERE account_id=?1 AND id=?2",
+                params![account_id, message_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(is_archive.unwrap_or(false))
+    }
+
     pub(super) fn set_archive_walked_to(
         &self,
         account_id: AccountId,

@@ -1429,6 +1429,12 @@ fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
         env.push(plain("SQUELCH_EMBED_IDLE_UNLOAD_SECS", &secs.to_string()));
     }
 
+    // How far back the tenant daemon's archive walk reaches, present only when
+    // the operator set one. Unset, the daemon keeps its own default.
+    if let Some(days) = config.archive_days {
+        env.push(plain("SQUELCH_ARCHIVE_DAYS", &days.to_string()));
+    }
+
     // The LLM gateway block, present only when the operator configured one.
     // With it absent the env above is byte-identical to what a warden without
     // the feature built, which is the env-contract tests' whole claim.
@@ -1813,6 +1819,7 @@ mod tests {
         // absent rather than empty.
         assert!(!plain.contains_key("SQUELCH_EMBED_MODEL"));
         // Unset by default, so the daemon keeps its own idle-unload window.
+        assert!(env.iter().all(|e| e.name != "SQUELCH_ARCHIVE_DAYS"));
         assert!(
             env.iter()
                 .all(|e| e.name != "SQUELCH_EMBED_IDLE_UNLOAD_SECS"),
@@ -2052,6 +2059,31 @@ mod tests {
         let zero = env
             .iter()
             .find(|e| e.name == "SQUELCH_EMBED_IDLE_UNLOAD_SECS")
+            .expect("the off switch is a value, not an absence");
+        assert_eq!(zero.value.as_deref(), Some("0"));
+    }
+
+    /// The daemon reads `SQUELCH_ARCHIVE_DAYS`, and a hosted tenant only gets
+    /// it if this CLOSED list renders it. `0` switches the archive walk off,
+    /// so it has to reach the pod as `"0"` rather than as nothing.
+    #[test]
+    fn the_archive_depth_reaches_the_pod_when_the_operator_sets_one() {
+        let mut c = test_config();
+        c.archive_days = Some(730);
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let env = pod.containers[0].env.clone().unwrap();
+        let plain: BTreeMap<&str, &str> = env
+            .iter()
+            .filter_map(|e| Some((e.name.as_str(), e.value.as_deref()?)))
+            .collect();
+        assert_eq!(plain["SQUELCH_ARCHIVE_DAYS"], "730");
+
+        c.archive_days = Some(0);
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let env = pod.containers[0].env.clone().unwrap();
+        let zero = env
+            .iter()
+            .find(|e| e.name == "SQUELCH_ARCHIVE_DAYS")
             .expect("the off switch is a value, not an absence");
         assert_eq!(zero.value.as_deref(), Some("0"));
     }

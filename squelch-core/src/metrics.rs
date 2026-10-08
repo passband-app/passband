@@ -332,6 +332,15 @@ pub struct SyncMetrics {
     catchup_total: AtomicU64,
     catchup_done: AtomicU64,
 
+    /// The archive walk, as the engine last saw it: the oldest instant it has
+    /// fully covered (unix seconds), and 1 once that reaches `sync.archive_days`
+    /// back. BOTH ZERO until the walk has looked at its cursor in this process,
+    /// and for good when the archive is off. Its own pair rather than a reuse
+    /// of the catch-up one: a catch-up is a wait somebody is watching, and the
+    /// walk is hours of background work that must not read as one.
+    archive_walked_to_unix: AtomicI64,
+    archive_complete: AtomicU64,
+
     gmail_auth: AtomicU64,
     /// Unix seconds of the FIRST credential failure in the current outage, or 0
     /// while the mailbox is connected. A STATE, not a count, for the same
@@ -660,6 +669,24 @@ impl SyncMetrics {
     pub fn catchup_end(&self) {
         self.catchup_total.store(0, Ordering::Relaxed);
         self.catchup_done.store(0, Ordering::Relaxed);
+    }
+
+    /// Where the archive walk stands: its cursor, and whether it has reached
+    /// its target. Called each time the walk reads or moves the cursor.
+    pub fn note_archive_walk(&self, walked_to: chrono::DateTime<Utc>, complete: bool) {
+        self.archive_walked_to_unix
+            .store(walked_to.timestamp(), Ordering::Relaxed);
+        self.archive_complete
+            .store(u64::from(complete), Ordering::Relaxed);
+    }
+
+    /// `(walked_to unix seconds, complete)` of the archive walk, or `None`
+    /// before it has looked at its cursor in this process.
+    pub fn archive_walk(&self) -> Option<(i64, bool)> {
+        match self.archive_walked_to_unix.load(Ordering::Relaxed) {
+            0 => None,
+            at => Some((at, self.archive_complete.load(Ordering::Relaxed) == 1)),
+        }
     }
 
     /// `(done, total)` of a catch-up in flight, or `None` when none is.
@@ -1493,6 +1520,21 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         total as f64,
     );
 
+    // Both always emitted, 0 included, so a tenant whose walk never started
+    // reads as a 0 a dashboard can see rather than as a missing series.
+    e.scalar(
+        "squelchd_archive_walked_to_timestamp_seconds",
+        MetricKind::Gauge,
+        "Unix timestamp the archive walk has fully covered back to; 0 until the walk has run in this process, and while the archive is off.",
+        metrics.archive_walked_to_unix.load(Ordering::Relaxed) as f64,
+    );
+    e.scalar(
+        "squelchd_archive_complete",
+        MetricKind::Gauge,
+        "1 once the archive walk has reached sync.archive_days back, else 0.",
+        metrics.get(&metrics.archive_complete),
+    );
+
     e.scalar(
         "squelchd_gmail_quota_retries_total",
         MetricKind::Counter,
@@ -2199,6 +2241,8 @@ mod tests {
         assert!(!text.contains("squelchd_triage_jobs"));
         assert!(!text.contains("squelchd_retriage_messages"));
         assert!(text.contains("squelchd_catchup_messages_total 0\n"));
+        assert!(text.contains("squelchd_archive_walked_to_timestamp_seconds 0\n"));
+        assert!(text.contains("squelchd_archive_complete 0\n"));
         assert!(!text.contains("squelchd_devices_paired"));
         assert!(!text.contains("squelchd_client_last_seen_timestamp_seconds"));
         assert!(text.ends_with('\n'));
@@ -2592,6 +2636,23 @@ mod sync_health_tests {
 #[cfg(test)]
 mod catchup_progress_tests {
     use super::*;
+
+    /// The archive pair renders what the walk last reported, and the catch-up
+    /// pair does not move for it.
+    #[test]
+    fn archive_exposition_tracks_the_cursor_and_completion() {
+        let m = SyncMetrics::new();
+        assert_eq!(m.archive_walk(), None);
+        let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        m.note_archive_walk(at, false);
+        assert_eq!(m.archive_walk(), Some((1_700_000_000, false)));
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_archive_walked_to_timestamp_seconds 1700000000\n"));
+        assert!(text.contains("squelchd_archive_complete 0\n"));
+        assert!(text.contains("squelchd_catchup_messages_total 0\n"));
+        m.note_archive_walk(at, true);
+        assert!(render(&m, None).contains("squelchd_archive_complete 1\n"));
+    }
 
     #[test]
     fn catchup_exposition_tracks_sent_extension_and_clears_when_idle() {

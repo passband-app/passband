@@ -75,6 +75,7 @@ enum ShortcutCatalog {
         Group(
             title: "Navigate",
             items: [
+                // Rules and Groups are Settings panes; their digits still open them.
                 Item(["1", "2", "3", "4", "5"], "sitrep · emails · auth · rules · groups"),
                 Item(["⌘["], "back"),
                 Item(["⌘]"], "forward"),
@@ -84,7 +85,7 @@ enum ShortcutCatalog {
                 Item(["⌘⇧K"], "new ask chat"),
                 Item(["⌘,"], "settings"),
                 Item(["g"], "auth messages"),
-                Item(["T"], "rules"),
+                Item(["T"], "rules (in settings)"),
                 Item(["A"], "audit log (in settings)"),
             ]),
         Group(

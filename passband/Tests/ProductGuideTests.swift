@@ -195,7 +195,7 @@ struct ProductGuideTests {
         expect(off.contains("- 2 Emails:") && off.contains("- 5 Groups:"), "off: Emails 2 to Groups 5")
         expect(!off.contains("- 6 "), "off: no sixth page")
         expect(off.contains("modifier):\n- 1 Sitrep"), "the list sits right under its heading")
-        expect(off.contains("named sets of recipients.\n- Usage and Settings"), "and runs straight on")
+        expect(off.contains("the key opens Settings > Groups.\n- Usage and Settings"), "and runs straight on")
         let on = ProductGuide.text(.gettingAround, runningVersion: nil, calendar: true)
         expect(on.contains("- 2 Calendar:") && on.contains("- 3 Emails:"), "on: Calendar 2, Emails 3")
         expect(on.contains("- 6 Groups:"), "on: Groups 6")

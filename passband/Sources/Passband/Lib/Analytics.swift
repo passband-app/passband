@@ -240,12 +240,12 @@ enum Analytics {
             // so a new set must land here too or its find trips the debug assert.
             "clear", "flow", "later", "teach", "find", "read", "glance", "write",
             // thread_opened sources (OpenSource): WHICH SURFACE the reader was
-            // entered from. "sitrep", "emails", "groups" are MainViews above,
-            // "reading" a triage kind, "reply" a compose kind; the rest are
-            // named here. "reader" is the walk from one queued thread to the
+            // entered from. "sitrep", "emails" are MainViews above, "reading" a
+            // triage kind, "reply" a compose kind; the rest are named here.
+            // "groups" was a MainView until the page moved into Settings. "reader" is the walk from one queued thread to the
             // next, which is an open the reader made, not the person.
             "sitrep_card", "search", "browse", "assistant", "deeper_search",
-            "notification", "reader", "tour",
+            "notification", "reader", "tour", "groups",
             // Verb origins (Via): how the verb was INPUT, and (Surface) which
             // page it was input on. "process", "sitrep", "emails" are
             // MainViews; "archive"/"done" already exist as undo kinds.

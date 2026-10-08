@@ -23,17 +23,37 @@ import Foundation
 /// bucket of entries. Keeping the three in one file is what lets the whole lot
 /// compile into a headless test with no app around it.
 enum SettingsSection: String, CaseIterable, Sendable {
-    case general, mail, assistant, agents, privacy, audit, account
+    case general, mail, rules, groups, assistant, agents, privacy, audit, account
 
     var label: String {
         switch self {
         case .general: "General"
         case .mail: "Mail"
+        case .rules: "Rules"
+        case .groups: "Groups"
         case .assistant: "Assistant"
         case .agents: "Agents"
         case .privacy: "Privacy"
         case .audit: "Audit"
-        case .account: "Account"
+        case .account: "Accounts"
+        }
+    }
+
+    /// The glyph beside the label: in the Mac's sub-nav and on the phone's
+    /// settings list. One table for both, so a pane wears the same mark
+    /// wherever it is listed. Rules and Groups keep the symbols they had on
+    /// the rail, which is how somebody who knew them there finds them here.
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .mail: "envelope"
+        case .rules: "slider.horizontal.3"
+        case .groups: "person.2"
+        case .assistant: "sparkles"
+        case .agents: "point.3.connected.trianglepath.dotted"
+        case .privacy: "hand.raised"
+        case .audit: "scroll"
+        case .account: "person.crop.circle"
         }
     }
 }
@@ -52,6 +72,7 @@ enum SettingsSection: String, CaseIterable, Sendable {
 enum SettingsCard: String, CaseIterable, Sendable {
     case you, appearance, notifications, help, developer
     case mail, search, signature, readTracking
+    case rules, groups
     case assistant
     case agents
     case privacy
@@ -63,6 +84,8 @@ enum SettingsCard: String, CaseIterable, Sendable {
         case .you, .appearance, .notifications, .help, .developer:
             .general
         case .mail, .search, .signature, .readTracking: .mail
+        case .rules: .rules
+        case .groups: .groups
         case .assistant: .assistant
         case .agents: .agents
         case .privacy: .privacy
@@ -75,11 +98,15 @@ enum SettingsCard: String, CaseIterable, Sendable {
     /// card's tour and what's-new are driven by the desktop's ActionLayer,
     /// which has no iOS host: the phone's settings never mount it, so a phone
     /// search must never offer it either.
+    ///
+    /// Rules and Groups are the same story from the other side: they are pages
+    /// the Mac files under Settings, and the phone's settings list has no such
+    /// rows to send a search result to.
     var isAvailable: Bool {
         #if os(macOS)
             true
         #else
-            self != .help
+            self != .help && self != .rules && self != .groups
         #endif
     }
 
@@ -96,6 +123,8 @@ enum SettingsCard: String, CaseIterable, Sendable {
         case .search: "Search"
         case .signature: "Signature"
         case .readTracking: "Read tracking"
+        case .rules: "Rules"
+        case .groups: "Groups"
         case .assistant: "Assistant"
         case .agents: "Agents"
         case .privacy: "Developer Telemetry"
@@ -130,7 +159,7 @@ enum SettingsSearch {
     /// EVERY setting in the app, once each. A control with no entry here is a
     /// control nobody can find by describing it, which is why the coverage
     /// assertion in the test suite fails a card that gains one and no words.
-    static let entries: [SettingsEntry] = generalEntries + mailEntries
+    static let entries: [SettingsEntry] = generalEntries + mailEntries + pageEntries
         + assistantEntries + agentEntries + privacyEntries + auditEntries + accountEntries
 
     /// The General pane's settings. Density is MAC ONLY, like the row itself
@@ -370,6 +399,32 @@ enum SettingsSearch {
             keywords: [
                 "model", "assistant model", "claude", "opus", "haiku", "sonnet", "llm",
                 "ai", "smarter", "faster", "cheaper", "which model",
+            ]),
+    ]
+
+    /// The two panes that are whole pages rather than cards of switches. One
+    /// entry each, because what somebody searches for here is the page: nobody
+    /// describes a single rule to the settings search, they describe wanting
+    /// a sender handled differently.
+    private static let pageEntries: [SettingsEntry] = [
+        SettingsEntry(
+            card: .rules,
+            title: "Sender rules",
+            blurb: "How mail from a sender or a whole domain is handled: always shown, filtered, or muted.",
+            keywords: [
+                "rules", "rule", "sender rules", "sender", "senders", "domain", "allow",
+                "allowlist", "mute", "muted", "filter", "filtered", "block", "blocked",
+                "squelch", "silence", "always show", "never show", "stop showing",
+                "vip", "whitelist", "blacklist",
+            ]),
+        SettingsEntry(
+            card: .groups,
+            title: "Groups",
+            blurb: "Named sets of people you write to together and address as one.",
+            keywords: [
+                "groups", "group", "audience", "audiences", "recipients", "people",
+                "members", "mailing list", "list", "distribution", "investors", "team",
+                "bcc", "send to many", "send individually", "mail merge",
             ]),
     ]
 

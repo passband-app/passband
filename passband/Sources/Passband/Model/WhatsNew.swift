@@ -8,7 +8,9 @@
 // right bit: it says the app has already introduced itself to whoever is
 // sitting here. A fresh install has not been introduced, so it gets the tour
 // and no changelog, and the two overlays can never stack, because one runs only
-// where the other has finished. It also settles the transition INTO this
+// where the other has finished. Finishing the tour for the first time stamps
+// the install current (`meetNewcomer`), or the launch after it would look like
+// the next case and announce the build they installed. It also settles the transition INTO this
 // feature, which has no other honest signal: an install that predates the stamp
 // but has finished the tour is an established install, owed the release it just
 // took and nothing older (see ReleaseNotes.unseen).
@@ -100,6 +102,17 @@ final class WhatsNew {
         notes = unseen
         catchUp = ReleaseNotes.catchUp(lastSeen: stamp, running: running, shown: unseen)
         Analytics.capture("whats_new_shown", ["releases": unseen.count])
+    }
+
+    /// The tour has just been finished for the first time: stamp this install
+    /// current, so the next launch does not read "tour done, no stamp" as an
+    /// install older than this feature and announce the only version this
+    /// person has ever run. The phone does the same at its Connect gate. An
+    /// install that already carries a stamp keeps it.
+    func meetNewcomer() {
+        guard !Self.forced, Prefs.shared.lastSeenReleaseNotes == nil else { return }
+        guard let running = runningVersion else { return }
+        stamp(ReleaseNotes.newest(atOrBelow: running)?.version)
     }
 
     /// Settings' "what's new in this version": on demand, ignoring the stamp.

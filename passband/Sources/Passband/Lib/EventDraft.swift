@@ -130,6 +130,16 @@ enum EventPaneTravel {
         return (true, true)
     }
 
+    /// A PARKED PANE COMING BACK (the Calendar page reached, or the email
+    /// over it closed): whether it may take its half of the window now.
+    /// One the user typed comes back, and a composer in its way goes to
+    /// drafts, because the user came to the page for it. One the ASSISTANT
+    /// proposed never closes mail being written (verify8 V8-2): it stays
+    /// parked until that mail is sent or closed by the user.
+    static func parkedMayReturn(proposed: Bool, writingMail: Bool) -> Bool {
+        !(proposed && writingMail)
+    }
+
     /// AN AGENT'S DRAFT ASKING FOR THE SCREEN (the agent door's `open_draft`,
     /// a `passband://draft` link; verify7 D5): whether an event pane counts
     /// as something the user is WRITING, the way a typed-in composer does.

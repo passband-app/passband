@@ -49,8 +49,9 @@ fn people_last_received_sql() -> String {
 }
 
 /// The same mail row by row and in no order, for somebody with no stored
-/// name: the newest received_at, the newest name, and whether any of it is
-/// list mail are all found in one pass in Rust, so there is still no sort.
+/// name: the newest received_at, the newest name on mail that is theirs
+/// alone, and whether each row is list mail are all found in one pass in
+/// Rust, so there is still no sort.
 fn people_names_sql() -> String {
     format!(
         "SELECT m.received_at, m.from_name,
@@ -64,15 +65,44 @@ fn people_names_sql() -> String {
 /// the address: `"Steven Ng via Team" <team@googlegroups.com>`, `"Steven from
 /// Acme" <support@acme.com>`, `"Steven Ng (via Slack)"`. A list or a help
 /// desk the user once wrote to must not be offered as the person "Steven"
-/// (verify7 D4).
+/// (verify7 D4). The shapes (verify8 V8-12):
+///
+/// * a bar, a spaced dash or a spaced at sign between a name and whose it
+///   is: `Steven | Acme`, `Steven - Acme`, `Steven @ Acme`;
+/// * an organisation in brackets: `Steven (Acme Support)`, `Steven Ng [Team]`;
+/// * `on behalf of`;
+/// * `via`, `from`, `at` or `with` BETWEEN two words: `Steven at Shop`,
+///   `Steven with Acme`. Not as the first word (somebody whose given name is
+///   "Via" is a person) and not as the last (`Steven Van At`, `Steven From`
+///   are surnames): the word has to join a name to something.
 fn list_shaped(name: &str) -> bool {
+    if name.contains('|')
+        || [" - ", " \u{2013} ", " \u{2014} ", " @ "]
+            .iter()
+            .any(|mark| name.contains(mark))
+        || bracketed(name, '(', ')')
+        || bracketed(name, '[', ']')
+    {
+        return true;
+    }
     let words = name_words(name);
-    // After the first word: somebody whose given name is "Via" is a person.
-    // Brackets are dropped by `name_words`, so "(via Slack)" is caught too.
-    words
-        .iter()
-        .skip(1)
-        .any(|w| matches!(w.as_str(), "via" | "from" | "at"))
+    if words
+        .windows(3)
+        .any(|w| w[0] == "on" && w[1] == "behalf" && w[2] == "of")
+    {
+        return true;
+    }
+    words.iter().enumerate().any(|(i, w)| {
+        i > 0 && i + 1 < words.len() && matches!(w.as_str(), "via" | "from" | "at" | "with")
+    })
+}
+
+/// Something written between `open` and a later `close`: `(Acme Support)`.
+/// Empty brackets are not an organisation.
+fn bracketed(name: &str, open: char, close: char) -> bool {
+    name.split_once(open)
+        .and_then(|(_, rest)| rest.split_once(close))
+        .is_some_and(|(inside, _)| inside.chars().any(char::is_alphanumeric))
 }
 
 /// A name as lowercase words, split on whitespace, with the punctuation around
@@ -185,11 +215,13 @@ impl SqliteStore {
     ///   (`contacts.display_name`). Without one, the newest name on that
     ///   address's own readable mail ([`people_names_sql`]); without that, the
     ///   address's local part, and the answer carries no name.
-    /// * An address with no stored name whose readable mail is LIST-SHAPED is
-    ///   not offered at all: any of it carries `List-Unsubscribe`, or a From
-    ///   name that is somebody speaking through the address
-    ///   ([`list_shaped`]: "Steven Ng via Team", "Steven from Acme"). A group
-    ///   or a help desk the user once wrote to is not the person "Steven".
+    /// * That fallback name is read only from mail that is the address's OWN:
+    ///   no `List-Unsubscribe`, and no From name that is somebody speaking
+    ///   through the address ([`list_shaped`]: "Steven Ng via Team", "Steven
+    ///   from Acme"). An address with no stored name ALL of whose readable
+    ///   mail is list mail is not offered at all: a group or a help desk the
+    ///   user once wrote to is not the person "Steven". One list post among
+    ///   a colleague's direct mail does not hide the colleague.
     /// * Order: two-way first, by the OLDER of the last mail each way (an
     ///   exchange is as recent as its older half); then people only written
     ///   to, by when; ties by address.
@@ -296,12 +328,17 @@ impl SqliteStore {
                 people.push(c);
                 continue;
             }
-            // NO STORED NAME: the newest name on their own readable mail
-            // speaks for them, unless that mail is a list's or a desk's.
+            // NO STORED NAME: the newest name on their OWN mail speaks for
+            // them. Their own: mail with no `List-Unsubscribe` and no From
+            // name shaped like a list's or a desk's. Mail that is not (a
+            // colleague's post through a group that keeps their address) is
+            // not read for a name, and does not hide them (verify8 V8-11:
+            // one such post used to hide the person for good).
             // Compared as text, as the ORDER BY this replaces compared them.
             let mut newest: Option<String> = None;
             let mut newest_named: Option<(String, String)> = None;
-            let mut relayed = false;
+            let mut any_mail = false;
+            let mut any_own = false;
             let mut rows = their_names.query(params![account_id, c.addr])?;
             while let Some(r) = rows.next()? {
                 let at = r.get::<_, Option<String>>(0)?.unwrap_or_default();
@@ -309,23 +346,26 @@ impl SqliteStore {
                     .get::<_, Option<String>>(1)?
                     .map(|n| n.trim().to_string())
                     .filter(|n| !n.is_empty());
-                if r.get::<_, bool>(2)? || theirs.as_deref().is_some_and(list_shaped) {
-                    relayed = true;
+                any_mail = true;
+                if newest.as_ref().is_none_or(|when| at > *when) {
+                    newest = Some(at.clone());
                 }
+                if r.get::<_, bool>(2)? || theirs.as_deref().is_some_and(list_shaped) {
+                    continue;
+                }
+                any_own = true;
                 if let Some(name) = theirs
                     && newest_named.as_ref().is_none_or(|(when, _)| at > *when)
                 {
-                    newest_named = Some((at.clone(), name));
-                }
-                if newest.as_ref().is_none_or(|when| at > *when) {
-                    newest = Some(at);
+                    newest_named = Some((at, name));
                 }
             }
             drop(rows);
-            // An address that carries other people's names (a list, a relay,
-            // a help desk) is offered by the name the user's own Sent mail
-            // gave it, or not at all: here there is none.
-            if relayed {
+            // An address ALL of whose mail is a list's, a relay's or a help
+            // desk's is offered by the name the user's own Sent mail gave
+            // it, or not at all: here there is none. (No mail at all is
+            // somebody written to who never answered: the local part below.)
+            if any_mail && !any_own {
                 continue;
             }
             c.last_received = lenient_dt(newest);
@@ -712,8 +752,8 @@ mod tests {
             seen_as(&store, acct, "real@x.com", "Steven Real");
             assert_eq!(named(&store, acct, "steven"), ["real@x.com"], "{name:?}");
         }
-        // An OLDER list-shaped name is enough: the address relays, whoever
-        // posted last.
+        // A list-shaped name is never the name served: with only such mail
+        // the address is not offered, however many people posted through it.
         let (store, acct) = store_with(&[wrote_to("team@googlegroups.com", None, 1)]);
         inbound(
             &store,
@@ -722,8 +762,14 @@ mod tests {
             Some("Ana via Team"),
             9,
         );
-        inbound(&store, acct, "team@googlegroups.com", Some("Steven Ng"), 0);
-        seen_as(&store, acct, "team@googlegroups.com", "Steven Ng");
+        inbound(
+            &store,
+            acct,
+            "team@googlegroups.com",
+            Some("Steven Ng via Team"),
+            0,
+        );
+        seen_as(&store, acct, "team@googlegroups.com", "Steven Ng via Team");
         assert!(named(&store, acct, "steven").is_empty());
         // A bulk sender, known by its List-Unsubscribe header, under a plain
         // name.
@@ -766,6 +812,101 @@ mod tests {
         assert_eq!(named(&store, acct, "steven"), ["real@x.com"]);
     }
 
+    /// verify8 V8-11: a colleague whose address is their own, with direct
+    /// mail, and ONE post through a group that keeps the poster's address and
+    /// adds `List-Unsubscribe`. That post used to hide them for good.
+    #[test]
+    fn one_list_post_does_not_hide_a_person() {
+        let (store, acct) = store_with(&[wrote_to("steven@corp.com", None, 1)]);
+        inbound(&store, acct, "steven@corp.com", Some("Steven Ng"), 5);
+        inbound(&store, acct, "steven@corp.com", Some("Steven Ng"), 2);
+        seen_as(&store, acct, "steven@corp.com", "Steven Ng");
+        let post = inbound(&store, acct, "steven@corp.com", Some("Steven Ng"), 300);
+        assert_eq!(named(&store, acct, "steven"), ["steven@corp.com"]);
+        spoil(
+            &store,
+            "UPDATE messages SET list_unsubscribe='<mailto:u@groups.corp.com>' WHERE id=?1",
+            post,
+        );
+        assert_eq!(
+            store.people_named(acct, "steven", 3).unwrap(),
+            [PersonNamed {
+                addr: "steven@corp.com".into(),
+                display_name: Some("Steven Ng".into()),
+            }],
+            "still offered, under the name on their direct mail"
+        );
+        // THE NAME COMES ONLY FROM THEIR OWN MAIL. The newest mail is a list
+        // post under another name: it is not the name served, and it is not
+        // what the typed name is matched against.
+        let newer = inbound(
+            &store,
+            acct,
+            "steven@corp.com",
+            Some("Stefan Team Digest"),
+            0,
+        );
+        spoil(
+            &store,
+            "UPDATE messages SET list_unsubscribe='<mailto:u@groups.corp.com>' WHERE id=?1",
+            newer,
+        );
+        assert_eq!(
+            store.people_named(acct, "steven", 3).unwrap(),
+            [PersonNamed {
+                addr: "steven@corp.com".into(),
+                display_name: Some("Steven Ng".into()),
+            }]
+        );
+        assert!(
+            named(&store, acct, "stefan").is_empty(),
+            "a list post's name finds nobody"
+        );
+        // The same for a list-SHAPED name among direct mail.
+        inbound(&store, acct, "steven@corp.com", Some("Steven via Eng"), 0);
+        assert_eq!(named(&store, acct, "steven"), ["steven@corp.com"]);
+        // The list post still counts as mail from them: an exchange is as
+        // recent as its newest mail each way, whatever that mail was.
+        let (store, acct) = store_with(&[
+            wrote_to("steven@corp.com", None, 1),
+            wrote_to("stella@corp.com", None, 1),
+        ]);
+        inbound(&store, acct, "steven@corp.com", Some("Steven Ng"), 40);
+        inbound(&store, acct, "stella@corp.com", Some("Stella Ho"), 20);
+        assert_eq!(
+            named(&store, acct, "ste"),
+            ["stella@corp.com", "steven@corp.com"]
+        );
+        let post = inbound(&store, acct, "steven@corp.com", Some("Steven Ng"), 3);
+        spoil(
+            &store,
+            "UPDATE messages SET list_unsubscribe='<mailto:u@groups.corp.com>' WHERE id=?1",
+            post,
+        );
+        assert_eq!(
+            named(&store, acct, "ste"),
+            ["steven@corp.com", "stella@corp.com"]
+        );
+        // ALL of it list mail: not offered, by name or by local part.
+        let (store, acct) = store_with(&[wrote_to("steven@lists.test", None, 1)]);
+        let only = inbound(&store, acct, "steven@lists.test", Some("Steven Ng"), 0);
+        spoil(
+            &store,
+            "UPDATE messages SET list_unsubscribe='<mailto:u@lists.test>' WHERE id=?1",
+            only,
+        );
+        assert!(named(&store, acct, "steven").is_empty());
+        // Own mail with no name on it, beside a list post: the local part.
+        inbound(&store, acct, "steven@lists.test", None, 1);
+        assert_eq!(
+            store.people_named(acct, "steven", 3).unwrap(),
+            [PersonNamed {
+                addr: "steven@lists.test".into(),
+                display_name: None,
+            }]
+        );
+    }
+
     #[test]
     fn list_shapes() {
         for relayed in [
@@ -774,6 +915,19 @@ mod tests {
             "Steven Ng (via Slack)",
             "\"Steven Ng\" VIA Team",
             "Steven at Shop",
+            // verify8 V8-12.
+            "Steven (Acme Support)",
+            "Steven | Acme",
+            "Steven|Acme",
+            "Steven - Acme",
+            "Steven \u{2013} Acme",
+            "Steven @ Acme",
+            "Steven with Acme",
+            "Steven Ng on behalf of Team",
+            "Steven Ng On Behalf Of Team",
+            "Steven Ng [Team]",
+            "Steven At Home",
+            "Steven Van At Acme",
         ] {
             assert!(list_shaped(relayed), "{relayed:?}");
         }
@@ -783,8 +937,57 @@ mod tests {
             "From Russia",
             "Steven Viator",
             "Steven",
+            // verify8 V8-12: the marker word joins nothing.
+            "Steven Van At",
+            "Steven From",
+            "Steven At",
+            "Steven Via",
+            "Steven With",
+            "With Steven",
+            // Not the spaced forms, and nothing in the brackets.
+            "Mary-Jane Ng",
+            "Steven Ng-Park",
+            "steven@acme",
+            "Steven ()",
+            "Behalf Of",
         ] {
             assert!(!list_shaped(person), "{person:?}");
+        }
+    }
+
+    /// verify8 V8-13: what the route's two-letter minimum counts is the
+    /// first word AS THIS FILE READS IT, so the two cannot disagree.
+    #[test]
+    fn a_typed_names_length_is_its_first_words_letters() {
+        use crate::store::typed_name_len;
+        for (typed, len) in [
+            ("", 0),
+            ("  ", 0),
+            ("s", 1),
+            ("s.", 1),
+            ("s-", 1),
+            ("(s)", 1),
+            ("s'", 1),
+            (". s", 1),
+            ("s .", 1),
+            ("--", 0),
+            ("@", 0),
+            ("st", 2),
+            ("(st)", 2),
+            ("o'b", 2),
+            ("s steven", 1),
+            ("steven ng", 6),
+            ("\u{e9}", 1),
+            ("j2", 2),
+        ] {
+            assert_eq!(typed_name_len(typed), len, "{typed:?}");
+            // The store's first word, counted the same way.
+            let first = name_words(typed).into_iter().next().unwrap_or_default();
+            assert_eq!(
+                first.chars().filter(|c| c.is_alphanumeric()).count(),
+                len,
+                "{typed:?} against name_words"
+            );
         }
     }
 

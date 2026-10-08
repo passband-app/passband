@@ -1141,7 +1141,8 @@ final class AssistantSession {
                 guard let self, self.alive(gen), !cards.isEmpty else { return }
                 self.shownIds.formUnion(cards.map(\.threadId))
                 self.append(.emails, emails: cards)
-            })
+            },
+            live: { [weak self] in self?.alive(gen) ?? false })
         let answer = Wire.RequestBlock.toolResult(
             toolUseId: call.id, content: outcome.content, isError: outcome.isError)
         // The wire still gets its answer — the loop's own `alive` check ends the

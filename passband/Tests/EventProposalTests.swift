@@ -36,6 +36,8 @@ struct EventProposalTests {
         theTitleAndThePlaceAreOneShortLine()
         itNeverTakesTheScreenFromSomebody()
         aPaneInUseRefuses()
+        aStaleRunDraftsNothing()
+        aParkedProposalWaitsForMailBeingWritten()
         whatTheModelIsTold()
 
         if failures > 0 {
@@ -327,6 +329,8 @@ struct EventProposalTests {
                      EventProposals.calendarUnreachableText, EventProposals.askClosedText,
                      EventProposals.writingMailText, EventProposals.draftedParkedText,
                      EventProposals.keysLockedText, EventProposals.longTitleText,
+                     EventProposals.staleRunText, EventProposals.guestsNeedAClickText,
+                     EventProposals.guestsNeedAClickHint,
                      EventProposals.longLocationText, EventProposals.unknownFieldText("x")] {
             expect(!text.contains("\u{2014}") && !text.contains("\u{2013}"), "no dash the house style forbids: \(text.prefix(24))")
         }
@@ -487,6 +491,55 @@ struct EventProposalTests {
         expect(EventProposals.keysMayAct(proposed: false, engaged: false), "a pane the user opened is theirs from the start")
         expect(EventProposals.keysMayAct(proposed: false, engaged: true), "always")
         expect(EventProposals.keysLockedText.contains("click add"), "and the toast says what does work")
+        // GUESTS A MODEL NAMED (verify8 V8-3): ⌘↵ never saves a proposal
+        // that would tell guests, clicked in or not. Only the button does.
+        for engaged in [false, true] {
+            expect(!EventProposals.commandEnterMaySave(proposed: true, engaged: engaged, tellsGuests: true),
+                   "a proposal with guests: ⌘↵ never invites (engaged \(engaged))")
+        }
+        expect(!EventProposals.commandEnterMaySave(proposed: true, engaged: false, tellsGuests: false),
+               "a proposal with no guests keeps the old rule: nothing until the user is in the pane")
+        expect(EventProposals.commandEnterMaySave(proposed: true, engaged: true, tellsGuests: false),
+               "and then ⌘↵ adds it")
+        for engaged in [false, true] {
+            for guests in [false, true] {
+                expect(EventProposals.commandEnterMaySave(proposed: false, engaged: engaged, tellsGuests: guests),
+                       "a pane the user opened: ⌘↵ is theirs, guests or not")
+            }
+        }
+        expect(EventProposals.guestsNeedAClickText.contains("Only a click")
+            && EventProposals.guestsNeedAClickHint.contains("Only a click")
+            && EventProposals.guestsNeedAClickHint.contains("⌘↵ does not"), "the toast and the hint line say so")
+        // The pane's own measure of "would tell guests" is the one plain
+        // Enter already goes by: any guest on a new event.
+        expect(!EventGuests.enterMaySave(EventGuests.controls(editing: false, before: 0, after: 1)),
+               "one guest on a new event is a save that tells")
+        expect(EventGuests.enterMaySave(EventGuests.controls(editing: false, before: 0, after: 0)),
+               "none is not")
+    }
+
+    /// verify8 V8-1: the run is asked about AFTER the calendar is read. A
+    /// New chat or an account switch during that wait gets fixed words and
+    /// no pane.
+    static func aStaleRunDraftsNothing() {
+        expect(EventProposals.runStillCurrent(live: true, epochAsked: 4, epochNow: 4), "the same run, the same mailbox: go on")
+        expect(!EventProposals.runStillCurrent(live: false, epochAsked: 4, epochNow: 4), "New chat during the load: stop")
+        expect(!EventProposals.runStillCurrent(live: true, epochAsked: 4, epochNow: 5), "the mailbox switched: stop")
+        expect(!EventProposals.runStillCurrent(live: false, epochAsked: 4, epochNow: 5), "both: stop")
+        let said = EventProposals.staleRunText
+        expect(said.contains("Nothing was drafted") && said.contains("Do not try again"),
+               "fixed words: nothing happened, and no retry into the new conversation")
+        expect(!said.contains("\u{2014}") && !said.contains("\u{2013}"), "house style")
+    }
+
+    /// verify8 V8-2: a parked proposal never closes mail being written.
+    static func aParkedProposalWaitsForMailBeingWritten() {
+        expect(!EventPaneTravel.parkedMayReturn(proposed: true, writingMail: true),
+               "a proposal stays parked while a composer or inline reply holds anything typed")
+        expect(EventPaneTravel.parkedMayReturn(proposed: true, writingMail: false), "and comes back once it does not")
+        expect(EventPaneTravel.parkedMayReturn(proposed: false, writingMail: true),
+               "a pane the USER typed comes back when they come to the page, as before")
+        expect(EventPaneTravel.parkedMayReturn(proposed: false, writingMail: false), "always")
     }
 
     static func whatTheModelIsTold() {

@@ -600,16 +600,29 @@ extension EventGuests {
     /// What the daemon is asked for a typed name, most specific first: the
     /// name as typed, then its first word alone ("ana downtown" is Ana).
     ///
-    /// NOTHING UNDER TWO CHARACTERS is asked: the daemon refuses it (400),
+    /// NOTHING UNDER TWO LETTERS is asked: the daemon refuses it (400),
     /// since one letter matches a large part of anybody's contacts.
     static func queries(for name: String) -> [String] {
         let words = nameKey(name).split(separator: " ").map(String.init)
         guard let first = words.first else { return [] }
         let all = words.count > 1 ? [words.joined(separator: " "), first] : [first]
-        return all.filter { $0.count >= minQuery }
+        return all.filter(askable)
     }
 
+    /// The daemon's own minimum (`CALENDAR_PEOPLE_NAME_MIN`).
     static let minQuery = 2
+
+    /// Whether a name is long enough to ask about, COUNTED AS THE DAEMON
+    /// COUNTS IT (`typed_name_len`, verify8 V8-13): the letters and digits
+    /// of its first word, the punctuation around the word dropped. "s.",
+    /// "(s)" and "o'" are one letter whatever their length, and so is
+    /// "s ng": the store matches from the first word.
+    static func askable(_ name: String) -> Bool {
+        let first = name.split(whereSeparator: \.isWhitespace)
+            .map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
+            .first { !$0.isEmpty } ?? ""
+        return first.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count >= minQuery
+    }
 
     /// How one question to the daemon about a name came out.
     enum NameAsk: Hashable, Sendable {

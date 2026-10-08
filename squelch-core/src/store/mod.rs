@@ -172,6 +172,19 @@ pub struct ContactEntry {
     pub last_sent_at: Option<DateTime<Utc>>,
 }
 
+/// How long a typed name is as [`Store::people_named`] will read it: the
+/// letters and digits of its FIRST word, the punctuation around the word
+/// dropped. `"s."`, `"(s)"`, `"s-"` and `". s"` are all one letter, whatever
+/// their length in characters, and one letter matches a large part of
+/// anybody's contacts: the calendar people route refuses a name shorter than
+/// two by THIS count, not by counting characters (verify8 V8-13).
+pub fn typed_name_len(name: &str) -> usize {
+    name.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .find(|w| !w.is_empty())
+        .map_or(0, |w| w.chars().filter(|c| c.is_alphanumeric()).count())
+}
+
 /// One person the user has written to whose name matches a typed given name:
 /// the calendar event pane's guest SUGGESTION (`/client/calendar/people`).
 /// HUMAN-DOOR ONLY, like [`ContactEntry`].

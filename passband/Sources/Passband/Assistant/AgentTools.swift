@@ -116,11 +116,15 @@ enum AgentTools {
 
     /// Execute one tool call. `cite` collects sources as they are seen; `show`
     /// hands the session email cards to put in the transcript; `gate` is the
-    /// confirm ceremony for the four tools that touch the mailbox.
+    /// confirm ceremony for the four tools that touch the mailbox. `live`
+    /// answers whether the run that made the call still owns its session
+    /// (`AssistantSession.alive`): the one tool that changes the screen after
+    /// a wait asks it before it does (`createCalendarEvent`).
     @MainActor
     static func run(
         name: String, input: [String: JSONValue], gate: ActionGate,
-        cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void
+        cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void,
+        live: @MainActor () -> Bool = { true }
     ) async -> ToolOutcome {
         // Whether the guide may speak of the Calendar page, and whether the
         // calendar tool exists: only while this mailbox has the page
@@ -147,7 +151,7 @@ enum AgentTools {
             case .labelMessage: return await labelMessage(input, gate)
             case .sendEmail: return await sendEmail(input, gate)
             case .unsubscribeSender: return await unsubscribeSender(input, gate)
-            case .createCalendarEvent: return await createCalendarEvent(input)
+            case .createCalendarEvent: return await createCalendarEvent(input, live: live)
             case .productHelp: return productHelp(input, calendar: calendar)
             case .listShortcuts: return listShortcuts(calendar: calendar)
             case .findSetting: return findSetting(input)
@@ -459,14 +463,25 @@ enum AgentTools {
     /// connect Google Calendar". It is the page's own read
     /// (`refreshCalendar`), and it writes nothing.
     @MainActor
-    private static func createCalendarEvent(_ input: [String: JSONValue]) async -> ToolOutcome {
+    private static func createCalendarEvent(
+        _ input: [String: JSONValue], live: @MainActor () -> Bool
+    ) async -> ToolOutcome {
         let store = AppStore.shared
+        // Before the one wait below: which mailbox this was asked in.
+        let epoch = store.epoch
         let proposal: EventProposal
         switch EventProposals.read(input) {
         case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
         case .success(let read): proposal = read
         }
         if EventProposals.mustLoad(feed: store.calendarFeed) { await store.refreshCalendar() }
+        // THE WAIT IS OVER; IS THIS STILL THE RUN TO ANSWER? A New chat or an
+        // account switch during the load leaves this call running: the loop
+        // only looks once the tool returns. Everything after this line is
+        // synchronous, so one check here covers the draft and the pane.
+        guard EventProposals.runStillCurrent(live: live(), epochAsked: epoch, epochNow: store.epoch) else {
+            return failure(EventProposals.staleRunText, summary: "event not drafted")
+        }
         let draft: EventDraft
         switch EventProposals.draft(
             proposal, feed: store.calendarFeed, owner: store.calendarAccountEmail, today: Date(),

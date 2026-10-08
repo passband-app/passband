@@ -500,6 +500,11 @@ extension AppStore {
         pushToast(EventProposals.keysLockedText)
     }
 
+    /// ⌘↵ on a proposed pane with guests: the button is the only way.
+    func noteProposedGuestsNeedAClick() {
+        pushToast(EventProposals.guestsNeedAClickText)
+    }
+
     /// An event pane the user is writing in, as an agent's draft asking for
     /// the screen sees it (`EventPaneTravel.heldByUser`).
     var eventPaneHeldByUser: Bool {
@@ -587,12 +592,21 @@ extension AppStore {
     /// It takes its half of the window the way it did when it opened
     /// (`openEventPane`): a composer opened meanwhile is closed into drafts
     /// with the usual toast, and a side panel steps aside.
+    ///
+    /// EXCEPT A PROPOSAL OVER MAIL BEING WRITTEN (verify8 V8-2,
+    /// `EventPaneTravel.parkedMayReturn`): a pane the assistant filled in
+    /// stays parked while a composer or an inline reply holds anything
+    /// typed, whichever door brought the user here (the page reached, the
+    /// email over it closed). It is asked again when that mail is sent or
+    /// closed (RootView's hook on the composers).
     func returnParkedEventEditor() {
         guard calendarEditorParked else { return }
         guard calendarEditor?.epoch == epoch else {
             closeEventEditor()
             return
         }
+        guard EventPaneTravel.parkedMayReturn(proposed: calendarPaneProposed, writingMail: mailBeingWritten())
+        else { return }
         if compose != nil { closeCompose() }
         if sideView.isOpen { closeSide() }
         calendarEditorParked = false

@@ -9,49 +9,54 @@
 // PURE, and Foundation only (Tests/TitleParseTests.swift). Clock and zone are
 // arguments.
 //
-// WHAT IT READS.
-//   - A day: "on friday", "fri", "this fri", "next tue", "today", "tonight",
-//     "tomorrow", "oct 12", "october 12th", "12 oct", "on 10/12".
-//   - A time or a range: "4pm", "4 pm", "at 4:30", "at noon", "at 16:30",
-//     "4-6pm", "4pm to 6pm", "from 4 to 5:30".
-//   - Who: "with steven", "with steven and ana", "with steven, ana and bo".
+// THE RULES. Eight, and no special cases beside them.
 //
-// WHERE IT READS THEM. A day or a time is taken only when the typing itself
-// says it is one:
-//   (a) it is LED: "on friday", "this fri", "next tue", "at 4:30", "@ 4pm",
-//       "from 4 to 5:30"; or
-//   (b) it is in the title's TRAILING RUN: every word after it is a day or a
-//       time word too ("dinner with steven friday 4pm").
-// A weekday at the front or in the middle of a title is a word of the title:
-// "Black Friday sale", "Thursday Night Football", "4pm standup".
+//   1. ONLY THE END OF THE TITLE IS READ. A closing "with <somebody>" is set
+//      aside first, so "dinner friday 4pm with steven" and "dinner with
+//      steven friday 4pm" both work. What is read is the TRAILING RUN: every
+//      last word that looks like a day or a time word, or one of their leads
+//      (on, at, @, this, next, from, to). A day or a time anywhere before the
+//      run is a word of the title: "Black Friday sale", "Never on Sunday
+//      screening", "Meet 2 PM candidates", "Vote on 1/2 measure". The word
+//      after "with" is never a day or a time ("call with friday").
+//   2. CAPITALS DO NOT MATTER in the run: "Dinner Friday 4pm", "DINNER FRIDAY
+//      4PM" and "Lunch Tomorrow" read as their lower-case selves do.
+//   3. WORDS COME OUT OF THE SAVED TITLE ONLY WHEN THE RUN IS LED by on, at
+//      or @: "dinner on this friday" is saved as "Dinner", "dinner with
+//      steven on friday 4pm" as "Dinner with Steven". An unled run fills the
+//      wells and leaves the title EXACTLY as typed: "taco tuesday" is on
+//      Tuesday and is still called "taco tuesday". Nothing is ever taken out
+//      that would leave no title.
+//   4. ALL OR NOTHING. The run is read whole or not at all: never a time
+//      without the day beside it, never a day from a run whose time cannot
+//      be read. Two different days, two different times, a weekday and a
+//      date that disagree ("fri oct 10", a Saturday), a range that does not
+//      end after it starts ("7pm-6pm", "4-4pm"; an evening into the next
+//      morning, "10pm-2am", is a range), a year already gone: nothing.
+//   5. for / before / after / until / of / the LEAD NOTHING: "out of office
+//      until friday", "the day after tomorrow", "pray for sun", "Edge of
+//      Tomorrow". "by friday" is an unled run like any other: it fills the
+//      day and the title stays whole.
+//   6. SHORT WORDS THAT ARE ALSO WORDS (sun, sat, wed, mar, may, jun) are
+//      read only when led (on, this, next) or when the day or time beside
+//      them in the run is a plain one. "gym sat" is not read; "gym sat 9am"
+//      and "gym on sat" are. A month needs its day number, and a full month
+//      name beside a number is a date: "protest march 4" fills March 4 and,
+//      unled, keeps its title. A NUMBER ALONE IS NEVER A CLOCK, led or not:
+//      the form reads a bare 7 as 7am, which is not what "dinner at 7"
+//      means, and "meet at 4" may be a room. A clock says am or pm ("4pm"),
+//      or has a lead and a colon ("at 4:30"); a colon alone is a verse or a
+//      score ("Isaiah 14:12").
+//   7. A WELL SET BY HAND WINS, and nothing comes out of the title for it:
+//      only words whose reading was put in a well are ever removed
+//      (`takeDay` / `takeTime`).
+//   8. THE "saves as" LINE under the title shows only when the saved title
+//      is not the typed one (`EventForm.titleSavesChanged`). An unled
+//      reading shows as the wash on the wells it filled.
 //
-// AMBIGUITY RESOLVES TO NOTHING. It is a convenience on a field whose text is
-// saved on somebody's calendar, so every rule errs toward leaving the title
-// alone:
-//   - A bare number is never a time. "meet at 4" could be a room, a count or
-//     an address, and "from 3 to 4 people" is a head count. A clock needs its
-//     am or pm ("4pm"), or a lead and a colon ("at 4:30", "from 4 to 5:30").
-//     A colon alone is a verse or a score ("Isaiah 14:12").
-//   - The word after "with" is never a day or a time: "call with 4pm people".
-//   - A weekday must be the word itself ("lunch at Friday's" is a place). One
-//     in capitals is an exam ("SAT"), and one with a capital after another
-//     capitalised word is half a name ("Black Friday", "USA Today").
-//   - "sun", "sat" and "wed" are words: unled, they need a time or a date
-//     beside them, and never follow "the", "a", "in", "of" or "to".
-//   - A month needs its day number ("May day parade" has none).
-//   - A weekday and a date that disagree ("fri oct 10" when the 10th is a
-//     Saturday) are neither.
-//   - Two different days, or two different times, anywhere in the title, are
-//     a title about something else: neither is taken.
-//
-// WHAT IS SAVED. The words that named the day and the time come out of the
-// title ("on friday 4pm"), with the "on" / "at" / "from" that led them. A day
-// that is a deadline or a subject ("ship v2 by friday", "prep for friday":
-// led by for, by, before, after or until) fills the day well and leaves the
-// title exactly as typed. The "with <name>" words stay, and when words come
-// out a name typed in lower case gets its capital: "Dinner with Steven". When
-// the words that are kept hold no capital at all, the first letter gets one.
-// A title nothing came out of is returned exactly as typed.
+// THE SAVED TITLE, when words come out: the "with <name>" words stay, a name
+// typed in lower case gets its capital ("Dinner with Steven"), and a title
+// left with no capital at all gets one on its first letter.
 
 import Foundation
 
@@ -77,26 +82,17 @@ enum TitleParse {
     /// Names one title may carry. Past it the rest are words.
     static let maxNames = 4
 
-    /// How a day or a time was introduced.
-    private enum Lead { case none, take, keep }
-
-    /// One day or time expression found in the title, whether or not it will
-    /// be taken.
-    private struct Mention {
-        var isDay: Bool
+    /// One day or time expression of the trailing run.
+    private struct Phrase {
         /// Its words, the lead-in included.
         var range: Range<Int>
-        /// Its words without the lead-in.
-        var core: Range<Int>
-        var lead: Lead
-        /// A day mention's day; nil when its weekday and its date disagree.
+        var isDay: Bool
         var day: Date?
         var start = 0
         var end: Int?
-        /// Never read: a name, an exam, a word.
-        var blocked = false
-        /// Fills its well and stays in the title.
-        var kept = false
+        /// Plain ("friday", "4pm", "oct 12"), or led. A phrase that is not
+        /// ("sat", "may 5") is read only beside one that is.
+        var sure: Bool
     }
 
     /// Read a title. `takeDay` / `takeTime` false leaves that kind of word in
@@ -108,7 +104,6 @@ enum TitleParse {
     ) -> TitleReading {
         let words = raw.split(whereSeparator: \.isWhitespace).map(String.init)
         let low = words.map(normal)
-        var taken = Array(repeating: false, count: words.count)
 
         // WITH: the names, and the word after "with" kept from every other
         // reading.
@@ -123,115 +118,94 @@ enum TitleParse {
             // The words that ARE names, not the "and" between them.
             nameWords.formUnion(used.filter { low[$0] != "and" && low[$0] != "&" })
         }
-
-        // EVERY MENTION, read or not. Times first: a day's words are looked
-        // for only among what no time took.
-        var mentions: [Mention] = []
-        var i = 0
-        while i < low.count {
-            if let hit = timeAt(i, low: low, shielded: shielded) {
-                mentions.append(hit)
-                i = hit.range.upperBound
-            } else {
-                i += 1
-            }
-        }
-        let timeWords = Set(mentions.flatMap { Array($0.range) })
-        i = 0
-        while i < low.count {
-            if !timeWords.contains(i),
-                let hit = dayAt(
-                    i, low: low, shielded: shielded, timeWords: timeWords, today: today, calendar: calendar)
-            {
-                mentions.append(hit)
-                i = hit.range.upperBound
-            } else {
-                i += 1
-            }
-        }
-        mentions.sort { $0.range.lowerBound < $1.range.lowerBound }
-
-        // THE TRAILING RUN: from here to the end, every word is a day or a
-        // time word.
-        let mentionWords = Set(mentions.flatMap { Array($0.range) })
-        var trailing = low.count
-        while trailing > 0, mentionWords.contains(trailing - 1) { trailing -= 1 }
-
-        // WHAT IS NEVER READ, and what fills its well but stays in the title.
-        for k in mentions.indices {
-            var m = mentions[k]
-            let before = m.core.lowerBound - 1
-            if m.isDay {
-                let core = m.core.map { words[$0] }
-                // "SAT", "MAR": an exam, an acronym.
-                if core.contains(where: allCapitals) { m.blocked = true }
-                // "Black Friday", "USA Today", "Top 5 Mar": half a name. A
-                // name after "with" is not the other half ("with Steven
-                // Friday": the day ends the names).
-                if m.lead == .none, before >= 0, !nameWords.contains(before), capitalised(words[before]),
-                    core.contains(where: capitalised)
-                {
-                    m.blocked = true
-                }
-                // "sun", "sat", "wed": words, unless something beside them
-                // says otherwise.
-                if m.lead == .none, m.core.count == 1, wordlike.contains(low[m.core.lowerBound]) {
-                    let beside = mentionWords.contains(before) || mentionWords.contains(m.core.upperBound)
-                    if !beside || (before >= 0 && articles.contains(low[before])) { m.blocked = true }
-                }
-            } else if m.lead == .none, before >= 0, keepLeads.contains(low[before]) {
-                // "submit by 5pm" is a deadline: it fills the time and the
-                // words stay. "open until 9pm" is when it stops, not when it
-                // starts.
-                if low[before] == "until" || low[before] == "till" { m.blocked = true } else { m.lead = .keep }
-            }
-            if m.lead == .keep { m.kept = true }
-            // "ship v2 by friday 4pm": the time belongs to the deadline.
-            if k > 0, mentions[k - 1].kept, !mentions[k - 1].blocked,
-                mentions[k - 1].range.upperBound == m.range.lowerBound
-            {
-                m.kept = true
-            }
-            mentions[k] = m
-        }
-        func read(_ m: Mention) -> Bool { !m.blocked && (m.lead != .none || m.range.lowerBound >= trailing) }
-
         var reading = TitleReading(title: raw.trimmingCharacters(in: .whitespacesAndNewlines), names: names)
-        // One day, said once (or the same day said twice): taken. Two
-        // different days ANYWHERE in the title, read or not: neither. Only
-        // the words of a mention that was read come out.
-        let days = mentions.filter(\.isDay)
-        if takeDay, let first = days.first?.day, days.allSatisfy({ $0.day == first }), days.contains(where: read) {
-            reading.day = first
-            for m in days where read(m) && !m.kept { for k in m.range { taken[k] = true } }
-        }
-        let times = mentions.filter { !$0.isDay }
-        if takeTime, let first = times.first, times.allSatisfy({ $0.start == first.start && $0.end == first.end }),
-            times.contains(where: read)
+
+        // RULE 1. A closing "with ..." that says nothing about when is set
+        // aside, and the run is the words that end just before it.
+        func runWord(_ k: Int) -> Bool { !shielded.contains(k) && low[k] != "with" && looksLikeWhen(low[k]) }
+        var end = low.count
+        if let with = low.lastIndex(of: "with"), with + 1 < low.count,
+            !(with + 1..<low.count).contains(where: { runWord($0) && !["and", "or", "&"].contains(low[$0]) })
         {
-            (reading.start, reading.end) = (first.start, first.end)
-            for m in times where read(m) && !m.kept { for k in m.range { taken[k] = true } }
+            end = with
         }
-        // Nothing came out: exactly as typed, whatever was filled.
+        var from = end
+        while from > 0, runWord(from - 1) { from -= 1 }
+        // "dinner - friday": a dash before the run is the title's own.
+        while from < end, low[from] == "-" || low[from] == "\u{2013}" { from += 1 }
+        guard from < end else { return reading }
+        // RULE 5.
+        if from > 0, leadsNothing.contains(low[from - 1]) { return reading }
+
+        // RULE 4: the run whole, or nothing.
+        func word(_ k: Int) -> String? { k >= from && k < end ? low[k] : nil }
+        var phrases: [Phrase] = []
+        var at = from
+        while at < end {
+            guard
+                let hit = timePhrase(at, word: word)
+                    ?? dayPhrase(at, word: word, today: today, calendar: calendar)
+            else { return reading }
+            phrases.append(hit)
+            at = hit.range.upperBound
+        }
+        // RULE 6.
+        for (k, phrase) in phrases.enumerated() where !phrase.sure {
+            let beside = (k > 0 && phrases[k - 1].sure) || (k + 1 < phrases.count && phrases[k + 1].sure)
+            guard beside else { return reading }
+        }
+        let days = phrases.filter(\.isDay)
+        let times = phrases.filter { !$0.isDay }
+        guard days.allSatisfy({ $0.day == days[0].day }),
+            times.allSatisfy({ $0.start == times[0].start && $0.end == times[0].end })
+        else { return reading }
+
+        // RULE 7: what is put in a well.
+        if takeDay { reading.day = days.first?.day }
+        if takeTime, let time = times.first { (reading.start, reading.end) = (time.start, time.end) }
+
+        // RULE 3: led, the words that were read come out.
+        guard removalLeads.contains(low[from]) || (low[from].hasPrefix("@") && low[from].count > 1) else { return reading }
+        var taken = Array(repeating: false, count: words.count)
+        for phrase in phrases where phrase.isDay ? takeDay : takeTime {
+            for k in phrase.range { taken[k] = true }
+        }
         guard taken.contains(true) else { return reading }
-        reading.title = rebuilt(words, taken: taken, nameWords: nameWords)
+        let saved = rebuilt(words, taken: taken, nameWords: nameWords)
+        if !saved.isEmpty { reading.title = saved }
         return reading
     }
 
-    /// Two letters or more, every one a capital.
-    private static func allCapitals(_ word: String) -> Bool {
-        let letters = word.filter(\.isLetter)
-        return letters.count >= 2 && letters.allSatisfy(\.isUppercase)
+    /// Leads that take their run out of the saved title with them.
+    private static let removalLeads: Set<String> = ["on", "at", "@"]
+    /// Words before a run that make it something other than when the event
+    /// is: a subject, a deadline's far side, half a name.
+    private static let leadsNothing: Set<String> = ["for", "before", "after", "of", "the"]
+    /// Short forms that are also words: read only led, or beside a plain day
+    /// or time.
+    private static let wordlikeDays: Set<String> = ["sun", "sat", "wed"]
+    private static let wordlikeMonths: Set<String> = ["mar", "may", "jun"]
+    /// Words of a run that are not themselves a day, a month or a number.
+    /// "until" and "till" only ever join two clocks, so a run they lead
+    /// cannot be read (rule 5). "or" and "and" join nothing: they are here
+    /// so that "dinner friday or saturday" is two days, and so nothing,
+    /// instead of a Saturday with a Friday left unread before it.
+    private static let runWords: Set<String> = [
+        "on", "at", "@", "this", "next", "from", "to", "until", "till", "-", "\u{2013}", "or", "and", "&",
+        "am", "pm", "a.m.", "p.m.", "noon", "midnight", "today", "tonight", "tomorrow", "tmrw",
+    ]
+
+    /// Whether a word could be part of a day or a time: the test for where
+    /// the trailing run begins. Wide on purpose. A word that looks like one
+    /// and cannot be read ("catch 22", "7-11", "call 1-800-555 4pm") makes
+    /// the whole run unreadable, which is rule 4.
+    private static func looksLikeWhen(_ w: String) -> Bool {
+        if runWords.contains(w) || weekdayWord(w) != nil || monthWord(w) != nil || dayNumber(w) != nil { return true }
+        let body = w.hasPrefix("@") ? String(w.dropFirst()) : w
+        if body == "noon" || body == "midnight" { return w != body }
+        guard let first = body.first, first.isNumber else { return false }
+        return body.allSatisfy { $0.isNumber || ":.-\u{2013}/apm".contains($0) }
     }
-
-    private static func capitalised(_ word: String) -> Bool { word.first?.isUppercase == true }
-
-    /// Short weekdays that are also words.
-    private static let wordlike: Set<String> = ["sun", "sat", "wed"]
-    private static let articles: Set<String> = ["the", "a", "an", "in", "of", "to"]
-    /// Leads that make a day a deadline or a subject: the day is filled, the
-    /// words stay.
-    private static let keepLeads: Set<String> = ["for", "by", "before", "after", "until", "till"]
 
     // MARK: words
 
@@ -296,7 +270,9 @@ enum TitleParse {
     }
 
     private static func isNameWord(_ w: String, next: String?) -> Bool {
-        guard w.count >= 2, !nameStops.contains(w) else { return false }
+        // Two LETTERS, as the daemon counts a name (`EventGuests.askable`):
+        // "o'" and "j-" are one letter and a mark.
+        guard w.filter({ $0.isLetter || $0.isNumber }).count >= 2, !nameStops.contains(w) else { return false }
         guard w.unicodeScalars.allSatisfy({ CharacterSet.letters.contains($0) || $0 == "-" || $0 == "'" })
         else { return false }
         // A day ends the names: "with steven friday", "with ana oct 12".
@@ -349,61 +325,46 @@ enum TitleParse {
         return n
     }
 
-    /// A day phrase starting at `i` (its lead-in word included), or nil.
-    private static func dayAt(
-        _ i: Int, low: [String], shielded: Set<Int>, timeWords: Set<Int>, today: Date, calendar: Calendar
-    ) -> Mention? {
-        guard !shielded.contains(i) else { return nil }
-        func word(_ k: Int) -> String? {
-            k >= 0 && k < low.count && !shielded.contains(k) && !timeWords.contains(k) ? low[k] : nil
+    /// A day phrase at `p`: "friday", "on friday", "this fri", "on next tue",
+    /// "today", "oct 12", "fri oct 9", "12 oct 2027", "on 10/12". Nil when the
+    /// words there are not one, or are one that contradicts itself.
+    private static func dayPhrase(
+        _ p: Int, word: (Int) -> String?, today: Date, calendar: Calendar
+    ) -> Phrase? {
+        var k = p
+        var led = false
+        if word(k) == "on" {
+            led = true
+            k += 1
         }
-        // "by friday", "for next tue": the day is filled and every word
-        // stays.
-        if keepLeads.contains(low[i]) {
-            guard i + 1 < low.count, !timeWords.contains(i + 1),
-                var hit = dayAt(
-                    i + 1, low: low, shielded: shielded, timeWords: timeWords, today: today, calendar: calendar),
-                hit.lead != .keep
-            else { return nil }
-            hit.range = i..<hit.range.upperBound
-            hit.lead = .keep
-            return hit
+        var which: String?
+        if let w = word(k), w == "this" || w == "next" {
+            which = w
+            k += 1
         }
-        // "on <day>", "this <weekday>", "next <weekday>": the lead comes out
-        // of the title with the day, and only with one.
-        if low[i] == "on" || low[i] == "this" || low[i] == "next" {
-            guard let hit = bareDay(i + 1, word: word, lead: low[i], today: today, calendar: calendar)
-            else { return nil }
-            return Mention(isDay: true, range: i..<hit.range.upperBound, core: hit.range, lead: .take, day: hit.day)
-        }
-        guard let hit = bareDay(i, word: word, lead: nil, today: today, calendar: calendar) else { return nil }
-        return Mention(isDay: true, range: hit.range, core: hit.range, lead: .none, day: hit.day)
-    }
-
-    /// The day words at `i`. The day is nil when a weekday and the date
-    /// after it disagree.
-    private static func bareDay(
-        _ i: Int, word: (Int) -> String?, lead: String?, today: Date, calendar: Calendar
-    ) -> (range: Range<Int>, day: Date?)? {
-        guard let w = word(i) else { return nil }
+        guard let w = word(k) else { return nil }
         let today = calendar.startOfDay(for: today)
-        if lead == nil || lead == "on" {
+        func phrase(_ end: Int, _ day: Date, sure: Bool) -> Phrase {
+            Phrase(range: p..<end, isDay: true, day: day, sure: led || sure)
+        }
+        if which == nil {
             switch w {
-            case "today", "tonight": return (i..<i + 1, today)
-            case "tomorrow", "tmrw": return (i..<i + 1, EventForm.addDays(1, today, calendar))
+            case "today", "tonight": return phrase(k + 1, today, sure: true)
+            case "tomorrow", "tmrw": return phrase(k + 1, EventForm.addDays(1, today, calendar), sure: true)
             default: break
             }
         }
         if let (weekday, _) = weekdayWord(w) {
+            let plain = !wordlikeDays.contains(w)
             // "fri oct 9": the date decides, and the weekday must be its own.
-            // "fri oct 10", a Saturday: neither.
-            if lead != "next", lead != "this", let dated = monthDay(i + 1, word: word, today: today, calendar: calendar) {
-                let agrees = calendar.component(.weekday, from: dated.day) == weekday
-                return (i..<dated.range.upperBound, agrees ? dated.day : nil)
+            // "fri oct 10", a Saturday: not a day at all.
+            if which == nil, let dated = monthDay(k + 1, word: word, today: today, calendar: calendar) {
+                guard calendar.component(.weekday, from: dated.day) == weekday else { return nil }
+                return phrase(dated.end, dated.day, sure: plain || dated.sure)
             }
             let ahead = (weekday - calendar.component(.weekday, from: today) + 7) % 7
             var day = EventForm.addDays(ahead, today, calendar)
-            if lead == "next" {
+            if which == "next" {
                 // "next tue" is the Tuesday of NEXT week, by the user's own
                 // weeks, never the one coming up in this one.
                 let gone = (calendar.component(.weekday, from: today) - calendar.firstWeekday + 7) % 7
@@ -411,36 +372,58 @@ enum TitleParse {
                 let into = (weekday - calendar.firstWeekday + 7) % 7
                 day = EventForm.addDays(into, nextWeek, calendar)
             }
-            return (i..<i + 1, day)
+            return phrase(k + 1, day, sure: plain || which != nil)
         }
-        guard lead != "this", lead != "next" else { return nil }
-        if let dated = monthDay(i, word: word, today: today, calendar: calendar) { return (dated.range, dated.day) }
+        guard which == nil else { return nil }
+        if let dated = monthDay(k, word: word, today: today, calendar: calendar) {
+            return phrase(dated.end, dated.day, sure: dated.sure)
+        }
         // "on 10/12": a slashed date only when "on" says so.
         let slashed = w.split(separator: "/", omittingEmptySubsequences: false)
-        if lead == "on", slashed.count == 2 || slashed.count == 3,
+        if led, slashed.count == 2 || slashed.count == 3,
             slashed.allSatisfy({ !$0.isEmpty && $0.count <= 4 && $0.allSatisfy(\.isNumber) }),
-            let day = EventForm.parseDate(w, today: today, calendar: calendar)
+            let day = EventForm.parseDate(w, today: today, calendar: calendar),
+            slashed.count == 2 || !yearGone(day, today: today, calendar: calendar)
         {
-            return (i..<i + 1, day)
+            return phrase(k + 1, day, sure: true)
         }
         return nil
     }
 
+    /// A year was said and it is over.
+    private static func yearGone(_ day: Date, today: Date, calendar: Calendar) -> Bool {
+        calendar.component(.year, from: day) < calendar.component(.year, from: today)
+    }
+
     /// "oct 12", "october 12th", "12 oct", each with an optional year after.
+    /// Sure unless the month is one of the short forms that are also words
+    /// and the day has no "th" on it ("may 5", "5 mar").
     private static func monthDay(
         _ i: Int, word: (Int) -> String?, today: Date, calendar: Calendar
-    ) -> (range: Range<Int>, day: Date)? {
+    ) -> (end: Int, day: Date, sure: Bool)? {
         guard let a = word(i), let b = word(i + 1) else { return nil }
-        let isPair = (monthWord(a) != nil && dayNumber(b) != nil) || (dayNumber(a) != nil && monthWord(b) != nil)
-        guard isPair else { return nil }
+        let month: String
+        let number: String
+        if monthWord(a) != nil, dayNumber(b) != nil {
+            (month, number) = (a, b)
+        } else if dayNumber(a) != nil, monthWord(b) != nil {
+            (month, number) = (b, a)
+        } else {
+            return nil
+        }
         var text = "\(a) \(b)"
         var end = i + 2
+        var year = false
         if let y = word(i + 2), y.count == 4, y.allSatisfy(\.isNumber), let n = Int(y), (2000...2999).contains(n) {
             text += " \(y)"
             end = i + 3
+            year = true
         }
         guard let day = EventForm.parseDate(text, today: today, calendar: calendar) else { return nil }
-        return (i..<end, day)
+        // "run oct 12 2000": a year already gone is not when anything is.
+        if year, yearGone(day, today: today, calendar: calendar) { return nil }
+        let sure = !wordlikeMonths.contains(month) || number.last?.isLetter == true
+        return (end, day, sure)
     }
 
     // MARK: when (times)
@@ -498,36 +481,40 @@ enum TitleParse {
         return (c, k + 1)
     }
 
-    /// A time phrase starting at `i` (its lead-in word included), or nil.
+    /// A time phrase at `p` (its lead-in included), or nil: "4pm", "4 pm",
+    /// "at 4:30", "@4pm", "noon", "4-6pm", "4pm to 6", "from 4 to 5:30".
     ///
-    /// HOW SURE THE TYPING MUST BE. With no lead, am or pm must be said
-    /// ("4pm", "4-6pm"): "Isaiah 14:12" and "Score 21:17" are not clocks. Led
-    /// by "at" or "from", a colon will do ("at 4:30", "from 4 to 5:30"). A
-    /// bare number never: "from 3 to 4 people".
-    private static func timeAt(_ i: Int, low: [String], shielded: Set<Int>) -> Mention? {
-        guard !shielded.contains(i) else { return nil }
-        func word(_ k: Int) -> String? { k >= 0 && k < low.count && !shielded.contains(k) ? low[k] : nil }
+    /// HOW SURE THE TYPING MUST BE. Am or pm said ("4pm", "4-6pm"), or a
+    /// colon behind "at" or "from" ("at 4:30", "from 4 to 5:30"). A colon
+    /// with no lead is a verse or a score ("Isaiah 14:12", "Romans
+    /// 13:11-14"), and no am or pm and no colon is a number ("meet at 4",
+    /// "from 3 to 4 people"): neither is a time.
+    private static func timePhrase(_ p: Int, word: (Int) -> String?) -> Phrase? {
+        guard var w = word(p) else { return nil }
+        var k = p
         var lead: String?
-        var k = i
-        if ["at", "@", "from"].contains(low[i]) {
-            lead = low[i] == "@" ? "at" : low[i]
-            k = i + 1
+        if w == "at" || w == "@" || w == "from" {
+            lead = w == "from" ? "from" : "at"
+            k = p + 1
+            guard let next = word(k) else { return nil }
+            w = next
+        } else if w.hasPrefix("@"), w.count > 1 {
+            // "@4pm", typed without the space.
+            lead = "at"
+            w = String(w.dropFirst())
         }
-        guard let w = word(k) else { return nil }
-        func mention(_ end: Int, _ start: Int, _ stop: Int?) -> Mention {
-            Mention(
-                isDay: false, range: i..<end, core: k..<end, lead: lead == nil ? .none : .take, day: nil,
-                start: start, end: stop)
+        let first = w
+        func at(_ j: Int) -> String? { j == k ? first : word(j) }
+        func phrase(_ end: Int, _ start: Int, _ stop: Int?) -> Phrase {
+            Phrase(range: p..<end, isDay: false, day: nil, start: start, end: stop, sure: true)
         }
         func sure(_ a: Clock, _ b: Clock) -> Bool {
             a.meridiem || b.meridiem || (lead != nil && (a.colon || b.colon))
         }
 
-        // "noon", "midnight": after "at", or as the title's last word. "High
-        // noon screening" and "Midnight Mass" are titles.
         if w == "noon" || w == "midnight" {
-            guard lead == "at" || (lead == nil && k == low.count - 1) else { return nil }
-            return mention(k + 1, w == "noon" ? 720 : 0, nil)
+            guard lead != "from" else { return nil }
+            return phrase(k + 1, w == "noon" ? 720 : 0, nil)
         }
 
         // "4-6pm", "4pm-6pm", "at 4:30-5": one word, a dash between two clocks.
@@ -536,41 +523,48 @@ enum TitleParse {
             guard sides.count == 2, let a = clock(sides[0]), let b = clock(sides[1]), sure(a, b),
                 let span = resolve(a, b)
             else { return nil }
-            return mention(k + 1, span.start, span.end)
+            return phrase(k + 1, span.start, span.end)
         }
 
-        guard let (a, after) = clockAt(k, word: word) else { return nil }
+        guard let (a, after) = clockAt(k, word: at) else { return nil }
         // "4 to 6pm", "4pm to 6", "from 4 to 5:30".
-        if let joiner = word(after), ["to", "until", "till", "-", "\u{2013}"].contains(joiner),
-            let (b, end) = clockAt(after + 1, word: word), sure(a, b), let span = resolve(a, b)
-        {
-            return mention(end, span.start, span.end)
+        if let joiner = word(after), ["to", "until", "till", "-", "\u{2013}"].contains(joiner) {
+            guard let (b, end) = clockAt(after + 1, word: at), sure(a, b), let span = resolve(a, b)
+            else { return nil }
+            return phrase(end, span.start, span.end)
         }
-        // One clock. "from 4pm" is a start with no end said; "from" alone
-        // with a bare number is nothing.
+        // One clock. "from 4pm" is a start with no end said.
         guard a.meridiem || (lead == "at" && a.colon) || (lead == "from" && a.twentyFour),
             let t = EventForm.parseTime(a.text)
         else { return nil }
-        return mention(after, t.minutes, nil)
+        return phrase(after, t.minutes, nil)
     }
 
     /// Two clocks as a span. A side with no am or pm takes it from the
     /// other: "4-6pm" is 4pm, "11-1pm" is 11am (the latest reading that
     /// still comes before the end), "4pm to 6" is 6pm. Neither said ("from 4
     /// to 5:30"): the form's own reading of a bare hour.
+    ///
+    /// IT MUST END AFTER IT STARTS, on the same day, or run from an evening
+    /// into the next morning ("10pm-2am"). "7pm-6pm" would be 23 hours and
+    /// "4-4pm" twelve: nobody means those, so they are not spans.
     private static func resolve(_ a: Clock, _ b: Clock) -> (start: Int, end: Int)? {
         guard let ta = EventForm.parseTime(a.text) else { return nil }
+        var start = ta.minutes
+        let end: Int
         if a.explicit || !b.explicit {
-            guard let end = EventForm.parseEnd(b.text, after: ta.minutes), end != ta.minutes else { return nil }
-            return (ta.minutes, end)
+            guard let stop = EventForm.parseEnd(b.text, after: start) else { return nil }
+            end = stop
+        } else {
+            guard let tb = EventForm.parseTime(b.text) else { return nil }
+            end = tb.minutes
+            let hour = start % 720
+            // The readings of the bare start, the one nearest before the end
+            // first; none before it ("10-2am") is the evening before.
+            start = [hour + 720, hour].first { $0 < end } ?? hour + 720
+            guard start % 720 != end % 720 else { return nil }
         }
-        guard let tb = EventForm.parseTime(b.text) else { return nil }
-        let end = tb.minutes
-        let hour = ta.minutes % 720
-        // The readings of the bare start, the one nearest before the end
-        // first; none before it ("10-2am") is the evening before.
-        let start = [hour + 720, hour].first { $0 < end } ?? hour + 720
-        guard start != end else { return nil }
+        guard end > start || (start >= 720 && end < 720) else { return nil }
         return (start, end)
     }
 
@@ -641,14 +635,8 @@ struct TitleRead: Hashable, Sendable {
     /// What each field the title filled held before, so deleting the words
     /// puts it back.
     var filled: [TitleField: String] = [:]
-    /// What the title last wrote into each field it filled.
-    var wrote: [TitleField: String] = [:]
     /// Fields the user set by hand: the title never writes them again.
     var hand: Set<TitleField> = []
-    /// A hand-set field the title HAD filled, and what the title said then.
-    /// While the title still says it, its words stay out of the saved title:
-    /// correcting a well never puts "friday 7pm" back into "Dinner".
-    var corrected: [TitleField: String] = [:]
     /// Names whose suggestion was answered (added or dismissed), folded to
     /// lower case: it does not come back for this pane.
     var answered: Set<String> = []
@@ -658,31 +646,22 @@ struct TitleRead: Hashable, Sendable {
 
 extension EventForm {
     /// What the draft's title says, as the pane will act on it: nil when the
-    /// title is not being read. Words for a hand-set field stay in the title,
-    /// unless the title had filled that field before the hand corrected it
-    /// and still says the same thing (`TitleRead.corrected`): those words
-    /// were already out, and stay out.
+    /// title is not being read. A field the user set by hand is not the
+    /// title's to fill, and its words are not taken out of the title either:
+    /// only words whose reading is put in a well ever come out.
     static func titleReading(_ d: EventDraft, today: Date, calendar: Calendar) -> TitleReading? {
         guard d.titleRead.reads else { return nil }
-        let read = d.titleRead
-        var takeDay = !read.hand.contains(.date) || read.corrected[.date] != nil
-        var takeTime = !d.allDay && (!read.hand.contains(.start) || read.corrected[.start] != nil)
-        var reading = TitleParse.read(d.title, today: today, calendar: calendar, takeDay: takeDay, takeTime: takeTime)
-        // A corrected field's words stay out only while they say what they
-        // said: "dinner friday" moved to Tuesday by hand, then retyped as
-        // "dinner saturday", keeps "saturday".
-        let said = texts(reading, today: today, calendar: calendar)
-        var again = false
-        if takeDay, read.hand.contains(.date), said[.date] != read.corrected[.date] { (takeDay, again) = (false, true) }
-        if takeTime, read.hand.contains(.start),
-            said[.start] != read.corrected[.start] || said[.end] != read.corrected[.end]
-        {
-            (takeTime, again) = (false, true)
-        }
-        if again {
-            reading = TitleParse.read(d.title, today: today, calendar: calendar, takeDay: takeDay, takeTime: takeTime)
-        }
-        return reading
+        let hand = d.titleRead.hand
+        return TitleParse.read(
+            d.title, today: today, calendar: calendar,
+            takeDay: !hand.contains(.date), takeTime: !d.allDay && !hand.contains(.start))
+    }
+
+    /// The saved title is not the typed one: words came out of it. This, and
+    /// not a filled well, is what puts the "saves as" line under the title;
+    /// a title that fills the wells and keeps its words shows on the wells.
+    static func titleSavesChanged(_ d: EventDraft, today: Date, calendar: Calendar) -> Bool {
+        savedTitle(d, today: today, calendar: calendar) != trimmed(d.title)
     }
 
     /// What a reading puts in the wells.
@@ -726,11 +705,9 @@ extension EventForm {
             if let text = wanted[field] {
                 if out.titleRead.filled[field] == nil { out.titleRead.filled[field] = out[keyPath: path] }
                 out[keyPath: path] = text
-                out.titleRead.wrote[field] = text
             } else if let before = out.titleRead.filled[field] {
                 out[keyPath: path] = before
                 out.titleRead.filled[field] = nil
-                out.titleRead.wrote[field] = nil
             }
         }
         return out
@@ -739,19 +716,28 @@ extension EventForm {
     /// A when field typed into, or a day clicked on the grid: the field is
     /// the user's from here, and the title stops writing it.
     ///
-    /// THE TWO TIMES GO TOGETHER. A start typed over the title's "7pm" takes
-    /// the end with it, as it stands: otherwise the end would fall back to
-    /// what it was before the title, and an 8pm start would be left ending
-    /// at an hour the user never saw beside it.
+    /// A START TAKES ITS END WITH IT. A start typed over the title's "7pm"
+    /// takes the end as it stands: otherwise the end would fall back to what
+    /// it was before the title, and an 8pm start would be left ending at an
+    /// hour the user never saw beside it.
+    ///
+    /// AN END CORRECTED LEAVES THE TITLE ITS START. "dinner on friday at 7pm",
+    /// then 9:30pm typed into the end: the start is still the title's, so its
+    /// words stay out of the saved title and a later "at 8pm" still moves it.
+    /// An end typed beside a start the title did NOT write takes the start
+    /// too: the user has set a span, and a time typed later in the title
+    /// must not slide one end of it.
     static func handSet(_ d: EventDraft, _ field: TitleField) -> EventDraft {
         var out = d
-        for f in field == .date ? [TitleField.date] : [.start, .end] {
-            // What the title had put there is remembered, so its words stay
-            // out of the saved title while it still says so.
-            if let wrote = out.titleRead.wrote[f] { out.titleRead.corrected[f] = wrote }
+        let fields: [TitleField]
+        switch field {
+        case .date: fields = [.date]
+        case .start: fields = [.start, .end]
+        case .end: fields = out.titleRead.filled[.start] != nil ? [.end] : [.start, .end]
+        }
+        for f in fields {
             out.titleRead.hand.insert(f)
             out.titleRead.filled[f] = nil
-            out.titleRead.wrote[f] = nil
         }
         return out
     }
@@ -765,7 +751,7 @@ extension EventForm {
     }
 
     /// Whether Esc on the title has anything to undo: the title is being
-    /// read and it has changed the saved title or filled a field.
+    /// read and it has filled a field (a changed saved title always has).
     static func titleIsRead(_ d: EventDraft, today: Date, calendar: Calendar) -> Bool {
         titleReading(d, today: today, calendar: calendar)?.filled == true
     }

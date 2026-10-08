@@ -119,8 +119,18 @@ enum EventProposals {
         + "which was left open. Nothing has been added to the calendar and nobody has been invited. Only "
         + "the user can add it, with the event pane's own control. Tell them it is waiting on the Calendar "
         + "page to review; do not say it was created or that anyone was invited."
+    /// The conversation that asked is gone (New chat), or the mailbox was
+    /// switched, while the calendar was being read (verify8 V8-1). Fixed
+    /// words, and nothing opens.
+    static let staleRunText =
+        "Nothing was drafted: the conversation was cleared or the mailbox was switched while the calendar "
+        + "was loading. Do not try again; the user will ask again if they still want the event."
     /// ⌘↵ or ↵ on a proposed pane nobody has clicked or typed in.
     static let keysLockedText = "Your assistant drafted this event. Read it, then click add."
+    /// ⌘↵ on a proposed pane that has guests, clicked in or not.
+    static let guestsNeedAClickText = "Your assistant added these guests. Only a click on the button invites them."
+    /// The same, said in the pane's footer for as long as it holds.
+    static let guestsNeedAClickHint = "Your assistant added these guests. Only a click on this button invites them; ⌘↵ does not."
     static let longTitleText =
         "The title must be one line of at most 200 characters. Shorten it and call again."
     static let longLocationText =
@@ -393,6 +403,28 @@ enum EventProposals {
     /// not add an event or invite its guests. The pane's own button always
     /// works: a click cannot be typed ahead.
     static func keysMayAct(proposed: Bool, engaged: Bool) -> Bool { !proposed || engaged }
+
+    /// Whether ⌘↵ may SAVE the pane (verify8 V8-3). On a pane the assistant
+    /// filled in whose save would tell guests, never, clicked in or not: one
+    /// click on the title and then ⌘↵ is not a decision to email the people
+    /// a model named. The invitation goes out only by a click on the control
+    /// that names them ("add and invite 3"). With no guests, or on a pane
+    /// the user opened, the rule is `keysMayAct`.
+    static func commandEnterMaySave(proposed: Bool, engaged: Bool, tellsGuests: Bool) -> Bool {
+        if proposed, tellsGuests { return false }
+        return keysMayAct(proposed: proposed, engaged: engaged)
+    }
+
+    /// Whether the run that asked for a proposal is still the one to answer
+    /// (verify8 V8-1): its conversation is still the live one, and the
+    /// mailbox is the one it was asked in. Checked AFTER the calendar feed
+    /// is read, which is the only wait on the tool's path: a New chat or an
+    /// account switch during it must not leave a pane on screen from a
+    /// conversation thrown away, or draft one mailbox's event on another's
+    /// calendar.
+    static func runStillCurrent(live: Bool, epochAsked: Int, epochNow: Int) -> Bool {
+        live && epochAsked == epochNow
+    }
 
     // MARK: the pane
 

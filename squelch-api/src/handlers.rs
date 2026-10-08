@@ -2908,12 +2908,14 @@ const CALENDAR_PEOPLE_NAME_MAX: usize = 64;
 /// And one shorter than this is not asked about: one letter matches a large
 /// part of anybody's contacts, and every match is a probe of that person's
 /// mail under the store's one mutex. The client asks for nothing shorter.
+/// Counted in letters and digits of the first word, as the store reads the
+/// name (`typed_name_len`): "s." and "(s)" are one letter.
 const CALENDAR_PEOPLE_NAME_MIN: usize = 2;
 
 /// `GET /client/calendar/people?name=steven`: up to three people the user has
 /// WRITTEN TO whose name starts with the typed words, best first (see
 /// `SqliteStore::people_named` for who qualifies and the order). A name
-/// shorter than two characters (empty included) is a 400 with a fixed body; one
+/// shorter than two letters or digits (empty included) is a 400 with a fixed body; one
 /// that is too long or an address answers the empty list. Neither says
 /// anything of the input.
 pub async fn get_calendar_people(
@@ -2921,11 +2923,10 @@ pub async fn get_calendar_people(
     Query(params): Query<CalendarPeopleQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let name = params.name.trim().to_string();
-    let length = name.chars().count();
-    if length < CALENDAR_PEOPLE_NAME_MIN {
+    if squelch_core::store::typed_name_len(&name) < CALENDAR_PEOPLE_NAME_MIN {
         return Err(ApiError::bad_request("name is too short"));
     }
-    let people = if length > CALENDAR_PEOPLE_NAME_MAX || name.contains('@') {
+    let people = if name.chars().count() > CALENDAR_PEOPLE_NAME_MAX || name.contains('@') {
         Vec::new()
     } else {
         store_call(&state, move |store, account_id| {

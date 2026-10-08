@@ -311,6 +311,15 @@ private struct ShellWatchers: View {
             .onChange(of: store.threadId) { _, thread in
                 if thread == nil, store.activeView == .calendar { store.returnParkedEventEditor() }
             }
+            // A proposal kept parked because mail was being written (it
+            // never closes a typed-in composer or inline reply) is asked
+            // again when the composer is sent or closed. An inline reply
+            // lives in an open email, so its end is the hook above.
+            // `composeOpen`, not `compose`: that one changes on every key.
+            // A no-op with nothing parked.
+            .onChange(of: store.composeOpen) { _, open in
+                if !open, store.activeView == .calendar, store.threadId == nil { store.returnParkedEventEditor() }
+            }
             .onChange(of: store.lastRefresh) { old, new in
                 if old == nil, new != nil {
                     store.tour.maybeStart()

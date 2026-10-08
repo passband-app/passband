@@ -134,7 +134,7 @@ async fn a_name_that_is_not_a_name_answers_nobody() {
     for uri in [
         format!("{PEOPLE}?name={long}"),
         format!("{PEOPLE}?name=steven%40x.com"),
-        format!("{PEOPLE}?name=s%40"),
+        format!("{PEOPLE}?name=st%40"),
     ] {
         let resp = h.app.clone().oneshot(authed("GET", &uri)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "{uri}");
@@ -266,6 +266,15 @@ async fn a_name_under_two_characters_is_a_400() {
         format!("{PEOPLE}?name=%20S%20"),
         format!("{PEOPLE}?name=%40"),
         format!("{PEOPLE}?name=%C3%A9"),
+        // verify8 V8-13: two characters and more, and still ONE letter as
+        // the store reads them ("s.", "s-", "(s)", "s'", ". s", "s .").
+        format!("{PEOPLE}?name=s."),
+        format!("{PEOPLE}?name=s-"),
+        format!("{PEOPLE}?name=(s)"),
+        format!("{PEOPLE}?name=s%27"),
+        format!("{PEOPLE}?name=.%20s"),
+        format!("{PEOPLE}?name=s%20."),
+        format!("{PEOPLE}?name=--"),
     ] {
         let (status, body) = get(&h.app, &uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
@@ -273,6 +282,10 @@ async fn a_name_under_two_characters_is_a_400() {
     }
     // Two characters are a name.
     let (status, body) = get(&h.app, &format!("{PEOPLE}?name=st")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["people"].as_array().map(Vec::len), Some(3));
+    // And so are two letters with punctuation around them.
+    let (status, body) = get(&h.app, &format!("{PEOPLE}?name=(st)")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["people"].as_array().map(Vec::len), Some(3));
 }

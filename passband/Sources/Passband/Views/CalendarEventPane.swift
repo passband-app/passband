@@ -207,7 +207,8 @@
             plan: GuestPlan, problem: EventDraftProblem?, reading: TitleReading?, suggestion: GuestSuggestion?,
             now: Date, cal: Calendar
         ) -> some View {
-            VStack(alignment: .leading, spacing: 0) {
+            let savesChanged = EventForm.titleSavesChanged(draft, today: now, calendar: cal)
+            return VStack(alignment: .leading, spacing: 0) {
                 TextField("Title", text: titleBinding(now: now, cal: cal))
                     .textFieldStyle(.plain)
                     .font(Typo.ui(15, weight: .semibold))
@@ -215,8 +216,10 @@
                     .focused($focus, equals: .title)
                     .padding(.horizontal, InlineFieldMetrics.inset)
                     .padding(.top, Space.s10)
-                    .padding(.bottom, reading?.filled == true ? Space.s2 : Space.s10)
-                if let reading, reading.filled {
+                    .padding(.bottom, savesChanged ? Space.s2 : Space.s10)
+                // Only when words came out of the title. A reading that
+                // fills the wells and keeps every word shows on the wells.
+                if let reading, savesChanged {
                     savedTitleLine(reading)
                 }
                 Hairline()
@@ -250,23 +253,19 @@
                     .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         }
 
-        /// Under the title, while its words filled a day or a time: the title
-        /// that will be saved, and the way to keep the typed one instead. A
-        /// title that was nothing but a day and a time says what is missing.
+        /// Under the title, while words are coming out of it ("on friday
+        /// 4pm"): the title that will be saved, and the way to keep the typed
+        /// one instead. Never an empty one: words are not taken out of a
+        /// title that would be left with none.
         private func savedTitleLine(_ reading: TitleReading) -> some View {
             HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
-                if reading.title.isEmpty {
-                    Text("Needs a title beside the day and time")
-                        .foregroundStyle(Palette.warn)
-                } else {
-                    Text("saves as")
-                        .foregroundStyle(Palette.inkFaintest)
-                    // The user's own words: plain Text, never markup.
-                    Text(verbatim: reading.title)
-                        .foregroundStyle(Palette.inkDim)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                Text("saves as")
+                    .foregroundStyle(Palette.inkFaintest)
+                // The user's own words: plain Text, never markup.
+                Text(verbatim: reading.title)
+                    .foregroundStyle(Palette.inkDim)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Spacer(minLength: Space.s8)
                 KeyHint("esc", "keep as typed")
                     .fixedSize()
@@ -751,6 +750,9 @@
             let note = problem.flatMap { Self.saidElsewhere.contains($0) ? nil : $0.text }
             let controls = plan.controls
             let blocked = problem != nil || store.calendarWriting
+            // A proposal with guests: the button is the only way, so it does
+            // not wear the ⌘↵ cap it would not answer to.
+            let clickOnly = guestsNeedAClick(plan)
             let remove = Group {
                 if editing != nil {
                     Button("delete event") { confirmingDelete = true }
@@ -773,7 +775,8 @@
                         .disabled(blocked)
                 }
                 Button { save(controls.primary, problem: problem) } label: {
-                    keyed(store.calendarWriting ? "saving…" : controls.primary.label, "⌘↵")
+                    let label = store.calendarWriting ? "saving…" : controls.primary.label
+                    if clickOnly { Text(label) } else { keyed(label, "⌘↵") }
                 }
                 .buttonStyle(.glassProminent)
                 .tint(Palette.accent)
@@ -781,7 +784,11 @@
             }
             return VStack(alignment: .trailing, spacing: Space.s8) {
                 // ENTER DOES NOT SEND, said where the eye is when it matters.
-                if !EventGuests.enterMaySave(controls) {
+                if clickOnly {
+                    Text(EventProposals.guestsNeedAClickHint)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                } else if !EventGuests.enterMaySave(controls) {
                     Text("With guests, only ⌘↵ or a click saves.")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
@@ -994,6 +1001,13 @@
                     if confirmingDelete {
                         deleteNow(tellGuests: deleteWording.tell != nil)
                     } else {
+                        // GUESTS A MODEL NAMED ARE INVITED BY A CLICK ONLY,
+                        // however much of the pane has been clicked or typed
+                        // in (`EventProposals.commandEnterMaySave`).
+                        guard !guestsNeedAClick(plan) else {
+                            store.noteProposedGuestsNeedAClick()
+                            return true
+                        }
                         save(plan.controls.primary, problem: problem)
                     }
                     return true
@@ -1167,6 +1181,14 @@
         /// ↵ and ⌘↵ act, and the pane may take the keyboard: always, except
         /// in a pane the assistant filled in that nobody has clicked or
         /// typed in yet.
+        /// The assistant filled this pane in and its save would tell guests:
+        /// ⌘↵ never saves it, and the footer says so.
+        private func guestsNeedAClick(_ plan: GuestPlan) -> Bool {
+            !EventProposals.commandEnterMaySave(
+                proposed: store.calendarPaneProposed, engaged: true,
+                tellsGuests: !EventGuests.enterMaySave(plan.controls))
+        }
+
         private var keysAreTheUsers: Bool {
             EventProposals.keysMayAct(proposed: store.calendarPaneProposed, engaged: store.calendarPaneEngaged)
         }

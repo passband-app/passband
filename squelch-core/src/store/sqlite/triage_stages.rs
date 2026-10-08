@@ -431,9 +431,8 @@ impl SqliteStore {
             // one to be triaged, so it becomes live mail in this transaction
             // and the job below is an ordinary triage. A window holds no
             // archive row (the select above), and must never promote one.
-            if foreground {
-                super::agent_triage::promote_archive_conn(&tx, account_id, *id)?;
-            }
+            let promoted =
+                foreground && super::agent_triage::promote_archive_conn(&tx, account_id, *id)?;
             super::agent_triage::enqueue_agent_triage_lane(
                 &tx,
                 account_id,
@@ -442,6 +441,9 @@ impl SqliteStore {
                 false,
                 foreground,
             )?;
+            if promoted {
+                super::agent_triage::requeue_promoted_conn(&tx, account_id, *id, Utc::now())?;
+            }
             tx.execute(
                 "UPDATE triage SET retriage_at=?3 WHERE account_id=?1 AND message_id=?2",
                 params![account_id, id, now],

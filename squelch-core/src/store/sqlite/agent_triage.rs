@@ -431,6 +431,9 @@ fn is_archive_conn(conn: &Connection, account: AccountId, message: i64) -> Resul
 /// sent row is live and pending, which closes its thread at the agent door
 /// over archive siblings that door could read a moment before. Returns
 /// whether the row was promoted.
+///
+/// A caller that promotes then queues the row's triage and calls
+/// [`requeue_promoted_conn`], in that order.
 pub(super) fn promote_archive_conn(
     conn: &Connection,
     account: AccountId,
@@ -444,6 +447,38 @@ pub(super) fn promote_archive_conn(
         ),
         params![account, message],
     )? == 1)
+}
+
+/// A PROMOTED ROW IS LEFT WITH WORK THAT CAN RUN. Call after the promotion's
+/// own enqueue. That enqueue merges into whatever job the row already has at
+/// its current revision, and deliberately keeps a FAILED job failed (a
+/// correction to a live row must not reset its retry state). For a row just
+/// promoted that job is the surfacing check an agent's search once bought:
+/// left failed, the row would be live, pending and closing its thread at the
+/// agent door with nothing ever due to judge it. The same for a job that
+/// completed and left the access pending. Requeued here from zero attempts;
+/// nothing is touched while a job for the row is queued or running.
+pub(super) fn requeue_promoted_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE agent_triage_jobs SET state='queued',attempts=0,available_at=?3,last_error=NULL,
+             lease_token=NULL,lease_until=NULL
+         WHERE id=(SELECT j.id FROM agent_triage_jobs j
+             JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
+             WHERE j.account_id=?1 AND j.message_id=?2 AND j.input_revision=a.revision
+               AND j.kind IN ('triage','access') AND j.trigger NOT LIKE 'revisit:%'
+               AND (j.state='failed' OR (j.state='completed' AND a.access='pending'))
+             ORDER BY j.id DESC LIMIT 1)
+           AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs live
+               WHERE live.account_id=?1 AND live.message_id=?2
+                 AND live.kind IN ('triage','access') AND live.state IN ('queued','leased'))",
+        params![account, message, now.to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 pub(super) fn correct_agent_triage_conn(
@@ -477,9 +512,14 @@ pub(super) fn correct_agent_triage_conn(
     // correction recorded and no job either: nothing may queue work on a row
     // still in the archive from here.
     let archived = is_archive_conn(conn, account, message)?;
-    if !archived || (field != "external_access" && promote_archive_conn(conn, account, message)?) {
+    let promoted =
+        archived && field != "external_access" && promote_archive_conn(conn, account, message)?;
+    if !archived || promoted {
         let trigger = format!("correction:{}", now.to_rfc3339());
         enqueue_agent_triage_conn(conn, account, message, &trigger, false)?;
+    }
+    if promoted {
+        requeue_promoted_conn(conn, account, message, now)?;
     }
     let revision: i64 = conn.query_row(
         "SELECT revision FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
@@ -2193,8 +2233,10 @@ pub struct AccessProgress {
 /// Put a FAILED access job on an unassessed archive row back in the queue once
 /// it is [`ARCHIVE_ACCESS_RETRY_HOURS`] old. `available_at` is the last time
 /// the job was scheduled, which is never later than the failure, so this errs
-/// toward a slightly early retry and never toward none. Returns whether a job
-/// was revived.
+/// toward a slightly early retry and never toward none. The row's LATEST
+/// failure is the one that has to be that old: an older failed job beside a
+/// fresh one is no reason to try again today. Returns whether a job was
+/// revived.
 fn revive_failed_archive_access(
     conn: &Connection,
     account: AccountId,
@@ -2213,6 +2255,11 @@ fn revive_failed_archive_access(
                 " AND j.kind='access' AND j.trigger IN ('archive_access','source_access')
                    AND j.input_revision=a.revision AND j.state='failed'
                    AND julianday(j.available_at)<=julianday(?3)
+                   AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs fresh
+                       WHERE fresh.account_id=m.account_id AND fresh.message_id=m.id
+                         AND fresh.kind='access' AND fresh.input_revision=a.revision
+                         AND fresh.state='failed'
+                         AND julianday(fresh.available_at)>julianday(?3))
                    AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs live
                        WHERE live.account_id=m.account_id AND live.message_id=m.id
                          AND live.kind IN ('triage','access') AND live.state IN ('queued','leased'))
@@ -2227,9 +2274,24 @@ fn revive_failed_archive_access(
     };
     // Revived AS `archive_access`, whatever queued it first: the trigger is
     // what the outstanding ceiling counts and what the worker charges the
-    // daily sub-cap on, so a revived check is inside both. The select above
-    // prefers a job that already carries it, which is what keeps this rename
-    // clear of the jobs' unique key.
+    // daily sub-cap on, so a revived check is inside both.
+    //
+    // THE RENAME MUST NOT MEET THE JOBS' UNIQUE KEY (account, message, kind,
+    // revision, trigger). The select above prefers a failed job that already
+    // carries the trigger, but the row may hold one in another state beside
+    // a failed `source_access` (completed, with the access still pending).
+    // Then that job is the one revived, and the other is left as it is.
+    let twin: Option<i64> = conn
+        .query_row(
+            "SELECT t.id FROM agent_triage_jobs j
+             JOIN agent_triage_jobs t ON t.account_id=j.account_id AND t.message_id=j.message_id
+               AND t.kind=j.kind AND t.input_revision=j.input_revision
+             WHERE j.id=?1 AND t.id!=j.id AND t.trigger='archive_access'",
+            params![job],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let job = twin.unwrap_or(job);
     conn.execute(
         "UPDATE agent_triage_jobs SET state='queued',attempts=0,available_at=?2,last_error=NULL,
              trigger='archive_access'

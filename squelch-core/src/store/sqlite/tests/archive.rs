@@ -608,17 +608,22 @@ fn the_forward_edge_starts_at_the_walks_start_and_moves_only_by_its_own_setter()
     );
 }
 
-/// THE DISK FLOOR'S NUMBER: a real figure for a database on disk, and "no
-/// disk to fill" for one in memory.
+/// THE DISK GUARDS' NUMBERS: real figures for a database on disk (its
+/// volume's free space and size, and its own file plus log), and "no disk to
+/// fill" for one in memory.
 #[test]
-fn free_disk_bytes_reads_the_databases_own_filesystem() {
+fn archive_disk_reads_the_databases_own_filesystem_and_its_own_size() {
     let (memory, _) = store();
-    assert_eq!(memory.free_disk_bytes().unwrap(), u64::MAX);
+    assert_eq!(
+        memory.archive_disk().unwrap(),
+        crate::store::ArchiveDisk::UNBOUNDED
+    );
 
     let dir = std::env::temp_dir().join(format!("squelch-free-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let on_disk = SqliteStore::open(dir.join("squelch.db")).unwrap();
-    let free = on_disk.free_disk_bytes().unwrap();
+    let disk = on_disk.archive_disk().unwrap();
+    let free = disk.free_bytes;
     // The same question asked of the directory the file is in, by hand: the
     // floor is only a guard if the number is this volume's and nobody else's.
     #[cfg(unix)]
@@ -634,9 +639,41 @@ fn free_disk_bytes_reads_the_databases_own_filesystem() {
         // SAFETY: a zero return means the struct was filled in.
         let stat = unsafe { stat.assume_init() };
         #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-        let bytes = (stat.f_bavail as u64) * (stat.f_frsize as u64);
+        let bytes = (
+            (stat.f_bavail as u64) * (stat.f_frsize as u64),
+            (stat.f_blocks as u64) * (stat.f_frsize as u64),
+        );
         bytes
     };
+    // The database's own size: the file and its write-ahead log, as the
+    // directory lists them. Then it grows, and the number follows.
+    let on_disk_now = || -> u64 {
+        ["squelch.db", "squelch.db-wal"]
+            .iter()
+            .filter_map(|name| std::fs::metadata(dir.join(name)).ok())
+            .map(|meta| meta.len())
+            .sum()
+    };
+    assert!(disk.db_bytes > 0);
+    assert_eq!(disk.db_bytes, on_disk_now());
+    let wal_before = std::fs::metadata(dir.join("squelch.db-wal")).map_or(0, |meta| meta.len());
+    let acct = on_disk.ensure_account("disk@example.com").unwrap();
+    for i in 0..40 {
+        triaged(acct, &format!("g-disk-{i}"), &format!("t-disk-{i}"))
+            .body(&"a body long enough to take pages ".repeat(400))
+            .ingest(&on_disk);
+    }
+    let grown = on_disk.archive_disk().unwrap().db_bytes;
+    assert_eq!(grown, on_disk_now());
+    assert!(
+        grown > disk.db_bytes,
+        "{grown} after, {} before",
+        disk.db_bytes
+    );
+    assert!(
+        std::fs::metadata(dir.join("squelch.db-wal")).map_or(0, |meta| meta.len()) > wal_before,
+        "the fixture grew the log, so the log is being counted"
+    );
     // The path the store asked about is the database file itself.
     let file: String = on_disk
         .lock()
@@ -660,10 +697,15 @@ fn free_disk_bytes_reads_the_databases_own_filesystem() {
     // Other processes write to this volume while the suite runs, so within a
     // gigabyte and not to the byte.
     #[cfg(unix)]
-    assert!(
-        free.abs_diff(expected) < 1 << 30,
-        "{free} bytes free, where the volume itself says {expected}"
-    );
+    {
+        assert!(
+            free.abs_diff(expected.0) < 1 << 30,
+            "{free} bytes free, where the volume itself says {}",
+            expected.0
+        );
+        assert_eq!(disk.total_bytes, expected.1, "the whole volume's size");
+        assert!(disk.total_bytes >= free);
+    }
 }
 
 #[test]
@@ -3264,4 +3306,464 @@ fn a_wall_of_unreadable_matches_neither_hides_a_readable_one_nor_slows_the_searc
             "a search over hidden matches took {elapsed:?}"
         );
     }
+}
+
+/// F1. THE VECTOR LEG RANKS READABLE MAIL ONLY. A few readable rows, and the
+/// semantic and hybrid answers recorded; then more unreadable rows than the
+/// leg's whole window holds, every one of them nearer the query than any
+/// readable row. The answers are the same answers, in the same order. The
+/// human door's KNN, which is over the whole account, is full of the new rows.
+#[test]
+fn the_external_vector_leg_is_not_filled_by_nearer_mail_the_caller_cannot_read() {
+    use crate::embed::{Embedder, StubEmbedder};
+    use crate::store::{ExternalSearchMode, SearchSort};
+    let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
+    let (store, acct) = store_with_embedder(embedder.clone());
+    let mut readable = Vec::new();
+    for (i, body) in [
+        "osprey migration estuary",
+        "a long note about ledgers that mentions an osprey once",
+        "migration paperwork for the visa office",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = archive(
+            &store,
+            &triaged(acct, &format!("g-r{i}"), &format!("t-r{i}"))
+                .subject("field notes")
+                .body(body)
+                .received_at(days_ago(200 + i as i64)),
+        );
+        allow(&store, id);
+        embed_and_store(&store, embedder.as_ref(), acct, id, "field notes", body);
+        readable.push(id);
+    }
+    let answers = |store: &SqliteStore| -> serde_json::Value {
+        let mut out = serde_json::Map::new();
+        for mode in [ExternalSearchMode::Semantic, ExternalSearchMode::Hybrid] {
+            for sort in [SearchSort::Recent, SearchSort::BestMatch] {
+                for limit in [1usize, 2, 50] {
+                    let hits = store
+                        .external_search_filtered(
+                            acct,
+                            "osprey migration",
+                            &Default::default(),
+                            sort,
+                            mode,
+                            limit,
+                        )
+                        .unwrap();
+                    out.insert(
+                        format!("{mode:?}/{sort:?}/{limit}"),
+                        serde_json::to_value(&hits).unwrap(),
+                    );
+                }
+            }
+        }
+        serde_json::Value::Object(out)
+    };
+    let before = answers(&store);
+    assert_eq!(
+        before["Semantic/BestMatch/50"].as_array().unwrap().len(),
+        readable.len(),
+        "the fixture is found by meaning"
+    );
+    assert_eq!(before["Semantic/BestMatch/1"][0]["id"], readable[0]);
+
+    // Nearer than anything readable: the query's own words and no others.
+    let hidden = crate::store::EXTERNAL_RECALL_MAX + 104;
+    let nearest = embedder
+        .embed(&crate::embed::message_embed_text(
+            "osprey migration",
+            "osprey migration",
+            crate::embed::DEFAULT_EMBED_MAX_CHARS,
+        ))
+        .unwrap();
+    let mut wall = Vec::with_capacity(hidden);
+    for i in 0..hidden {
+        let id = archive(
+            &store,
+            &triaged(acct, &format!("g-h{i}"), &format!("t-h{i}"))
+                .subject("osprey migration")
+                .body("osprey migration")
+                .received_at(days_ago(100)),
+        );
+        store.upsert_message_vector(acct, id, &nearest).unwrap();
+        wall.push(id);
+    }
+    // The human door is unchanged: its nearest are the new rows, all of them.
+    let human: Vec<i64> = store
+        .semantic_search(acct, "osprey migration", 4096)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(human.len(), 4096);
+    assert!(human.iter().all(|id| wall.contains(id)));
+
+    let after = answers(&store);
+    for (search, hits) in before.as_object().unwrap() {
+        assert_eq!(
+            &after[search], hits,
+            "{search} changed with mail the caller cannot read"
+        );
+    }
+    for id in &wall {
+        assert_eq!(jobs(&store, *id), 0);
+    }
+}
+
+/// F1. WHAT THE EXACT SCAN COSTS. The external vector leg reads and measures
+/// every readable vector of the account, so its time grows with readable mail
+/// where vec0's KNN does not. Ten thousand readable rows, timed, and the
+/// order checked against the human door's KNN over the same rows: same
+/// metric, same ranking.
+#[test]
+fn the_external_vector_leg_over_ten_thousand_readable_rows() {
+    use crate::embed::{Embedder, StubEmbedder};
+    use crate::store::{ExternalSearchMode, SearchSort};
+    let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
+    let (store, acct) = store_with_embedder(embedder.clone());
+    let words = [
+        "osprey",
+        "ledger",
+        "heron",
+        "visa",
+        "estuary",
+        "invoice",
+        "survey",
+        "migration",
+    ];
+    let rows = 10_000;
+    for i in 0..rows {
+        let body = format!(
+            "{} {} {} entry {i}",
+            words[i % 8],
+            words[(i / 8) % 8],
+            words[(i / 64) % 8]
+        );
+        let id = archive(
+            &store,
+            &triaged(acct, &format!("g-{i}"), &format!("t-{i}"))
+                .subject("notes")
+                .body(&body)
+                .received_at(days_ago(100 + (i % 900) as i64)),
+        );
+        embed_and_store(&store, embedder.as_ref(), acct, id, "notes", &body);
+    }
+    store
+        .lock()
+        .unwrap()
+        .execute("UPDATE agent_message_state SET access='allowed'", [])
+        .unwrap();
+    let query = embedder
+        .embed(&crate::embed::query_embed_text("osprey migration"))
+        .unwrap();
+    store.nearest_readable(acct, &query, 10).unwrap();
+    let started = std::time::Instant::now();
+    let exact = store
+        .nearest_readable(acct, &query, crate::store::EXTERNAL_RECALL_MAX)
+        .unwrap();
+    let leg = started.elapsed();
+    assert_eq!(exact.len(), crate::store::EXTERNAL_RECALL_MAX);
+    let started = std::time::Instant::now();
+    let hits = store
+        .external_search_filtered(
+            acct,
+            "osprey migration",
+            &Default::default(),
+            SearchSort::BestMatch,
+            ExternalSearchMode::Semantic,
+            10,
+        )
+        .unwrap();
+    let whole = started.elapsed();
+    assert_eq!(hits.len(), 10);
+    // How much of the leg is choosing the readable rows, before any vector
+    // is read: the same prefilter, counted.
+    let started = std::time::Instant::now();
+    let passing: i64 = store
+        .lock()
+        .unwrap()
+        .query_row(
+            concat!(
+                "SELECT COUNT(*) FROM messages m WHERE m.account_id=?1 AND m.is_spam=0 AND ",
+                external_candidate_sql!()
+            ),
+            params![acct],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let choosing = started.elapsed();
+    assert_eq!(passing, rows as i64);
+    eprintln!(
+        "F1 exact vector leg over {rows} readable rows: leg {leg:?} (of which choosing \
+         the readable rows {choosing:?}), whole semantic search (embed, leg, authority, \
+         hydrate) {whole:?}"
+    );
+    // Same metric as the KNN: the same distances in the same order.
+    let knn = store
+        .semantic_search(acct, "osprey migration", 200)
+        .unwrap();
+    let distance = |id: i64| -> f32 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT vec_distance_l2(embedding, ?2) FROM message_vecs WHERE message_id=?1",
+                params![id, zerocopy::AsBytes::as_bytes(query.as_slice())],
+                |r| r.get::<_, f64>(0),
+            )
+            .unwrap() as f32
+    };
+    for (rank, (id, knn_distance)) in knn.iter().enumerate() {
+        assert!((distance(*id) - knn_distance).abs() < 1e-5);
+        assert!((distance(exact[rank].id) - knn_distance).abs() < 1e-5);
+    }
+    // Generous: a debug build on a loaded machine. See the note on
+    // `nearest_readable` for what to do when an account outgrows it.
+    assert!(
+        leg < std::time::Duration::from_secs(2),
+        "the exact vector leg took {leg:?}"
+    );
+}
+
+/// m1. PROMOTION LEAVES THE ROW WITH WORK THAT CAN RUN. An agent's search
+/// bought a check on an archive row and the check failed for good. The owner
+/// then files the row by hand. It is live mail now, and the job it has is
+/// queued: a promoted row left pending behind a failed job would close its
+/// thread at the agent door with nothing ever due to judge it.
+#[test]
+fn a_promoted_row_whose_surfacing_check_failed_is_queued_again() {
+    let (store, acct) = store();
+    let fail_check = |old: i64| {
+        store
+            .request_archive_access(acct, &[old], Default::default(), Utc::now())
+            .unwrap();
+        let job = store
+            .claim_agent_job(acct, "access", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.message_id, old);
+        assert!(store.fail_agent_job(&job, "attempts_exhausted").unwrap());
+        assert_eq!(
+            job_rows(&store, old),
+            vec![("access".into(), "archive_access".into(), "failed".into())]
+        );
+    };
+    let runnable = |old: i64, trigger: &str| {
+        assert!(!is_archive(&store, old), "promoted");
+        let rows = job_rows(&store, old);
+        assert_eq!(rows.len(), 1, "the same job, not a second one");
+        assert_eq!(rows[0].0, "triage", "a live row now: full triage");
+        assert!(rows[0].1.starts_with(trigger), "{}", rows[0].1);
+        assert_eq!(rows[0].2, "queued");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT attempts FROM agent_triage_jobs WHERE message_id=?1",
+                old
+            ),
+            0
+        );
+        assert_eq!(state(&store, old).1, "pending");
+        let job = store
+            .claim_agent_job(acct, "investigation", Utc::now(), 120)
+            .unwrap()
+            .expect("and a worker can claim it");
+        assert_eq!(job.message_id, old);
+    };
+
+    // By a filing correction.
+    let old = heron_archive(&store, acct, 1)[0];
+    fail_check(old);
+    store
+        .correct_agent_triage(
+            acct,
+            old,
+            "show_in_fye",
+            &serde_json::json!(true),
+            Utc::now(),
+        )
+        .unwrap();
+    runnable(old, "correction:");
+
+    // By the owner's one-message re-triage.
+    let other = archive(
+        &store,
+        &triaged(acct, "g-other", "t-other")
+            .subject("heron census")
+            .received_at(days_ago(300)),
+    );
+    fail_check(other);
+    assert_eq!(store.retriage_reset(acct, Some(other), 7).unwrap(), 1);
+    runnable(other, "manual:");
+
+    // A completed check that left the access pending is no better than a
+    // failed one, and is queued again the same way.
+    let third = archive(
+        &store,
+        &triaged(acct, "g-third", "t-third")
+            .subject("heron atlas")
+            .received_at(days_ago(310)),
+    );
+    store
+        .request_archive_access(acct, &[third], Default::default(), Utc::now())
+        .unwrap();
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_triage_jobs SET state='completed' WHERE message_id=?1",
+            params![third],
+        )
+        .unwrap();
+    store
+        .correct_agent_triage(
+            acct,
+            third,
+            "show_in_fye",
+            &serde_json::json!(true),
+            Utc::now(),
+        )
+        .unwrap();
+    runnable(third, "correction:");
+}
+
+/// m5. REVIVING A FAILED CHECK NEVER MEETS THE JOBS' UNIQUE KEY. A row can
+/// hold two access jobs at one revision: an old `source_access` and an
+/// `archive_access`. Reviving the first renames it to the second's trigger,
+/// which the key (account, message, kind, revision, trigger) forbids.
+#[test]
+fn reviving_a_failed_check_beside_its_twin_breaks_no_unique_key() {
+    let (store, acct) = store();
+    let caps = Default::default();
+    let now = Utc::now();
+    // Two jobs on one row: `source_access` failed two days ago, and
+    // `archive_access` in `twin` state, last scheduled at `twin_at`.
+    let seed = |key: &str, twin: &str, twin_at: DateTime<Utc>| -> i64 {
+        let old = archive(
+            &store,
+            &triaged(acct, key, key)
+                .subject("heron survey")
+                .received_at(days_ago(200)),
+        );
+        store
+            .request_archive_access(acct, &[old], caps, now)
+            .unwrap();
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_triage_jobs SET state=?2,available_at=?3 WHERE message_id=?1",
+            params![old, twin, twin_at.to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,
+                 state,available_at,attempts,last_error)
+             SELECT account_id,message_id,kind,'source_access',input_revision,
+                 'failed',?2,6,'attempts_exhausted'
+             FROM agent_triage_jobs WHERE message_id=?1",
+            params![old, days_ago(2).to_rfc3339()],
+        )
+        .unwrap();
+        old
+    };
+    let later = now + chrono::Duration::hours(1);
+
+    // The twin completed and left the row pending: it is the one revived,
+    // and the failed job beside it is left as it was.
+    let completed = seed("g-completed", "completed", days_ago(3));
+    assert_eq!(
+        store
+            .request_archive_access(acct, &[completed], caps, later)
+            .unwrap(),
+        vec![completed]
+    );
+    assert_eq!(
+        job_rows(&store, completed),
+        vec![
+            ("access".into(), "archive_access".into(), "queued".into()),
+            ("access".into(), "source_access".into(), "failed".into()),
+        ]
+    );
+
+    // The twin failed an hour ago: the row's latest failure is not a day
+    // old, so nothing is revived, whatever older failure sits beside it.
+    let fresh = seed("g-fresh", "failed", now - chrono::Duration::hours(1));
+    assert!(
+        store
+            .request_archive_access(acct, &[fresh], caps, later)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        job_rows(&store, fresh),
+        vec![
+            ("access".into(), "archive_access".into(), "failed".into()),
+            ("access".into(), "source_access".into(), "failed".into()),
+        ]
+    );
+
+    // Both failed long ago: one is revived, as `archive_access`.
+    let both = seed("g-both", "failed", days_ago(3));
+    assert_eq!(
+        store
+            .request_archive_access(acct, &[both], caps, later)
+            .unwrap(),
+        vec![both]
+    );
+    assert_eq!(
+        job_rows(&store, both),
+        vec![
+            ("access".into(), "archive_access".into(), "queued".into()),
+            ("access".into(), "source_access".into(), "failed".into()),
+        ]
+    );
+}
+
+/// F1. THE SAME METRIC AS THE KNN. Two readable rows whose vectors the two
+/// usual metrics order oppositely: one points exactly the query's way and is
+/// ten times as long (nearest by angle, far by distance), the other is a
+/// little off and close by. The external leg and the human door's KNN agree,
+/// and both mean straight-line distance.
+#[test]
+fn the_external_vector_leg_ranks_by_the_knns_own_metric() {
+    use crate::embed::{Embedder, StubEmbedder};
+    let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
+    let (store, acct) = store_with_embedder(embedder.clone());
+    let query = embedder
+        .embed(&crate::embed::query_embed_text("osprey migration"))
+        .unwrap();
+    let add = |key: &str, vector: Vec<f32>| -> i64 {
+        let id = archive(
+            &store,
+            &triaged(acct, key, key)
+                .subject("field notes")
+                .received_at(days_ago(200)),
+        );
+        allow(&store, id);
+        store.upsert_message_vector(acct, id, &vector).unwrap();
+        id
+    };
+    let same_way_far_off = add("g-long", query.iter().map(|x| x * 10.0).collect());
+    let mut nudged = query.clone();
+    let spare = nudged.iter().position(|x| *x == 0.0).unwrap();
+    nudged[spare] = 0.3;
+    let close_by = add("g-close", nudged);
+
+    let knn: Vec<i64> = store
+        .semantic_search(acct, "osprey migration", 10)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(knn, vec![close_by, same_way_far_off], "vec0 ranks by L2");
+    let exact: Vec<i64> = store
+        .nearest_readable(acct, &query, 10)
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate.id)
+        .collect();
+    assert_eq!(exact, knn);
 }

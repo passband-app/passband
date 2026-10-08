@@ -1010,8 +1010,8 @@ impl Store for SqliteStore {
         self.set_archive_walked_to(account_id, walked_to)
     }
 
-    fn free_disk_bytes(&self) -> Result<u64> {
-        self.free_disk_bytes()
+    fn archive_disk(&self) -> Result<crate::store::ArchiveDisk> {
+        self.archive_disk()
     }
 
     fn archive_covered_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {

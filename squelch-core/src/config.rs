@@ -268,8 +268,23 @@ pub struct SyncConfig {
     /// the filesystem holding the database has less than this free, and holds
     /// off just the same when free space cannot be read. A year of bodies is
     /// the largest thing this daemon writes, and a full disk fails the LIVE
-    /// ingest, not the walk. 0 turns the check off. Config file only.
+    /// ingest, not the walk.
+    ///
+    /// THE FLOOR IN FORCE IS THIS OR A FIFTH OF THE WHOLE FILESYSTEM,
+    /// WHICHEVER IS LARGER. A volume can be shared (every hosted tenant's
+    /// database sits on one), and a fixed number of MiB is then a floor for
+    /// all of them together; a share of the volume is one that still means
+    /// something there. Once held, the walk resumes at the floor plus a
+    /// tenth, so it does not start and stop around one number.
+    ///
+    /// 0 turns the free-space check off, the fifth included. Config file only.
     pub archive_min_free_mb: u64,
+    /// THE ARCHIVE WALK'S CEILING ON ITS OWN DATABASE, in MiB: the walk stores
+    /// nothing while the database file plus its write-ahead log is this large
+    /// or larger. Free space is everybody's on a shared volume; this is the
+    /// one limit that is the account's alone. Live mail is never held by it.
+    /// 0 is no ceiling. Config file only.
+    pub archive_max_db_mb: u64,
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
     pub poll_secs: u64,
@@ -317,6 +332,7 @@ impl Default for SyncConfig {
             backfill_days: 30,
             archive_days: 365,
             archive_min_free_mb: 2048,
+            archive_max_db_mb: 4096,
             poll_secs: 5,
             fetch_concurrency: 2,
             spam_max: 200,
@@ -2554,6 +2570,7 @@ mod tests {
         assert_eq!(c.sync.backfill_days, 30);
         assert_eq!(c.sync.archive_days, 365);
         assert_eq!(c.sync.archive_min_free_mb, 2048);
+        assert_eq!(c.sync.archive_max_db_mb, 4096);
         assert_eq!(c.sync.poll_secs, 5);
         assert_eq!(c.sync.fetch_concurrency, 2);
         assert!(c.client_id.is_none());
@@ -3020,6 +3037,7 @@ archive_days = 730
         let names = [
             ["SQUELCH", "ARCHIVE", "DAYS"].join("_"),
             ["SQUELCH", "ARCHIVE", "MIN", "FREE", "MB"].join("_"),
+            ["SQUELCH", "ARCHIVE", "MAX", "DB", "MB"].join("_"),
             ["SQUELCH", "TRIAGE", "ARCHIVE", "ACCESS", "DAILY", "CAP"].join("_"),
         ];
         // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
@@ -3031,6 +3049,7 @@ archive_days = 730
         let mut c = Config::default();
         c.sync.archive_days = 730;
         c.sync.archive_min_free_mb = 512;
+        c.sync.archive_max_db_mb = 900;
         c.triage.agent.archive_access_daily_cap = 9;
         c.apply_env_overrides();
         unsafe {
@@ -3040,15 +3059,56 @@ archive_days = 730
         }
         assert_eq!(c.sync.archive_days, 730);
         assert_eq!(c.sync.archive_min_free_mb, 512);
+        assert_eq!(c.sync.archive_max_db_mb, 900);
         assert_eq!(c.triage.agent.archive_access_daily_cap, 9);
         let d = Config::default();
         assert_eq!(
             (
                 d.sync.archive_days,
                 d.sync.archive_min_free_mb,
+                d.sync.archive_max_db_mb,
                 d.triage.agent.archive_access_daily_cap
             ),
-            (365, 2048, 50)
+            (365, 2048, 4096, 50)
+        );
+    }
+
+    /// THE ARCHIVE'S FOUR KEYS ARE READ FROM THE FILE, under the names the
+    /// docs give them. The file is the only place they can be set, so a key
+    /// that did not parse would be a setting nobody could change.
+    #[test]
+    fn the_four_archive_keys_load_from_toml() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("squelch-cfg-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[sync]
+archive_days = 730
+archive_min_free_mb = 512
+archive_max_db_mb = 900
+
+[triage.agent]
+archive_access_daily_cap = 9
+"#,
+        )
+        .unwrap();
+        let c = Config::load_from(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(c.sync.archive_days, 730);
+        assert_eq!(c.sync.archive_min_free_mb, 512);
+        assert_eq!(c.sync.archive_max_db_mb, 900);
+        assert_eq!(c.triage.agent.archive_access_daily_cap, 9);
+        // Every one of them differs from its default, so none passed by it.
+        let d = Config::default();
+        assert_ne!(c.sync.archive_days, d.sync.archive_days);
+        assert_ne!(c.sync.archive_min_free_mb, d.sync.archive_min_free_mb);
+        assert_ne!(c.sync.archive_max_db_mb, d.sync.archive_max_db_mb);
+        assert_ne!(
+            c.triage.agent.archive_access_daily_cap,
+            d.triage.agent.archive_access_daily_cap
         );
     }
 

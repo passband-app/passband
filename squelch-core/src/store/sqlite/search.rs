@@ -215,8 +215,8 @@ fn push_filter_clauses(sql: &mut String, args: &mut Vec<Value>, filter: &SearchF
 /// blend has to happen BEFORE the top-`k` truncation, which is exactly when a
 /// hydrated `SearchHit` does not exist yet.
 #[derive(Clone, Copy)]
-struct Candidate {
-    id: i64,
+pub(super) struct Candidate {
+    pub(super) id: i64,
     received_at: DateTime<Utc>,
 }
 
@@ -288,8 +288,7 @@ fn fuse_ranked(lists: &[&[Candidate]], sort: SearchSort, now: DateTime<Utc>) -> 
 /// The widest recall window an external search may grow to, counted in rows
 /// that passed the external prefilter (`external_candidate_sql!`): mail the
 /// caller cannot be shown never takes a place in it. It bounds the per-row
-/// authority checks one search can run under the store mutex, and it is also
-/// sqlite-vec's own ceiling for one KNN query.
+/// authority checks one search can run under the store mutex.
 pub const EXTERNAL_RECALL_MAX: usize = 4096;
 
 /// WHO A RECALL LEG IS FETCHING FOR. `Internal` is the human door and the
@@ -342,7 +341,7 @@ struct ExternalLeg {
     /// How many rows `ranked` was fetched to hold; 0 before the first fetch.
     depth: usize,
     /// Whether a deeper fetch can return more (the keyword leg), or `ranked`
-    /// is all there will be (one KNN, already at its ceiling).
+    /// is all there will be (the vector leg, fetched once at its ceiling).
     grows: bool,
     verdicts: HashMap<i64, bool>,
 }
@@ -525,12 +524,12 @@ impl SqliteStore {
     /// the hits are rehydrated through [`Self::external_search_hits`] on the
     /// way out, which asks the authority once more.
     ///
-    /// THE QUERY IS EMBEDDED ONCE and the vector leg is asked once, for the
-    /// most sqlite-vec returns in one KNN; each wider window is a longer
-    /// prefix of that same list. KNN cannot carry the prefilter into its
-    /// ranking (it is applied to the neighbours it returns), so a readable
-    /// row farther out than that many nearer rows is found by the keyword
-    /// leg or not at all.
+    /// THE QUERY IS EMBEDDED ONCE and the vector leg is asked once
+    /// ([`Self::nearest_readable`]), for the [`EXTERNAL_RECALL_MAX`] nearest
+    /// rows AMONG THOSE THAT PASS THE PREFILTER; each wider window is a longer
+    /// prefix of that same list. It is not the human door's KNN, which picks
+    /// its neighbours over the whole account and would let mail the caller
+    /// cannot read fill the list.
     pub fn external_search_filtered(
         &self,
         account_id: AccountId,
@@ -548,12 +547,11 @@ impl SqliteStore {
                 return Ok(ExternalLeg::fixed(Vec::new()));
             };
             let qvec = embedder.embed(&crate::embed::query_embed_text(text))?;
-            Ok(ExternalLeg::fixed(
-                self.knn_by_vector(account_id, &qvec, EXTERNAL_RECALL_MAX, Audience::External)?
-                    .into_iter()
-                    .map(|(c, _dist)| c)
-                    .collect(),
-            ))
+            Ok(ExternalLeg::fixed(self.nearest_readable(
+                account_id,
+                &qvec,
+                EXTERNAL_RECALL_MAX,
+            )?))
         };
         match mode {
             ExternalSearchMode::Hybrid => {
@@ -785,23 +783,22 @@ impl SqliteStore {
             .embedder()
             .ok_or_else(|| CoreError::InvalidInput("no embedder attached".into()))?;
         let qvec = embedder.embed(&crate::embed::query_embed_text(query_text))?;
-        self.knn_by_vector(account_id, &qvec, k, Audience::Internal)
+        self.knn_by_vector(account_id, &qvec, k)
     }
 
     /// Lower-level KNN used by [`semantic_knn`](Self::semantic_knn) (and reused
     /// by [`hybrid_search`]): given an already-computed query vector, return the
     /// `k` nearest account-owned messages for the account, each with its distance.
     ///
-    /// `audience` narrows the NEIGHBOURS RETURNED, like the spam test beside
-    /// it: vec0 picks its `k` first and the joins filter afterwards, so an
-    /// external caller gets the readable ones among the `k` nearest, not the
-    /// `k` nearest readable.
+    /// THE HUMAN DOOR AND THE DAEMON ONLY. vec0 picks its `k` over the whole
+    /// account and the joins filter afterwards, so this cannot be narrowed to
+    /// what an external caller may read; that caller's vector leg is
+    /// [`Self::nearest_readable`].
     fn knn_by_vector(
         &self,
         account_id: AccountId,
         query: &[f32],
         k: usize,
-        audience: Audience,
     ) -> Result<Vec<(Candidate, f32)>> {
         if query.len() != VEC_DIMS {
             return Err(CoreError::InvalidInput(format!(
@@ -813,7 +810,7 @@ impl SqliteStore {
         // vec0 KNN: MATCH the embedding, constrain by the account_id metadata
         // column, cap with `k = ?`, then re-join triage to drop any sealed row
         // that should never have been indexed in the first place.
-        let mut stmt = conn.prepare(&format!(
+        let mut stmt = conn.prepare(
             "SELECT v.message_id, v.distance, m.received_at
              FROM message_vecs v
              JOIN messages m ON m.id = v.message_id
@@ -821,10 +818,9 @@ impl SqliteStore {
              WHERE v.embedding MATCH ?1
                AND v.account_id = ?2
                AND v.k = ?3
-               AND m.is_spam = 0{}
+               AND m.is_spam = 0
              ORDER BY v.distance",
-            audience.clause()
-        ))?;
+        )?;
         let rows = stmt.query_map(params![query.as_bytes(), account_id, k as i64], |r| {
             Ok((
                 Candidate {
@@ -833,6 +829,66 @@ impl SqliteStore {
                 },
                 r.get::<_, f64>(1)? as f32,
             ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// THE EXTERNAL VECTOR LEG: the `k` nearest messages AMONG THOSE THAT PASS
+    /// THE PREFILTER (`external_candidate_sql!`), nearest first. An exact
+    /// scan, not vec0's KNN: the readable rows are chosen first, each one's
+    /// stored vector is read by its key, and the distance is computed in SQL.
+    /// A row the caller cannot be shown is never measured, so no number of
+    /// them, however near, moves a readable row down this list or off it.
+    ///
+    /// `vec_distance_l2` because `message_vecs` declares no `distance_metric`
+    /// and L2 is vec0's default: the same number [`Self::knn_by_vector`]
+    /// orders by, so the two doors rank the same rows the same way.
+    ///
+    /// STILL ONLY A PREFILTER. Every row returned goes through the authority
+    /// ([`ExternalLeg`], then [`Self::external_search_hits`]) like any other.
+    ///
+    /// COST: one vector read and one 384-wide distance per readable row of
+    /// the account, with no index.
+    /// `the_external_vector_leg_over_ten_thousand_readable_rows` in
+    /// tests/archive.rs times it.
+    pub(super) fn nearest_readable(
+        &self,
+        account_id: AccountId,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<Candidate>> {
+        if query.len() != VEC_DIMS {
+            return Err(CoreError::InvalidInput(format!(
+                "query embedding len {} != vec0 width {VEC_DIMS}",
+                query.len()
+            )));
+        }
+        let conn = self.lock()?;
+        // CROSS JOIN pins the order: readable rows first, then a point read of
+        // each one's vector. `+v.account_id` keeps that test out of vec0's
+        // planner, which would otherwise be offered it as a KNN constraint.
+        // Ties break on the id so the list is the same list every time.
+        let mut stmt = conn.prepare_cached(concat!(
+            "SELECT m.id, m.received_at
+             FROM messages m
+             CROSS JOIN message_vecs v ON v.message_id = m.id
+             WHERE m.account_id = ?2
+               AND m.is_spam = 0
+               AND +v.account_id = ?2
+               AND ",
+            external_candidate_sql!(),
+            " ORDER BY vec_distance_l2(v.embedding, ?1), m.id
+             LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![query.as_bytes(), account_id, k as i64], |r| {
+            Ok(Candidate {
+                id: r.get::<_, i64>(0)?,
+                received_at: dt(r, 1)?,
+            })
         })?;
         let mut out = Vec::new();
         for row in rows {
@@ -932,7 +988,7 @@ impl SqliteStore {
                 // sqlite-vec caps one nearest-neighbor query at 4096. For the
                 // human door, which pages as deep as it likes, keyword recall
                 // keeps expanding beyond the semantic window.
-                self.knn_by_vector(account_id, &qvec, k.min(4096), Audience::Internal)?
+                self.knn_by_vector(account_id, &qvec, k.min(4096))?
                     .into_iter()
                     .map(|(c, _dist)| c)
                     .collect()

@@ -916,22 +916,26 @@ pub enum ArchiveHold {
     Window = 2,
     /// The embedder's init has not resolved either way.
     Embedder = 3,
-    /// Under `sync.archive_min_free_mb`, or free space could not be read.
+    /// Under the free-space floor (`sync.archive_min_free_mb` or a fifth of
+    /// the volume), or free space could not be read.
     Disk = 4,
     /// The clock reads before 2024.
     Clock = 5,
     /// Gmail refused the walk for quota three times this UTC day.
     QuotaDay = 6,
+    /// The database itself is at `sync.archive_max_db_mb`.
+    DbSize = 7,
 }
 
 impl ArchiveHold {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Poll,
         Self::Window,
         Self::Embedder,
         Self::Disk,
         Self::Clock,
         Self::QuotaDay,
+        Self::DbSize,
     ];
 
     /// The `reason` label, and the word the log line uses.
@@ -943,6 +947,7 @@ impl ArchiveHold {
             Self::Disk => "disk",
             Self::Clock => "clock",
             Self::QuotaDay => "quota_day",
+            Self::DbSize => "db_size",
         }
     }
 }
@@ -1641,7 +1646,7 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
     e.family(
         "squelchd_archive_held",
         MetricKind::Gauge,
-        "1 for the reason the archive walk is currently holding off, else 0: poll (no successful poll yet), window (a backfill or catch-up is fetching), embedder (its init has not resolved), disk (under sync.archive_min_free_mb, or free space unreadable), clock (the clock reads before 2024), quota_day (Gmail refused the walk three times today).",
+        "1 for the reason the archive walk is currently holding off, else 0: poll (no successful poll yet), window (a backfill or catch-up is fetching), embedder (its init has not resolved), disk (free space under the larger of sync.archive_min_free_mb and a fifth of the volume, or unreadable), clock (the clock reads before 2024), quota_day (Gmail refused the walk three times today), db_size (the database is at sync.archive_max_db_mb).",
     );
     let held = metrics.archive_hold();
     for hold in ArchiveHold::ALL {
@@ -2802,6 +2807,11 @@ mod catchup_progress_tests {
                 )));
             }
         }
+        m.note_archive_hold(Some(ArchiveHold::DbSize));
+        assert_eq!(m.archive_hold(), Some(ArchiveHold::DbSize));
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_archive_held{reason=\"db_size\"} 1\n"));
+        assert!(text.contains("squelchd_archive_held{reason=\"disk\"} 0\n"));
         m.note_archive_hold(None);
         assert_eq!(m.archive_hold(), None);
         assert!(render(&m, None).contains("squelchd_archive_held{reason=\"disk\"} 0\n"));

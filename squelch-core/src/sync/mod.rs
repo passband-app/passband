@@ -1518,8 +1518,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// convenience.
     fn archive_hold(&self, hold: Option<ArchiveHold>) -> ArchiveStep {
         self.metrics.note_archive_hold(hold);
-        let before = std::mem::replace(&mut self.archive.state().hold, hold);
+        let (before, room) = {
+            let mut state = self.archive.state();
+            (
+                std::mem::replace(&mut state.hold, hold),
+                state.room_note.clone(),
+            )
+        };
         if before != hold {
+            self.archive.hold_changes.fetch_add(1, Ordering::Relaxed);
             match hold {
                 Some(hold) => eprintln!(
                     "squelch: archive walk holding ({}): {}",
@@ -1528,9 +1535,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                         ArchiveHold::Poll => "no poll has succeeded yet",
                         ArchiveHold::Window => "a window of mail is being fetched",
                         ArchiveHold::Embedder => "the embedder has not finished loading",
-                        ArchiveHold::Disk =>
-                            "the database volume is under sync.archive_min_free_mb, or its free \
-                             space could not be read",
+                        // The numbers, from the check that just refused.
+                        ArchiveHold::Disk | ArchiveHold::DbSize => room.as_str(),
                         ArchiveHold::Clock => "the clock reads before 2024",
                         ArchiveHold::QuotaDay => "Gmail refused it three times today",
                     }
@@ -1566,42 +1572,84 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self.archive.state().clock.unwrap_or_else(Utc::now)
     }
 
-    /// IS THERE ROOM TO STORE MORE. Below `sync.archive_min_free_mb` the walk
-    /// writes nothing, and a number that cannot be read is treated as no room:
-    /// the walk is the one writer here that can always wait. Measured on the
-    /// filesystem the database file itself is on (`Store::free_disk_bytes`),
-    /// and asked BEFORE EVERY BATCH as well as before every chunk: a chunk is
-    /// a whole week of mail, however much that is, and this floor is the only
-    /// thing between a heavy week and a full volume. The number is logged once
-    /// per stretch rather than every thirty seconds.
-    fn archive_has_room(&self) -> bool {
-        let floor_mb = self.config.sync.archive_min_free_mb;
-        if floor_mb == 0 {
-            return true;
+    /// IS THERE ROOM TO STORE MORE, and if not, which guard says so. Asked
+    /// BEFORE EVERY BATCH as well as before every chunk: a chunk is a whole
+    /// week of mail, however much that is, and these are the only things
+    /// between a heavy week and a full volume. A number that cannot be read
+    /// is no room: the walk is the one writer here that can always wait.
+    /// Nothing else asks this. Live mail is stored whatever it answers.
+    ///
+    /// THE FREE-SPACE FLOOR is `sync.archive_min_free_mb` or a fifth of the
+    /// whole filesystem ([`ARCHIVE_FLOOR_VOLUME_SHARE`], capped at 10 GiB),
+    /// whichever is larger,
+    /// measured on the filesystem the database file is on. The share is there
+    /// because that filesystem can be one every tenant's database is on: a
+    /// fixed 2 GiB is then the fleet's last 2 GiB, and each walk would write
+    /// until it was. ONCE HELD it resumes only at the floor plus a tenth
+    /// ([`ARCHIVE_FLOOR_RESUME_MARGIN`]); without the margin a walk sitting
+    /// at the floor starts, stores a batch, and stops, every thirty seconds.
+    ///
+    /// THE DATABASE CEILING is `sync.archive_max_db_mb` on this database's own
+    /// file and log: the one limit that is this account's alone, where free
+    /// space on a shared volume is whatever the neighbours left.
+    ///
+    /// Says nothing itself. The numbers are left for [`Self::archive_hold`],
+    /// which logs a hold once, when it starts.
+    fn archive_room(&self) -> Option<ArchiveHold> {
+        const MIB: u64 = 1024 * 1024;
+        let sync = &self.config.sync;
+        if sync.archive_min_free_mb == 0 && sync.archive_max_db_mb == 0 {
+            self.archive.state().disk_short = false;
+            return None;
         }
-        let free = match self.archive.state().free_probe {
+        let disk = match self.archive.state().disk_probe {
             Some(probe) => probe(),
-            None => self.store.free_disk_bytes().ok(),
+            None => self.store.archive_disk().ok(),
         };
-        let room = free.is_some_and(|bytes| bytes / (1024 * 1024) >= floor_mb);
         let mut state = self.archive.state();
-        if room {
-            state.room_logged = false;
-        } else if !state.room_logged {
-            state.room_logged = true;
-            match free {
-                Some(bytes) => eprintln!(
-                    "squelch: archive walk paused: {} MiB free on the database volume, under the \
-                     {floor_mb} MiB floor (sync.archive_min_free_mb)",
-                    bytes / (1024 * 1024)
-                ),
-                None => eprintln!(
-                    "squelch: archive walk paused: free space on the database volume could not \
-                     be read"
-                ),
+        let Some(disk) = disk else {
+            // With the free-space check switched off, an unreadable volume
+            // holds nothing, as it never did: 0 means "whatever the disk
+            // says". The ceiling goes unread with it, on the one kind of
+            // host (no `statvfs`) where nothing here can be measured.
+            if sync.archive_min_free_mb == 0 {
+                state.disk_short = false;
+                return None;
+            }
+            state.room_note = "the database volume could not be measured".into();
+            return Some(ArchiveHold::Disk);
+        };
+        if sync.archive_min_free_mb == 0 {
+            state.disk_short = false;
+        } else {
+            let floor = archive_floor_bytes(sync.archive_min_free_mb, disk.total_bytes);
+            let needed = if state.disk_short {
+                floor.saturating_add(floor / ARCHIVE_FLOOR_RESUME_MARGIN)
+            } else {
+                floor
+            };
+            state.disk_short = disk.free_bytes < needed;
+            if state.disk_short {
+                state.room_note = format!(
+                    "{} MiB free on the database volume; the floor is {} MiB (the larger of \
+                     sync.archive_min_free_mb and a fifth of the volume, capped at 10 GiB) and it resumes at {} MiB",
+                    disk.free_bytes / MIB,
+                    floor / MIB,
+                    floor.saturating_add(floor / ARCHIVE_FLOOR_RESUME_MARGIN) / MIB
+                );
+                return Some(ArchiveHold::Disk);
             }
         }
-        room
+        let ceiling = sync.archive_max_db_mb.saturating_mul(MIB);
+        if ceiling != 0 && disk.db_bytes >= ceiling {
+            state.room_note = format!(
+                "the database is {} MiB, at its {} MiB ceiling (sync.archive_max_db_mb)",
+                disk.db_bytes / MIB,
+                sync.archive_max_db_mb
+            );
+            return Some(ArchiveHold::DbSize);
+        }
+        None
     }
 
     /// How long the lane waits after the error the last chunk returned: the
@@ -1666,8 +1714,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 return Ok(self.archive_hold(Some(ArchiveHold::QuotaDay)));
             }
         }
-        if !self.archive_has_room() {
-            return Ok(self.archive_hold(Some(ArchiveHold::Disk)));
+        if let Some(full) = self.archive_room() {
+            return Ok(self.archive_hold(Some(full)));
         }
         self.archive_hold(None);
 
@@ -1681,6 +1729,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             Ok(ArchiveStep::Walked) => {
                 // The chunk is behind the cursor; so is what failed in it.
                 state.failing = None;
+                state.skips_counted.clear();
                 state.quota_wait = None;
                 state.quota_backoff = None;
             }
@@ -1928,13 +1977,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 self.archive_hold(Some(gate));
                 return Ok(None);
             }
-            // THE DISK FLOOR, PER BATCH. One chunk is a week of mail and can
+            // THE DISK GUARDS, PER BATCH. One chunk is a week of mail and can
             // be thousands of bodies; asked only at its start, a heavy week
-            // would be written straight through the floor. Stopping here
-            // loses nothing: the cursor has not moved, and what this chunk
-            // already stored is skipped when the walk comes back to it.
-            if !self.archive_has_room() {
-                self.archive_hold(Some(ArchiveHold::Disk));
+            // would be written straight through the floor or the ceiling.
+            // Stopping here loses nothing: the cursor has not moved, and what
+            // this chunk already stored is skipped when the walk comes back.
+            if let Some(full) = self.archive_room() {
+                self.archive_hold(Some(full));
                 return Ok(None);
             }
             let wait =
@@ -1991,9 +2040,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// AT MOST [`ArchivePace::poison_skips`] A PASS. A message Gmail will not
     /// serve is one or two; more than a handful failing over and over is an
     /// outage or a broken store, and the chunk stays where it is.
+    ///
+    /// COUNTED ONCE. A chunk that fails for some other reason is walked again,
+    /// and a message already stepped over is stepped over again on every one
+    /// of those passes; the counter is of messages, not of steps.
     fn archive_skip(&self, id: &str, error: &CoreError, quota_or_auth_before: u64) -> bool {
         if matches!(error, CoreError::NotFound) {
-            self.metrics.count_archive_skipped();
+            if self.archive.state().count_skip(id) {
+                self.metrics.count_archive_skipped();
+            }
             return true;
         }
         if matches!(error, CoreError::Credential(_))
@@ -2008,7 +2063,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         {
             return false;
         }
-        self.metrics.count_archive_skipped();
+        if self.archive.state().count_skip(id) {
+            self.metrics.count_archive_skipped();
+        }
         true
     }
 
@@ -3751,6 +3808,27 @@ impl Default for ArchivePace {
 /// archive walk writes nothing by it. See [`SyncEngine::archive_walk_chunk`].
 const ARCHIVE_CLOCK_FLOOR_UNIX: i64 = 1_704_067_200;
 
+/// The archive walk's free-space floor is never less than the filesystem's
+/// size divided by this: a fifth. See [`SyncEngine::archive_room`].
+const ARCHIVE_FLOOR_VOLUME_SHARE: u64 = 5;
+
+/// The most the volume share may ask for. A fifth of a 50 GiB tenant volume
+/// is a sensible reserve; a fifth of a laptop's terabyte is 200 GiB the walk
+/// has no claim on, and would hold it on any ordinarily full disk.
+const ARCHIVE_FLOOR_SHARE_CAP: u64 = 10 * 1024 * 1024 * 1024;
+
+/// The free-space floor in bytes: the configured floor, or the volume share
+/// capped at [`ARCHIVE_FLOOR_SHARE_CAP`], whichever is larger.
+fn archive_floor_bytes(min_free_mb: u64, total_bytes: u64) -> u64 {
+    min_free_mb
+        .saturating_mul(1024 * 1024)
+        .max((total_bytes / ARCHIVE_FLOOR_VOLUME_SHARE).min(ARCHIVE_FLOOR_SHARE_CAP))
+}
+
+/// A walk held by the free-space floor resumes at the floor plus the floor
+/// divided by this: a tenth more.
+const ARCHIVE_FLOOR_RESUME_MARGIN: u64 = 10;
+
 /// What the archive walk keeps between chunks, and the two flags it raises
 /// for the rest of the engine. All of it is in memory and none of it is the
 /// walk's position (that is the stored cursor): a restart forgets a backoff
@@ -3764,6 +3842,9 @@ struct ArchiveRun {
     in_flight: AtomicBool,
     /// Messages the pass now running has stepped over for failing repeatedly.
     skipped: std::sync::atomic::AtomicU32,
+    /// How many times the hold has started, changed or ended, which is how
+    /// many lines [`SyncEngine::archive_hold`] has logged.
+    hold_changes: AtomicU64,
     /// Quota and credential refusals Gmail has given the walk, ever. Counters
     /// rather than a last-error slot so a caller compares before and after its
     /// own work and concurrent fetches cannot overwrite each other.
@@ -3787,6 +3868,9 @@ struct ArchiveState {
     /// The ids already booked in the pass now running, so one pass counts
     /// once however many times it meets an id.
     failed_this_pass: std::collections::HashSet<String>,
+    /// The ids of the chunk being walked that the skipped-messages counter
+    /// has already counted. Kept and dropped with `failing`.
+    skips_counted: std::collections::HashSet<String>,
     /// What the walk last said was holding it off; `None` for nothing.
     hold: Option<ArchiveHold>,
     /// The wait the next quota refusal earns; `None` is the starting one.
@@ -3800,11 +3884,15 @@ struct ArchiveState {
     minute: Option<(tokio::time::Instant, usize)>,
     /// When the forward pass last found nothing left to cover.
     forward_caught_up: Option<tokio::time::Instant>,
-    /// The disk floor's pause has been logged for this stretch.
-    room_logged: bool,
-    /// Test seams: a fixed clock, and a stand-in for the store's free space.
+    /// THE FREE-SPACE FLOOR IS HOLDING THE WALK. While it is, room means the
+    /// floor plus its margin; see [`SyncEngine::archive_room`].
+    disk_short: bool,
+    /// What the last disk guard to refuse measured, for the hold's log line.
+    /// Numbers and setting names only.
+    room_note: String,
+    /// Test seams: a fixed clock, and a stand-in for the store's disk numbers.
     clock: Option<DateTime<Utc>>,
-    free_probe: Option<fn() -> Option<u64>>,
+    disk_probe: Option<fn() -> Option<crate::store::ArchiveDisk>>,
 }
 
 impl ArchiveRun {
@@ -3830,8 +3918,15 @@ impl ArchiveState {
             .is_none_or(|(failing, _)| *failing != chunk)
         {
             self.failing = Some((chunk, std::collections::HashMap::new()));
+            self.skips_counted.clear();
         }
         self.failed_this_pass.clear();
+    }
+
+    /// `id` is being stepped over. Returns whether this is the first time in
+    /// this chunk, which is when it is counted.
+    fn count_skip(&mut self, id: &str) -> bool {
+        self.skips_counted.insert(id.to_string())
     }
 
     /// `id` failed in the pass now running. Returns on how many EARLIER
@@ -7583,6 +7678,16 @@ mod tests {
         eng
     }
 
+    /// Disk numbers in MiB, for the walk's `disk_probe`.
+    fn disk_mb(free: u64, total: u64, db: u64) -> crate::store::ArchiveDisk {
+        const MIB: u64 = 1024 * 1024;
+        crate::store::ArchiveDisk {
+            free_bytes: free * MIB,
+            total_bytes: total * MIB,
+            db_bytes: db * MIB,
+        }
+    }
+
     /// A shutdown channel nobody fires. The sender is returned to be held: a
     /// dropped one reads as "changed" forever.
     fn never_shutdown() -> (
@@ -8321,10 +8426,11 @@ mod tests {
         assert_eq!(eng.config.sync.archive_min_free_mb, 2048);
         let (_tx, mut rx) = never_shutdown();
 
-        for short in [(|| Some(2047 * 1024 * 1024)) as fn() -> Option<u64>, || {
-            None
-        }] {
-            eng.archive.state().free_probe = Some(short);
+        for short in [
+            (|| Some(disk_mb(2047, 0, 0))) as fn() -> Option<crate::store::ArchiveDisk>,
+            || None,
+        ] {
+            eng.archive.state().disk_probe = Some(short);
             assert_eq!(
                 eng.archive_walk_chunk(&mut rx).await.unwrap(),
                 ArchiveStep::Held
@@ -8333,14 +8439,22 @@ mod tests {
         assert!(g.seen().is_empty(), "held means off the wire");
         assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
 
+        // Nothing free on a volume of any size: 0 switches off the fifth too.
+        eng.archive.state().disk_probe = Some(|| Some(disk_mb(0, 50 * 1024, 0)));
         eng.config.sync.archive_min_free_mb = 0;
         assert_eq!(
             eng.archive_walk_chunk(&mut rx).await.unwrap(),
             ArchiveStep::Walked,
             "0 is no floor, whatever the disk says"
         );
+        eng.archive.state().disk_probe = Some(|| None);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked,
+            "or cannot say"
+        );
         eng.config.sync.archive_min_free_mb = 2048;
-        eng.archive.state().free_probe = Some(|| Some(2048 * 1024 * 1024));
+        eng.archive.state().disk_probe = Some(|| Some(disk_mb(2048, 0, 0)));
         assert_eq!(
             eng.archive_walk_chunk(&mut rx).await.unwrap(),
             ArchiveStep::Walked,
@@ -8348,7 +8462,7 @@ mod tests {
         );
         // With no probe the engine asks the store, and an in-memory database
         // has no disk to fill.
-        eng.archive.state().free_probe = None;
+        eng.archive.state().disk_probe = None;
         assert_eq!(
             eng.archive_walk_chunk(&mut rx).await.unwrap(),
             ArchiveStep::Walked
@@ -8589,6 +8703,58 @@ mod tests {
         );
     }
 
+    /// m4. A SKIPPED MESSAGE IS COUNTED ONCE. A chunk holds a message deleted
+    /// before its fetch and one Gmail will not serve. The chunk is walked
+    /// four times before it passes, and the deleted message is stepped over
+    /// on every one of them: two messages were skipped, and the counter says
+    /// two, not five.
+    #[tokio::test]
+    async fn a_message_stepped_over_on_every_pass_is_counted_once() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        // Listed, and no body behind it: the mock answers 404.
+        g.0.lock()
+            .unwrap()
+            .all_mail
+            .push((at.timestamp(), "g-gone".to_string()));
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-bad".to_string(),
+            std::iter::repeat_n((500, "backendError".to_string()), 10).collect(),
+        );
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.config.sync.fetch_concurrency = 1;
+        let (_tx, mut rx) = never_shutdown();
+
+        for _ in 1..=3 {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+            assert_eq!(eng.metrics.archive_skipped(), 1, "the deleted one, once");
+        }
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-gone"), 4, "stepped over on every pass");
+        assert_eq!(g.calls("get:g-bad"), 4);
+        assert_eq!(eng.metrics.archive_skipped(), 2, "two messages, two counts");
+
+        // The next chunk is its own: a message gone from it is counted.
+        let at = cursor - ChronoDuration::days(8);
+        g.0.lock()
+            .unwrap()
+            .all_mail
+            .push((at.timestamp(), "g-gone-2".to_string()));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(eng.metrics.archive_skipped(), 3);
+    }
+
     /// A TRANSIENT ERROR NEVER COSTS A MESSAGE. Gmail fails one body for a
     /// quarter of an hour and then a different one once. Counted per CHUNK,
     /// the fourth pass was "tolerant" and dropped the second message on its
@@ -8823,12 +8989,11 @@ mod tests {
         use std::sync::atomic::AtomicUsize;
         // Room for the chunk's own check and the first batch's, then none.
         static ASKED: AtomicUsize = AtomicUsize::new(0);
-        fn filling_up() -> Option<u64> {
-            let floor = 2048 * 1024 * 1024;
+        fn filling_up() -> Option<crate::store::ArchiveDisk> {
             Some(if ASKED.fetch_add(1, Ordering::SeqCst) < 2 {
-                floor
+                disk_mb(2048, 0, 0)
             } else {
-                floor - 1
+                disk_mb(2047, 0, 0)
             })
         }
         let (store, acct) = store_at_cursor(Some(100));
@@ -8846,7 +9011,7 @@ mod tests {
         let (_tx, mut rx) = never_shutdown();
         let fetched = |g: &MockGmail| g.seen().iter().filter(|s| s.starts_with("get:")).count();
 
-        eng.archive.state().free_probe = Some(filling_up);
+        eng.archive.state().disk_probe = Some(filling_up);
         assert_eq!(
             eng.archive_walk_chunk(&mut rx).await.unwrap(),
             ArchiveStep::Held
@@ -8870,7 +9035,7 @@ mod tests {
         assert_eq!(g.seen().len(), served, "held means off the wire");
 
         // Room again: the other fifteen, and only those.
-        eng.archive.state().free_probe = Some(|| Some(u64::MAX));
+        eng.archive.state().disk_probe = Some(|| Some(crate::store::ArchiveDisk::UNBOUNDED));
         assert_eq!(
             eng.archive_walk_chunk(&mut rx).await.unwrap(),
             ArchiveStep::Walked
@@ -8882,6 +9047,176 @@ mod tests {
             Some(cursor - ChronoDuration::days(7))
         );
         assert_eq!(eng.metrics.archive_hold(), None);
+    }
+
+    /// F3. ON A VOLUME OTHER DATABASES SHARE, THE FLOOR IS A FIFTH OF IT. The
+    /// configured 2 GiB is everybody's last 2 GiB there, so the floor in force
+    /// is the larger of the two. AND IT DOES NOT FLAP: once held, the walk
+    /// resumes at the floor plus a tenth, and the hold is said once when it
+    /// starts and once when it ends. Live mail is stored throughout.
+    #[tokio::test]
+    async fn the_disk_floor_is_a_fifth_of_the_volume_and_resumes_with_a_margin() {
+        use std::sync::atomic::AtomicU64;
+        // A 50 GiB volume: the floor is 10 GiB and the walk resumes at 11.
+        const GIB: u64 = 1024;
+        static FREE_MB: AtomicU64 = AtomicU64::new(0);
+        fn shared() -> Option<crate::store::ArchiveDisk> {
+            Some(disk_mb(FREE_MB.load(Ordering::SeqCst), 50 * GIB, 0))
+        }
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let g = MockGmail::default();
+        let live_at = days_ago(1);
+        g.old_mail("g-live", live_at, alert_eml(live_at));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(eng.config.sync.archive_min_free_mb, 2048);
+        let (_tx, mut rx) = never_shutdown();
+        eng.archive.state().disk_probe = Some(shared);
+        let changes = || eng.archive.hold_changes.load(Ordering::Relaxed);
+        let mut step = async |free_mb: u64| {
+            FREE_MB.store(free_mb, Ordering::SeqCst);
+            eng.archive_walk_chunk(&mut rx).await.unwrap()
+        };
+
+        // Four times the configured floor free, and still short of a fifth.
+        assert_eq!(step(8 * GIB).await, ArchiveStep::Held);
+        assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::Disk));
+        assert_eq!(changes(), 1);
+        assert!(g.seen().is_empty(), "held means off the wire");
+        // Back at the floor, and anywhere under floor plus a tenth: held, and
+        // nothing more said about it.
+        for free_mb in [10 * GIB - 1, 10 * GIB, 10 * GIB + 512, 11 * GIB - 1] {
+            assert_eq!(step(free_mb).await, ArchiveStep::Held, "{free_mb} MiB free");
+        }
+        assert_eq!(changes(), 1, "one line for the whole stretch");
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        // LIVE MAIL IS NOT THE WALK'S TO HOLD: it is stored under the floor.
+        eng.fetch_raw_and_ingest(
+            &["g-live".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            GmailRetry::None,
+        )
+        .await
+        .unwrap();
+        assert!(stored(&store, acct, "g-live"));
+        assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::Disk));
+
+        // The margin reached: it walks, and says so once.
+        assert_eq!(step(11 * GIB).await, ArchiveStep::Walked);
+        assert_eq!(eng.metrics.archive_hold(), None);
+        assert_eq!(changes(), 2);
+        // Not held, so the floor itself is room again: no second threshold
+        // for a walk that never stopped.
+        assert_eq!(step(10 * GIB).await, ArchiveStep::Walked);
+        assert_eq!(changes(), 2);
+        assert_eq!(step(10 * GIB - 1).await, ArchiveStep::Held);
+        assert_eq!(changes(), 3);
+    }
+
+    /// The volume share stops growing at 10 GiB, so a large, ordinarily full
+    /// disk does not hold the walk; the configured floor still wins when it
+    /// is the larger.
+    #[test]
+    fn the_volume_share_of_the_disk_floor_is_capped() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(archive_floor_bytes(2048, 5 * GIB), 2 * GIB);
+        assert_eq!(archive_floor_bytes(2048, 50 * GIB), 10 * GIB);
+        assert_eq!(archive_floor_bytes(2048, 926 * GIB), 10 * GIB);
+        assert_eq!(archive_floor_bytes(20 * 1024, 926 * GIB), 20 * GIB);
+    }
+
+    /// F3. THE ACCOUNT'S OWN CEILING. Free space on a shared volume is what
+    /// the neighbours left; the size of this database is this account's
+    /// alone. At `sync.archive_max_db_mb` the walk holds, with its own reason,
+    /// before a chunk and between its batches; 0 is no ceiling; and live mail
+    /// is stored regardless.
+    #[tokio::test]
+    async fn the_archive_walk_holds_at_its_own_database_ceiling() {
+        use std::sync::atomic::AtomicUsize;
+        // Under the ceiling for the chunk's own check and the first batch's,
+        // then at it. All the free space in the world throughout.
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        fn growing() -> Option<crate::store::ArchiveDisk> {
+            Some(if ASKED.fetch_add(1, Ordering::SeqCst) < 2 {
+                disk_mb(u64::MAX >> 20, 0, 4095)
+            } else {
+                disk_mb(u64::MAX >> 20, 0, 4096)
+            })
+        }
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        let ids: Vec<String> = (0..25).map(|i| format!("g-{i:02}")).collect();
+        for id in &ids {
+            g.old_mail(id, at, alert_eml(at));
+        }
+        let live_at = days_ago(1);
+        g.old_mail("g-live", live_at, alert_eml(live_at));
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(eng.config.sync.archive_max_db_mb, 4096);
+        let (_tx, mut rx) = never_shutdown();
+        let fetched = |g: &MockGmail| g.seen().iter().filter(|s| s.starts_with("get:")).count();
+
+        eng.archive.state().disk_probe = Some(growing);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(fetched(&g), 10, "one batch and no more");
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::DbSize));
+        assert_eq!(eng.archive.hold_changes.load(Ordering::Relaxed), 1);
+
+        // Still at it: nothing at all, not even the listing.
+        let served = g.seen().len();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(g.seen().len(), served, "held means off the wire");
+        assert_eq!(eng.archive.hold_changes.load(Ordering::Relaxed), 1);
+        // The free-space floor switched off does not switch this off.
+        eng.config.sync.archive_min_free_mb = 0;
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        eng.config.sync.archive_min_free_mb = 2048;
+
+        // LIVE MAIL IS NOT THE WALK'S TO HOLD.
+        eng.fetch_raw_and_ingest(
+            &["g-live".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            GmailRetry::None,
+        )
+        .await
+        .unwrap();
+        assert!(stored(&store, acct, "g-live"));
+
+        // 0 is no ceiling: the other fifteen, and only those.
+        eng.config.sync.archive_max_db_mb = 0;
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(fetched(&g), 26);
+        assert!(ids.iter().all(|id| stored(&store, acct, id)));
+        assert_eq!(eng.metrics.archive_hold(), None);
+        // And one MiB under it is room.
+        eng.config.sync.archive_max_db_mb = 4096;
+        eng.archive.state().disk_probe = Some(|| Some(disk_mb(u64::MAX >> 20, 0, 4095)));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
     }
 
     /// W3. A HELD WALK SAYS WHY. Each reason the walk can hold for reaches the
@@ -8908,10 +9243,10 @@ mod tests {
         {
             let mut state = eng.archive.state();
             state.clock = DateTime::from_timestamp(ARCHIVE_CLOCK_FLOOR_UNIX - 1, 0);
-            state.free_probe = Some(|| None);
+            state.disk_probe = Some(|| None);
         }
         let mut seen = Vec::new();
-        for lift in 0..6 {
+        for lift in 0..7 {
             match lift {
                 0 => {}
                 1 => eng.poll_healthy.store(true, Ordering::Relaxed),
@@ -8923,7 +9258,10 @@ mod tests {
                     state.quota_day = Some(now.date_naive());
                     state.quota_refusals_today = eng.archive_pace.quota_refusals_per_day;
                 }
-                _ => eng.archive.state().quota_refusals_today = 0,
+                5 => eng.archive.state().quota_refusals_today = 0,
+                _ => {
+                    eng.archive.state().disk_probe = Some(|| Some(disk_mb(u64::MAX >> 20, 0, 4096)))
+                }
             }
             assert_eq!(
                 eng.archive_walk_chunk(&mut rx).await.unwrap(),
@@ -8945,11 +9283,18 @@ mod tests {
                 ArchiveHold::Clock,
                 ArchiveHold::QuotaDay,
                 ArchiveHold::Disk,
+                ArchiveHold::DbSize,
             ]
         );
+        assert_eq!(seen.len(), ArchiveHold::ALL.len(), "every reason there is");
         assert!(g.seen().is_empty(), "held means off the wire, every time");
+        assert_eq!(
+            eng.archive.hold_changes.load(Ordering::Relaxed),
+            7,
+            "said once per change"
+        );
 
-        eng.archive.state().free_probe = Some(|| Some(u64::MAX));
+        eng.archive.state().disk_probe = Some(|| Some(crate::store::ArchiveDisk::UNBOUNDED));
         assert_eq!(
             eng.archive_walk_chunk(&mut rx).await.unwrap(),
             ArchiveStep::Walked

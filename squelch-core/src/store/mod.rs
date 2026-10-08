@@ -1489,6 +1489,27 @@ pub enum HealScope {
     TextAndTriage,
 }
 
+/// What the archive walk's disk guards measure, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveDisk {
+    /// Free to an unprivileged writer on the filesystem holding the database.
+    pub free_bytes: u64,
+    /// That whole filesystem's size. On a volume several tenants share it is
+    /// everybody's, which is why a share of it is part of the floor.
+    pub total_bytes: u64,
+    /// This database's own file plus its write-ahead log.
+    pub db_bytes: u64,
+}
+
+impl ArchiveDisk {
+    /// No disk to fill: all the room there is, and nothing used.
+    pub const UNBOUNDED: Self = Self {
+        free_bytes: u64::MAX,
+        total_bytes: 0,
+        db_bytes: 0,
+    };
+}
+
 /// The squelch local store. Implemented by [`SqliteStore`].
 ///
 /// SECURITY: every method that can feed the MCP surface (`ranked_updates`,
@@ -2069,12 +2090,11 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         covered_to: DateTime<Utc>,
     ) -> Result<()>;
 
-    /// Bytes free to an unprivileged writer on the filesystem holding the
-    /// database, for the archive walk's disk floor. `u64::MAX` for a database
-    /// that is not a file (in memory): there is no disk for it to fill. An
-    /// `Err` means the number could not be read, which the walk treats as "do
-    /// not write".
-    fn free_disk_bytes(&self) -> Result<u64>;
+    /// The three numbers the archive walk's disk guards read: see
+    /// [`ArchiveDisk`]. A database that is not a file (in memory) has no disk
+    /// to fill and answers [`ArchiveDisk::UNBOUNDED`]. An `Err` means the
+    /// numbers could not be read, which the walk treats as "do not write".
+    fn archive_disk(&self) -> Result<ArchiveDisk>;
 
     /// Whether the stored row `message_id` is an archive row. What a live
     /// ingest asks after [`Store::ingest_message`] hands back an id, to tell a

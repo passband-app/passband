@@ -271,9 +271,14 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   at eight seconds (MCP) or six (HTTP). `get_thread` waits the same way for the
   sibling checks its own open queued, BEFORE it applies the guard, so a thread
   is not served with a sibling missing and then closed when the verdict lands.
-- UNTIL THE ROW IS `allowed` THE CALLER LEARNS NOTHING ABOUT IT. No id, subject,
-  sender or snippet, and no count or flag either: a search that matched
-  unassessed archive mail returns the same bytes as one that matched nothing.
+- UNTIL THE ROW IS `allowed` NOTHING OF IT IS RETURNED. No id, subject, sender
+  or snippet, and no count or flag either. WHICH rows a search returns is the
+  same set whether or not mail the caller cannot read matched: a search that
+  matched only unassessed archive mail returns the same empty list as one that
+  matched nothing. That is a statement about membership and it is the whole
+  of the guarantee. The ORDER of the readable rows, and their `relevance`
+  numbers, are not covered by it at the keyword leg (residual 3), and neither
+  is how long the search took (residuals 1 and 2).
   An earlier draft reported a count of pending matches; that is an oracle (ask
   it about any word, phrase, sender or date and read the answer off mail nobody
   has cleared) and it must not come back in any form. What the response does
@@ -286,13 +291,23 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   in their own SQL (`external_candidate_sql!`: the row is `allowed`, the owner
   has not sealed it, and no sibling the thread guard counts is un-allowed or
   sealed), so a row the caller cannot be shown is never ranked, windowed or
-  hydrated. The prefilter is a necessary condition and authorizes nothing: each
+  hydrated. The keyword leg carries it in its FTS query. The vector leg does
+  not use the vec0 nearest-neighbour index at all for these callers, because
+  that index picks its neighbours over the whole account and can only be
+  filtered afterwards: it selects the rows that pass the prefilter first, reads
+  each one's stored vector, and orders them by `vec_distance_l2` (the metric
+  the vec0 table ranks by), keeping the nearest 4,096 (`nearest_readable`). A
+  hidden row is never measured, so no number of hidden rows, however near the
+  query, moves a readable row down that list or off it. The human door keeps
+  the vec0 index unchanged. The prefilter is a necessary condition and
+  authorizes nothing: each
   leg's list is then cut to what the AUTHORITY allows
   (`external_message_allowed_conn`, with its recursive check of every source a
   decision consumed, plus `thread_guard_and_subject`) BEFORE the legs are fused,
   and every hit is rehydrated through the same authority on the way out. Which
-  readable rows come back, in what order and with what `relevance`, is therefore
-  decided over readable mail (but see residual 3). Do not replace the authority
+  readable rows come back is therefore decided over readable mail alone. Their
+  order is too at the vector leg and in the fusion; at the keyword leg it is
+  not quite (residual 3). Do not replace the authority
   with the prefilter, and do not loosen one without the other:
   `the_external_prefilter_is_implied_by_the_authority` holds them together.
 - The rows a search asks an access check for are chosen by a separate query
@@ -300,18 +315,52 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   search itself runs once. A query with no text the index can look up
   (operators alone: a sender, a date range) is not a keyword match and buys
   nothing, at either door.
-- Accepted residuals. (1) The time a search takes still says that some
-  unassessed archive row keyword-matched and was queued; bounded by the
-  ceilings above, and carries no content. (2) Scoring every row a word matches
-  is work FTS5 does whether or not the caller may read them, so a word that
-  thousands of hidden rows say takes measurably longer than one nobody says
-  (about 17 ms against 0.3 ms over 4,200 hidden rows in a debug build; it was
-  1.3 s before the prefilter). (3) bm25's term weights and length
-  normalisation come from the whole index, so for a query of several words
-  where readable rows match different ones, their relative order can move with
-  how common each word is in mail the caller cannot read. (4) The vector leg
-  is one KNN of at most 4,096 neighbours, filtered afterwards: a readable row
-  farther out than that is found by the keyword leg or not at all.
+- Accepted residuals. None of these returns a field of a hidden row; each is
+  something a caller can infer from a response it was entitled to.
+  1. SURFACING TIME. The time a search takes says that some unassessed archive
+     row keyword-matched and a check was queued and waited for. Bounded by the
+     ceilings above, and carries no content.
+  2. KEYWORD LATENCY. A query whose words match hidden mail is slower than one
+     whose words match nothing. FTS5 walks and scores every row a word
+     matches before the prefilter can discard it, so the time grows with how
+     many hidden rows say the word. Measured in a debug build over 4,200
+     hidden rows that all match: 18 ms when one readable row matches too,
+     17 ms when only hidden rows match, 0.3 ms for a word nobody says (it was
+     1.3 s before the prefilter). A caller who can time its searches can
+     therefore tell "some mail I cannot read says this word, and roughly how
+     much" from "none does". Not bounded by the surfacing caps: no check is
+     queued and none is needed for the effect.
+  3. KEYWORD RANKING. Full-text relevance (bm25) is computed from word
+     statistics over the whole full-text index: how many stored messages
+     contain each word, and the average length of a stored message. The index
+     holds all mail, readable or not. So the relative order of two READABLE
+     hits, and their `relevance` numbers, can change with whether, and how
+     often, a word appears in mail the caller cannot read. That includes
+     unassessed archive mail, and it equally includes `restricted` and
+     owner-sealed LIVE mail. In plain terms: a caller with two readable
+     messages that each contain a different word can search for both words,
+     see which message ranks first, and learn something about whether one of
+     those words also appears in mail it cannot see. One mail carrying the
+     word is enough to flip the order of two otherwise evenly matched hits.
+     It is about one bit per query, a word-existence signal, never a field of
+     the hidden mail. Single-word queries are affected too, through the
+     average document length: enough long hidden messages reorder two
+     readable hits of different lengths. It applies to keyword mode and to
+     hybrid mode (the keyword leg's order feeds the fusion), not to semantic
+     mode. It PREDATES the archive tier: sealed and restricted live mail sits
+     in the same index and moves the same statistics; the archive adds more
+     hidden mail to the index, not a new channel. It is
+     NOT bounded by the surfacing caps, which limit model calls and not
+     searches. Removing it means scoring against statistics of readable mail
+     only, which FTS5 cannot do; that is a ranking change and has not been
+     made.
+  4. VECTOR LEG COST. The exact scan in `nearest_readable` reads and measures
+     every readable vector of the account on each semantic or hybrid agent
+     search, where the vec0 index would not. Its time depends on how much mail
+     the account holds, not on the query, so it says nothing about any word.
+     Measured in a debug build over 10,000 readable rows: about 245 ms for
+     the leg. A readable row beyond the 4,096 nearest READABLE rows is still
+     found by the keyword leg or not at all.
 - PROMOTION is the one way `is_archive` changes, 1 to 0 and never back: the
   owner, at the human door, re-triages one archive message or corrects how it
   is filed (`promote_archive_conn`, called from `retriage_reset`'s

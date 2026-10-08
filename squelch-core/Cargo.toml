@@ -62,7 +62,7 @@ zerocopy = { workspace = true }
 # session's heap actually leaves the process (see `mem.rs` for the
 # measurements); that call is a glibc entry point and is cfg-gated to glibc in
 # the source. And `statvfs` behind the archive walk's free-space floor
-# (`Store::free_disk_bytes`), which every unix has, the self-hosted Mac
+# (`Store::archive_disk`), which every unix has, the self-hosted Mac
 # included. So the dependency is scoped to unix rather than to glibc.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

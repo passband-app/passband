@@ -199,10 +199,11 @@ fn seed_contacts_conn(
 }
 
 /// `statvfs(2)` on `path`: the blocks an unprivileged writer may still take,
-/// in bytes. The one platform call behind the archive walk's disk floor.
+/// and the filesystem's whole size, both in bytes. The one platform call
+/// behind the archive walk's disk floor.
 #[cfg(unix)]
 #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-fn free_bytes_at(path: &std::path::Path) -> Result<u64> {
+fn volume_bytes_at(path: &std::path::Path) -> Result<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| CoreError::InvalidInput("database path holds a NUL byte".to_string()))?;
@@ -220,12 +221,16 @@ fn free_bytes_at(path: &std::path::Path) -> Result<u64> {
     let stat = unsafe { stat.assume_init() };
     // Widths differ by platform (32-bit block counts on macOS), hence the
     // casts and the allow above.
-    Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+    let block = stat.f_frsize as u64;
+    Ok((
+        (stat.f_bavail as u64).saturating_mul(block),
+        (stat.f_blocks as u64).saturating_mul(block),
+    ))
 }
 
 /// Nowhere else is there a `statvfs`, so nowhere else is the number known.
 #[cfg(not(unix))]
-fn free_bytes_at(_path: &std::path::Path) -> Result<u64> {
+fn volume_bytes_at(_path: &std::path::Path) -> Result<(u64, u64)> {
     Err(CoreError::Other(anyhow::anyhow!(
         "free disk space is not readable on this platform"
     )))
@@ -1484,8 +1489,11 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// See [`crate::store::Store::free_disk_bytes`].
-    pub(super) fn free_disk_bytes(&self) -> Result<u64> {
+    /// See [`crate::store::Store::archive_disk`]. The database's own size is
+    /// the main file plus its `-wal`: a walk writes there first, and a large
+    /// log is as much disk as a large file. A file that cannot be sized
+    /// counts as empty; the volume's numbers are the ones that must be read.
+    pub(super) fn archive_disk(&self) -> Result<crate::store::ArchiveDisk> {
         let file: String = {
             let conn = self.lock()?;
             conn.query_row(
@@ -1496,9 +1504,15 @@ impl SqliteStore {
             .unwrap_or_default()
         };
         if file.is_empty() {
-            return Ok(u64::MAX);
+            return Ok(crate::store::ArchiveDisk::UNBOUNDED);
         }
-        free_bytes_at(std::path::Path::new(&file))
+        let (free_bytes, total_bytes) = volume_bytes_at(std::path::Path::new(&file))?;
+        let size = |path: &str| std::fs::metadata(path).map_or(0, |meta| meta.len());
+        Ok(crate::store::ArchiveDisk {
+            free_bytes,
+            total_bytes,
+            db_bytes: size(&file).saturating_add(size(&format!("{file}-wal"))),
+        })
     }
 
     /// See [`crate::store::Store::archive_covered_to`]. A row from before the

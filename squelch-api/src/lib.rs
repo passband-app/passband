@@ -88,6 +88,9 @@ pub fn router(state: ApiState) -> Router {
             "/",
             axum::routing::get(|| async { axum::response::Redirect::temporary("/console") }),
         )
+        // gzip over the whole door, outermost: one layer, and the predicate
+        // below decides per response what is left alone.
+        .layer(compression_layer())
 }
 
 /// The `/client/*` router. Bearer auth is layered over every route in it: the
@@ -355,6 +358,41 @@ fn client_router(state: ApiState) -> Router {
                 .allow_headers(tower_http::cors::Any),
         )
         .with_state(state)
+}
+
+/// gzip, for any caller that asks (`Accept-Encoding: gzip`), at the fastest
+/// level. The bodies this door serves are JSON and server-rendered or
+/// sanitized HTML, which gzip cuts 5-10x, and the Swift client's `URLSession`
+/// asks on every request and decodes transparently. gzip is the only encoding
+/// compiled in (`compression-gzip`), so nothing here has to be switched on.
+///
+/// What is NOT compressed is the predicate's call, per response, and three of
+/// its rules carry real weight:
+///
+/// - `text/event-stream` (tower-http's default): the events stream and the
+///   assistant relay, which mirrors the upstream content-type. An SSE frame
+///   has to leave the process the moment it is written, and a gzip encoder
+///   would hold it.
+/// - images (default): the tracking pixel, the account photo, and image
+///   attachments, already-compressed bytes.
+/// - `application/octet-stream` and `application/pdf` (ours): the attachment
+///   door serves everything that is not a PDF or a non-SVG image as
+///   octet-stream (`handlers::safe_content_type`), and a PDF or an
+///   archive deflated on a worker thread comes out the same size for the
+///   CPU spent.
+///
+/// Bodies under 32 bytes (default) are left alone too: a gzip header costs
+/// more than it saves there.
+fn compression_layer()
+-> tower_http::compression::CompressionLayer<impl tower_http::compression::Predicate> {
+    use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+    tower_http::compression::CompressionLayer::new()
+        .quality(tower_http::CompressionLevel::Fastest)
+        .compress_when(
+            DefaultPredicate::new()
+                .and(NotForContentType::const_new("application/octet-stream"))
+                .and(NotForContentType::const_new("application/pdf")),
+        )
 }
 
 /// The Calendar page's routes, ALL BEHIND THE `calendar` HIDDEN FEATURE

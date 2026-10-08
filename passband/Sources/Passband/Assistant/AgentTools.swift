@@ -1090,12 +1090,21 @@ enum AgentTools {
                 Search the user's mailbox by meaning AND keyword (hybrid recall). \
                 Returns summaries only (sender, subject, date, a snippet, and a \
                 thread_id), never full bodies. Auth/2FA messages are excluded. Reach \
-                for this first when the question is about a specific message.
+                for this first when the question is about a specific message, and \
+                reach for it again, reworded, when the first try comes back empty: \
+                the right mail usually lacks one of the words you used. Operators \
+                go in the query beside the words: from:<name or address fragment>, \
+                after:YYYY-MM-DD, before:YYYY-MM-DD. A query of only operators \
+                lists the matching mail newest first.
                 """,
             input_schema: .init(
                 properties: [
-                    "query": .init(type: "string", description: "What to look for, phrased naturally."),
-                    "limit": .init(type: "integer", description: "Max results (default 8, max 20)."),
+                    "query": .init(
+                        type: "string",
+                        description: "What to look for, phrased naturally, plus any from:, after:, before: operators."),
+                    "limit": .init(
+                        type: "integer",
+                        description: "Max results (default 8, max 20). Use 20 when hunting for something."),
                 ],
                 required: ["query"])),
 
@@ -1151,7 +1160,11 @@ enum AgentTools {
                 to parse a receipt yourself: shipments (in flight, with carrier and \
                 status), receipts (amounts), calendar (invites and reservations), \
                 banking (statements, alerts, autopay), marketing (live offers and \
-                codes). Ask for one kind at a time.
+                codes). Ask for one kind at a time. It covers only mail RECEIVED \
+                inside the window (30 days unless widened, 90 at most) and only what \
+                the extractor recognized, so an empty result means nothing extracted \
+                lately, not nothing in the mailbox: widen the window, then search_mail \
+                for the same thing.
                 """,
             input_schema: .init(
                 properties: [
@@ -1160,9 +1173,10 @@ enum AgentTools {
                         values: ["shipments", "receipts", "bills", "calendar", "banking", "marketing"]),
                     "days": .init(
                         type: "integer",
-                        description: "Look-back window for receipts and marketing."),
+                        description: "How far back the mail was received, in days (default 30, max 90)."),
                     "hours": .init(
-                        type: "integer", description: "Look-ahead window for calendar."),
+                        type: "integer",
+                        description: "The same window in hours (max 2160); overrides days. It is when the mail arrived, not when the event is."),
                     "include_delivered": .init(
                         type: "boolean",
                         description: "Shipments only: include already-delivered parcels."),

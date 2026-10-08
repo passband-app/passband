@@ -1369,6 +1369,7 @@ final class AssistantSession {
     /// live property — the pin may move between requests, the question may not.
     private func system(_ pin: PinnedContext) -> String {
         let today = Date().formatted(.dateTime.month(.wide).day().year())
+        let year = Calendar.current.component(.year, from: Date())
         // The search lane's prompt lives in a pure file so its two properties
         // that cannot be seen on screen — no dash the house style forbids, and
         // every mail-derived line inside data markers — are asserted in
@@ -1383,8 +1384,9 @@ final class AssistantSession {
 
             Rules:
             - Be concise and direct. Lead with the answer, then the supporting detail.
-            - Ground every claim in what the tools returned. If you can't find it, say so
-              plainly rather than guessing.
+            - Ground every claim in what the tools returned. If you still can't find it
+              after the hunt described under Finding things, say so plainly rather than
+              guessing.
             - You are the user's stand-in: the whole point is that they never have to open
               the email themselves. Summarize; don't tell them to go read it.
             - Auth codes, 2FA, and password-reset messages are deliberately invisible to
@@ -1414,6 +1416,29 @@ final class AssistantSession {
               email?": showing is free and clickable, so just show it.
             - ACT: set_status, create_sender_rule, save_draft, archive_message,
               label_message, send_email, unsubscribe_sender.\(Self.helpTools)
+
+            Finding things:
+            - One empty result is not an answer. The mail that answers a question usually
+              lacks one of the words in it. Before you say you can't find something,
+              search AGAIN, at least twice more and differently each time: rephrase it,
+              drop a word, search only the rarest word, try the sender's name or company,
+              and raise the limit to 20.
+            - search_mail takes operators alongside the words: from:<name or address
+              fragment>, after:YYYY-MM-DD, before:YYYY-MM-DD. "The invoice Dan sent in
+              March" is "invoice from:dan after:\(year)-03-01 before:\(year)-04-01", and
+              "from:dan" alone lists everything Dan sent, newest first.
+            - get_records is a shortcut, never the whole story. It holds only what Passband
+              extracted from mail RECEIVED in its window, 30 days unless you widen it, 90
+              at most. Empty means "nothing extracted lately", not "not in the mailbox":
+              widen the window, then search_mail for the same thing, every time, without
+              being asked. A dinner reservation confirmed in July is not on the calendar
+              list in October; it is still in the mail.
+            - A snippet is the head of a message. When a thread looks right but the snippet
+              doesn't say, get_thread it: the sentence you need is usually further in.
+            - "I couldn't find it" comes only after the records, several differently worded
+              searches, and the promising threads have all come up empty. Then say in one
+              line what you searched for, so the user can correct the word instead of
+              repeating the ask.
 
             Acting:
             - archive_message, label_message, send_email, and unsubscribe_sender pause and

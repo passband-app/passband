@@ -2171,6 +2171,15 @@ final class FramePrewarmer {
     static let shared = FramePrewarmer()
 
     private var queue: [String] = []
+    /// THE OPEN THREAD'S OWN NEIGHBOURS: the messages just past either edge of
+    /// the window, which the reader is about to scroll onto. Served before the
+    /// board's queue, because these are a scroll away rather than a click.
+    private struct Neighbour {
+        let message: ClientMessage
+        let style: ThreadStyle
+        let width: CGFloat
+    }
+    private var neighbours: [Neighbour] = []
     private var running = false
     private var inflight: Set<WebFramePool.Key> = []
     /// Bumped by `wipe`: an account switch must abandon the queue AND refuse
@@ -2192,10 +2201,26 @@ final class FramePrewarmer {
         kick()
     }
 
+    /// The messages the open reader is about to scroll onto, nearest first.
+    /// Replaces the last answer: the window has moved, and what was next to
+    /// it a moment ago is either mounted now or behind it.
+    ///
+    /// A message mounting in a LAZY stack is a frame built at the moment it
+    /// comes into view: parse, layout and measure all happen with its space
+    /// already on screen, which is a blank box and then mail flashing into
+    /// it, once per message, all the way up a long thread. Rendered here
+    /// first, the mount is a pool hit and the message is simply there.
+    func ahead(_ messages: [ClientMessage], style: ThreadStyle, width: CGFloat) {
+        guard width > 0 else { return }
+        neighbours = messages.map { Neighbour(message: $0, style: style, width: width) }
+        kick()
+    }
+
     /// Account switch: nothing queued belongs to the new daemon.
     func wipe() {
         generation &+= 1
         queue.removeAll()
+        neighbours.removeAll()
         nudged?.cancel()
         nudged = nil
     }
@@ -2230,9 +2255,21 @@ final class FramePrewarmer {
         let gen = generation
         Task { @MainActor [weak self] in
             defer { self?.running = false }
-            while let self, gen == self.generation, !self.queue.isEmpty {
-                let next = self.queue.removeFirst()
-                await self.render(next, gen: gen)
+            while let self, gen == self.generation,
+                !(self.queue.isEmpty && self.neighbours.isEmpty)
+            {
+                if !self.neighbours.isEmpty {
+                    let next = self.neighbours.removeFirst()
+                    // The read tier, not the prerendered one: this is the
+                    // open thread's mail, and it must not push the board's
+                    // rows out of theirs.
+                    await self.render(
+                        next.message, style: next.style, width: next.width, prerendered: false,
+                        gen: gen)
+                } else {
+                    let next = self.queue.removeFirst()
+                    await self.render(next, gen: gen)
+                }
                 // A beat between renders, so a click landing mid-queue is
                 // served before the next document starts.
                 await Task.yield()
@@ -2264,10 +2301,18 @@ final class FramePrewarmer {
         let style = ThreadViewer.resolveStyle(
             threadId: threadId, messages: view.messages,
             readingMail: ThreadViewer.isReadingMail(threadId, store))
-        let bubble = style == .bubbles
-        let allowRemote = Prefs.shared.loadRemoteImages
         let width = ThreadViewer.expectedBodyWidth(style: style)
         guard width > 0 else { return }
+        await render(message, style: style, width: width, prerendered: true, gen: gen)
+    }
+
+    /// One message into one parked frame, under the key its card will ask for.
+    private func render(
+        _ message: ClientMessage, style: ThreadStyle, width: CGFloat, prerendered: Bool, gen: Int
+    ) async {
+        guard let html = message.html, !html.isEmpty else { return }
+        let bubble = style == .bubbles
+        let allowRemote = Prefs.shared.loadRemoteImages
 
         // The prepared body, from the warmer if it has been here, made here
         // (off the main actor) if not.
@@ -2330,7 +2375,7 @@ final class FramePrewarmer {
             coordinator.drop(webView)
             return
         }
-        coordinator.release(webView, prerendered: true)
+        coordinator.release(webView, prerendered: prerendered)
     }
 
     /// A continuation may be resumed exactly once, and two things race to.

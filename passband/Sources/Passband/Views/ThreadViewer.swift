@@ -110,6 +110,9 @@ struct ThreadViewer: View {
     /// issue competing `scrollTo`s at two targets, which is a column that
     /// judders rather than lands. See `settle`.
     @State private var settleTask: Task<Void, Never>?
+    /// The opening landing, kept until the reader takes the scroll. See
+    /// `LandingHold`.
+    @State private var hold = LandingHold()
     /// HOW MUCH MAIL LANDED BELOW THE READER while they were reading, and it is
     /// only ever non-zero for somebody who is NOT at the end of the thread:
     /// `refreshInPlace` carries a reader who was parked on the newest onto the
@@ -406,7 +409,10 @@ struct ThreadViewer: View {
         // The pass outlives nothing: a reader that has left owns no thread to
         // measure. Scoped by token because a thread SWITCH starts the next
         // pass before this fires.
-        .onDisappear { FrameMeasurer.shared.cancel(token: threadId) }
+        .onDisappear {
+            FrameMeasurer.shared.cancel(token: threadId)
+            hold.end()
+        }
         // The default changed in Settings while this thread is open. A thread
         // that has been switched by hand keeps what it was told — that is the
         // whole point of an override — so only the ones following the default
@@ -876,7 +882,11 @@ struct ThreadViewer: View {
                                 .onGeometryChange(for: CGRect.self) {
                                     $0.frame(in: .scrollView)
                                 } action: { frame in
+                                    let mounting = map.frames[i] == nil
                                     map.note(i, frame: frame)
+                                    holdNewest(proxy)
+                                    // A card arriving is the window moving.
+                                    if mounting { renderAhead() }
                                     if i == index { acknowledgeDisplayedMessage(id: m.id, frame: frame) }
                                     if i == newestIndex { newestHeight = frame.height }
                                 }
@@ -905,6 +915,8 @@ struct ThreadViewer: View {
                             FrameHeights.shared.using(width: width)
                         }
                         .readerColumn()
+                        // The column itself, as a scroll target: see `holdNewest`.
+                        .id(Self.columnId)
                         // INSIDE the scroll content deliberately: an overlay on the
                         // ScrollView itself would sit above it and eat the wheel
                         // wherever it covers, and the pointer parks in the gutter.
@@ -959,6 +971,11 @@ struct ThreadViewer: View {
                     // hands off. It fires twice a gesture, not per tick.
                     .onScrollPhaseChange { _, phase in
                         handScrolling = phase != .idle
+                        // A hand on the scroll ends the opening hold for good.
+                        // `.animating` is ours (a `j`, the pill), not theirs.
+                        if phase == .tracking || phase == .interacting || phase == .decelerating {
+                            hold.end()
+                        }
                         // A WHEEL NEVER TOUCHES THE SELECTION, so somebody who
                         // scrolled down to the arrival themselves would still be
                         // looking at a pill telling them it is below. Asked of
@@ -1029,7 +1046,7 @@ struct ThreadViewer: View {
                 .onChange(of: index) { was, now in
                     // Reaching the end of the thread IS reading what arrived —
                     // whether that took the pill, a press of `j`, or the rail.
-                    if now == newestIndex { arrivals = 0 }
+                    if now == newestIndex { arrivals = 0 } else { hold.end() }
                     // The find moved the selection and has aimed the column
                     // itself, at a line rather than at this card's top.
                     if find.steering {
@@ -1105,6 +1122,10 @@ struct ThreadViewer: View {
                     guard !landed || (parkedOnNewest && !handScrolling) || resized
                     else { return }
                     proxy.scrollTo(newestIndex, anchor: .top)
+                    // The first landing is the one that gets held: every card
+                    // above is still at a guess, and the one that measures
+                    // next takes the newest out of the window with it.
+                    if !landed { hold.begin() }
                     landed = true
                     // A reply already open (an `r` from a list row opens the
                     // reader and the composer together) is what the reader
@@ -1322,6 +1343,69 @@ struct ThreadViewer: View {
                 proxy.scrollTo(target, anchor: .top)
             }
         }
+    }
+
+    /// PUT THE NEWEST BACK when layout, not the reader, took it away. Asked by
+    /// every card whose frame moves, because the newest cannot ask for itself:
+    /// shoved far enough it is recycled by the stack and stops reporting.
+    ///
+    /// A RECYCLED CARD CANNOT BE SCROLLED TO: its `.id` is gone with it, and a
+    /// `scrollTo` naming it does nothing at all. The column is always there,
+    /// and its end is where the newest lives, so that is the first step: it
+    /// brings the card back, and the next pass can aim at the card itself.
+    ///
+    /// THE FIND AND THE REPLY COMPOSER AIM THE COLUMN THEMSELVES, at a line
+    /// inside a message and at the foot of one. Either being up means the
+    /// reader has asked to be somewhere other than the newest message's top,
+    /// which ends the hold as surely as a wheel does.
+    private func holdNewest(_ proxy: ScrollViewProxy) {
+        if find.open || store.inlineReply != nil {
+            hold.end()
+            return
+        }
+        hold.aim {
+            index == newestIndex && !handScrolling && !parkedOnNewest
+        } scroll: { attempt in
+            if map.frames[newestIndex] == nil {
+                // Every other try is aimed a little short of the end.
+                // Arriving at the end can leave the stack with NO card laid
+                // out, and asking for the end again is then asking for where
+                // the scroll already is: nothing moves, so nothing is laid
+                // out. A different offset is what makes it look again.
+                let short = attempt.isMultiple(of: 2)
+                proxy.scrollTo(
+                    Self.columnId, anchor: short ? UnitPoint(x: 0.5, y: 0.99) : .bottom)
+            } else {
+                proxy.scrollTo(newestIndex, anchor: .top)
+            }
+        }
+    }
+
+    private static let columnId = "reader-column"
+
+    /// HAVE THE NEXT MESSAGES DRAWN BEFORE THE SCROLL REACHES THEM (see
+    /// `FramePrewarmer.ahead`). Asked each time a card mounts, which is as
+    /// often as the answer changes.
+    ///
+    /// MORE ABOVE THAN BELOW, and above first: the reader opens at the end of
+    /// the thread, so up is the way nearly every scroll goes. Five in all,
+    /// inside the six the pool keeps for mail that has been read.
+    ///
+    /// Only mail the pool may hold at all (`cache_allowed`), and only what is
+    /// not already drawn. "Drawn" is judged within a few windows of here: the
+    /// map can keep a frame for a card the stack laid out once, far away, and
+    /// let go of without saying so.
+    private func renderAhead() {
+        guard thread?.cache_allowed == true, styleReady, viewportHeight > 0 else { return }
+        let near = map.frames.filter {
+            $0.value.maxY > -2 * viewportHeight && $0.value.minY < 3 * viewportHeight
+        }
+        let visible = near.filter { $0.value.maxY > 0 && $0.value.minY < viewportHeight }.keys
+        guard let top = visible.min(), let bottom = visible.max() else { return }
+        let wanted = [top - 1, bottom + 1, top - 2, bottom + 2, top - 3].filter {
+            messages.indices.contains($0) && near[$0] == nil
+        }
+        FramePrewarmer.shared.ahead(wanted.map { messages[$0] }, style: style, width: bodyWidth)
     }
 
     /// Whether the newest message's top edge is still sitting at the top of the
@@ -2692,11 +2776,14 @@ struct ThreadViewer: View {
         // that here forgets the only report there will ever be: geometry
         // speaks when it changes, the height never changes again, and the
         // landing waits on a number that stays zero while the reader sits
-        // where the initial offset left it, at the END of the mail.
+        // where the initial offset left it, at the END of the mail. The hold
+        // is left alone for the same reason: that landing has already begun
+        // one, for this thread.
         if thread?.thread_id != threadId {
             map.forget()
             newestHeight = 0
             landed = false
+            hold.end()
         }
         // Another thread's arrivals are not this one's, and a REOPEN of the
         // same thread re-fetches from the top — either way the pill is
@@ -4192,6 +4279,76 @@ private final class WheelYield {
             if let monitor { NSEvent.removeMonitor(monitor) }
         #endif
         monitor = nil
+    }
+}
+
+/// THE OPENING LANDING, HELD UNTIL THE READER TAKES THE SCROLL. Landing once is
+/// not landing: the reader opens on the newest message while every card above
+/// it is still a guess, and the first of those to measure itself (a reply
+/// carrying a whole chain inline is several thousand points) pushes the newest
+/// out of the window. The landing's own guard cannot answer that. It re-lands
+/// only for a reader still parked on the newest, and being pushed off is the
+/// one thing that guard reads as having left; pushed far enough, the stack
+/// recycles the card and its height never changes again, so nothing fires at
+/// all. The reader then opens a long thread on the middle of some other
+/// message, and stays there until somebody scrolls.
+///
+/// So the position is HELD: while nobody has touched the scroll or moved the
+/// selection, a card moving with the newest off its mark is layout's doing and
+/// is put right. The wheel, a touch or a step off the newest ends it for the
+/// thread; after that the reader owns the scroll and the landing's guard is
+/// the only thing left, as before.
+///
+/// BOUNDED, like `settle`: a thread whose heights never agree with where the
+/// scroll puts them spends the budget and is left alone. Coming to rest pays
+/// it back, so late images can each move the column and each be answered.
+@MainActor
+private final class LandingHold {
+    private var wheel: WheelYield?
+    private var aiming: Task<Void, Never>?
+    private var spent = 0
+    private static let budget = 60
+
+    private var live: Bool {
+        if wheel?.tripped == true { end() }
+        return wheel != nil
+    }
+
+    func begin() {
+        end()
+        spent = 0
+        let wheel = WheelYield()
+        wheel.watch()
+        self.wheel = wheel
+    }
+
+    func end() {
+        aiming?.cancel()
+        aiming = nil
+        wheel?.end()
+        wheel = nil
+    }
+
+    /// Scroll until `off` stops being true. One loop at a time: every card
+    /// that moves asks, and they all move at once.
+    func aim(
+        while off: @escaping @MainActor () -> Bool, scroll: @escaping @MainActor (Int) -> Void
+    ) {
+        guard live, aiming == nil else { return }
+        aiming = Task { @MainActor in
+            // Next turn, not inside the layout pass that reported the frame.
+            await Task.yield()
+            while !Task.isCancelled, live, off(), spent < Self.budget {
+                spent += 1
+                scroll(spent)
+                do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
+            }
+            // A cancelled loop was ended by `end`, which may already have
+            // been followed by a `begin`: the slot is no longer this loop's.
+            guard !Task.isCancelled else { return }
+            if !off() { spent = 0 }
+            aiming = nil
+        }
     }
 }
 

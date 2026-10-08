@@ -1014,6 +1014,14 @@ struct DeveloperSection: View {
                     .toggleStyle(.switch)
                     .labelsHidden()
                     .tint(Palette.accent)
+                    // A note for Braelyn from Ellie, left at Ellie's asking:
+                    // hover the switch while dev mode is on. DEBUG BUILDS
+                    // ONLY (a build from source, never a release), so no
+                    // user of the shipped app can see it. An empty string
+                    // shows no tooltip.
+                    #if DEBUG
+                    .help(prefs.developerMode ? "ilysm cutie <3 - ellie" : "")
+                    #endif
             }
         }
     }

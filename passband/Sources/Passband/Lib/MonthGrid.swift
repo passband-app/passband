@@ -31,16 +31,30 @@ import Foundation
 // MARK: - the page's mode
 
 /// How the calendar page is drawn. The agenda is the daily surface; the month
-/// is the shape of the month. There is no week or day view: the day is a
-/// column beside the month.
+/// is the shape of the month; the week (wave 6) is seven of the month's day
+/// columns over one hours axis (Lib/WeekGrid.swift).
 enum CalendarViewMode: String, Sendable, Hashable {
     case agenda
     case month
+    case week
 
-    /// The page opens on the month (wave 3). The agenda is a key away.
+    /// The page opens on the month (wave 3). The others are a key away.
     static let initial: CalendarViewMode = .month
-    /// The header's switch, left to right: Month | Agenda.
-    static let pickerOrder: [CalendarViewMode] = [.month, .agenda]
+    /// The header's switch, left to right: Month | Week | Agenda.
+    static let pickerOrder: [CalendarViewMode] = [.month, .week, .agenda]
+
+    /// The switch's word, and the page header's (lowercased there).
+    var label: String {
+        switch self {
+        case .month: "Month"
+        case .week: "Week"
+        case .agenda: "Agenda"
+        }
+    }
+
+    /// The month and the week share a place (`MonthPlace`), a selected item
+    /// and the timeline range asked for; the agenda has its own.
+    var isGrid: Bool { self != .agenda }
 }
 
 // MARK: - where the month is

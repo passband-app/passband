@@ -76,6 +76,10 @@ struct Google {
     reads: Vec<(String, String, HashMap<String, String>)>,
     /// Answer every one-event read with this status instead.
     read_fail: Option<u16>,
+    /// Let this many one-event reads through, then answer every later one
+    /// with this status: how a test fails only the RE-READ that follows an
+    /// insert Google answered 409.
+    read_fail_late: Option<(usize, u16)>,
     /// Apply every write, then LOSE the answer: the connection is dropped
     /// before the response goes out, as a timeout or a reset would.
     lose_answers: bool,
@@ -156,6 +160,11 @@ async fn get_route(
     g.reads.push((calendar.clone(), id.clone(), q.clone()));
     if let Some(status) = g.read_fail {
         return StatusCode::from_u16(status).unwrap().into_response();
+    }
+    match g.read_fail_late {
+        Some((0, status)) => return StatusCode::from_u16(status).unwrap().into_response(),
+        Some((left, status)) => g.read_fail_late = Some((left - 1, status)),
+        None => {}
     }
     if g.stale_reads > 0 {
         g.stale_reads -= 1;
@@ -3413,6 +3422,7 @@ async fn a_google_5xx_on_a_write_may_have_happened() {
             );
             assert_eq!(answer["code"], json!("uncertain"), "{status} {method}");
             assert_eq!(w.events().await, before, "{status} {method} changed a row");
+            assert!(kicked(&w).await, "{status} {method}: a sync was kicked");
         }
     }
     assert!(
@@ -4993,6 +5003,74 @@ async fn a_create_sent_twice_with_its_id_makes_one_event_and_one_invitation() {
             .count(),
         1
     );
+}
+
+/// THE RE-READ AFTER A 409 FAILING (verify6 Z2). The first send made the
+/// event and Google mailed its guest. The app sends again; the read ahead of
+/// the insert misses it (a replica behind), Google answers the insert 409,
+/// and the read that should fetch the event fails. Whatever that read failed
+/// with, the daemon does not know what Google holds: 504 `uncertain` with a
+/// sync kicked, never `google_refused` (which would thaw the pane for an
+/// edited resend). And still one event, one invitation.
+#[tokio::test]
+async fn a_409_whose_reread_fails_is_uncertain_with_one_invitation() {
+    for status in [500u16, 503, 404, 403, 429] {
+        let (w, start) = guest_world(&format!("create-409-reread-{status}")).await;
+        let request = json!({"calendar_id": "primary", "title": "Once", "start": rfc(start),
+                             "end": rfc(start + Duration::hours(1)), "all_day": false,
+                             "id": CLIENT_ID, "guests": ["nia@example.com"], "notify": true});
+        let (code, _, _) = send(
+            &w.app,
+            "POST",
+            "/client/calendar/events",
+            Some(request.clone()),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CREATED, "{status}");
+        // Whatever the first create kicked is not this test's.
+        let _ = kicked(&w).await;
+        let before = w.events().await;
+        {
+            let mut g = w.google();
+            g.stale_reads = 1;
+            g.read_fail_late = Some((1, status));
+        }
+        let (code, answer, _) =
+            send(&w.app, "POST", "/client/calendar/events", Some(request)).await;
+        eprintln!("409 then a re-read {status}: {code} {answer}");
+        assert_eq!(code, StatusCode::GATEWAY_TIMEOUT, "{status}: {answer}");
+        assert_eq!(answer["code"], json!("uncertain"), "{status}");
+        assert!(kicked(&w).await, "{status}: a sync was kicked");
+        assert_eq!(w.events().await, before, "{status}: no row changed");
+        let sent = writes(&w);
+        assert_eq!(
+            sent.len(),
+            2,
+            "{status}: the second insert was sent and refused"
+        );
+        let held = w
+            .google()
+            .full
+            .get(PRIMARY)
+            .unwrap()
+            .iter()
+            .flatten()
+            .filter(|e| e["id"] == CLIENT_ID)
+            .count();
+        assert_eq!(
+            held, 1,
+            "{status}: Google holds one event, so one invitation went out"
+        );
+        assert_eq!(
+            audit(&w)[0]
+                .2
+                .as_deref()
+                .map(|d| d.starts_with("failed:uncertain")),
+            Some(true),
+            "{status}: {:?}",
+            audit(&w)
+        );
+    }
 }
 
 /// The other half: a read that has not caught up misses the event, and the

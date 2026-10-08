@@ -99,12 +99,12 @@ use crate::store::{
     DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken,
     LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer, MessageMissingRecipients,
     MessageOpen, MessageUnsub, MintedPairingCode, MissingVector, NewAuditEntry, NewEvent,
-    NewNotifyDecision, NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody,
-    SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow,
-    SenderDomainEntry, SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope,
-    Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
-    TriagedMessage, UsageTokens,
+    NewNotifyDecision, NotifyDecisionRow, PersonNamed, RevisitQueued, SPAM_SYNCED_AT_KEY,
+    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict,
+    SenderDigestRow, SenderDomainEntry, SenderEntry, SenderHistory, SentMessage, SitrepBand,
+    SpamScope, Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued,
+    Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage,
+    TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
@@ -893,6 +893,15 @@ impl Store for SqliteStore {
         limit: u32,
     ) -> Result<Vec<ContactEntry>> {
         self.search_contacts(account_id, q, limit)
+    }
+
+    fn people_named(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<PersonNamed>> {
+        self.people_named(account_id, name, limit)
     }
 
     fn merge_harvested_contacts(

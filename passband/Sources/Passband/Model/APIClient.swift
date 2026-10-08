@@ -23,6 +23,40 @@ enum RetriageScope: Sendable {
     case days(Int)
 }
 
+/// A per-request delegate that keeps what the task recorded about its own
+/// send: its metrics (did any transaction start its request) and the body
+/// bytes it handed over. Read only after the request failed. Whatever was not
+/// delivered by then stays nil, and the decision falls back to the error's
+/// code.
+final class SendWitness: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private let hadBody: Bool
+    private var requestStarted: Bool?
+    private var bodyBytesSent: Int64?
+
+    init(hadBody: Bool) { self.hadBody = hadBody }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        let started = metrics.transactionMetrics.contains { $0.requestStartDate != nil }
+        lock.lock()
+        requestStarted = started
+        bodyBytesSent = task.countOfBytesSent
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        bodyBytesSent = max(bodyBytesSent ?? 0, task.countOfBytesSent)
+        lock.unlock()
+    }
+
+    var evidence: SendEvidence {
+        lock.lock()
+        defer { lock.unlock() }
+        return SendEvidence(requestStarted: requestStarted, bodyBytesSent: bodyBytesSent, hadBody: hadBody)
+    }
+}
+
 actor APIClient {
     static let shared = APIClient()
 
@@ -166,11 +200,15 @@ actor APIClient {
         }
         let data: Data
         let response: URLResponse
+        // What the task itself saw of the send, for a failure: a calendar
+        // write must know whether "could not reach the server" means nothing
+        // left (`APIError.neverSent`).
+        let witness = SendWitness(hadBody: (req.httpBody?.count ?? 0) > 0)
         do {
-            (data, response) = try await session.data(for: req)
+            (data, response) = try await session.data(for: req, delegate: witness)
         } catch {
             // Transport failure OR timeout — never echo the token/url detail.
-            throw APIError.transport(error)
+            throw APIError.transport(error, evidence: witness.evidence)
         }
         guard let http = response as? HTTPURLResponse else {
             // Something answered: the request got somewhere.
@@ -366,6 +404,15 @@ actor APIClient {
     /// from `senders` instead (`RulePatternSuggest.domains(from:)`).
     func senderDomains(_ q: String, limit: Int = 8) async throws -> [SenderDomainHit] {
         try await get("/client/sender-domains", query: ["q": q, "limit": String(limit)])
+    }
+
+    /// Who a first name most likely is, for the event pane's guest
+    /// suggestion: at most three people the user has written to, the most
+    /// recent exchange first. Behind the calendar feature; a daemon older
+    /// than the route answers 404, and the pane then suggests nobody.
+    func calendarPeople(named name: String) async throws -> [NamedPerson] {
+        let answer: NamedPeople = try await get("/client/calendar/people", query: ["name": name])
+        return answer.people
     }
 
     /// The reader's contact card for one address. A daemon older than the

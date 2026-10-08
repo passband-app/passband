@@ -63,6 +63,23 @@ run_suite month-grid \
   Sources/Passband/Lib/CalendarColor.swift \
   Tests/MonthGridTests.swift
 
+# The week view (wave 6): which seven days (the user's first weekday, the DST
+# weeks), that the week is a row of the month the page asks for, overlapping
+# events side by side per day, the strip of all-day items and trips in the
+# month's own lanes, the draft among the blocks, widths, words and j / k.
+run_suite week-grid \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/MonthGrid.swift \
+  Sources/Passband/Lib/WeekGrid.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/WeekGridTests.swift
+
 # The event editor: typed dates and times, what blocks a save, the exact
 # body sent (timed with offsets, all-day with the INCLUSIVE last day), an
 # edit's patch carrying only what moved, the route's path, the daemon's
@@ -74,8 +91,42 @@ run_suite event-draft \
   Sources/Passband/Lib/Agenda.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
   Sources/Passband/Lib/EventGuests.swift \
   Tests/EventDraftTests.swift
+
+# The title that understands "dinner with steven on friday 4pm" (wave 6): a
+# table of phrases and what each fills, the negatives that must fill nothing,
+# the saved title, the names, the fields a title may and may not write, the
+# way back (deleted words, Esc), and who is offered as a guest.
+run_suite title-parse \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/TitleParseTests.swift
+
+# The assistant's one calendar tool (wave 6): offered only with the Calendar
+# page (off, the inventory is main's), a proposal read and turned into the
+# pane's own draft by the pane's own rules, guests only where the calendar may
+# invite, every bad proposal an answer and never a draft, a pane in use never
+# replaced, and what the model is told did NOT happen.
+run_suite event-proposal \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Assistant/JSONValue.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Sources/Passband/Lib/EventProposal.swift \
+  Tests/EventProposalTests.swift
 
 # Guests on an event (wave 5), the first write that makes Google email other
 # people: how the guests line is read (bare addresses, one per person, the
@@ -92,6 +143,7 @@ run_suite event-guests \
   Sources/Passband/Lib/Agenda.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
   Sources/Passband/Lib/EventGuests.swift \
   Tests/EventGuestsTests.swift
 

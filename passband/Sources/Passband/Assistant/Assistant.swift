@@ -1141,7 +1141,8 @@ final class AssistantSession {
                 guard let self, self.alive(gen), !cards.isEmpty else { return }
                 self.shownIds.formUnion(cards.map(\.threadId))
                 self.append(.emails, emails: cards)
-            })
+            },
+            live: { [weak self] in self?.alive(gen) ?? false })
         let answer = Wire.RequestBlock.toolResult(
             toolUseId: call.id, content: outcome.content, isError: outcome.isError)
         // The wire still gets its answer — the loop's own `alive` check ends the
@@ -1420,7 +1421,7 @@ final class AssistantSession {
               accept it and move on, do not retry or argue.
             - create_sender_rule writes only Passband's local triage rules, never the
               mailbox. It changes what gets surfaced from here on; it moves no mail.
-            - When the user asks you to write but not send, use save_draft.
+            - When the user asks you to write but not send, use save_draft.\(Self.calendarTools)
             \(openEmailBlock(pin))
             """
     }
@@ -1433,6 +1434,15 @@ final class AssistantSession {
     /// request does not carry.
     private static var helpIntro: String {
         AgentTools.Tool.productHelp.isAvailable ? ProductGuide.promptIntro : ""
+    }
+
+    /// The one line the prompt gains while this mailbox has the Calendar
+    /// page, and so the calendar tool. Empty otherwise: with the page off the
+    /// prompt is the one from before the tool existed, and never names a
+    /// tool the request does not carry.
+    @MainActor private static var calendarTools: String {
+        AgentTools.Tool.createCalendarEvent.isAvailable && AppStore.shared.calendarPageAvailable
+            ? "\n" + EventProposals.promptLine : ""
     }
 
     private static var helpTools: String {

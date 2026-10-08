@@ -196,6 +196,7 @@ fn calendar_routes() -> Vec<(&'static str, &'static str, Value)> {
         ("PATCH", "/client/timeline/ghosts/1", json!({ "state": 7 })),
         ("POST", "/client/timeline/refresh", Value::Null),
         ("POST", "/client/calendar/connect", Value::Null),
+        ("GET", "/client/calendar/people?name=steven", Value::Null),
         ("POST", "/client/calendar/events", json!({ "title": 7 })),
         (
             "PATCH",

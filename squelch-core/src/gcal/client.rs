@@ -154,8 +154,9 @@ pub enum CallError {
     /// `duplicate`, "The requested identifier already exists").
     Duplicate,
     /// The request went out and no usable answer came back: the connection
-    /// was lost or timed out after sending, or a 2xx body could not be read.
-    /// Google may have done what was asked. A write that ends here is NOT a
+    /// was lost or timed out after sending, a 2xx body could not be read, or
+    /// Google answered 5xx (its own failure, which does not say the request
+    /// was not applied). Google may have done what was asked. A write that ends here is NOT a
     /// refusal, and is never retried.
     Uncertain,
     Kind(CalendarErrorKind),
@@ -474,7 +475,8 @@ impl CalendarApi {
     /// happened, and sending it again could make it twice. A failure before
     /// the request could have reached Google (no connection) is
     /// `Unavailable`; one after (a timeout or a lost connection once
-    /// connected, a 2xx whose body does not read) is [`CallError::Uncertain`].
+    /// connected, a 2xx whose body does not read, any 5xx from Google) is
+    /// [`CallError::Uncertain`]. A 4xx is Google's refusal, by its status.
     /// A read treats both alike ([`CallError::kind`]).
     async fn call(
         &self,

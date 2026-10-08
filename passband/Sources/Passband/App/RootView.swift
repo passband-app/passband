@@ -305,6 +305,21 @@ private struct ShellWatchers: View {
                     store.returnParkedEventEditor()
                 }
             }
+            // A proposal made while an email was open over the Calendar page
+            // itself is parked without the page ever changing: it comes back
+            // when the email closes.
+            .onChange(of: store.threadId) { _, thread in
+                if thread == nil, store.activeView == .calendar { store.returnParkedEventEditor() }
+            }
+            // A proposal kept parked because mail was being written (it
+            // never closes a typed-in composer or inline reply) is asked
+            // again when the composer is sent or closed. An inline reply
+            // lives in an open email, so its end is the hook above.
+            // `composeOpen`, not `compose`: that one changes on every key.
+            // A no-op with nothing parked.
+            .onChange(of: store.composeOpen) { _, open in
+                if !open, store.activeView == .calendar, store.threadId == nil { store.returnParkedEventEditor() }
+            }
             .onChange(of: store.lastRefresh) { old, new in
                 if old == nil, new != nil {
                     store.tour.maybeStart()
@@ -786,7 +801,7 @@ struct RoutedHost<Content: View>: View {
     /// its own text.
     private var heading: (title: String, subtitle: String?) {
         switch view {
-        case .calendar: ("Calendar", store.calendarMode == .month ? "month" : "agenda")
+        case .calendar: ("Calendar", store.calendarMode.label.lowercased())
         default: (view.label, nil)
         }
     }
@@ -801,7 +816,7 @@ struct RoutedHost<Content: View>: View {
                 VStack(alignment: .leading, spacing: 0) {
                     RoutedHeader(title: heading.title, subtitle: heading.subtitle) {
                         // The calendar's one header control: which way the
-                        // page is drawn (`a` / `m`).
+                        // page is drawn (`m` / `w` / `a`).
                         if view == .calendar { CalendarModeSwitch() }
                     }
                     content

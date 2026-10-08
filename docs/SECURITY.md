@@ -1177,7 +1177,8 @@ row is written even when the client disconnects mid-request: each write's checks
 Google call and audit run in a task of their own that the handler awaits, so
 dropping the request does not cancel them. The `calendar:` prefix keeps the
 audit listing's join to `messages` (a numeric target) from matching a calendar id
-that starts with digits. The in-app assistant has no tool for any of it.
+that starts with digits. The in-app assistant has no tool that reaches any of
+these routes (see "The assistant's calendar tool" below).
 
 **Guests: a human-door route can make Google email third parties**
 (docs/CALENDAR.md §8, "Guests, invited by Google"). Since wave 5 the three write
@@ -1193,8 +1194,11 @@ reaches people outside the account and cannot be undone. What gates it:
   (`gcal/client.rs:Notify`) has two values and defaults to the silent one, and
   `sendUpdates` is always named, never left to Google's default.
 - **The human door alone.** The three routes are bearer authed on `/client`; no
-  agent route, MCP tool or assistant tool can name a guest or set `notify`, and
-  nothing the daemon does on its own (the sync, triage, ghosts) calls a write.
+  agent route or MCP tool can name a guest or set `notify`, and nothing the
+  daemon does on its own (the sync, triage, ghosts) calls a write. The
+  assistant's one calendar tool can put addresses in the event pane's guests
+  line, where the user sees them as pills; it cannot send the request, and
+  `notify` is decided only by which save control the user then presses.
 - **Whose calendar.** Guests only on the user's own calendar (the primary one, or
   one they are `owner` of): `gcal/mod.rs:may_invite`. A shared calendar the user
   can write to cannot be made to invite anyone, nor to mail an update or a
@@ -1226,6 +1230,110 @@ not mean it (the client's controls must say what they send, and offer it only
 where the daemon would accept it; the daemon cannot tell intent), and Google's own behaviour with `sendUpdates=none`, which the reference
 hedges ("some emails might still be sent") and which has not been tested against
 a real account.
+
+**The assistant's calendar tool (client, wave 6).** The embedded assistant
+(§6) has one calendar tool, `create_calendar_event`, and it is a draft, not a
+write (`passband/Sources/Passband/Lib/EventProposal.swift`,
+`AgentTools.createCalendarEvent`).
+- **It calls no route.** The tool reads the model's proposal, validates it with
+  the event pane's own rules, and opens the pane on the Calendar page filled
+  in. The create route is reached only by the user pressing the pane's save
+  control, with the same body rules, create id and uncertain-write handling as
+  an event they typed. So a prompt injection in mail the assistant read can at
+  worst put a filled-in pane in front of the user. It cannot add an event or
+  cause an invitation BY ITSELF. Exactly: an event is added, or an invitation
+  sent, only by (a) a click on the pane's own save control, or (b) `↵` or
+  `⌘↵` pressed after the user has clicked or typed inside that pane
+  (`EventProposals.keysMayAct`; `↵` never saves a draft with guests in any
+  case). What the claim does NOT cover is the user's own judgement: someone
+  who clicks "add and invite N" on a pane whose title, place and guests an
+  injected email chose has added it. The pane shows all of them whole
+  (below), which is the whole of that defence.
+- **It never takes the screen or the keyboard from somebody**
+  (`EventProposals.landing`, `CalendarStore.proposeEvent`). A run goes on
+  after the assistant's bar is closed (a citation clicked, "edit in
+  composer"), so a tool call can land while the user is doing something else.
+  The proposal is REFUSED, with a fixed sentence, unless the assistant's bar
+  is open at that moment, and while a composer or an inline reply holds
+  anything typed: mail being written is never closed for it. An email being
+  read is not closed either; the pane is then parked, whole, and shown when
+  the user goes to the Calendar page. The pane it opens never takes the
+  caret, and `↵` and `⌘↵` do nothing in it (a toast says to click add) until
+  the user has clicked or typed in it, so a key typed ahead, or meant for the
+  composer or the reader that was on screen, cannot add or invite. Modelled
+  on the agent door's `open_draft` (`ComposeState.keyboardSendLocked`). That
+  path in turn treats an event pane holding anything (typed, parked, or with
+  a write out or in doubt) as something being written: the agent's draft
+  waits in drafts and Passband does not come forward over it, nor for a
+  draft the composer did not actually take (`EventPaneTravel.heldByUser`,
+  `agentDraftMayComeForward`).
+- **The title and the place are the only text the assistant supplies.** Each
+  is one line of at most 200 characters (the daemon's own caps, and what the
+  pane's one-line fields show whole); longer, or with a line break or a tab
+  in it, the call is refused, not trimmed (`EventProposals.oneLine`). The
+  tool has no notes or description parameter, and `EventProposals.read`
+  refuses a call that carries one under any of the names a model reaches for
+  (`notes`, `note`, `description`, `body`, `details`, `agenda`, `summary`,
+  `message`), in any case. Any OTHER field the tool does not list is refused
+  by name too ("unknown field"), so nothing is dropped in silence and the
+  model is told rather than left to believe something was saved. The reason
+  is the guests: Google emails an event's description and place to them, and
+  model-written prose must never reach other people through Passband. The
+  notes line of the pane it opens is always empty.
+- **It never invites.** Proposed guests are shown as guest pills. Google emails
+  them only if the user presses the control labelled "add and invite N"; plain
+  Enter does not save an event with guests (§ "Guests" above).
+- **It does not read the calendar.** No event reaches the model. A proposal
+  names a calendar or leaves it to the primary; a name that matches no writable
+  calendar is refused with a fixed sentence that lists none of them. The one
+  thing the tool may ask the daemon is the page's own timeline read
+  (`refreshCalendar`), once, when the client holds no feed yet (the Calendar
+  page has not been opened this session): the answer stays in the store and
+  none of it goes to the model. A feed that still is not there is "could not
+  reach the calendar", never "no calendar".
+- **It never replaces the user's work.** A pane holding anything (typed, or an
+  earlier proposal, on screen or parked) refuses the tool with a fixed sentence
+  the model relays.
+- **It follows the page.** Offered only on the Mac and only while
+  `calendarPageAvailable`; with the flag off the tool definitions and system
+  prompt sent to the model are the ones from before the tool existed, and a
+  call naming it is answered as any unknown tool. No edit or delete tool.
+  Nothing was added to `/mcp`, `/client/agent/*` or the relay.
+
+**Who a name is: `GET /client/calendar/people` (wave 6).** The event pane reads
+"with steven" out of a new event's title (a deterministic parser in the client,
+no model) and asks the daemon who that most likely is, to SUGGEST a guest.
+- Behind `require_calendar` with the other calendar routes (404 with the flag
+  off), bearer authed on the human door, `no-store`, at most three answers. Not
+  on the agent door, `/mcp` or the assistant relay.
+- **A candidate is somebody the user has written to** (`contacts`, `sent_count >
+  0`), never the account's own address. Receiving mail from someone never makes
+  them a candidate, so mail under a matching display name cannot plant a guest.
+- **A list or a help desk is not a person.** A candidate with no name from the
+  user's own Sent mail is named by the newest From name on its readable mail,
+  and a group or a desk the user once wrote to sends as `"Steven Ng via Team"`
+  or `"Steven from Acme"`. So an address with no stored name is not offered AT
+  ALL when any of its readable mail carries `List-Unsubscribe` or a From name
+  of that shape (a later word that is "via", "from" or "at";
+  `contacts.rs::list_shaped`). It is offered only under a name the user's own
+  Sent mail gave it. What this does not catch: a relay that rewrites From to
+  the bare poster's name and sends no `List-Unsubscribe`.
+- **Ranking reads mail only where mail may be read.** Inbound mail counts toward
+  "most recently exchanged" only when it is not sent, not spam, not sealed (the
+  ghosts' `ELIGIBLE` test plus the legacy column, never `triage.sensitivity`
+  alone) and passed sender authentication (`auth_pass = 1`; never evaluated
+  reads as no).
+- **Nothing is added by the answer.** The client draws it as a dashed
+  suggestion with a checkmark and an x; it is not in the draft's guests, does
+  not change the save control and is never sent until the user accepts it, and
+  then only as any typed guest would be.
+- A name under two characters (empty included) is a 400 with a fixed body and
+  never reaches the store: one letter matches a large part of anybody's
+  contacts, and every match is a probe of that person's mail under the
+  store's one mutex. Over-long (more than 64 characters) or `@`-bearing input
+  answers an empty list. The input is never echoed. The probes are index
+  seeks on one sender with no sort (`MAX(received_at)`, or one unsorted pass
+  for a contact with no stored name).
 
 **What the event pane sends to Apple (client).** The location line of the
 client's event pane suggests places from Apple's MapKit
@@ -1302,6 +1410,21 @@ minute.
   or run a write's Google call and audit inside the request future alone.
 - Do not gate ghosts on `triage.sensitivity`; use the sealed test
   `sealed_messages` uses.
+- Do not give the assistant's calendar tool a notes or description parameter,
+  or let anything it supplies but the title, the place and the times reach an
+  event's body; do not trim an over-long title or place, or drop a field it
+  does not know, in silence.
+- Do not let the assistant's calendar tool call a write route, set `notify`,
+  skip the pane, replace a pane that holds anything, or be offered while the
+  Calendar page is not; do not hand the model an event or a list of calendars.
+- Do not let a proposed pane take the caret, act on `↵` or `⌘↵` before the
+  user has clicked or typed in it, open while the assistant's bar is closed,
+  or close mail being written or an email being read. Do not let an agent's
+  `open_draft` bring Passband forward over an event pane that holds anything.
+- Do not offer a contact with no stored name under a list-shaped From name.
+- Do not let `/client/calendar/people` return somebody the user has not written
+  to, read sealed, spam or auth-failed mail for its ranking, or move to the
+  agent door.
 - Do not let a mail path load the Calendar slot, or the calendar loop load the
   Write slot: the token in either can do more than its job.
 - Do not loosen `google_link`, drop the `fields` mask or `maxAttendees`, or ask

@@ -403,6 +403,14 @@ fn calendar_routes(state: ApiState) -> Router<ApiState> {
             "/client/calendar/events/{calendar_id}/{id}",
             patch(calendar_write::edit_event).delete(calendar_write::delete_event),
         )
+        // The event pane's guest suggestion: people the user has written to
+        // whose name a title mentions. A read, and HUMAN DOOR ONLY: it is a
+        // lookup into who the user writes to, which the agent door, the agent
+        // routes and the assistant relay never get.
+        .route(
+            "/client/calendar/people",
+            get(handlers::get_calendar_people),
+        )
         // The user's correction of a person's inferred timezone (docs/
         // CALENDAR.md §7). A local write, human door only, for the reason the
         // contact card is; part of the calendar feature, so it is here. The

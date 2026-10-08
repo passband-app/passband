@@ -172,6 +172,31 @@ pub struct ContactEntry {
     pub last_sent_at: Option<DateTime<Utc>>,
 }
 
+/// How long a typed name is as [`Store::people_named`] will read it: the
+/// letters and digits of its FIRST word, the punctuation around the word
+/// dropped. `"s."`, `"(s)"`, `"s-"` and `". s"` are all one letter, whatever
+/// their length in characters, and one letter matches a large part of
+/// anybody's contacts: the calendar people route refuses a name shorter than
+/// two by THIS count, not by counting characters (verify8 V8-13).
+pub fn typed_name_len(name: &str) -> usize {
+    name.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .find(|w| !w.is_empty())
+        .map_or(0, |w| w.chars().filter(|c| c.is_alphanumeric()).count())
+}
+
+/// One person the user has written to whose name matches a typed given name:
+/// the calendar event pane's guest SUGGESTION (`/client/calendar/people`).
+/// HUMAN-DOOR ONLY, like [`ContactEntry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonNamed {
+    pub addr: String,
+    /// The name the match was made on: the one the user's own Sent mail used,
+    /// else the newest one on that address's readable, authenticated mail.
+    /// `None` when the match was made on the address itself.
+    pub display_name: Option<String>,
+}
+
 /// One row of the sender directory (`senders`): an address that has written to
 /// the account, as the search field's `from:` autocomplete hit shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2044,6 +2069,20 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         q: &str,
         limit: u32,
     ) -> Result<Vec<ContactEntry>>;
+
+    /// HUMAN-DOOR ONLY (`/client/calendar/people`): at most `limit` people
+    /// THE USER HAS WRITTEN TO whose name starts with the typed words, the
+    /// most recently exchanged-with first. The answer is offered as a
+    /// possible invitee, so somebody who has only written TO the user is
+    /// never in it, and neither is the account's own address. MUST NOT be
+    /// reachable from MCP, the agent routes or the assistant relay: it is a
+    /// lookup into who the user writes to.
+    fn people_named(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<PersonNamed>>;
 
     /// Merge the Sent-history harvest's per-address aggregate (MAX semantics —
     /// idempotent across harvest re-runs and overlap with ingest seeding).

@@ -105,7 +105,7 @@ enum ShortcutCatalog {
     static let calendarGroup = Group(
         title: "Calendar",
         items: [
-            Item(["m", "a"], "month / agenda"),
+            Item(["m", "w", "a"], "month / week / agenda"),
             Item(["j", "k"], "move selection"),
             Item(["Enter"], "open the mail behind it"),
             Item(["y"], "going (again: not going)"),
@@ -113,10 +113,12 @@ enum ShortcutCatalog {
             Item(["n"], "new event"),
             Item(["e"], "edit event"),
             Item(["⌘↵"], "save the event"),
+            Item(["Tab"], "new event: to a suggested guest"),
             Item(["⌫"], "delete event"),
             Item(["←", "→", "↑", "↓"], "month: move the day"),
-            Item(["[", "]"], "month: previous / next"),
-            Item(["t"], "month: today"),
+            Item(["←", "→"], "week: move the day"),
+            Item(["[", "]"], "month, week: previous / next"),
+            Item(["t"], "month, week: today"),
             Item(["Enter"], "month: open the day"),
         ])
 

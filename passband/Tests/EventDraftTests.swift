@@ -30,6 +30,7 @@ struct EventDraftTests {
         anAllDayDraftToTheWireWithTheInclusiveEnd()
         validation()
         summaries()
+        anAgentsDraftDoesNotComeForwardOverAnEvent()
         newDrafts()
         sweptDrafts()
         aClickedDayMovesTheDraft()
@@ -42,6 +43,7 @@ struct EventDraftTests {
         refusalsAreFixedSentences()
         anUncertainWriteIsSettledByTheFeed()
         aTimedOutWriteIsUncertainNotUnsaved()
+        neverSentIsDecidedByEvidence()
         anUncertainCreateIsFoundByItsId()
         anUncertainEditLooksOnlyAtWhatItChanged()
         aDeleteThatCanNoLongerTellIsRefused()
@@ -217,7 +219,10 @@ struct EventDraftTests {
         expect(problem(draft(date: "someday")) == .badDate, "an unreadable date")
         expect(problem(draft(start: "lunchtime")) == .badStart, "an unreadable start")
         expect(problem(draft(end: "later")) == .badEnd, "an unreadable end")
-        expect(problem(draft(start: "7pm", end: "7pm")) == .noLength, "ending when it starts")
+        expect(problem(draft(start: "7pm", end: "7pm")) == nil,
+               "the same time with no end day said is the next day's: a whole day")
+        expect(problem(draft(start: "7pm", end: "7pm", endDate: "Oct 8")) == .noLength,
+               "ending when it starts, on an end day said by hand")
         expect(problem(draft(start: "7pm", end: "8pm", endDate: "Oct 7")) == .endsBeforeStart,
                "an end day before the start")
         expect(problem(draft(allDay: true, endDate: "Oct 7")) == .endsBeforeStart, "a last day before the first")
@@ -231,10 +236,32 @@ struct EventDraftTests {
         expect(texts.allSatisfy { !$0.contains("\u{2014}") }, "and no em dash anywhere")
     }
 
+    /// verify7 D5: an agent's draft asking for the screen (`open_draft`, a
+    /// passband://draft link) against an event pane.
+    static func anAgentsDraftDoesNotComeForwardOverAnEvent() {
+        func held(_ exists: Bool, touched: Bool = false, parked: Bool = false, editable: Bool = true) -> Bool {
+            EventPaneTravel.heldByUser(exists: exists, touched: touched, parked: parked, editable: editable)
+        }
+        expect(!held(false), "no pane: nothing is being written")
+        expect(!held(false, touched: true, parked: true, editable: false), "whatever the leftovers say")
+        expect(!held(true), "an untouched pane on screen gives way, as it does to any composer")
+        expect(held(true, touched: true), "a pane with something typed in it is the user's writing")
+        expect(held(true, parked: true), "so is a parked one, though it is not on screen")
+        expect(held(true, editable: false), "and one whose write is out or frozen")
+        expect(held(true, touched: true, parked: true, editable: false), "all three")
+        expect(!EventPaneTravel.agentDraftMayComeForward(writing: true, composerHoldsIt: true),
+               "nothing comes forward over something being written")
+        expect(!EventPaneTravel.agentDraftMayComeForward(writing: false, composerHoldsIt: false),
+               "nor for a draft the composer did not take: there is nothing to show")
+        expect(!EventPaneTravel.agentDraftMayComeForward(writing: true, composerHoldsIt: false), "nor both")
+        expect(EventPaneTravel.agentDraftMayComeForward(writing: false, composerHoldsIt: true),
+               "only for a draft that is really in the composer, with nothing else being written")
+    }
+
     static func summaries() {
         func s(_ d: EventDraft) -> String? {
             if case .success(let w) = EventForm.when(d, today: now, calendar: cal) {
-                return EventForm.summary(w, calendar: cal)
+                return EventForm.summary(w, now: now, calendar: cal)
             }
             return nil
         }
@@ -245,6 +272,44 @@ struct EventDraftTests {
         expect(s(draft(allDay: true)) == "Thu Oct 8, all day", "one day")
         expect(s(draft(date: "Oct 14", allDay: true, endDate: "Oct 19")) == "Wed Oct 14 to Mon Oct 19, all day",
                "a run of days")
+        // THE YEAR, WHEN IT IS NOT THIS ONE, AND A START GONE BY (verify7
+        // E13). Now is Mon Oct 5 2026, 3:40pm.
+        func w(_ start: String, _ end: String, allDay: Bool = false) -> String {
+            EventForm.summary(
+                ResolvedWhen(allDay: allDay, start: allDay ? day(start) : at(start), end: allDay ? day(end) : at(end)),
+                now: now, calendar: cal)
+        }
+        expect(w("2027-01-06T12:00:00-08:00", "2027-01-06T13:00:00-08:00") == "Wed Jan 6 2027, 12pm to 1pm",
+               "next year is said")
+        expect(w("2020-01-09T12:00:00-08:00", "2020-01-09T13:00:00-08:00") == "Thu Jan 9 2020, 12pm to 1pm, in the past",
+               "a proposal for 2020 reads as 2020, and as gone")
+        expect(w("2026-10-09T12:00:00-07:00", "2027-10-09T12:00:00-07:00") == "Fri Oct 9 2026, 12pm to 12pm Sat Oct 9 2027",
+               "a year-long event says both years")
+        expect(w("2026-12-31T22:00:00-08:00", "2027-01-01T02:00:00-08:00") == "Thu Dec 31, 10pm to 2am Fri",
+               "new year's night is still a night")
+        expect(w("2026-12-30", "2027-01-02", allDay: true) == "Wed Dec 30 2026 to Sat Jan 2 2027, all day",
+               "a run of days over the year's end")
+        expect(w("2027-03-04", "2027-03-04", allDay: true) == "Thu Mar 4 2027, all day", "an all-day next year")
+        expect(w("2026-10-05T09:00:00-07:00", "2026-10-05T10:00:00-07:00") == "Mon Oct 5, 9am to 10am, in the past",
+               "this morning has gone by")
+        expect(w("2026-10-05T16:00:00-07:00", "2026-10-05T17:00:00-07:00") == "Mon Oct 5, 4pm to 5pm",
+               "later today has not")
+        expect(w("2026-10-01T09:00:00-07:00", "2026-10-01T10:00:00-07:00") == "Thu Oct 1, 9am to 10am, in the past",
+               "last week, this year: no year, but said")
+        expect(w("2026-10-05", "2026-10-05", allDay: true) == "Mon Oct 5, all day", "all day today has not gone by")
+        expect(w("2026-10-04", "2026-10-04", allDay: true) == "Sun Oct 4, all day, in the past", "all day yesterday has")
+        // A WEEKDAY IN THE END-DAY WELL IS READ FROM THE START (verify7 E16).
+        expect(s(draft(date: "Oct 19", start: "7pm", end: "9pm", endDate: "tue")) == "Mon Oct 19, 7pm to 9pm Tue",
+               "an event starting Mon Oct 19 that ends \"tue\" ends the Tuesday after it")
+        expect(s(draft(date: "Oct 19", start: "7pm", end: "9pm", endDate: "mon")) == "Mon Oct 19, 7pm to 9pm",
+               "the start's own weekday is the start day")
+        expect(s(draft(date: "Oct 19", allDay: true, endDate: "friday")) == "Mon Oct 19 to Fri Oct 23, all day",
+               "and the same for a last day")
+        expect(s(draft(date: "Oct 19", start: "7pm", end: "9pm", endDate: "Oct 21")) == "Mon Oct 19, 7pm to 9pm Wed Oct 21",
+               "a date is a date, whatever the start")
+        var run = draft(date: "Oct 19", start: "7pm", end: "9pm", endDate: "wed")
+        run = EventForm.moved(run, to: day("2026-10-26"), today: now, calendar: cal)
+        expect(run.endDate == "Wed Oct 28", "a clicked day carries a weekday end day by its length from the start: \(run.endDate)")
     }
 
     static func newDrafts() {
@@ -330,8 +395,10 @@ struct EventDraftTests {
         expect(row(draft(date: "Oct 14"))?.start == at("2026-10-14T19:45:00-07:00"), "it moves with the date")
         expect(row(draft(start: "8pm", end: "10pm"))?.start == at("2026-10-08T20:00:00-07:00"), "and the time")
         expect(row(draft(), color: "#f4511e")?.event?.color == "#f4511e", "and recolours with the calendar")
-        expect(row(draft(date: "someday")) == nil && row(draft(start: "7pm", end: "7pm")) == nil,
+        expect(row(draft(date: "someday")) == nil && row(draft(start: "7pm", end: "sometime")) == nil,
                "while the times do not read there is no chip, not a wrong one")
+        expect(row(draft(start: "7pm", end: "7pm"))?.end == at("2026-10-09T19:00:00-07:00"),
+               "the same time twice is a whole day (wave 6), and the chip shows it")
         let trip = row(draft(date: "Oct 14", allDay: true, endDate: "Oct 19"))
         expect(trip?.allDay == true && trip?.start == day("2026-10-14") && trip?.end == day("2026-10-20"),
                "an all-day run covers through its last day")
@@ -576,11 +643,17 @@ struct EventDraftTests {
             expect(e.kind == .network && e.mayHaveArrived, "\(code): may have arrived")
             expect(CalendarWrite.verdict(of: e) == .mayHaveHappened(code: nil), "\(code): settled, may have happened")
         }
-        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .notConnectedToInternet, .dnsLookupFailed,
+        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
                      .secureConnectionFailed] {
             let e = APIError.transport(URLError(code))
             expect(!e.mayHaveArrived && CalendarWrite.verdict(of: e) == .notSent, "\(code): never got there")
         }
+        // verify6 Z1: "not connected" is also what an interface dropping
+        // under a LIVE request reads as, so the code alone proves nothing.
+        let offline = APIError.transport(URLError(.notConnectedToInternet))
+        expect(offline.mayHaveArrived && CalendarWrite.verdict(of: offline).mayHaveHappened,
+               "notConnectedToInternet with no evidence: may have arrived")
+        expect(!APIError.notSentCodes.contains(.notConnectedToInternet), "and it is off the unsent list")
         // verify5 Y2: when in doubt, freeze. Anything not provably before the
         // send (a cancellation, an unknown code, a decode failure, an error
         // that is not a URLError) may have arrived.
@@ -972,6 +1045,50 @@ struct EventDraftTests {
         cleared.location = nil
         expect(CalendarWrite.edited(a, clear, in: TimelineFeed(events: [cleared])) != nil, "cleared")
         expect(CalendarWrite.edited(a, clear, in: TimelineFeed(events: [a])) == nil, "not cleared yet")
+    }
+
+    /// verify6 Z1: "never sent" is decided by what the task itself recorded,
+    /// and by the error's code only when it recorded nothing.
+    static func neverSentIsDecidedByEvidence() {
+        func sent(_ code: URLError.Code?, _ e: SendEvidence?) -> Bool { !APIError.neverSent(code: code, evidence: e) }
+        let started = SendEvidence(requestStarted: true, bodyBytesSent: 0, hadBody: true)
+        let neverStarted = SendEvidence(requestStarted: false, bodyBytesSent: 0, hadBody: true)
+        let noMetricsNoBytes = SendEvidence(requestStarted: nil, bodyBytesSent: 0, hadBody: true)
+        let noMetricsBytes = SendEvidence(requestStarted: nil, bodyBytesSent: 212, hadBody: true)
+        let bodylessUnknown = SendEvidence(requestStarted: nil, bodyBytesSent: 0, hadBody: false)
+        let nothing = SendEvidence(requestStarted: nil, bodyBytesSent: nil, hadBody: true)
+        // 1. Evidence of a send wins over any code, the "unsent" ones too.
+        for code in [URLError.Code.notConnectedToInternet, .cannotConnectToHost, .secureConnectionFailed, .timedOut] {
+            expect(sent(code, started), "\(code) after the request started: may have arrived")
+            expect(sent(code, noMetricsBytes), "\(code) with body bytes sent: may have arrived")
+        }
+        expect(sent(.notConnectedToInternet, SendEvidence(requestStarted: false, bodyBytesSent: 1, hadBody: true)),
+               "bytes sent outvote metrics that saw no request")
+        // 2. Metrics that saw no request start are proof, whatever the code:
+        // a true offline save keeps its friendly message.
+        for code in [URLError.Code.notConnectedToInternet, .timedOut, .networkConnectionLost, .cancelled, .unknown] {
+            expect(!sent(code, neverStarted), "\(code) with no request ever started: never sent")
+        }
+        expect(!sent(nil, neverStarted), "and an error that is not a URLError")
+        expect(!sent(.notConnectedToInternet, SendEvidence(requestStarted: false, bodyBytesSent: nil, hadBody: false)),
+               "a bodyless request (a delete) is proved by its metrics alone")
+        // 3. No metrics: a body of which nothing went is proof; a bodyless
+        // request proves nothing by its zero.
+        expect(!sent(.notConnectedToInternet, noMetricsNoBytes), "a body, none of it sent: never sent")
+        expect(!sent(.timedOut, noMetricsNoBytes), "whatever the code")
+        expect(sent(.notConnectedToInternet, bodylessUnknown), "a delete's zero bytes prove nothing: may have arrived")
+        expect(sent(.timedOut, bodylessUnknown), "nor for a timeout")
+        // 4. Nothing recorded: the code list, as with no evidence at all.
+        expect(sent(.notConnectedToInternet, nothing) && sent(.notConnectedToInternet, nil),
+               "no evidence: notConnectedToInternet may have arrived")
+        expect(sent(.timedOut, nothing) && sent(nil, nothing) && sent(nil, nil), "and so may anything unlisted")
+        expect(!sent(.cannotFindHost, nothing) && !sent(.cannotFindHost, nil) && !sent(.cannotConnectToHost, bodylessUnknown),
+               "no evidence: the provably-before codes are still unsent")
+        // Through the door the client uses, to the pane's verdict.
+        let live = APIError.transport(URLError(.notConnectedToInternet), evidence: started)
+        expect(CalendarWrite.verdict(of: live).mayHaveHappened, "an interface dropped mid-request freezes the pane")
+        let dead = APIError.transport(URLError(.notConnectedToInternet), evidence: neverStarted)
+        expect(CalendarWrite.verdict(of: dead) == .notSent, "a save while truly offline is unsent, and says so")
     }
 
     /// verify3 W10: an answer that came back but could not be read means

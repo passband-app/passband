@@ -1,7 +1,8 @@
 // THE ACCOUNT PAGE — the phone's you-space, behind the person glyph at the top
 // left of the sitrep. Everything about the person using the app and the install
-// they are using it on lives here: which mailboxes this install knows first, and
-// then the six settings panes under that.
+// they are using it on lives here: which mailboxes this install knows first,
+// then what that mailbox has been told (its rules, its groups), and then the
+// settings panes under that.
 //
 // WHY THE SETTINGS LIVE UNDER THE PERSON AND NOT BESIDE THE MAIL. A phone settles
 // settings behind whoever is signed in — it is where every other app on the
@@ -31,6 +32,18 @@
 // on the device has — the one place in this app where matching the platform's
 // habit beats having a house style.
 //
+// RULES AND GROUPS ARE HERE TOO, above the settings. On the Mac they lead the
+// Settings sub-nav, with the accounts; a phone's bar has three tabs and
+// neither of these is somewhere you live. But a rule made from a swipe has to
+// be findable afterwards, and the place a thumb goes looking for "what have I
+// told this thing" is the screen about you. So they get a pane of their own,
+// ABOVE the settings and directly under the switcher: they belong to the
+// mailbox the switcher just named (a second account has different rules),
+// where everything below them belongs to the install. Their rows wear the same
+// shape as the settings rows so the screen still reads as one index. They ARE
+// `SettingsSection` cases (the Mac's sub-nav lists them, and the label and
+// icon come from there), but not in `order`: here they are pushed as pages.
+//
 // A LIST AND NOT A `List`. The app paints its own canvas and floats glass on it,
 // and `insetGrouped` brings a grouped system background plus separator insets
 // that fight both. This is the same ScrollView-of-cards MobileRecordsView is, and
@@ -46,19 +59,25 @@ struct AccountPage: View {
     /// beside the pane is a map, and a map you can read at a glance has no
     /// reason to lead with anything.
     ///
-    /// Rules and Groups are NOT here: they are the Mac's two former rail pages,
-    /// built around a keyboard, and the phone has never had either.
+    /// Rules and Groups are NOT here: the Mac files them as settings panes, and
+    /// the phone gives them rows of their own above this list (`pages`).
     private static let order: [SettingsSection] = [
         .account, .general, .mail, .assistant, .agents, .privacy, .audit,
     ]
-
-    private var accounts: [AccountRecord] { AccountManager.shared.accounts }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 masthead
-                switcher
+                // Which mailbox the panes below are about. Adding is NOT here:
+                // it lives in the Account pane, one row down, where removing
+                // and renaming already live.
+                //
+                // A DIFFERENT mailbox closes the page: choosing one is asking
+                // to see it, and its board is behind this pane. The one already
+                // live stays put, since a tap on it is a look, not a move.
+                AccountSwitcher { changed in if changed { AccountDoor.shared.close() } }
+                pages
                 index
             }
             .padding(.horizontal, 16)
@@ -67,9 +86,43 @@ struct AccountPage: View {
         .background(Palette.canvas)
         .navigationTitle("Account")
         .navigationBarTitleDisplayMode(.inline)
+        // THE WAY BACK OUT, on the side it came in from. This page is the
+        // first screen of a pane that slid in from the left (AccountDoor), so
+        // it has no stack to pop: the chevron sends the pane back, and so does
+        // dragging it that way. Both are on THIS screen only; a page pushed
+        // from here has the stack's own back.
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { AccountDoor.shared.close() } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .accessibilityLabel("Close")
+            }
+        }
+        .simultaneousGesture(
+            LeadingPaneClose.drag { close in if close { AccountDoor.shared.close() } })
+        #if DEBUG
+            // A screenshot's way in; see FixtureRoute.
+            .navigationDestination(item: stagedPage) { page in
+                switch page {
+                case .rules: RulesView()
+                case .groups: GroupsView()
+                case .general: pane(.general)
+                case .agents: pane(.agents)
+                }
+            }
+        #endif
     }
 
-    /// The one serif line on the index, same as Quick Look's: says what the six
+    #if DEBUG
+        private var stagedPage: Binding<FixtureRoute.Page?> {
+            Binding(
+                get: { FixtureRoute.shared.page },
+                set: { FixtureRoute.shared.page = $0 })
+        }
+    #endif
+
+    /// The one serif line on the index, same as Quick Look's: says what the
     /// rows have in common so the screen reads as a place, not a menu.
     private var masthead: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -87,85 +140,37 @@ struct AccountPage: View {
         .padding(.top, 4)
     }
 
-    /// WHICH MAILBOX THE PANES BELOW ARE ABOUT, and the tap that changes it.
+    /// WHAT THIS MAILBOX HAS BEEN TOLD: the two pages the Mac keeps at the top
+    /// of its Settings sub-nav. The views are the Mac's own (`RulesView`, `GroupsView`), each
+    /// with a phone layout inside it, so a rule edited here is edited by the
+    /// same code that edits it there.
     ///
-    /// It renders for a single account too. One row is not a switcher, but it is
-    /// still the answer to "who am I signed in as" — and a control that appears
-    /// only once a second account exists is one nobody finds before they need
-    /// it. Adding is NOT here: it lives in the Account pane, one row down, where
-    /// removing and renaming already live. This surface answers which, not how
-    /// many.
-    private var switcher: some View {
+    /// Rules first. It is the page a swipe's Tune has been writing to all
+    /// along, and the one a person comes back for.
+    private var pages: some View {
         VStack(spacing: 0) {
-            ForEach(accounts) { account in
-                let isActive = account.id == AccountManager.shared.activeId
-                Button {
-                    // `switchTo` declines the account already live, so a tap on
-                    // the checked row costs nothing — no flush, no epoch bump,
-                    // no world rebuilt to arrive where it started. Which is why
-                    // the row is not `.disabled`: dimming the ACTIVE account
-                    // would say the opposite of what the checkmark says.
-                    Task { await AccountManager.shared.switchTo(account.id) }
-                } label: {
-                    accountRow(account, isActive: isActive)
-                }
-                .buttonStyle(.plain)
-                if account.id != accounts.last?.id { Hairline() }
+            NavigationLink { RulesView() } label: {
+                row(
+                    symbol: SettingsSection.rules.symbol, title: SettingsSection.rules.label,
+                    blurb: "what you asked for from each sender")
             }
+            .buttonStyle(.plain)
+            Hairline()
+            NavigationLink { GroupsView() } label: {
+                row(
+                    symbol: SettingsSection.groups.symbol, title: SettingsSection.groups.label,
+                    blurb: "people you write to together")
+            }
+            .buttonStyle(.plain)
         }
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
     }
 
-    private func accountRow(_ account: AccountRecord, isActive: Bool) -> some View {
-        HStack(spacing: 12) {
-            // The same initial-in-a-circle the Mac's rail wears, so one person
-            // on both devices recognizes an account by the same mark.
-            Text(account.initial)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-                .frame(width: 26, height: 26)
-                .background(Circle().fill(Palette.accentSoft))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(account.displayName)
-                    .font(Typo.rowSub)
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                // Only when it would SAY something new: `displayName` already
-                // falls back to the host, and a row reading "baddiebox:8848"
-                // twice is noise dressed as detail.
-                if let host = subtitle(account) {
-                    Text(host)
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 8)
-            if isActive {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.accent)
-                    .accessibilityLabel("Active account")
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 11)
-        .contentShape(Rectangle())
-    }
-
-    /// The daemon behind a NAMED account. Nil when the name is already the host
-    /// (or when the host is not known yet, which is a record written before the
-    /// field existed — `noteDisplayHost` fills those in at boot).
-    private func subtitle(_ account: AccountRecord) -> String? {
-        let named = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !named.isEmpty, !account.displayHost.isEmpty else { return nil }
-        return account.displayHost
-    }
-
-    /// One glass pane, six rows, hairlines between: the inset-grouped shape,
-    /// built out of the app's own material rather than the system's.
+    /// One glass pane, a row per settings pane, hairlines between: the
+    /// inset-grouped shape, built out of the app's own material rather than
+    /// the system's.
     private var index: some View {
         VStack(spacing: 0) {
             ForEach(Self.order, id: \.self) { section in
@@ -180,16 +185,21 @@ struct AccountPage: View {
     }
 
     private func row(_ section: SettingsSection) -> some View {
+        row(symbol: section.symbol, title: section.label, blurb: blurb(section))
+    }
+
+    /// The one row shape on this screen, for a settings pane or a page.
+    private func row(symbol: String, title: String, blurb: String) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: section.symbol)
+            Image(systemName: symbol)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Palette.accent)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
-                Text(section.label)
+                Text(title)
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.ink)
-                Text(blurb(section))
+                Text(blurb)
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                     .lineLimit(1)
@@ -216,20 +226,21 @@ struct AccountPage: View {
                     YouSection()
                     AppearanceSection()
                     NotificationsSection()
-                    // NO HelpSection: both of its buttons render through the
-                    // desktop's ActionLayer, which has no iOS host yet. Either
-                    // would set state (`tour.active`, `whatsNew.notes`) that no
-                    // surface here is able to show or dismiss. The phone's
-                    // what's-new is the App Store's release notes until that
-                    // host exists.
+                    // HelpSection is here for its What's new row, which the
+                    // shell can now answer (WhatsNewWalk, mounted in
+                    // MobileShell). Its Practice inbox row stays on the Mac:
+                    // the tour is a lesson over the Mac's shell and the phone
+                    // has none. The section leaves both out by itself, and
+                    // draws nothing when there is no note to show.
+                    HelpSection()
                     DeveloperSection()
                 case .mail:
                     MailSection()
                     SearchSection()
                     SignatureSection()
                     ReadTrackingSection()
-                // Mac panes: the phone lists neither (see `order`), so there is
-                // no row that could push one.
+                // Not panes here: the phone pushes these two from `pages`, as
+                // pages of their own, so nothing asks this switch for either.
                 case .rules, .groups:
                     EmptyView()
                 case .assistant:
@@ -265,7 +276,7 @@ struct AccountPage: View {
         case .rules: "how each sender's mail is handled"
         case .groups: "people you write to together"
         case .assistant: "your own api key, and which model"
-        case .agents: "connect OpenClaw, Claude Code and others"
+        case .agents: "connect Claude, OpenClaw, Hermes Agent and others"
         case .privacy: "what telemetry leaves the app"
         case .audit: "what the agent and this app have done"
         case .account: "the mailboxes this install knows"

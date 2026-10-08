@@ -6,8 +6,11 @@
 //! docs/SECURITY.md §4.
 
 mod agent;
+mod agent_write;
 mod assistant;
 mod auth;
+mod calendar_connect;
+mod calendar_write;
 mod console;
 mod devices;
 mod error;
@@ -37,18 +40,18 @@ pub use error::ApiError;
 /// The auth-mail retention pass. Exported for the daemon's timer: it uses the
 /// WRITE credential, which the readonly-bound sync loop must never touch.
 pub use handlers::run_shred_pass;
-pub use http_metrics::record_http_metrics;
+pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
 /// The scheduled-send worker's pass. Exported for the daemon's timer for the
 /// same reason as the shredder: it sends on the WRITE credential.
 pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
-pub use sharing::Sharing;
-pub use state::{ApiState, StateError, attach_event_channel};
+pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
+pub use state::{AgentDoorStatus, ApiState, StateError, attach_event_channel};
 
 use axum::{
     Router, middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 
 /// Build this crate's router: the bearer-authed `/client/*` tree, plus the TWO
@@ -165,6 +168,9 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/receipts", get(handlers::get_receipts))
         .route("/client/banking", get(handlers::get_banking))
         .route("/client/calendar", get(handlers::get_calendar))
+        // Everything behind the Calendar page, behind the `calendar` hidden
+        // feature: see `calendar_routes`.
+        .merge(calendar_routes(state.clone()))
         .route("/client/search", get(handlers::search))
         // The user's own sent mail. Human door only — this is the one listing
         // that reads `is_sent = 1`, and the agent door gets no such route: what
@@ -214,6 +220,7 @@ fn client_router(state: ApiState) -> Router {
         // Sender autocomplete for the search field's `from:` operator: who
         // writes to the user. Human door only, for the reason contacts is.
         .route("/client/senders", get(handlers::get_senders))
+        .route("/client/sender-domains", get(handlers::get_sender_domains))
         // The reader's contact card: one address, everything known about it.
         // Human door only, for the reason contacts is.
         .route("/client/person", get(handlers::get_person))
@@ -252,6 +259,7 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/marketing", get(handlers::get_marketing))
         .route("/client/audit", get(handlers::get_audit))
         .route("/client/stats", get(handlers::get_stats))
+        .route("/client/account/photo", get(handlers::get_account_photo))
         // SHARING. The GET is a read (may this daemon share, and what could the
         // mail say); the POST spends a quota and sends mail as the user, so it
         // sits with the write routes below rather than here... except it does
@@ -290,6 +298,10 @@ fn client_router(state: ApiState) -> Router {
             "/client/unsubscribes/resolution",
             post(handlers::unsubscribe_resolution),
         )
+        .route(
+            "/client/unsubscribes/smart_block",
+            get(handlers::unsubscribe_smart_block),
+        )
         // Notification delivery: the SSE feed plus the iOS NSE's by-id fetch.
         // Human door only — the agent door gains no access to the event log.
         .route("/client/events", get(events::events_stream))
@@ -319,6 +331,13 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/actions/not_spam", post(handlers::action_not_spam))
         .route("/client/actions/label", post(handlers::action_label))
         .route("/client/actions/send", post(handlers::action_send))
+        // What an agent on the agent door may write (issue #394). Set HERE,
+        // by the owner, and only read over there: the agent door has no route
+        // or tool that changes it.
+        .route(
+            "/client/settings/agent-access",
+            get(agent_write::get_agent_access).put(agent_write::put_agent_access),
+        )
         // Bearer auth wraps EVERY route above.
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -334,4 +353,75 @@ fn client_router(state: ApiState) -> Router {
                 .allow_headers(tower_http::cors::Any),
         )
         .with_state(state)
+}
+
+/// The Calendar page's routes, ALL BEHIND THE `calendar` HIDDEN FEATURE
+/// ([`squelch_core::features::CALENDAR`]). Off is as if the feature did not
+/// exist: every route here answers [`ApiError::not_found`], the opaque 404 a
+/// missing thread or a hidden sealed message gets, asked at the moment of each request (a flag flipped under a running daemon
+/// changes the next answer), and BEFORE ANY OTHER WORK. The gate is a route
+/// layer rather than a line in each handler because the handlers' extractors
+/// (the query, the JSON body, the path) run before a handler body could ask,
+/// and a refused request should not have its body read at all. For the same
+/// reason a write refused here writes NO audit row: a path the daemon does
+/// not serve writes none either, and the audit log records attempts at
+/// actions that exist (the calendar writes audit their own refusals, from
+/// inside a feature that is on).
+///
+/// Merged inside [`client_router`], so bearer auth still runs first: a caller
+/// with no credential gets the 401 and learns nothing about the flag.
+fn calendar_routes(state: ApiState) -> Router<ApiState> {
+    Router::new()
+        // Calendar ghosts: the timeline read and the user's word on one ghost
+        // (dismissed, going, a corrected end). HUMAN DOOR ONLY in both
+        // directions: the agent door has no timeline route.
+        .route("/client/timeline", get(handlers::get_timeline))
+        .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
+        // Start a Google Calendar sync now (the calendar page opening), at
+        // most once per account per 30 seconds. HUMAN DOOR ONLY: the agent
+        // door neither reads the calendar nor spends its quota.
+        .route("/client/timeline/refresh", post(handlers::refresh_timeline))
+        // Connect Google Calendar on a SELF-HOST: the daemon runs the consent
+        // `squelchd auth --calendar` runs, on a loopback listener, and answers
+        // the consent URL. 409 on hosted, where the control plane runs it.
+        // HUMAN DOOR ONLY: the agent door can neither grant nor read calendar.
+        .route(
+            "/client/calendar/connect",
+            post(calendar_connect::connect_calendar),
+        )
+        // The user's own create, edit and delete of one event on their Google
+        // Calendar: Google first, then the local row, each attempt audited.
+        // HUMAN DOOR ONLY: the agent door and the in-app assistant can neither
+        // read nor write a calendar.
+        .route(
+            "/client/calendar/events",
+            post(calendar_write::create_event),
+        )
+        .route(
+            "/client/calendar/events/{calendar_id}/{id}",
+            patch(calendar_write::edit_event).delete(calendar_write::delete_event),
+        )
+        // The user's correction of a person's inferred timezone (docs/
+        // CALENDAR.md §7). A local write, human door only, for the reason the
+        // contact card is; part of the calendar feature, so it is here. The
+        // inference itself runs at ingest whatever the flag says, and
+        // `GET /client/person` serves the zone only while the flag is on.
+        .route(
+            "/client/person/timezone",
+            put(handlers::put_person_timezone),
+        )
+        .route_layer(middleware::from_fn_with_state(state, require_calendar))
+}
+
+/// The `calendar` gate itself. See [`calendar_routes`].
+async fn require_calendar(
+    axum::extract::State(state): axum::extract::State<ApiState>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.features().enabled(squelch_core::features::CALENDAR) {
+        return ApiError::not_found().into_response();
+    }
+    next.run(req).await
 }

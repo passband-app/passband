@@ -12,7 +12,7 @@ use super::*;
 /// and pinning it means a missing index is a loud prepare error, not a silent
 /// walk. `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
 pub(crate) const SENDER_RULE_DIGEST_SQL: &str =
-    "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL
+    "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL, t.category
      FROM messages m INDEXED BY idx_messages_from_nocase
      JOIN triage t ON t.message_id = m.id
      WHERE m.account_id = ?1
@@ -212,6 +212,7 @@ impl SqliteStore {
                     tier: r.get(1)?,
                     status: r.get(2)?,
                     opened: r.get(3)?,
+                    category: r.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -286,7 +287,8 @@ impl SqliteStore {
                  requested_at=excluded.requested_at, method=excluded.method,
                  source_message_id=excluded.source_message_id,
                  violation_count=0, last_violation_at=NULL, resolution=NULL,
-                 status=NULL, status_url=NULL, status_reason=NULL, status_at=NULL",
+                 status=NULL, status_url=NULL, status_reason=NULL, status_at=NULL,
+                 smart_block=CASE WHEN smart_block = 'null' THEN NULL ELSE smart_block END",
             params![
                 account_id,
                 sender,
@@ -318,7 +320,8 @@ impl SqliteStore {
                  source_message_id=excluded.source_message_id,
                  violation_count=0, last_violation_at=NULL, resolution=NULL,
                  status='running', status_url=excluded.status_url,
-                 status_reason=NULL, status_at=excluded.status_at",
+                 status_reason=NULL, status_at=excluded.status_at,
+                 smart_block=CASE WHEN smart_block = 'null' THEN NULL ELSE smart_block END",
             params![account_id, sender, now, source_message_id, url],
         )?;
         Ok(())
@@ -416,13 +419,14 @@ impl SqliteStore {
         let mut stmt = conn.prepare(
             "SELECT sender_addr, requested_at, method, violation_count,
                     last_violation_at, resolution, status, status_url,
-                    status_reason, status_at
+                    status_reason, status_at, smart_block
              FROM unsubscribes
              WHERE account_id = ?1
              ORDER BY requested_at DESC",
         )?;
         let out = stmt
             .query_map(params![account_id], |r| {
+                let memo = SmartBlockMemo::from_column(r.get(10)?);
                 Ok(UnsubscribeRecord {
                     sender: r.get(0)?,
                     requested_at: dt(r, 1)?,
@@ -434,6 +438,11 @@ impl SqliteStore {
                     status_url: r.get(7)?,
                     status_reason: r.get(8)?,
                     status_at: dt_opt(r, 9)?,
+                    smart_block_asked: memo != SmartBlockMemo::NotAsked,
+                    smart_block: match memo {
+                        SmartBlockMemo::Asked(block) => block,
+                        SmartBlockMemo::NotAsked => None,
+                    },
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -451,6 +460,40 @@ impl SqliteStore {
             "UPDATE unsubscribes SET resolution = ?3, status_url = NULL
              WHERE account_id = ?1 AND sender_addr = ?2",
             params![account_id, sender, resolution],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub(super) fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<SmartBlockMemo>> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT smart_block FROM unsubscribes
+                 WHERE account_id = ?1 AND sender_addr = ?2",
+                params![account_id, sender],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(row.map(SmartBlockMemo::from_column))
+    }
+
+    pub(super) fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: Option<&SmartBlock>,
+    ) -> Result<bool> {
+        let raw = serde_json::to_string(&proposal)
+            .map_err(|e| CoreError::InvalidInput(format!("smart block: {e}")))?;
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE unsubscribes SET smart_block = ?3
+             WHERE account_id = ?1 AND sender_addr = ?2",
+            params![account_id, sender, raw],
         )?;
         Ok(n > 0)
     }

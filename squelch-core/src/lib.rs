@@ -3,12 +3,15 @@
 //! Sealed (auth-related) messages are ABSENT from every agent-door query, never
 //! redacted — see docs/SECURITY.md §4, [`store`], and [`triage::seal`].
 
+pub mod agent_write;
 pub mod auth;
 pub mod carriers;
 pub mod config;
 pub mod credentials;
 pub mod embed;
 pub mod error;
+pub mod features;
+pub mod gcal;
 pub mod gmail_budget;
 pub mod mem;
 pub mod metrics;
@@ -16,6 +19,7 @@ pub mod push;
 pub mod store;
 pub mod sync;
 pub mod text;
+pub mod timezone;
 pub mod tracking;
 pub mod triage;
 pub mod types;

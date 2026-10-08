@@ -31,8 +31,9 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 
-use crate::reconnect::ReconnectView;
-use crate::store::UserRow;
+use crate::reconnect::{Purpose, ReconnectView};
+use crate::store::{FeatureBoard, UserRow};
+use squelch_core::features::Feature;
 
 /// The Content-Security-Policy every page carries. The single allowance is the
 /// inline `<style>`; `frame-ancestors 'none'` (with the older `X-Frame-Options`
@@ -681,7 +682,7 @@ pub fn signup_form(
 <li><strong>Change</strong> (<code>gmail.modify</code>): archiving and labeling, never deletion.</li>
 <li><strong>Send</strong> (<code>gmail.send</code>): replying from the app.</li>
 </ul>
-<p>Passband needs all three, so keep every box checked. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
+<p>Passband needs all three, so keep those boxes checked. It also asks for your name and profile photo, to show them in the app; that one is optional. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
 </details>
 {links_html}"#,
             error_html = error_html,
@@ -796,8 +797,41 @@ pub fn app_signed_in(
 /// EXHAUSTIVE ON PURPOSE. This page's failure mode is a state that reads as
 /// "still working" forever, which is the bug the whole worker exists to end,
 /// and a `_` arm would let a new terminal state ship straight into it.
-pub fn reconnect_result(view: ReconnectView) -> Response {
-    let (heading, detail, link, button) = match view {
+///
+/// `purpose` picks the words, never the behaviour: a calendar grant installs
+/// exactly as a reconnect does, so the states, the refresh and the links are
+/// the same list, and a view the row could not be read for is told in the
+/// reconnect's neutral words.
+pub fn reconnect_result(view: ReconnectView, purpose: Purpose) -> Response {
+    let (heading, detail, link, button) = match purpose {
+        Purpose::Reconnect => reconnect_words(view),
+        Purpose::Calendar => calendar_words(view),
+    };
+    let mut response = page(
+        StatusCode::OK,
+        heading,
+        &format!(
+            "<h1>{}</h1><p class=\"lead\" role=\"status\">{}</p><a class=\"button\" href=\"{}\">{} <span class=\"arrow\" aria-hidden=\"true\">→</span></a>",
+            escape_html(heading),
+            escape_html(detail),
+            escape_html(link),
+            escape_html(button),
+        ),
+    );
+    if view.refreshes() {
+        response.headers_mut().insert(
+            header::REFRESH,
+            header::HeaderValue::from_static("5; url=/reconnect/status"),
+        );
+    }
+    response
+}
+
+/// `(heading, detail, link, button)` for a plain reconnect.
+fn reconnect_words(
+    view: ReconnectView,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match view {
         ReconnectView::Pending => (
             "Reconnecting your mailbox…",
             "We’re restarting your mailbox with your new Google connection. This can take a few minutes. You can close this page; reconnecting will continue.",
@@ -846,25 +880,62 @@ pub fn reconnect_result(view: ReconnectView) -> Response {
             "passband://open",
             "Open Passband",
         ),
-    };
-    let mut response = page(
-        StatusCode::OK,
-        heading,
-        &format!(
-            "<h1>{}</h1><p class=\"lead\" role=\"status\">{}</p><a class=\"button\" href=\"{}\">{} <span class=\"arrow\" aria-hidden=\"true\">→</span></a>",
-            escape_html(heading),
-            escape_html(detail),
-            escape_html(link),
-            escape_html(button),
-        ),
-    );
-    if view.refreshes() {
-        response.headers_mut().insert(
-            header::REFRESH,
-            header::HeaderValue::from_static("5; url=/reconnect/status"),
-        );
     }
-    response
+}
+
+/// `(heading, detail, link, button)` for the calendar grant. The same states
+/// as [`reconnect_words`], and the same neutrality on a refusal: which record
+/// disagreed is not the browser's to learn. Every link is a constant.
+fn calendar_words(view: ReconnectView) -> (&'static str, &'static str, &'static str, &'static str) {
+    match view {
+        ReconnectView::Pending => (
+            "Connecting your calendar…",
+            "We’re restarting your mailbox with calendar access. This can take a few minutes. You can close this page; connecting will continue.",
+            "/reconnect/status",
+            "Check progress",
+        ),
+        ReconnectView::Retrying => (
+            "Connecting your calendar is taking longer than usual",
+            "We’re still working on it and will keep trying automatically. You can close this page and return later.",
+            "/reconnect/status",
+            "Check progress",
+        ),
+        ReconnectView::Checking => (
+            "Checking your calendar connection…",
+            "We’re checking the latest progress. This page will update automatically.",
+            "/reconnect/status",
+            "Check progress",
+        ),
+        ReconnectView::Complete => (
+            "Calendar is connected",
+            "Calendar is connected. You can close this tab and go back to Passband.",
+            "passband://open",
+            "Open Passband",
+        ),
+        ReconnectView::Refused => (
+            "Your calendar couldn’t be connected",
+            "Passband couldn’t connect your calendar, and nothing about your mail changed. Open Passband to try again later.",
+            "passband://open",
+            "Open Passband",
+        ),
+        ReconnectView::GaveUp => (
+            "Connecting your calendar didn’t finish",
+            // Back to the app, not a bare `/reconnect?calendar=1`: the app's
+            // own link carries the mailbox hint, and a retry started here
+            // would run without the wrong-account guard.
+            "We kept trying for a while but couldn’t confirm the new connection. Nothing needs undoing. Go back to Passband and connect your calendar again from there.",
+            "passband://open",
+            "Open Passband",
+        ),
+        // Unreachable in practice (an expired view has no row to read a
+        // purpose from) and answered in the calendar's words anyway.
+        ReconnectView::Expired => (
+            "This page has expired",
+            "Open Passband to check on your calendar. If it is still not connected, start again from there.",
+            "passband://open",
+            "Open Passband",
+        ),
+    }
 }
 
 /// The page BOTH logins get when they are refused: the same shell as [`problem`]
@@ -942,6 +1013,79 @@ pub fn app_no_tenant(heading: &str, detail: &str) -> Response {
             detail = escape_html(detail),
         ),
     )
+}
+
+/// The CSP of the agent confirmation page: [`CSP`] with `form-action` widened
+/// to any https origin, and nothing else changed (`frame-ancestors 'none'`
+/// included, which is what stops the Continue button being clickjacked).
+///
+/// WIDENED BECAUSE OF THE REDIRECT, for the reason [`CSP`] already names
+/// accounts.google.com: Chrome enforces `form-action` against where a form
+/// submission is REDIRECTED, and `POST /agent/confirm` answers with a 303 to
+/// the AuthKit URL WorkOS returned. That host is the tenant fleet's issuer,
+/// which this service is not configured with, so it cannot be named; under
+/// `form-action 'self'` the press would silently do nothing. What the
+/// widening does not open: the form's own `action` is a fixed same-origin path
+/// with nothing interpolated, and the redirect target was already held to an
+/// absolute https URL before it was sent (see
+/// [`crate::workos::acceptable_redirect`]).
+///
+/// AND LOOPBACK, because the chain does not always stop at AuthKit. When
+/// AuthKit already holds this agent's consent it shows no screen of its own
+/// and answers with a redirect straight to the agent's callback, which makes
+/// that callback one more hop of THIS form's submission. A desktop agent's
+/// callback is plain http on loopback (`http://127.0.0.1:<port>/callback`),
+/// and under `https:` alone Chrome ate the press: the completion had happened
+/// and the browser stayed on this page (seen on production, 2026-10-05, on the
+/// second authorization of one client). Loopback only, any port; plain http
+/// to anywhere else stays refused.
+const CSP_AGENT_CONFIRM: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https: http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'; base-uri 'none'";
+
+/// The same, on a plain-http local run, where the redirect may be plain http.
+const CSP_AGENT_CONFIRM_INSECURE: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https: http:; frame-ancestors 'none'; base-uri 'none'";
+
+/// The agent login's confirmation page: the one page of OURS between Google and
+/// AuthKit's consent screen.
+///
+/// IT EXISTS BECAUSE THE LINK CAN BE SENT. Whoever starts an agent's
+/// authorization can mail somebody else the `/agent/auth` link; Google's
+/// chooser asks a returning user nothing, and AuthKit's screen names the agent
+/// with whatever its builder registered. So this page says, before anything is
+/// sent anywhere, what is about to be granted, to which mailbox (escaped: a
+/// person with several Google accounts must see WHICH one), and when to walk
+/// away. Short, because a long warning is a warning nobody reads.
+///
+/// ONE FORM, TWO BUTTONS. Cancel comes FIRST in the markup, so if anything
+/// ever submits the form implicitly (Enter in a field), the default is the
+/// safe answer; Continue is the solid button beside it, and Cancel is quiet. Both carry the one-shot CSRF token; the server takes the
+/// pending state either way, so Cancel really does discard it.
+pub fn agent_confirm(mailbox: &str, csrf: &str, allow_http: bool) -> Response {
+    let mut resp = page(
+        StatusCode::OK,
+        "Connect an AI agent?",
+        &format!(
+            r#"<h1>Connect an AI agent to your mail?</h1>
+<p class="lead">An AI agent is asking to read the mail in <strong>{mailbox}</strong>.</p>
+<p>Only continue if you just started connecting an agent yourself, on this device. If someone sent you a link to this page, close it.</p>
+<p class="hint">The next screen names the agent. That name is chosen by whoever built it, so it does not prove who they are.</p>
+<form method="post" action="/agent/confirm"><input type="hidden" name="csrf" value="{csrf}">
+<button type="submit" name="decision" value="cancel" class="quiet">Cancel</button>
+<button type="submit" name="decision" value="continue">Continue <span class="arrow" aria-hidden="true">→</span></button>
+</form>"#,
+            mailbox = escape_html(mailbox),
+            csrf = escape_html(csrf),
+        ),
+    );
+    let csp = if allow_http {
+        CSP_AGENT_CONFIRM_INSECURE
+    } else {
+        CSP_AGENT_CONFIRM
+    };
+    resp.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(csp),
+    );
+    resp
 }
 
 /// The admin door: one field, and nothing that describes what is behind it.
@@ -1164,6 +1308,7 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
         "Waitlist",
         &format!(
             r#"<section class="hero">
+{tabs}
 <h1 data-text="Waitlist">Waitlist</h1>
 <p class="sr">{waiting_count} waiting, {approved_count} approved recently,
 {accepted_count} of those signed up, {active_count} of those active</p>
@@ -1198,6 +1343,7 @@ once and expires in {ttl} days.</p></div>
 </form>
 <p class="hint">This session lasts {session_days} days.</p>
 </div>"#,
+            tabs = admin_tabs(AdminTab::Waitlist),
             scope = scope(&rungs),
             error_html = stop_note(error),
             waiting_count = pending.len(),
@@ -1214,6 +1360,208 @@ once and expires in {ttl} days.</p></div>
                 "Nobody has been approved yet.",
             ),
             ttl = crate::invites::DEFAULT_TTL_DAYS,
+        ),
+    )
+}
+
+/// The two pages behind the admin token, as the strip above each one's title.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminTab {
+    Waitlist,
+    Features,
+}
+
+/// The way between the operator's pages. Plain links: no JavaScript here, and
+/// each page is a whole document.
+fn admin_tabs(current: AdminTab) -> String {
+    let tab = |tab: AdminTab, href: &str, label: &str| {
+        let here = if tab == current {
+            r#" aria-current="page""#
+        } else {
+            ""
+        };
+        format!(r#"<a href="{href}"{here}>{label}</a>"#)
+    };
+    format!(
+        r#"<nav class="tabs" aria-label="Admin pages">{}{}</nav>"#,
+        tab(AdminTab::Waitlist, "/admin", "Waitlist"),
+        tab(AdminTab::Features, "/admin/features", "Features"),
+    )
+}
+
+/// The form field names on the features page. Here so the page that writes
+/// them and the handler that reads them cannot drift apart.
+///
+/// `FEATURE_TENANT_FIELD` rides once per row as a hidden field and says "this
+/// tenant was on the page", which is what lets an UNTICKED box mean "off": a
+/// checkbox that is not ticked sends nothing at all, so without it a tenant
+/// with every box cleared would be indistinguishable from one who was never
+/// listed.
+pub const FEATURE_TENANT_FIELD: &str = "t";
+/// One COLUMN the page drew, as a hidden field, for the same reason the tenant
+/// field exists turned ninety degrees: a save may only untick boxes in columns
+/// this page actually had. A tab rendered before a deploy added a feature has
+/// no boxes for it, and must not read their absence as "off for everyone".
+pub const FEATURE_KEY_FIELD: &str = "k";
+/// One ticked box: `<tenant id>.<feature key>`.
+pub const FEATURE_GRANT_FIELD: &str = "g";
+/// One ticked box on the "everyone" row: a feature key.
+pub const FEATURE_EVERYONE_FIELD: &str = "all";
+
+/// The features page: which hidden features each tenant has been let into.
+///
+/// `board` is `None` when the store did not answer, and then THERE IS NO FORM.
+/// A form drawn over an empty list would post "every box is unticked" and the
+/// save would believe it, so the one thing this page must never do is offer a
+/// Save button under a list it failed to read.
+///
+/// ALWAYS 200, for the reason [`admin_page`] is: a banner over a real state is
+/// a finished page.
+///
+/// EVERYTHING FROM THE STORE IS ESCAPED, and so are the registry's own strings,
+/// which are compiled in and would be safe raw. The rule on this page is that
+/// nothing is interpolated raw, and it has no exceptions for good behaviour.
+pub fn admin_features(
+    registry: &[Feature],
+    board: Option<&FeatureBoard>,
+    error: Option<&str>,
+    saved: bool,
+    refresh_minutes: u64,
+) -> Response {
+    let legend: String = registry
+        .iter()
+        .map(|f| {
+            format!(
+                "<dt><code>{}</code></dt><dd>{}</dd>\n",
+                escape_html(f.key),
+                escape_html(f.summary),
+            )
+        })
+        .collect();
+
+    let body = match (registry.is_empty(), board) {
+        (true, _) => r#"<section class="rack"><div class="rack-head"><span class="led"></span><h2>Tenants</h2></div>
+<p class="muted">This build hides nothing: every feature it has is on for everyone. A hidden feature
+shows up here once it is listed in <code>squelch-core/src/features.rs</code> and that build is deployed.</p>
+</section>"#
+            .to_string(),
+        (false, None) => String::new(),
+        (false, Some(board)) => {
+            let head: String = registry
+                .iter()
+                .map(|f| format!("<th>{}</th>", escape_html(f.key)))
+                .collect();
+            let boxes = |name: &str, prefix: &str, on: &dyn Fn(&str) -> bool| -> String {
+                registry
+                    .iter()
+                    .map(|f| {
+                        let key = escape_html(f.key);
+                        let checked = if on(f.key) { " checked" } else { "" };
+                        format!(
+                            r#"<td class="tick"><label><input type="checkbox" name="{name}" value="{prefix}{key}"{checked}><span>{key}</span></label></td>"#
+                        )
+                    })
+                    .collect()
+            };
+            let everyone_row = format!(
+                r#"<tr class="everyone"><td class="who">Everyone<br><span class="muted">every tenant, and anybody who signs up later</span></td>{}</tr>
+"#,
+                boxes(FEATURE_EVERYONE_FIELD, "", &|key| board
+                    .everyone
+                    .contains(key)),
+            );
+            let tenant_rows: String = board
+                .tenants
+                .iter()
+                .map(|t| {
+                    // A row whose daemon cannot ask is still tickable: the
+                    // grant is stored and goes live when a token is minted.
+                    // What it must not do is look like every other row.
+                    let tokenless = if t.has_token {
+                        ""
+                    } else {
+                        r#"<br><span class="flag">no control token</span><span class="muted">waits for <code>share mint</code></span>"#
+                    };
+                    format!(
+                        r#"<tr><td class="who"><input type="hidden" name="{FEATURE_TENANT_FIELD}" value="{id}"><code>{label}</code><br><span class="muted">{email}</span>{tokenless}</td>{boxes}</tr>
+"#,
+                        id = t.id,
+                        label = escape_html(&t.label),
+                        email = escape_html(&t.account_email),
+                        boxes = boxes(FEATURE_GRANT_FIELD, &format!("{}.", t.id), &|key| t
+                            .features
+                            .contains(key)),
+                    )
+                })
+                .collect();
+            let nobody = if board.tenants.is_empty() {
+                r#"<p class="muted">No active tenants yet.</p>"#
+            } else {
+                ""
+            };
+            let columns: String = registry
+                .iter()
+                .map(|f| {
+                    format!(
+                        r#"<input type="hidden" name="{FEATURE_KEY_FIELD}" value="{}">"#,
+                        escape_html(f.key)
+                    )
+                })
+                .collect();
+            format!(
+                r#"<form class="features" method="post" action="/admin/features">{columns}
+<section class="rack">
+<div class="rack-head"><span class="led"></span><h2>Tenants</h2><span class="count">{count}</span>
+<p class="hint">A ticked box is on. A mailbox's daemon hears about a change within {refresh_minutes} minutes, with no restart.</p></div>
+<table class="matrix"><tr><th>Who</th>{head}</tr>
+{everyone_row}{tenant_rows}</table>
+{nobody}
+</section>
+<div class="footer-row"><button type="submit">Save</button>
+<p class="hint">Saves the whole page at once.</p></div>
+</form>"#,
+                count = board.tenants.len(),
+            )
+        }
+    };
+
+    let saved_note = if saved && error.is_none() {
+        r#"<p class="hint saved" role="status">Saved.</p>"#
+    } else {
+        ""
+    };
+    let legend = if legend.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<section class="rack"><div class="rack-head"><span class="led"></span><h2>Hidden features</h2><span class="count">{}</span></div>
+<dl class="legend">
+{legend}</dl>
+</section>"#,
+            registry.len(),
+        )
+    };
+
+    console(
+        StatusCode::OK,
+        "Features",
+        &format!(
+            r#"<section class="hero">
+{tabs}
+<h1 data-text="Features">Features</h1>
+</section>
+{error_html}{saved_note}
+<div class="racks">
+{legend}
+{body}
+</div>
+<div class="footer-row">
+<form class="signout" method="post" action="/admin/logout">
+<button type="submit" class="quiet">Sign out</button>
+</form>
+</div>"#,
+            tabs = admin_tabs(AdminTab::Features),
+            error_html = stop_note(error),
         ),
     )
 }
@@ -1551,6 +1899,44 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
+    /// The mailbox is ESCAPED on the confirmation page (the store holds
+    /// whatever Google verified, and this is the line where it meets HTML),
+    /// the page is unframeable and uncacheable, and it has no em dash.
+    #[tokio::test]
+    async fn the_agent_confirmation_escapes_the_mailbox_and_cannot_be_framed() {
+        let r = agent_confirm(r#"a"<b>&'c@example.com"#, "tok\"en", false);
+        assert_eq!(r.status(), StatusCode::OK);
+        let h = r.headers().clone();
+        let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+        assert!(csp.contains("form-action 'self' https:"), "{csp}");
+        // A returning agent's loopback callback is a hop of this form's
+        // submission; plain http to anywhere else is not allowed.
+        assert!(
+            csp.contains("form-action 'self' https: http://127.0.0.1:* http://localhost:*;"),
+            "{csp}"
+        );
+        assert!(!csp.contains("http:;") && !csp.contains("http: "), "{csp}");
+        assert_eq!(h[header::X_FRAME_OPTIONS], "DENY");
+        assert_eq!(h[header::CACHE_CONTROL], "no-store, no-cache");
+        assert_eq!(h[header::REFERRER_POLICY], "no-referrer");
+        let body = body_of(r).await;
+        assert!(
+            body.contains("a&quot;&lt;b&gt;&amp;&#39;c@example.com"),
+            "{body}"
+        );
+        assert!(!body.contains("<b>"), "{body}");
+        assert!(body.contains(r#"value="tok&quot;en""#), "{body}");
+        assert!(!body.contains('\u{2014}'), "{body}");
+        // Plain http is admitted to form-action only on an insecure run.
+        let insecure = agent_confirm("a@example.com", "t", true);
+        let csp = insecure.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.contains("https: http:"), "{csp}");
+    }
+
     async fn body_of(r: Response) -> String {
         String::from_utf8(to_bytes(r.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap()
     }
@@ -1640,6 +2026,8 @@ mod tests {
         assert!(html.contains("gmail.readonly"));
         assert!(html.contains("gmail.modify"));
         assert!(html.contains("gmail.send"));
+        // The fourth ask is named too, and named as the optional one.
+        assert!(html.contains("name and profile photo"), "{html}");
         // ...and the reason for each, not just the scope name.
         assert!(html.contains("triage"), "{html}");
         assert!(html.contains("labeling"), "{html}");

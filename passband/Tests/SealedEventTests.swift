@@ -35,6 +35,8 @@ struct SealedEventTests {
         {"id":99,"message_id":42,"thread_id":"auth","kind":"surfaced","tier":"signal","importance":0,"sender":"Security","one_line":"Login alert","created_at":"2026-09-17T12:00:00Z","is_auth":true}
         """.utf8))
         expect(auth.isAuth && EventBanner.copy(for: auth).sound, "Login alerts carry explicit auth and sound even at low importance")
+        aLoginCodeIsReadOutOfTheDaemonsSentenceAndNothingElse()
+        aFocusHoldsThePanelBackOnlyWhenAskedTo()
         anOrdinaryEventDecodesWithNoSealedKey()
         aSealedEventCarriesItsKind()
         anUnheardOfKindKeepsItsRawString()
@@ -331,6 +333,57 @@ struct SealedEventTests {
             print("  FAIL: \(what)")
         }
     }
+    /// The floating panel shows a code only when the event is the daemon's own
+    /// formatted sentence, flagged auth, and recent. Each miss here is a
+    /// different way of putting the wrong thing over somebody's browser.
+    static func aLoginCodeIsReadOutOfTheDaemonsSentenceAndNothingElse() {
+        let now = Fmt.date("2026-10-07T17:30:00Z")!
+        func event(_ line: String, auth: Bool = true, at: String = "2026-10-07T17:29:30Z") -> Event {
+            let json = """
+                {"id":7,"message_id":42,"thread_id":"t","kind":"surfaced","tier":"signal","importance":0,"sender":"UPS <pin@ups.com>","one_line":"\(line)","created_at":"\(at)","is_auth":\(auth)}
+                """
+            return try! JSONDecoder().decode(Event.self, from: Data(json.utf8))
+        }
+        let ups = EventBanner.loginCode(for: event("Your UPS login code is 914515"), now: now)
+        expect(ups == .init(service: "UPS", code: "914515"), "the daemon's sentence yields service and code")
+        expect(
+            EventBanner.loginCode(for: event("Your Example login code is 001234"), now: now)?.code
+                == "001234", "leading zeros survive")
+        let spaced = EventBanner.loginCode(for: event("Your Example login code is 123 456"), now: now)
+        expect(spaced?.code == "123 456", "a split code is shown as printed")
+        expect(spaced?.pasteable == "123456", "and pasted without the gap")
+        let lettered = EventBanner.loginCode(for: event("Your Example login code is ABC-DEF"), now: now)
+        expect(lettered?.pasteable == "ABC-DEF", "a lettered code keeps its hyphen on the pasteboard")
+        expect(
+            EventBanner.loginCode(for: event("Your Big Bank login code is 4821"), now: now)?.service
+                == "Big Bank", "a service name with a space in it is one name")
+
+        expect(
+            EventBanner.loginCode(for: event("Your UPS login code is 914515", auth: false), now: now)
+                == nil, "mail that is not auth never floats, whatever it says")
+        expect(
+            EventBanner.loginCode(for: event("New sign-in to your UPS account"), now: now) == nil,
+            "a descriptive auth line is a banner")
+        expect(
+            EventBanner.loginCode(for: event("Your UPS login code is in the email we sent"), now: now)
+                == nil, "prose after the marker is not a code")
+        expect(
+            EventBanner.loginCode(for: event("Your UPS login code is 12"), now: now) == nil,
+            "too short to be a code")
+        expect(
+            EventBanner.loginCode(
+                for: event("Your UPS login code is 914515", at: "2026-10-07T06:00:00Z"), now: now)
+                == nil, "a replayed event from last night does not float this morning")
+    }
+
+    static func aFocusHoldsThePanelBackOnlyWhenAskedTo() {
+        expect(EventBanner.floatsLoginCode(enabled: true, respectFocus: false, focused: true), "by default a Focus does not stop the panel")
+        expect(!EventBanner.floatsLoginCode(enabled: true, respectFocus: true, focused: true), "respecting a Focus that is on leaves the code to the banner")
+        expect(EventBanner.floatsLoginCode(enabled: true, respectFocus: true, focused: false), "no Focus, so it floats")
+        expect(EventBanner.floatsLoginCode(enabled: true, respectFocus: true, focused: nil), "a Focus the system will not report is not a Focus")
+        expect(!EventBanner.floatsLoginCode(enabled: false, respectFocus: false, focused: false), "off is off")
+    }
+
     static func genericPushStillIdentifiesItsAccountAndEvent() {
         let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
         let route = EventBanner.unresolvedPush("\(account.uuidString):42")

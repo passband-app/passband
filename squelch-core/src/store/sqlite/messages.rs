@@ -81,15 +81,26 @@ fn bump_unsub_violation_conn(
 /// `is_sent` and not the stored one is what keeps a real Bcc through the sticky
 /// `is_sent` flip: the inbound sighting offers nothing here, so the COALESCE
 /// keeps what the sent copy wrote.
-fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
+/// `date_offset_minutes` is the Date header's offset (the timezone
+/// inference's observation), written HERE with the rest of the row rather
+/// than by a follow-up UPDATE: it is the last column, after the bodies, and
+/// changing a record's size afterwards makes SQLite rewrite the whole record
+/// and its overflow pages a second time. `None` is "no opinion" and keeps
+/// what is stored, the recipients' rule.
+fn upsert_message_conn(
+    conn: &Connection,
+    msg: &NewMessage,
+    date_offset_minutes: Option<i32>,
+) -> Result<i64> {
     conn.execute(
         "INSERT INTO messages(account_id, gmail_msg_id, thread_id, from_addr, from_name,
              subject, received_at, snippet, body, body_html, is_sent, to_addrs,
              cc_addrs, bcc_addrs,
-             list_unsubscribe, list_unsub_one_click, auth_pass, is_spam)
+             list_unsubscribe, list_unsub_one_click, auth_pass, is_spam,
+             date_offset_minutes)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
              CASE WHEN ?11 = 1 THEN ?14 ELSE NULL END,
-             ?15,?16,?17,?18)
+             ?15,?16,?17,?18,?19)
          ON CONFLICT(account_id, gmail_msg_id) DO UPDATE SET
              thread_id=excluded.thread_id, from_addr=excluded.from_addr,
              from_name=excluded.from_name, subject=excluded.subject,
@@ -102,7 +113,9 @@ fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
              list_unsubscribe=excluded.list_unsubscribe,
              list_unsub_one_click=excluded.list_unsub_one_click,
              auth_pass=excluded.auth_pass,
-             is_spam=MIN(messages.is_spam, excluded.is_spam)",
+             is_spam=MIN(messages.is_spam, excluded.is_spam),
+             date_offset_minutes=COALESCE(excluded.date_offset_minutes,
+                                          messages.date_offset_minutes)",
         params![
             msg.account_id,
             msg.gmail_msg_id,
@@ -122,6 +135,7 @@ fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
             msg.list_unsub_one_click as i64,
             msg.auth_pass.map(|p| p as i64),
             msg.is_spam as i64,
+            date_offset_minutes,
         ],
     )?;
     let id: i64 = conn.query_row(
@@ -434,7 +448,7 @@ pub(super) fn external_contributor_allowed_conn(
 impl SqliteStore {
     pub(super) fn upsert_message(&self, msg: &NewMessage) -> Result<i64> {
         let conn = self.lock()?;
-        upsert_message_conn(&conn, msg)
+        upsert_message_conn(&conn, msg, None)
     }
 
     /// Clear provider spam after the caller restores the message in Gmail.
@@ -454,6 +468,10 @@ impl SqliteStore {
         if cleared == 0 {
             return Ok(false);
         }
+        // The message may feed ghosts again: project its stored decision now
+        // (the queued re-triage below re-decides it later), so a ghost it
+        // alone supplied comes back with the user's state intact.
+        super::ghosts::refresh_message_guarded(&tx, account_id, message_id)?;
         tx.execute(
             "UPDATE triage
                 SET stage1_model_used = NULL, model_used = NULL, needs_stage2 = 0,
@@ -478,6 +496,8 @@ impl SqliteStore {
             from_name.as_deref(),
             &received_at,
         )?;
+        // Its offset and any invitation it holds count from now on.
+        super::zones::refresh_for_message_guarded(&tx, account_id, message_id)?;
         super::agent_triage::enqueue_agent_triage_conn(
             &tx, account_id, message_id, "not_spam", false,
         )?;
@@ -805,7 +825,7 @@ impl SqliteStore {
         }
 
         // 1. Upsert the message row (+ FTS).
-        let id = upsert_message_conn(&tx, &triaged.message)?;
+        let id = upsert_message_conn(&tx, &triaged.message, triaged.date_offset_minutes)?;
 
         // 1a. HEAL: the vector was computed from the text the row had, which
         //     was the subject alone; drop it so the vector backfill re-embeds
@@ -840,6 +860,19 @@ impl SqliteStore {
                 &triaged.recipient_addrs,
             )?;
         }
+
+        // 1b''. TIMEZONE OBSERVATIONS: the Date header's offset is already
+        //       on the row (step 1); the invitation's organizer and zone go
+        //       beside it, and the zone of whoever they concern is recomputed,
+        //       when there is anything to learn. Under its own savepoint, so a
+        //       failure costs the zone and not the message (see
+        //       `zones::guarded` for the one exception).
+        super::zones::observe_guarded(
+            &tx,
+            triaged.message.account_id,
+            id,
+            triaged.invite_zone.as_ref(),
+        )?;
 
         // 1c. UNSUBSCRIBE VIOLATION LEDGER: inbound mail from a sender the user
         //     unsubscribed from, past the 72h grace, bumps that sender's
@@ -1215,6 +1248,80 @@ impl SqliteStore {
                  threads=excluded.threads,
                  fetched_at=excluded.fetched_at",
             params![account_id, messages, threads, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn account_identity(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<AccountIdentity>> {
+        let conn = self.lock()?;
+        // The blob is deliberately not selected: this rides on every stats call.
+        conn.query_row(
+            "SELECT name, given_name, photo_tag FROM account_profile WHERE account_id=?1",
+            params![account_id],
+            |r| {
+                Ok(AccountIdentity {
+                    name: r.get(0)?,
+                    given_name: r.get(1)?,
+                    photo_tag: r.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub(super) fn account_photo(&self, account_id: AccountId) -> Result<Option<AccountPhoto>> {
+        let conn = self.lock()?;
+        // The three columns are written together, so the filter is belt: a row
+        // with a name and no picture simply has all three NULL.
+        conn.query_row(
+            "SELECT photo, photo_mime, photo_tag FROM account_profile
+             WHERE account_id=?1
+               AND photo IS NOT NULL AND photo_mime IS NOT NULL AND photo_tag IS NOT NULL",
+            params![account_id],
+            |r| {
+                Ok(AccountPhoto {
+                    bytes: r.get(0)?,
+                    mime: r.get(1)?,
+                    tag: r.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub(super) fn set_account_profile(
+        &self,
+        account_id: AccountId,
+        name: Option<&str>,
+        given_name: Option<&str>,
+        photo: Option<&AccountPhoto>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO account_profile(
+                 account_id, name, given_name, photo, photo_mime, photo_tag, fetched_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(account_id) DO UPDATE SET
+                 name=excluded.name,
+                 given_name=excluded.given_name,
+                 photo=excluded.photo,
+                 photo_mime=excluded.photo_mime,
+                 photo_tag=excluded.photo_tag,
+                 fetched_at=excluded.fetched_at",
+            params![
+                account_id,
+                name,
+                given_name,
+                photo.map(|p| p.bytes.as_slice()),
+                photo.map(|p| p.mime.as_str()),
+                photo.map(|p| p.tag.as_str()),
+                Utc::now().to_rfc3339(),
+            ],
         )?;
         Ok(())
     }

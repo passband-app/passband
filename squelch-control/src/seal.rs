@@ -137,6 +137,7 @@ mod tests {
             access_token: ACCESS.into(),
             refresh_token: Some(REFRESH.into()),
             expires_at: Some(chrono::Utc::now()),
+            scopes: None,
         }
     }
 

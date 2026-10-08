@@ -56,7 +56,7 @@ targets:
         # keys to Info.plist, not here.
         INFOPLIST_FILE: Sources/Passband/Info.plist
         # Mirror of ./VERSION, which build.sh reads as the source of truth.
-        MARKETING_VERSION: "0.0.12"
+        MARKETING_VERSION: "0.0.13"
         CURRENT_PROJECT_VERSION: "1"
         COMBINE_HIDPI_IMAGES: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: Passband
@@ -109,6 +109,15 @@ targets:
           - "Views/UpdateAlert.swift"
           # The iPhone ask is a Mac card about the iPhone app.
           - "Views/TestFlightNudgeModal.swift"
+          # The discovery ring lives on the Mac's rail, and its page and found
+          # moment hang off the Mac shell. The ledger (Lib/DiscoveryLedger,
+          # Model/Discovery) does cross: the phone records finds too.
+          - "Views/Discovery/**"
+          # The agent-door ad is a Mac card too, like the iPhone ask, and the
+          # ad family's shared materials go with them. Its rule (Lib/
+          # AgentNudge.swift) compiles here so the Agents pane can stamp it.
+          - "Views/AgentNudgeModal.swift"
+          - "Views/AdCard.swift"
           # The AppKit HALF of the reader, and only that: an NSViewRepresentable
           # plus the WKWebView subclass that hands the scroll wheel back to the
           # column. Everything the reader is made of — the body-preparation
@@ -131,8 +140,10 @@ targets:
           # (MobileRootView.swift) mounts the pieces the phone has taken on,
           # on the same store flags. Among them: the TOASTS re-laid out for a
           # thumb in MobileToastHost, and the rule editor and code modal as-is.
-          # Not all of it has a phone mount. The tour overlay, What's New and
-          # the re-triage confirm/modal do not, for example.
+          # Not all of it has a phone mount. The tour overlay and the
+          # re-triage confirm/modal do not, for example. What's New does, as
+          # a view of the phone's own (PassbandiOS/Views/WhatsNewWalk.swift)
+          # over the phone's own notes; the Mac's card compiles here unmounted.
           - "Views/ActionLayer.swift"
           # --- phase 4: the remaining destinations ------------------------
           # The rail is the Mac's navigation model; the phone's is the tab bar.
@@ -190,7 +201,7 @@ targets:
         APS_ENVIRONMENT[config=Release]: production
         # The passband-ios-* tag overrides this in CI; it exists so an untagged local
         # build never claims a version ahead of what TestFlight actually has.
-        MARKETING_VERSION: "0.0.7"
+        MARKETING_VERSION: "0.0.8"
         CURRENT_PROJECT_VERSION: "1"
         # iPhone only. The iPad layout is a different design, not a stretch.
         TARGETED_DEVICE_FAMILY: "1"
@@ -260,7 +271,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Sources/PassbandiOSNotify/PassbandiOSNotify.entitlements
         # Version-locked to the app: iOS refuses to install a bundle whose
         # embedded extension disagrees about either number.
-        MARKETING_VERSION: "0.0.7"
+        MARKETING_VERSION: "0.0.8"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
         # The same signing posture as the app target above, for the same

@@ -11,10 +11,16 @@
 //
 // Keys: j/k select · n new · e/Enter edit · x delete.
 //
-// IT IS A SETTINGS PANE, NOT A ROUTED PAGE. It had a rail slot of its own until
-// the rail got crowded; a group is something you set up once and then address
-// from the composer, so it is filed with the other things you set up. `5` still
-// opens it. The Mac's SettingsView gives it the pane's whole height.
+// ON THE MAC IT IS A SETTINGS PANE, NOT A ROUTED PAGE. It had a rail slot of
+// its own until the rail got crowded; a group is something you set up once and
+// then address from the composer, so it is filed with the other things you set
+// up. Its digit still opens it. SettingsView gives it the pane's whole height.
+//
+// ON THE PHONE there is no beside, so the two columns are two screens: the
+// list hangs off the Account page (PassbandiOS/Views/AccountPage.swift) and a
+// tap pushes the detail. The detail is the Mac's right column, the same three
+// functions drawn into a ScrollView, on a second GroupsView told which group
+// it is about. See `phone` and `phoneDetail` below.
 
 import SwiftUI
 
@@ -30,11 +36,35 @@ struct GroupsView: View {
     @State private var detail: Loadable<SendGroup> = .idle
     @State private var history: Loadable<[GroupHistoryEntry]> = .idle
     @State private var detailFor: Int?
+    #if !os(macOS)
+        /// PHONE ONLY: the one group this instance is the detail screen of, or
+        /// nil for the list. The pushed screen is a second GroupsView rather
+        /// than a closure over the first one's state, and that is not style:
+        /// a destination built from the list's `detail` and `history` is drawn
+        /// from whatever they held when the list's body last ran, and the list
+        /// has no reason to run its body again while it is covered. An instance
+        /// of its own reads its own state in its own body.
+        var focus: SendGroup?
+        /// The row whose detail is pushed. The whole row and not an index: a
+        /// position would be pointing at somebody else's group the moment a
+        /// reload re-sorted the list.
+        @State private var opened: SendGroup?
+        @Environment(\.dismiss) private var dismiss
+    #endif
 
     private var groups: [SendGroup] { groupsState.value ?? [] }
     private var selected: SendGroup? { groups[safe: index] }
 
     var body: some View {
+        #if os(macOS)
+            desk
+        #else
+            if let focus { phoneDetail(focus) } else { phone }
+        #endif
+    }
+
+    /// The Mac's page: two columns, a cursor in the left one.
+    private var desk: some View {
         // A VStack, NOT a Group. `Group` applies a modifier to EACH of its
         // children rather than to the group as a whole, and the populated
         // branch below has two: the scrolling body and the bar under it. The
@@ -72,7 +102,7 @@ struct GroupsView: View {
         // Selection drives the right column. Keyed on the ID rather than the
         // index: a delete that shifts everything up must re-fetch, and a reload
         // that leaves the same group selected must not.
-        .task(id: selected?.id) { await loadDetail() }
+        .task(id: selected?.id) { await loadDetail(for: selected) }
     }
 
     private var empty: some View {
@@ -167,7 +197,14 @@ struct GroupsView: View {
                     .foregroundStyle(Palette.ink)
                 Chip(text: group.mode.label, tone: group.mode.tone, filled: true)
                 Spacer()
-                Button("edit") { edit(group) }
+                Button("edit") {
+                    #if os(macOS)
+                        edit(group)
+                    #else
+                        // With its people: see `withPeople`.
+                        Task { await phoneEdit(group) }
+                    #endif
+                }
                     .buttonStyle(.glass)
                     .font(Typo.micro)
             }
@@ -280,8 +317,13 @@ struct GroupsView: View {
     }
 
     private func edit(_ group: SendGroup) {
+        // The LIST's row carries counts and no people, and the editor's save
+        // replaces the membership with what its field holds: opened on the row,
+        // a rename would have to retype everyone or lose them. The detail
+        // column is showing the same group with its people, so hand that over.
+        let full = detail.value.flatMap { $0.id == group.id && $0.members != nil ? $0 : nil }
         store.openGroupEditor(
-            GroupEditorRequest(group: group, onSaved: { Task { await load() } }))
+            GroupEditorRequest(group: full ?? group, onSaved: { Task { await load() } }))
     }
 
     /// Delete, undo-first, like every other destructive verb in this app.
@@ -300,6 +342,20 @@ struct GroupsView: View {
             store.pushToast("still loading this group; try again in a second", .info)
             return
         }
+        await remove(group, full: full, members: members)
+    }
+
+    /// The delete itself, once the membership the undo needs is in hand. Split
+    /// from the guard above because the two platforms come by that membership
+    /// differently: the Mac is already showing it in the right column, and the
+    /// phone's list has to go and ask (`withPeople`).
+    ///
+    /// Answers whether the group went, which only the phone's detail screen
+    /// asks: it has to leave when its subject does.
+    @discardableResult
+    private func remove(_ group: SendGroup, full: SendGroup, members: [GroupMember]) async
+        -> Bool
+    {
         do {
             try await APIClient.shared.deleteGroup(group.id)
             Analytics.capture("group_deleted", ["mode": group.mode.rawValue])
@@ -312,8 +368,10 @@ struct GroupsView: View {
                 try await APIClient.shared.createGroup(body)
                 await GroupsReload.shared.reload()
             }
+            return true
         } catch {
             store.pushToast(errText(error, "delete failed"), .error)
+            return false
         }
     }
 
@@ -335,8 +393,8 @@ struct GroupsView: View {
     /// the two awaits below can still land after the user has moved on, and
     /// painting a previous group's members under the current group's name is the
     /// one wrong thing this page could do.
-    private func loadDetail() async {
-        guard let group = selected else {
+    private func loadDetail(for group: SendGroup?) async {
+        guard let group else {
             detail = .idle
             history = .idle
             detailFor = nil
@@ -354,6 +412,255 @@ struct GroupsView: View {
         }
     }
 }
+
+#if !os(macOS)
+    // MARK: - the phone's pages
+
+    extension GroupsView {
+        /// THE LEFT COLUMN, AS A SCREEN. Every gesture ends in a function the
+        /// Mac's keys already call:
+        ///
+        ///   tap a row            j/k onto it   pushes the right column
+        ///   swipe left: edit     e / Enter     `openGroupEditor`
+        ///   swipe left: delete   x             `remove` (undo in the toast)
+        ///   + in the bar         n             `create`
+        ///   pull down                          `load`
+        ///
+        /// A `List` for the reason the Rules page is one: the swipe is the
+        /// system's, and so is its truce with the back gesture.
+        fileprivate var phone: some View {
+            List {
+                if groupsState.isLoading && groups.isEmpty {
+                    BandNote("loading groups…").plainRow()
+                } else if let error = groupsState.error, groups.isEmpty {
+                    BandNote(error).plainRow()
+                } else if groups.isEmpty {
+                    phoneEmpty.plainRow()
+                } else {
+                    ForEach(groups) { group in
+                        PhoneGroupRow(group: group) { opened = group }
+                            .plainRow()
+                            // Delete takes the full swipe: it is the one with
+                            // an undo behind it. Edit opens a card, and a card
+                            // nobody asked for is the worse surprise.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button {
+                                    Haptics.commit()
+                                    Task { await phoneDelete(group) }
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(Palette.danger)
+                                Button {
+                                    Task { await phoneEdit(group) }
+                                } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+                                .tint(Palette.accent)
+                            }
+                            .contextMenu { phoneMenu(group) }
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 0)
+            .background(Palette.canvas)
+            .navigationTitle("Groups")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: create) {
+                        Image(systemName: "plus").foregroundStyle(Palette.accent)
+                    }
+                    .accessibilityLabel("New group")
+                }
+                .sharedBackgroundVisibility(.hidden)
+            }
+            .refreshable { await load() }
+            // Runs again on the way back from the detail, which is the reload
+            // an edit or a delete made there is owed.
+            .task {
+                GroupsReload.shared.handler = { await load() }
+                await load()
+            }
+            .onDisappear { GroupsReload.shared.handler = nil }
+            .navigationDestination(item: $opened) { group in GroupsView(focus: group) }
+            #if DEBUG
+                // A screenshot's way into a group; see FixtureRoute.
+                .onChange(of: FixtureRoute.shared.group, initial: true) { _, staged in
+                    if let row = groups.first(where: { $0.id == staged }) { opened = row }
+                }
+            #endif
+        }
+
+        /// THE RIGHT COLUMN, AS A PUSH: the same header, people and history
+        /// the Mac draws beside the list, by the same three functions.
+        ///
+        /// `focus` is the list's row, which is what there is to draw before
+        /// the single-group read lands; after it, and after every edit, the
+        /// header reads what that came back with, so a rename made from here
+        /// shows here.
+        fileprivate func phoneDetail(_ focus: SendGroup) -> some View {
+            let group = detail.value.flatMap { $0.id == focus.id ? $0 : nil } ?? focus
+            return ScrollView {
+                VStack(alignment: .leading, spacing: Space.scaled(18)) {
+                    detailHeader(group)
+                    membersSection(group)
+                    historySection
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, Space.s8)
+                .padding(.bottom, 28)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Palette.canvas)
+            // The name is the first thing under the bar already.
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        phoneMenu(group)
+                    } label: {
+                        Image(systemName: "ellipsis").foregroundStyle(Palette.accent)
+                    }
+                    .accessibilityLabel("Group actions")
+                }
+                .sharedBackgroundVisibility(.hidden)
+            }
+            .refreshable { await loadDetail(for: focus) }
+            .task { await loadDetail(for: focus) }
+            // A history row opens mail, and done should come back here.
+            .readerHost()
+        }
+
+        /// The long press on a row and the bar menu on the detail: one list of
+        /// verbs, so the two cannot drift.
+        @ViewBuilder private func phoneMenu(_ group: SendGroup) -> some View {
+            if focus == nil {
+                Button { opened = group } label: { Label("Open", systemImage: "person.2") }
+            }
+            Button { Task { await phoneEdit(group) } } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            // Destructive ROLE on an undoable act: the role is what puts it
+            // last and in red.
+            Button(role: .destructive) { Task { await phoneDelete(group) } } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+
+        /// The group WITH its people. The list read carries counts only, by the
+        /// daemon's design, and both verbs below are wrong without the
+        /// membership: an editor opened on a list row shows an empty people
+        /// field and would save it, and an undo built from one restores an
+        /// empty group wearing the old name. So each asks first, unless this
+        /// is the detail screen and already holding them.
+        private func withPeople(_ group: SendGroup) async -> SendGroup? {
+            if let held = detail.value, held.id == group.id, held.members != nil { return held }
+            do {
+                return try await APIClient.shared.group(group.id)
+            } catch {
+                store.pushToast(errText(error, "could not load this group"), .error)
+                return nil
+            }
+        }
+
+        /// `e`, on the full group. A save re-pulls whichever screen asked:
+        /// the list its rows, the detail its people. (The list under an open
+        /// detail re-pulls on the way back; see its `.task`.)
+        private func phoneEdit(_ group: SendGroup) async {
+            guard let full = await withPeople(group) else { return }
+            let onDetail = focus
+            store.openGroupEditor(
+                GroupEditorRequest(
+                    group: full,
+                    onSaved: {
+                        Task {
+                            if let onDetail { await loadDetail(for: onDetail) } else { await load() }
+                        }
+                    }))
+        }
+
+        /// `x`. Same delete, same undo; the membership the Mac reads off its
+        /// right column is fetched here instead of refused for.
+        private func phoneDelete(_ group: SendGroup) async {
+            guard let full = await withPeople(group), let members = full.members else { return }
+            let gone = await remove(group, full: full, members: members)
+            // A detail whose group is gone has nothing left to show.
+            if gone, focus != nil { dismiss() }
+        }
+
+        private var phoneEmpty: some View {
+            VStack(alignment: .leading, spacing: Space.s10) {
+                Text("no groups yet.")
+                    .font(Typo.row)
+                    .foregroundStyle(Palette.inkDim)
+                Text(
+                    "a group is a set of people you write to together, like your investors or your design partners. name it once and address it by name."
+                )
+                .font(Typo.rowSub)
+                .foregroundStyle(Palette.inkFaintest)
+                .fixedSize(horizontal: false, vertical: true)
+                Button("new group", action: create)
+                    .buttonStyle(.glass)
+                    .padding(.top, Space.s2)
+            }
+            .padding(.horizontal, Space.scaled(11))
+            .padding(.vertical, Space.s24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// A group in the phone's list. The Mac's row can be terse because the
+    /// column beside it spells the group out; here the row is all there is
+    /// before a tap, so it says the one consequential thing itself: HOW mail
+    /// to these people goes out.
+    private struct PhoneGroupRow: View {
+        let group: SendGroup
+        let onOpen: () -> Void
+
+        private var people: String {
+            "\(group.member_count) \(group.member_count == 1 ? "person" : "people")"
+        }
+
+        var body: some View {
+            ListRow(
+                selected: false, cornerRadius: 10, hPadding: Space.scaled(11), vPadding: Space.s10,
+                hoverFill: false, action: onOpen
+            ) { _, _ in
+                HStack(spacing: Space.s12) {
+                    Image(systemName: group.mode.symbol)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(group.mode.tone)
+                        .frame(width: 22)
+                    VStack(alignment: .leading, spacing: Space.scaled(3)) {
+                        Text(group.name)
+                            .font(Typo.row)
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                        Text("\(people) · \(group.mode.blurb)")
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: Space.s8)
+                    if let last = group.last_sent_at {
+                        // "sent", because a bare age beside a group reads
+                        // as how old the group is.
+                        Text("sent \(Fmt.relAge(last))")
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+            }
+        }
+    }
+#endif
 
 /// Lets a save fired from the editor — which outlives this view's closures —
 /// ask the list to re-pull if it is still on screen. Mirrors `RulesReload`.

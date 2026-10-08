@@ -117,6 +117,38 @@ pub const GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
 /// Convenience: the full set of scopes for the write credential.
 pub const WRITE_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE, GMAIL_SEND_SCOPE];
 
+/// The OPTIONAL calendar grant. Requested only by the hosted calendar consent
+/// (`/reconnect?calendar=1`, beside the three Gmail scopes) and by `squelchd
+/// auth --calendar`; never REQUIRED by any flow, so a person who unticks it at
+/// Google keeps a working mailbox and simply has no calendar.
+///
+/// "Calendar is granted" means a token's recorded scopes include
+/// [`CALENDAR_EVENTS_SCOPE`]. [`CALENDAR_LIST_SCOPE`] is wanted and not
+/// required: without it only the primary calendar is read.
+///
+/// `calendar.events` rather than `calendar.events.owned` or `calendar.readonly`:
+/// the timeline shows events on calendars the user subscribes to but does not
+/// own, and later waves create and answer events. Nothing in this wave writes.
+pub const CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
+pub const CALENDAR_LIST_SCOPE: &str =
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+
+/// Both calendar scopes, in the order a consent asks for them.
+pub const CALENDAR_SCOPES: &[&str] = &[CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOPE];
+/// Google's basic-profile scope: the account's name and profile photo, and
+/// nothing about mail. Non-sensitive in Google's own classification.
+///
+/// REQUESTED, NEVER REQUIRED. It rides along on the Read consent so the client
+/// can show a face and a name instead of an initial and a mailbox local part,
+/// and every check that holds a grant against a request leaves it out: a
+/// person who unticks it, and every credential minted before it existed, has a
+/// token that syncs exactly as well. The only consumer is the sync loop's
+/// profile refresh, which treats a refusal as "no picture" and moves on.
+///
+/// The long spelling, not `profile`: Google accepts either on the request and
+/// echoes this one on the response, so one string serves both directions.
+pub const GOOGLE_PROFILE_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.profile";
+
 /// Which backend persists OAuth tokens: the OS secret service, or a mode-0600
 /// JSON file (the only option on a headless box with no desktop keyring).
 /// Defaults to keyring on macOS, file on Linux.
@@ -1264,11 +1296,27 @@ pub struct Stage2Config {
     /// `model_used` on applied rows. Defaults to the SAME model as Stage-1:
     /// escalation buys more context and more thinking, not a bigger brain.
     pub model: String,
-    /// Reasoning depth for Stage-2, sent as `output_config.effort`. `xhigh`
-    /// against Stage-1's `low` is one of the two things escalation actually
-    /// buys (the other is [`Stage2Queued`](crate::store::Stage2Queued)'s
-    /// thread/sender/neighbour context). Env: `SQUELCH_STAGE2_EFFORT`.
+    /// Reasoning depth, sent as `output_config.effort`. This is the triage
+    /// agent's effort too. `low` since October 2026: replaying 393 of the
+    /// owner's triaged emails through the agent at `low` matched the `xhigh`
+    /// run on every placement and security metric, buried 4 of 93 FYE items
+    /// it showed (and showed 14 it did not), halved latency and cut cost 37%,
+    /// because output tokens were two thirds of the bill
+    /// (`evals/results/2026-10-triage-model-comparison.md`). This is the
+    /// STEADY-STATE effort: a new account runs at [`Self::onboarding_effort`]
+    /// for its first [`Self::onboarding_days`]. Env: `SQUELCH_STAGE2_EFFORT`.
     pub effort: Option<String>,
+    /// Effort for the triage agent while the account is new, in place of
+    /// [`Self::effort`]. `xhigh`: the first days are the first impression, the
+    /// backfill and the first week of arrivals are what a new user judges the
+    /// product on, and the eval's few disagreements (4 FYE items `low` buried)
+    /// are the kind of miss that costs trust before it has been earned. After
+    /// the window the account drops to `effort` and the cost saving.
+    /// Env: `SQUELCH_STAGE2_ONBOARDING_EFFORT` (`none`/`off` clears it).
+    pub onboarding_effort: Option<String>,
+    /// Length of the onboarding window in days, counted from the account's
+    /// `created_at`. 0 disables it. Env: `SQUELCH_STAGE2_ONBOARDING_DAYS`.
+    pub onboarding_days: u32,
     /// Cap on the flattened email body (chars) fed into the UNTRUSTED block.
     /// The body is truncated to this and the truncation is noted in-band.
     pub max_body_chars: usize,
@@ -1280,8 +1328,8 @@ pub struct Stage2Config {
     /// Global per-account-per-day API-call cap. Same increment-before
     /// discipline, counted via a `thread_id='__global__'` sentinel row in
     /// `wake_budget`. Like Stage-1's, this is a dollar ceiling in disguise: an
-    /// escalated call carries a 12000-char body plus thread and sender context
-    /// and thinks at `xhigh`, so it runs around a dime. See
+    /// escalated call carries a 12000-char body plus thread and sender context,
+    /// so it runs a few cents. See
     /// [`Stage1Config::global_daily_cap`].
     pub global_daily_cap: u32,
     /// Per-sender-per-day API-call cap, so one chatty sender fanning many
@@ -1312,10 +1360,13 @@ impl Default for Stage2Config {
             // context and more thinking. This is also the agent's model
             // (`SQUELCH_MODEL`), and Opus 5.5 is the current Opus at $4/$20
             // against Opus 5's $5/$25 with cache reads at a quarter of the
-            // price. Effort stays explicit: Opus 5.5's own default is
-            // `medium`, one level under the old default.
+            // price. Effort stays explicit rather than leaning on Opus 5.5's
+            // own default (`medium`): `low` is the measured choice, see the
+            // field doc.
             model: "claude-opus-5-5".to_string(),
-            effort: Some("xhigh".to_string()),
+            effort: Some("low".to_string()),
+            onboarding_effort: Some("xhigh".to_string()),
+            onboarding_days: 5,
             // Roomier than Stage-1's: an escalated row is one where the detail
             // that settles it may be deep in the body.
             max_body_chars: 12_000,
@@ -1371,6 +1422,27 @@ pub struct ResolvedAssistant {
 }
 
 impl Stage2Config {
+    /// The triage agent's effort for an account created at `created_at`, as
+    /// of `now`: [`Self::onboarding_effort`] inside the first
+    /// [`Self::onboarding_days`], [`Self::effort`] after. An unknown creation
+    /// time gets the steady-state effort, so a missing row can never pin an
+    /// account at the expensive setting.
+    pub fn effort_for_account(
+        &self,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<&str> {
+        let onboarding = created_at.is_some_and(|created| {
+            now.signed_duration_since(created)
+                < chrono::Duration::days(i64::from(self.onboarding_days))
+        });
+        if onboarding {
+            self.onboarding_effort.as_deref()
+        } else {
+            self.effort.as_deref()
+        }
+    }
+
     /// Resolve the LLM key, provider, and endpoint in one shot. Key source,
     /// first match wins: `SQUELCH_STAGE2_API_KEY` > `ANTHROPIC_API_KEY` >
     /// `OPENAI_API_KEY` > config `anthropic_api_key`. Provider precedence:
@@ -2019,6 +2091,14 @@ impl Config {
         );
         env_override("SQUELCH_MODEL", &mut self.stage2.model);
         env_override_effort("SQUELCH_STAGE2_EFFORT", &mut self.stage2.effort);
+        env_override_effort(
+            "SQUELCH_STAGE2_ONBOARDING_EFFORT",
+            &mut self.stage2.onboarding_effort,
+        );
+        env_override(
+            "SQUELCH_STAGE2_ONBOARDING_DAYS",
+            &mut self.stage2.onboarding_days,
+        );
         env_override(
             "SQUELCH_STAGE2_MAX_BODY_CHARS",
             &mut self.stage2.max_body_chars,
@@ -2971,7 +3051,7 @@ backfill_days = 90
     fn stage2_defaults_are_sane() {
         let c = Stage2Config::default();
         assert_eq!(c.model, "claude-opus-5-5");
-        assert_eq!(c.effort.as_deref(), Some("xhigh"));
+        assert_eq!(c.effort.as_deref(), Some("low"));
         assert_eq!(c.max_body_chars, 12_000);
         assert_eq!(c.batch_per_cycle, 10);
         assert_eq!(c.thread_daily_cap, 3);
@@ -3021,18 +3101,44 @@ backfill_days = 90
         let _ = now + planner.max_horizon;
     }
 
-    /// Both stages run the SAME model on purpose: escalation buys context and
-    /// reasoning depth, not a bigger model. If these two ever diverge by
-    /// default, the escalation story has quietly changed and the prompts and
-    /// docs that describe it need to change with it.
+    /// Both stages run the SAME model on purpose: escalation buys context,
+    /// not a bigger model. Since October 2026 it does not buy reasoning depth
+    /// either: the eval found `low` as good as `xhigh` on triage, so both
+    /// stages sit at `low`. If the models ever diverge by default, the
+    /// escalation story has quietly changed and the prompts and docs that
+    /// describe it need to change with it.
     #[test]
-    fn both_stages_default_to_one_model_differing_only_in_effort() {
+    fn both_stages_default_to_one_model_at_low_effort() {
         let s1 = Stage1Config::default();
         let s2 = Stage2Config::default();
         assert_eq!(s1.model, s2.model);
         assert_eq!(s1.price_in_per_mtok, s2.price_in_per_mtok);
         assert_eq!(s1.price_out_per_mtok, s2.price_out_per_mtok);
-        assert_ne!(s1.effort, s2.effort);
+        assert_eq!(s1.effort.as_deref(), Some("low"));
+        assert_eq!(s2.effort.as_deref(), Some("low"));
+    }
+
+    /// A new account triages at `xhigh` for its first five days, then drops
+    /// to the steady-state `low`. An unknown creation time is steady state.
+    #[test]
+    fn new_accounts_triage_at_onboarding_effort_for_five_days() {
+        let c = Stage2Config::default();
+        let now = chrono::Utc::now();
+        let days = |d: i64| Some(now - chrono::Duration::days(d));
+        assert_eq!(c.effort_for_account(days(0), now), Some("xhigh"));
+        assert_eq!(
+            c.effort_for_account(Some(now - chrono::Duration::hours(119)), now),
+            Some("xhigh")
+        );
+        assert_eq!(c.effort_for_account(days(5), now), Some("low"));
+        assert_eq!(c.effort_for_account(days(400), now), Some("low"));
+        assert_eq!(c.effort_for_account(None, now), Some("low"));
+
+        let off = Stage2Config {
+            onboarding_days: 0,
+            ..Stage2Config::default()
+        };
+        assert_eq!(off.effort_for_account(days(0), now), Some("low"));
     }
 
     /// An operator repointing a stage at a model with no effort support must be

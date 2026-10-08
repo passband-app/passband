@@ -414,13 +414,21 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
         }
         let input = snapshot(&context, &job, config.context.initial_thread_messages);
+        // A new account triages at the onboarding effort for its first days;
+        // a store error reads as "not new" and takes the cheaper setting.
+        let created_at = self
+            .store
+            .account_created_at(self.account_id)
+            .ok()
+            .flatten();
+        let effort = self.config.stage2.effort_for_account(created_at, now);
         let connection = AgentConnection {
             http: &self.http,
             url: &llm.url,
             api_key: &llm.api_key,
             provider: llm.provider,
             model: &base_model,
-            effort: self.config.stage2.effort.as_deref(),
+            effort,
         };
         match run_agent(connection, &config, input, &reader).await {
             Ok(run) => {
@@ -438,6 +446,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     "schema_version": 1,
                     "model": config.agent.model.as_deref().unwrap_or(&base_model),
                     "review_model": config.agent.review_model,
+                    "effort": effort,
                     "config": config,
                     "model_turns": run.model_turns,
                     "tool_calls": run.tool_calls,

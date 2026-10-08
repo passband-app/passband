@@ -2,7 +2,8 @@
 
 One section per surface: the **invariant**, the **enforcement point** (`file:symbol`
 — the line that actually holds it), and **what a maintainer must not break**.
-Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18.
+Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18,
+§8 on 2026-10-01.
 Stale source comments are flagged, not trusted.
 
 ## 1. HTML sanitization at ingest
@@ -257,12 +258,14 @@ The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
 their attachments. However many drafts an account holds (one per reply target,
 one per forwarded message, any number of new-message drafts), they are served
-only on `/client/drafts`, are never audited, and have no MCP surface.
+only on `/client/drafts` and the owner's own are never audited. The agent door
+cannot list, read, edit or delete a draft; the one thing it can do, when the
+owner allows it, is ADD one (§4c).
 
 A staged file has a SECOND claim, `scheduled_send_id`, beside `draft_id`: the
 outbox row (`scheduled_sends`, docs/SCHEDULED-SEND.md) that will send it. The
-outbox is human-only like drafts, served only on `/client/scheduled`, with no
-MCP surface; unlike drafts it IS audited (ids and reasons only, never the
+outbox is human-only, served only on `/client/scheduled`, with no MCP surface
+at all (an agent's send is immediate and cannot be scheduled); unlike drafts it IS audited (ids and reasons only, never the
 frozen request). A scheduled row holds its files for as long as it waits, up
 to 366 days, and a failed row for 30 days more; only a cancel releases them
 (back to unclaimed, the one-day clock restarted), and the compose door's
@@ -342,6 +345,201 @@ The sync suite asserts the "not fetched routinely" half against the mock's CALL
 LOG rather than against what landed: "no spam rows appeared" would also pass if
 the walk ran and the folder happened to be empty, and the thing being avoided is
 the request.
+
+## 4c. Agent writes: drafts and sending (issue #394)
+
+**Invariant.** An agent writes mail only as far as the mailbox owner has said
+it may, only through the human door's own send pipeline, and never with more
+latitude than the owner has there. With nothing chosen it may leave drafts and
+cannot send: no mail leaves a mailbox on an agent's say-so unless the owner
+chose that level. Nothing here changes what an agent can READ.
+
+**The setting.** `app_settings` key `agent.write_access`, per mailbox:
+`none`, `drafts`, `send`; each level includes the ones before it. A mailbox
+that has never set it is at `drafts` (`AgentWriteAccess::UNSET`; the owner's
+product decision, 2026-10-06). That default is safe to hold for the reason
+`drafts` is the hard gate at all: a draft is a local row, marked as the
+agent's, that becomes mail only when the owner presses send. What it does
+cost is stated under the residual risks below.
+`squelch-core/src/agent_write.rs:AgentWriteAccess::load` reads it, and a
+STORED value this build does not recognize FAILS CLOSED to `none`, not to the
+unset default: "the owner chose something we cannot read" is not "the owner
+never chose". The type has no `Default` impl so that a failed read can never
+be spelled `unwrap_or_default()`. It is set
+only on the human door (`GET`/`PUT /client/settings/agent-access`, bearer-authed,
+audited as `agent.write_access` with `before->after`; the ledger row is written
+FIRST and a failed row leaves the setting unchanged). The agent door has no
+tool or route that changes it. It is read from the store on every call, so
+turning it off stops the next tool call, not the next restart.
+
+**Enforcement.** The agent door (`squelch-mcp`) holds a `dyn AgentMailer` and
+nothing else: no write credential, no message builder, no draft or outbox store
+call (`squelch-mcp/src/main.rs:the_mcp_crate_never_reaches_the_draft_store_itself`
+scans its source for those identifiers). The one implementation is
+`squelch-api/src/agent_write.rs:ApiAgentMailer`, which `squelchd serve` hands
+over via `ApiState::agent_mailer`. The standalone `squelch-mcp` binary passes
+none and offers neither tool. For each call the mailer:
+
+- re-reads the setting and refuses below the needed level (the MCP server
+  also hides tools the level does not allow, but listing is a courtesy and
+  this check is the gate);
+- resolves a reply target by PERFORMING THE AGENT DOOR'S OWN READ
+  (`readable_parent`: the message must appear in the `thread_view` that
+  `get_thread` serves), so an agent can only reply to mail it can read, and a
+  restricted, pending or spam id answers the same `not found` as an unknown
+  one. It asks the read rather than re-listing the read's conditions: a first
+  version re-listed them and left out spam (§4b);
+- DECIDES THE RECIPIENTS ITSELF: the `to` the agent stated, else the parent's
+  stored From, and the `cc` the agent stated or none. The owner's own reply
+  honors the parent's `Reply-To` and derives copies from its headers; an
+  agent's does not, because the agent is shown only a message's From and its
+  human approves only what the agent shows them. A `Reply-To` nobody in that
+  conversation saw must not decide where approved mail goes. The resolved
+  `to`/`cc` are returned in the tool result;
+- for `send_email`, runs `validate_send`, the outbound guard (§5) and
+  `perform_send`, as `POST /client/actions/send` does, with `override_guard`
+  hard-wired to `false`. The guard reads MORE than it does for the owner:
+  recipients and subject as well as the body, and the body a second time
+  with markdown emphasis marks removed (`guard_text`), since for an agent
+  all of it is model output and this is the one check with no override;
+- for `create_draft`, INSERTS a local draft marked `drafts.from_agent = 1`
+  and never edits one: a reply whose message already has a draft is refused,
+  because that row may be the owner's own unfinished writing and an agent
+  cannot see it to know. At most 25 unsent agent drafts per mailbox. The
+  client marks such a draft "from your agent" in the drafts list AND inside
+  the composer it is restored into (`AgentDraftNotice`), with its recipient
+  fields laid open: a reply draft is restored straight into the reply box
+  when the owner presses `r`, so a mark only on the list would never be seen;
+- refuses, for both tools, a body with no visible character, a header field
+  carrying any control character or Unicode line separator, and more than 50
+  recipients;
+- audits every call that reaches it, refusals included, as actor `agent`
+  (ids, counts and fixed reason strings only, never content). A draft and its
+  ledger row are one transaction, like `set_sender_rule`. NOT audited: a
+  `send_email` call the MCP server turns away for `human_approved` not being
+  `true`, which never reaches the mailer; and, as on the human door, a send's
+  success row is best-effort once the mail has left.
+
+An agent's composition is deliberately narrower than the owner's: no
+attachments, no forward, no send group, no read tracking, no scheduling.
+
+**Asking for a draft on screen (`open_draft`, and `open: true` on
+`create_draft`).** At `drafts` and above an agent may ask the owner's Mac to
+bring one of its drafts up in the composer. This is the first thing the agent
+door can do that reaches the owner's SCREEN AND KEYBOARD FOCUS, so it is held
+to these rules:
+
+- It is a request to an app, not a reach into a machine. The daemon publishes
+  the draft id on an in-memory channel (`ApiState::draft_opens`); a Mac app
+  that asked for it on its own authenticated event stream
+  (`GET /client/events?opens=1`) receives an unpersisted, dated `open_draft`
+  frame. Nothing is stored or replayed, and the app drops a frame more than a
+  minute old, so a Mac that wakes from sleep has no window thrown at it. The
+  phone never asks and is never told.
+- Only a draft an agent wrote can be named. The mailer refuses any other id
+  with the same `not found` as an unknown one, and the app checks
+  `from_agent` AGAIN against the daemon's own draft list before opening
+  anything.
+- **It can open a draft; it must never be able to send one.** Bringing an
+  app to the front under somebody who is typing delivers their next
+  keystrokes to it, and in an agent's chat Cmd+Enter is "submit". So:
+  a composer opened by a request has `ComposeState.keyboardSendLocked` set,
+  and Cmd+Enter does not send it; only the send button does, and a click
+  cannot be typed ahead. Keyboard focus is taken off the composer after it
+  opens. And when the owner has anything of their own being written in
+  Passband, the app does not come forward at all (their own half-written
+  mail would be the thing a typed-ahead Cmd+Enter sent): a toast waits
+  instead, and nothing on screen is replaced. It never switches accounts.
+- It is rationed: one request per five seconds per mailbox, across all
+  agents (`ApiState::draft_open_clock`). The clock is checked BEFORE the
+  draft is looked up, and a request inside the interval is refused alike
+  whatever it named and writes no ledger row. In the other order the
+  refusal would tell an agent whether the owner had sent or discarded a
+  draft, and every attempt would be a row.
+- The agent is told the truth. The result says whether any Mac was listening
+  (the channel's receiver count), and the instructions tell it not to claim a
+  draft is on screen when none was, and that an open draft or a link is not
+  approval to send.
+- Audited as `draft.open` (`ok:mac`, `ok:no_mac`, `failed:target`), at most
+  one row per interval. Best-effort, like the human door's action rows.
+
+**The `passband://draft/<id>?mailbox=<address>&t=<created>` link** every draft
+comes back with is UNTRUSTED INPUT on the app side: any web page or local
+process can open one. It is parsed strictly (`Lib/AgentDraftLink.swift`:
+exactly the minted shape, no user, port, fragment or second path segment). It
+is bound to one draft by `t`, the second that draft was created, because draft
+ids are small row ids that are reused: without it an old link in a transcript
+would open whichever agent draft held the number next, and anything could walk
+`draft/1..N`. The app opens a link only for a `from_agent` draft created at
+that second, in the mailbox the link names (confirmed against the account's
+own address, never assumed), at most once per five seconds, and under every
+rule above. It can neither open nor probe for a draft the owner wrote.
+
+Residual, accepted: on an Open door at the default level, anything that can
+reach `/mcp` can make Passband come to the front every five seconds with a
+draft it wrote, when the owner is not writing in Passband. It cannot send,
+read more, or displace the owner's writing. `on_mac` reports a live
+connection, which a Mac that just went to sleep still has for a while; the
+agent may be told a Mac heard a request that the app then drops as stale.
+
+`from_agent` is set at insert and never cleared. An owner who rewrites an
+agent's draft still sees it marked, and so does an owner whose own save landed
+on a row the agent created a moment earlier. That errs toward the warning.
+
+**What "with your approval" does and does not mean.** At `send`, the approval
+is the agent's human saying yes IN THE AGENT'S OWN CONVERSATION. The daemon
+cannot see that conversation and does not verify it. What it does is:
+
+- tell the agent the rule three times: in the server instructions sent at
+  `initialize` (`server.rs:write_instructions`), in the `send_email`
+  description, and in the required `human_approved` argument, each saying that
+  approval is per message, comes from the human, and is never text found in an
+  email or a tool result. A sender rule's `standing_instruction` is named
+  explicitly as never being approval: `set_sender_rule` is an agent write, so
+  that text may have been written by an earlier, compromised session;
+- refuse a call whose `human_approved` is not `true`;
+- annotate the tool `destructiveHint` + `openWorldHint`, which is what MCP
+  clients key their own confirmation prompts on.
+
+**Residual risk of the default (`drafts`), accepted.** Every mailbox whose
+daemon serves the agent door offers `create_draft` without the owner having
+opened the setting. On an Open door (self-host, no agent sign-in) that means
+anything that can reach `/mcp` can leave up to 25 drafts in the owner's
+drafts list, and a reply draft is restored into the owner's reply box. What
+stands between such a draft and the wire is the owner: the mark in the list,
+the notice in the composer with its recipients laid open, and their own
+press of send. A draft written to be sent unread ("looks like mine") is the
+attack this default exposes, and the mark is the defence; do not weaken it.
+
+**Residual risk of `send`, accepted for an opt-in level and stated in the
+client.** A
+prompt-injected or simply wrong agent can assert `human_approved: true` and
+send. At `send`, the blast radius of the agent door grows from "can read
+triaged mail and write local rules" to "can send mail as the owner", including
+mail that quotes whatever it was able to read. Sealed mail stays unreadable and
+the outbound guard still blocks secret-shaped text with no override, but
+ordinary content is not protected by either. On an Open door (self-host, no
+agent sign-in) "the agent" is anything that can reach `/mcp`. An owner who
+wants a hard gate uses `drafts`, where the only way mail leaves is the owner
+pressing send in Passband. Not built yet, and the natural next steps if `send`
+needs hardening: per-send approval inside the app, a recipient allow-list, a
+daily cap, reply-only, and recording who authored a sender rule so agent-written
+rule text is not delivered as the owner's words.
+
+**Do not break.**
+- Never give `squelch-mcp` the write credential, a `GmailWriteClient`, or a
+  direct draft/outbox store call. Agent writes go through `AgentMailer`.
+- Never let an agent path pass `override_guard: true`.
+- Never resolve an agent's reply target with `action_message_ref` alone; it
+  applies no agent access check. And never re-list the agent door's read
+  conditions beside it: ask `thread_view`.
+- Never let an agent's send take its recipients from the pipeline's
+  derivation (`Reply-To`, the parent's Cc). State `to` and `cc` on the
+  `SendBody`.
+- Never let the unset level be `send`. Sending is only ever a choice.
+- Keep an unreadable stored setting, and a failed read, meaning `none`.
+- Keep the setting off the agent door: an agent that could raise its own
+  level has no level.
 
 ## 5. Outbound secret guard
 
@@ -612,3 +810,404 @@ it. That move is what the guard below exists for.
   list knows.
 - `needs_you` sends the user to the ORIGINAL link, not a post-redirect hop that may
   depend on this job's cookies.
+
+## 8. Agent door authentication
+
+**Invariant.** On a hosted tenant, only the owner of that tenant's mailbox can use
+its agent door, and only through a credential that cannot open the human door. A
+daemon whose agent-door settings are incomplete serves nothing on `/mcp`. A
+self-hosted daemon with no settings behaves exactly as it always has.
+
+**Three modes**, chosen once at startup by `squelch-mcp/src/auth.rs:AgentDoorAuth::from_env`
+and applied by `squelch-mcp/src/lib.rs:agent_door_router`, the only public way to
+build the HTTP agent door (the bare rmcp service is private to the crate):
+
+- **Open.** Neither `SQUELCH_MCP_OAUTH_ISSUER` nor `SQUELCH_MCP_PUBLIC_URL` is set.
+  No auth layer at all; the only guard is rmcp's Host allow-list (loopback plus
+  `SQUELCH_MCP_ALLOWED_HOSTS`). This is self-host, and it is fit only for a listener
+  the owner controls the reach of. No metadata routes exist.
+- **OAuth.** Both are set, each a valid `https` URL (`http` only on loopback), and
+  the public URL's path is exactly `/mcp` with no query or fragment (the resource
+  IS the door, so any other path could never match a token's `aud`). Every
+  `/mcp` request needs a bearer token, verified below. Two unauthenticated GET routes
+  publish RFC 9728 protected-resource metadata naming the issuer.
+- **Misconfigured.** Exactly one is set, one does not parse, the public URL's path
+  is anything but exactly `/mcp`, or OAuth is configured
+  but the daemon has no real account email to bind tokens to (unset, or the
+  `me@localhost` placeholder; `AgentDoorAuth::for_account`, applied inside
+  `agent_door_router` so no host can skip it). `/mcp` answers 503
+  to everything, no metadata is published, and startup logs which setting is at
+  fault. It never falls back to Open: the likeliest way to get here is a hosted pod
+  that lost one variable, and that pod's `/mcp` is published. The human door is
+  unaffected.
+
+**Roles.** The daemon is a **resource server only**. WorkOS AuthKit is the
+authorization server: it runs registration, consent and token issuance, and our
+control plane supplies the identity (a Google sign-in, mapped to a mailbox) through
+AuthKit's Standalone Connect hop. The daemon never issues a token, never sees the
+user's Google credential, and never calls AuthKit about a specific token. It
+verifies AuthKit's RS256 access tokens locally against the issuer's JWKS.
+
+**Verification, in order** (`auth.rs:Verifier::verify`). Each step is a refusal on
+failure, and the cheap, local steps come before anything that touches keys:
+
+1. An `Authorization: Bearer` header (`squelch-httpauth:parse_bearer`). Absent or
+   not Bearer: 401 with `WWW-Authenticate: Bearer resource_metadata="..."`.
+2. The token is at most 8 KiB. Checked before any decoding.
+3. The JWT header parses, `alg` is exactly `RS256`, and there is no `crit`
+   header (RFC 7515 §4.1.11: we understand no extensions, so we accept none).
+   `none` does not parse, and every HS* algorithm is refused here, before any key
+   is looked up, so the RSA public key can never be fed to HMAC.
+4. The header has a `kid`, and the JWKS cache has an RSA signing key of at least
+   2048 bits for it. See "The key set" below for when the cache refreshes. If no
+   refresh has ever succeeded, or none has for 24 hours, the answer is 503, never
+   a pass.
+5. The signature verifies under that key.
+6. `iss` equals our issuer and `aud` (a string, or an array) contains our public
+   URL. Both are exact string compares after trimming one trailing `/`.
+7. `exp` is present and not past, with 60 seconds of leeway; `nbf`, if present, is
+   not in the future, with the same leeway.
+8. **`email` equals this daemon's account email**, trimmed and ASCII-case-insensitive.
+   A token with no `email` claim is refused.
+
+Every refusal after step 1 is a 401 with `error="invalid_token"` added to the
+challenge, and an empty body, with one exception: when no key set can be trusted
+(step 4: never fetched, or no successful fetch for 24 hours) the answer is a 503
+with no challenge, because the token was never judged. A token that passes bounds
+its response (`auth.rs:response_lifetime`): the body is ended when the token's `exp`
+plus the leeway passes, so a long-lived GET event stream closes and the client
+must come back with a fresh token. Two clamps keep that bound from misfiring. A
+FLOOR of 30 seconds lets a response opened by a token accepted late in its leeway
+finish, rather than return an empty body after the tool has already run. A CAP of
+24 hours applies whatever `exp` says, and the arithmetic is total, so an absurd
+`exp` (`1e300`) gets a normal response instead of a panicked connection. Nothing an
+agent receives outlives the credential that asked for it by more than the floor.
+The library verifies the signature and nothing else:
+every claim check is ours, because its defaults check `aud` and `iss` only when
+present and leave `nbf` off.
+
+**The key set** (`auth.rs:JwksClient`). Fetched lazily from `<issuer>/oauth2/jwks`
+(or the override), with no redirects followed (a redirect is a failed fetch, since
+the https check covered only the configured URL) and the body read in chunks that
+stop at 256 KiB. A fetch happens when a `kid` is unknown or when the cached set is
+older than one hour, and never more than once per 60 seconds whatever arrives: a
+spray of random `kid`s cannot drive outbound fetches, and since a throttled request
+does not extend the window, a newly published key is usable at most 60 seconds
+after the last fetch. A successful fetch REPLACES the set, so a key the issuer
+withdraws stops verifying within about an hour, and a JWKS with no usable keys
+empties the set. A failed fetch keeps the old set, so an issuer blip does not log
+every agent out, but only until 24 hours have passed without one success; then
+nothing is trusted (503). A fresh cached key is never delayed by a refresh in
+flight.
+
+**Step 8 is the tenant boundary.** One wildcard resource indicator,
+`https://*.passband.email/mcp`, covers the whole fleet, so any Passband user can
+obtain a correctly signed, unexpired token whose `aud` names someone else's tenant.
+`aud` says "this token is for a Passband daemon"; only `email` says whose. Without
+step 8, tenant A's owner could read tenant B's mail with a token AuthKit issued
+quite properly.
+
+**The `email` claim exists only because the operator puts it there.** A WorkOS
+Connect access token carries `iss`, `aud`, `sub`, `client_id`, `org_id`, `sid`,
+`scope`, `jti`, `exp` and `iat`, and no `email`. The claim appears only when the
+environment's JWT template is set to `{"email": {{ user.email }}}`. Without the
+template every token is refused as `missing_email`, which is the fail-closed
+direction: a forgotten template locks agents out, it does not let them in. `sub`
+is WorkOS's own user id, not anything the control plane chose, so it cannot stand
+in for the mailbox.
+
+**The doors do not share credentials.** `/mcp` never accepts an `sqd_` device
+token or the `SQUELCH_API_TOKEN` master token: neither is a JWT, so step 3 refuses
+it, and nothing on the agent path consults the device-token table. `/client/*`
+never accepts an agent JWT: the bearer check there knows only the master token and
+issued device tokens. The two routers are merged side by side in
+`squelchd:build_serve_router`, so neither inherits the other's auth, CORS or body
+limits. Both directions are pinned against the real combined router in squelchd's
+tests. The agent door still has no path to the write credential, and sealed
+material stays structurally absent from it under §4: nothing here touches tool
+logic.
+
+**Rollout fails closed.** The warden never renders `SQUELCH_MCP_ALLOWED_HOSTS`. The
+public hostname reaches the rmcp Host allow-list only from `agent_door_router`, and
+only in OAuth mode. So an older daemon image behind a newly published `/mcp`
+Ingress path answers 403 from the Host guard rather than serving mail without a
+token.
+
+**Logging.** A refusal is counted under one closed category (`auth.rs:Refusal`,
+e.g. `wrong_mailbox`, `expired`), and only the counts are ever written. No token, no claim value and no email
+address reaches a log line or a response; a misconfiguration names the setting,
+not its value. Both binaries' startup lines (`squelchd serve` and the standalone
+`squelch-mcp --http`) print the same mode text (`AgentDoorAuth::describe`): the
+mode and, in OAuth mode, the public URL, which the metadata publishes anyway.
+
+**Accepted costs.**
+- **WorkOS can mint a token that reads a mailbox.** AuthKit holds the signing key,
+  so a compromise of WorkOS (or of our WorkOS API key, which completes the identity
+  hop) can produce a token that passes every step above. That is the price of not
+  running our own authorization server.
+- **Revocation is a WorkOS-side operator action, not instant, and not ours.** The
+  daemon checks no revocation list. Access tokens are short-lived, but AuthKit
+  also issues refresh tokens (`offline_access` is among the standard scopes a
+  dynamically registered client gets), so an approved agent keeps access for as
+  long as its grant lives on the WorkOS side. Ending that access means revoking
+  the grant in WorkOS, which today is something an operator does. The
+  access-token lifetime only bounds how long a revoked grant's last token keeps
+  working, and the stream bound above makes that true for open streams too.
+
+**The phishing shape that remains.** An attacker can register their own MCP client
+with AuthKit, start a flow, and send the victim the resulting login link. If the
+victim signs in and approves, the attacker's client gets a token for the victim's
+mailbox. Client names under dynamic registration are chosen by whoever registers
+the client and are not verified by anyone, so "Claude" on a consent screen proves
+nothing. The defence is two screens the victim must get past: our control plane's
+own confirmation page, which names the mailbox and is shown after Google sign-in
+and before anything is sent to WorkOS (`/agent/auth`, then Google, then confirm,
+then the POST that completes the hop), and then AuthKit's consent screen naming
+the client. Both depend on the victim reading them.
+
+**Not proxied on purpose.** The daemon does not serve
+`/.well-known/oauth-authorization-server`. Clients that predate the 2025-06-18
+authorization spec and expect the resource server to also be the authorization
+server will not work, and that is accepted rather than worked around.
+
+**Browser-based MCP clients are not supported.** `/mcp` sends no CORS headers, by
+choice for now, so a page in a browser cannot call it. The protected-resource
+metadata is CORS-open because it is public. Server-side and native clients, which
+is every agent we document, are unaffected.
+
+**Refusal logging is rate-bounded.** Refusals are unauthenticated, so they are
+counted per category and written as at most one summary line per minute
+(`auth.rs:RefusalLog`), never one line per request.
+
+**What a maintainer must not break.**
+- Do not drop or weaken step 8, and never swap the binding to `sub`: `sub` is
+  WorkOS's user id, and `email` (from the JWT template) is the claim this daemon
+  checks against its own mailbox.
+- Do not remove the stream bound or the key-set maximum age and ceiling.
+- Do not let a misconfiguration fall back to Open, and do not mount the agent door
+  any way other than `agent_door_router`.
+- Do not render `SQUELCH_MCP_ALLOWED_HOSTS` from the warden.
+- Do not let the agent door accept a human door credential, or the human door an
+  agent JWT.
+- Do not log anything from a token, including on the 401 path.
+
+## 9. Google Calendar
+
+**Invariant.** Calendar data (event titles, places, descriptions, organizers,
+guests' addresses, names and answers, links, calendar names) is human-door data: served on `GET /client/timeline` (and
+in the answer to the user's own write) and nowhere else, never in a log line,
+never in a triage prompt. Nothing calendar-related is on `/mcp` or
+`/client/agent/*`. The daemon writes to a calendar only when the user creates,
+edits or deletes one event from the human door; nothing writes on its own. Google
+emails an event's guests only when such a write says `notify: true`; no other
+input, default or code path can ask for it.
+
+**Enforcement.**
+- **Three tables, human door only.** `calendar_calendars`, `calendar_events` and
+  `calendar_event_guests` (an event's attendees, deleted with it by a trigger)
+  (`squelch-core/src/store/sqlite/calendar.rs`) are written by the sync loop
+  (`squelch-core/src/gcal/sync.rs`) and, one row at a time after Google accepted
+  it, by the user's own write (`squelch-api/src/calendar_write.rs`); they are read
+  only by `handlers.rs:get_timeline` and those write handlers.
+  Every query is scoped by `account_id`. A log line names a calendar by its
+  position in the pass, never its id, which is usually an address.
+- **Laundered and capped** (`gcal/mod.rs:read_event`). A shared calendar is written
+  by other people, so its text is treated like mail: titles and places lose control,
+  bidi and invisible characters and stop at 200 characters, a meeting link loses
+  its query, an organizer is kept only when it is an address, ids are bounded. At
+  most 25 calendars, 5000 events per calendar (the nearest to now kept), 40 pages of
+  250 per calendar per pass, 8 MB per response, one listing of 5000. Google is asked
+  for less in the first place: a `fields` mask names only what is read, and
+  `maxAttendees=100` bounds the guest list, so an invitation anyone can send never
+  delivers attachments, conference data, a guest's comment or more than 100 guests
+  to the daemon. Of each guest only the address (kept only when it is one), the
+  name (laundered like a title), the answer and two flags are stored; past 100,
+  Google sends the user's entry alone and the event is marked truncated.
+  Its description is read (the app shows it): markup becomes text, each line is
+  laundered like a place, and it stops at 2000 characters.
+- **`html_link` is an allow-list** (`gcal/mod.rs:google_link`): https, a host that is
+  `google.com` or ends in `.google.com`, no userinfo, at most 2048 characters.
+  Anything else is dropped, because the client opens it.
+- **No redirects, no bodies in errors** (`gcal/client.rs`). The client refuses
+  redirects (every request carries a bearer token) and reduces a failure to its
+  kind (`auth`, `quota`, `unavailable`).
+- **Calendar failures stay out of Gmail.** The loop is its own task; no failure of
+  it touches Gmail health or sync.
+- **Sealed mail feeds no ghost** (`store/sqlite/ghosts.rs:ELIGIBLE`, `may_feed`).
+  A calendar ghost is built only from a message that is not sent, not spam and
+  not sealed, where sealed is what the Auth page's `sealed_messages` reads today:
+  a stored decision naming an auth kind (a sign-in alert, a login code), or an
+  access review that is not `allowed` (`restricted`, or still `pending` after the
+  message changed). The retired `triage.sensitivity` column is NOT the test: the
+  agent pipeline no longer writes it. The same predicate runs at reconcile, at
+  rebuild and in SQL at listing time, so a message that becomes sealed after its
+  ghost was built stops serving it at once; a decision that does not parse feeds
+  nothing.
+
+**The user's own writes** (`squelch-api/src/calendar_write.rs`). `POST
+/client/calendar/events`, `PATCH` and `DELETE /client/calendar/events/{calendar_id}/{id}`,
+on the human door only, bearer authed, `no-store`. The order is fixed: the grant,
+the body (title 1 to 200 characters, refused rather than cut; one precision; the
+end after the start; place and description cut to 200 and 2000; all three lose
+control and invisible characters but are otherwise sent as typed, so a link keeps
+its query at Google, while the stored copy is Google's answer laundered by
+`read_event`),
+the calendar (one being read, on which the user is `owner` or `writer`), the
+stored event and the edit guard (`gcal/mod.rs:SyncedEvent::editable`: the user's
+own event, by `organizer.self`, no organizer named at all, or the mailbox's own
+address; it FAILS CLOSED, so an organizer Google names whose address does not
+read, stored as `organizer_unreadable`, and an event whose stored guest list
+marks someone other than this calendar as organizer, are somebody else's), and
+only then Google, through the same `CalendarCredentials` resolver the sync uses,
+with `sendUpdates=none` unless the request asked otherwise (below). Only Google's success
+changes a row, and what is stored is Google's answer read by the sync's own
+`read_event`. A write is never retried. A refusal Google answered is a 502; a
+write that went out and got no usable answer (a timeout or a lost connection after
+sending, a 2xx body that does not read: `CallError::Uncertain`) is a 504 saying
+Google may have made the change, kicks a sync and stores nothing, so the client
+refreshes before offering to send again (a "tell guests" is not repeated on a
+guess). A delete Google answers 404 or 410 found the event gone and removes the
+local row. Event and calendar ids of `.` or `..` (or empty) are refused at read
+and again when the URL is built, because a URL path would read them as "here"
+and "up one". Error bodies are fixed strings that never
+echo the request; logs carry the action and an error kind, never an id. Every
+attempt writes one audit row (`calendar_event_create` / `_edit` / `_delete`,
+actor `client-api`, target `calendar:<calendar_id>/<event_id>`, detail `ok` or the
+reason), never a title, place, description or guest's address. The target DOES
+carry the calendar id, and a calendar id can be an address: the primary calendar
+is stored as `primary`, but a personal calendar someone shared with the user is
+named by its owner's address. Audit rows are human-door data like the rest. The
+row is written even when the client disconnects mid-request: each write's checks,
+Google call and audit run in a task of their own that the handler awaits, so
+dropping the request does not cancel them. The `calendar:` prefix keeps the
+audit listing's join to `messages` (a numeric target) from matching a calendar id
+that starts with digits. The in-app assistant has no tool for any of it.
+
+**Guests: a human-door route can make Google email third parties**
+(docs/CALENDAR.md §8, "Guests, invited by Google"). Since wave 5 the three write
+routes can carry guests, and with `notify: true` Google Calendar sends each guest
+its own invitation, update or cancellation. Passband writes none of that mail and
+sends none through Gmail, but the effect is the same class as sending mail: it
+reaches people outside the account and cannot be undone. What gates it:
+
+- **One switch, default off.** `sendUpdates` is `all` only when the request's
+  `notify` is the JSON value `true` (`?notify=true` on a delete, given once).
+  Absent or `false` is `none`; any other value is a 400, not a guess
+  (`gcal/write.rs:notify`, `notify_query`). The client type that reaches the URL
+  (`gcal/client.rs:Notify`) has two values and defaults to the silent one, and
+  `sendUpdates` is always named, never left to Google's default.
+- **The human door alone.** The three routes are bearer authed on `/client`; no
+  agent route, MCP tool or assistant tool can name a guest or set `notify`, and
+  nothing the daemon does on its own (the sync, triage, ghosts) calls a write.
+- **Whose calendar.** Guests only on the user's own calendar (the primary one, or
+  one they are `owner` of): `gcal/mod.rs:may_invite`. A shared calendar the user
+  can write to cannot be made to invite anyone, nor to mail an update or a
+  cancellation: `notify: true` on an edit or a delete there is a 400
+  (`calendar_write.rs:refuse_notify_unless_own`, "guests can only be told about
+  changes on your own calendar"), refused before Google hears anything. The
+  client offers only the silent controls on such a calendar, with one line
+  saying why.
+- **Whose event.** An existing event's guest list changes only when the event is
+  the user's own, the user organizes it, and the stored list is whole
+  (`SyncedEvent::guest_editable`). Google replaces the attendee array on a patch,
+  so the daemon never sends a list built from a truncated one: it rereads the
+  event's attendees from Google inside the request, refuses if that read is
+  truncated or holds a guest with no address, and hands every kept guest back
+  exactly as read. An edit that names no `guests` sends no `attendees` key.
+- **What a guest can be.** At most 50 per request, each one plain ASCII
+  `local@domain` (no display name, quoting, comment, whitespace or control
+  character), no duplicates, never the owner. The daemon sets no other attendee
+  field and no invitation text; the title, place and description Google puts in
+  its mail are the event's own, typed by the user.
+- **What is audited.** Every attempt's row carries ` guests=<n>
+  notified=<true|false>` after its outcome, on failures too (a write that timed
+  out may have gone through, and is audited `failed:uncertain`), even when the
+  app disconnects mid-request, and never a guest's address. Guests' addresses are in no
+  log line and no error body.
+
+What this does NOT cover: a client that sends `notify: true` when the user did
+not mean it (the client's controls must say what they send, and offer it only
+where the daemon would accept it; the daemon cannot tell intent), and Google's own behaviour with `sendUpdates=none`, which the reference
+hedges ("some emails might still be sent") and which has not been tested against
+a real account.
+
+**What the event pane sends to Apple (client).** The location line of the
+client's event pane suggests places from Apple's MapKit
+(`MKLocalSearchCompleter`, then `MKLocalSearch` for the one picked). The text
+typed into that one field leaves the device for Apple, from the client and
+only once it is two characters long; the title, the times, the notes, the
+calendar and the account do not, the daemon is not involved, and no location
+permission is requested. Google's Places API is not used.
+
+**The token is the union; the slot is the boundary.** Self-host
+`squelchd auth --calendar` stores its token in its own credential slot
+(`CredentialKind::Calendar`). Google unions grants per Cloud project and the consent
+asks with `include_granted_scopes`, so that token carries EVERYTHING this OAuth
+client was granted for the account, Gmail scopes included (`gmail.modify` and
+`gmail.send` if `squelchd auth --write` was ever run). Asking for less cannot
+narrow it; only a separate Cloud project could. What keeps calendar code away from
+mail is the slot and the code paths: the calendar loop loads only the Calendar slot
+(or, without one, the Read slot when it records `calendar.events`) and only calls
+the Calendar API, and no mail path loads the Calendar slot. Hosted is unchanged: the
+control plane seals ONE token into the Read and Write slots, as before, and a
+calendar grant adds `calendar.events` and `calendarlist.readonly` to that one token.
+
+**The loopback consent endpoint (self-host only).** `POST /client/calendar/connect`
+(human door, bearer authed) lets the app's Connect button grant calendar on a
+daemon with no control plane. A daemon that knows a console origin answers 409
+and starts nothing; one with no OAuth client answers 409 too. Otherwise it mints a
+fresh `state` and PKCE pair through `squelch_core::auth::LoopbackConsent`, the
+builder `squelchd auth --calendar` uses, so the URL is the CLI's (calendar scopes,
+`access_type=offline`, `prompt=consent`, `include_granted_scopes=true`,
+`login_hint` set to the configured mailbox). The redirect lands on a listener bound
+to `127.0.0.1` only (port 8847, or `SQUELCH_AUTH_PORT`), which refuses non-loopback
+peers and serves one route, `/`. One consent is pending per daemon: a new call
+replaces it, a matching redirect consumes it, it expires after ten minutes, and
+the listener stops when nothing is pending. A redirect is redeemed only when its
+`state` matches the pending one in constant time; a wrong or stale `state` gets a
+plain page and changes nothing. The code then goes through the same guarded
+exchange as every other consent: the grant must include `calendar.events`, and
+Google's profile must name the configured mailbox (case-insensitive). Any refusal
+stores nothing and shows a page that names no address. A good consent is stored
+in the Calendar slot through the configured backend (keyring on macOS, file
+elsewhere) by the same call the CLI makes, the `granted` cache is dropped, and the
+calendar sync is kicked. Pages carry no scripts and no links, under
+`default-src 'none'`. Logs name the event kind only, never the code, the `state`,
+a token or an address. Anything on this machine can reach the listener while it is
+up, but a code it delivers is useless without the PKCE verifier held in the
+daemon, and only the redirect carrying the pending `state` is redeemed.
+
+**Credentials file writes.** The calendar resolver is a third writer of the
+credentials file beside the Gmail Read and Write stores, so every write goes
+through one read-modify-write (`credentials.rs:update_credentials_file`) under a
+process-wide mutex and an advisory lock on `<credentials file>.lock` (owner-only),
+which also covers `squelchd auth` run beside a running daemon. A writer waits at
+most 10 seconds for the lock and then fails like any other credential write. Each
+write has its own temp name; temp files a crashed writer left are removed after a
+minute.
+
+**What a maintainer must not break.**
+- Do not add a calendar route to the agent door or MCP, or put calendar text in a
+  triage prompt, without a decision recorded in docs/CALENDAR.md §10.
+- Do not log an event's title, place, description, organizer, attendee, link or a
+  calendar id.
+- Do not change a local calendar row before Google accepted the write, retry a
+  write, or audit a write's text or a guest's address.
+- Do not send `sendUpdates=all` from anything but a request whose `notify` is
+  literally `true`, give `Notify` another default or a third value, or let a write
+  leave `sendUpdates` off the URL.
+- Do not build an `attendees` array from stored rows, from a truncated list, or for
+  an edit that did not name `guests`; do not widen `may_invite` past the user's own
+  calendars, or accept `notify: true` on a calendar it refuses; do not let
+  anything derived from mail set guests or `notify`.
+- Do not read an organizer that is present but unreadable as "no organizer"; the
+  edit guard fails closed.
+- Do not report a write whose answer was lost as refused (it may have happened),
+  or run a write's Google call and audit inside the request future alone.
+- Do not gate ghosts on `triage.sensitivity`; use the sealed test
+  `sealed_messages` uses.
+- Do not let a mail path load the Calendar slot, or the calendar loop load the
+  Write slot: the token in either can do more than its job.
+- Do not loosen `google_link`, drop the `fields` mask or `maxAttendees`, or ask
+  for more of an attendee than the mask names in a request whose answer is stored.
+- Do not write the credentials file except through `update_credentials_file`.

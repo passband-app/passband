@@ -271,6 +271,12 @@ private struct DraftRow: View {
                     Text("editing")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.accent)
+                } else if draft.from_agent == true {
+                    // Whose words these are, before they are sent as yours.
+                    Text("from your agent")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.accent)
+                        .help("An agent connected over Agent MCP wrote this draft.")
                 }
                 Text(Fmt.relAge(draft.updated_at))
                     .font(Typo.num(10))

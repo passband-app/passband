@@ -40,6 +40,8 @@ struct KeyDispatchTests {
         aHoldIsReleasedWhateverShiftDid()
         aCancelledHoldSaysSo()
         aHoldOutlivesTheSurfaceThatStartedIt()
+        theCalendarKeyTakesShiftCOnlyWhenOffered()
+        theDigitsAreAskedAtKeyTime()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -182,6 +184,87 @@ struct KeyDispatchTests {
     /// most of why they exist — so the helper bakes it in.
     static func chord(_ key: String, _ tag: String) -> KeyBinding {
         KeyBinding(key, tag, meta: true, allowInInput: true) { ran.append(tag) }
+    }
+
+    // MARK: - the calendar's key
+
+    /// ⇧C, as RootView binds it (`PageKeys.calendar`, the same function):
+    /// EXACT CASE, DECLINING, in the GLOBAL set. The exact pass reaches global
+    /// before the fold reaches the surface, so while the page is offered ⇧C
+    /// opens it over a surface's `c` (compose, which ⇧C used to reach through
+    /// the fold). With the gate closed it is asked, declines, and the fold
+    /// hands ⇧C to `c` exactly as before.
+    static func theCalendarKeyTakesShiftCOnlyWhenOffered() {
+        let registry = KeyRegistry.shared
+        var offered = true
+        let global = registry.register(
+            .global,
+            box: KeyRegistry.BindingsBox([
+                PageKeys.calendar(
+                    offered: {
+                        ran.append("calendar")
+                        return offered
+                    },
+                    go: {})
+            ]))
+        stage([[verb("c", "compose")]]) {
+            equal(press("C"), ["calendar"], "shift+c opens the calendar over a surface's c")
+            equal(press("c"), ["compose"], "plain c still composes")
+            offered = false
+            equal(press("C"), ["calendar", "compose"],
+                  "gate closed: asked, declines, and shift+c folds to c as it did before")
+            equal(press("C", editing: true), [], "a capital C typed into a field is just typed")
+        }
+        // EXACT CASE is what keeps a bare `c` from reaching it through the
+        // fold on a surface that binds no `c` of its own.
+        offered = true
+        stage([[]]) {
+            equal(press("c"), [], "a plain c never opens the calendar, even with nothing else bound to c")
+            equal(press("C"), ["calendar"], "while ⇧C does")
+        }
+        registry.unregister(global)
+    }
+
+    /// THE DIGITS, as RootView binds them (`PageKeys.digits`, the same
+    /// function): one DECLINING binding per digit in the GLOBAL set, each
+    /// asking for the page order when it is pressed. So
+    /// the gate opening renumbers without anything re-registering, and the
+    /// extra digit (6) passes on to whatever else binds it while the calendar
+    /// is not offered.
+    static func theDigitsAreAskedAtKeyTime() {
+        let registry = KeyRegistry.shared
+        let base = ["sitrep", "emails", "auth", "rules", "groups"]
+        var offered = false
+        func pages() -> [String] {
+            var out = base
+            if offered { out.insert("calendar", at: 1) }
+            return out
+        }
+        var under: [String] = []
+        let below = registry.register(
+            .global,
+            box: KeyRegistry.BindingsBox([KeyBinding("6", "an older six") { under.append("older six") }]))
+        // Registered after it, so asked first.
+        let digits = registry.register(
+            .global,
+            box: KeyRegistry.BindingsBox(
+                PageKeys.digits(count: base.count + 1, pages: pages, go: { ran.append($0) })))
+        stage([[]]) {
+            equal(press("2"), ["emails"], "gate closed: 2 is emails, as it always was")
+            equal(press("5"), ["groups"], "and 5 is groups")
+            equal(press("6"), [], "6 opens no page")
+            equal(under, ["older six"], "and passes on to whatever else binds it")
+            offered = true
+            under = []
+            equal(press("1"), ["sitrep"], "offered: sitrep is still 1")
+            equal(press("2"), ["calendar"], "calendar is 2")
+            equal(press("3"), ["emails"], "all mail is 3")
+            equal(press("6"), ["groups"], "and groups is 6")
+            equal(under, [], "held, not passed on")
+            equal(press("2", editing: true), [], "a 2 typed into a field is just typed")
+        }
+        registry.unregister(digits)
+        registry.unregister(below)
     }
 
     /// A declining binding: records that it was ASKED, then holds or passes.

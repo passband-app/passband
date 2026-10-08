@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v5";
+pub const PROMPT_VERSION: &str = "agent-triage-v7";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -801,6 +801,38 @@ fn decision_schema_body() -> Value {
             ("title", text()),
             ("start", nullable(reference("time"))),
             ("location", nullable(text())),
+            ("end", nullable(reference("time"))),
+            (
+                "duration_estimate",
+                nullable(object(vec![("minutes", integer()), ("basis", text())])),
+            ),
+            (
+                "event_kind",
+                enumeration(&[
+                    "ticket",
+                    "travel",
+                    "reservation",
+                    "invite",
+                    "proposal",
+                    "other",
+                ]),
+            ),
+            (
+                "commitment",
+                enumeration(&["committed", "invited", "proposed", "unknown"]),
+            ),
+            (
+                "change",
+                enumeration(&["created", "updated", "cancelled", "agreed"]),
+            ),
+            ("identity_refs", array(text())),
+            (
+                "likelihood",
+                nullable(object(vec![
+                    ("band", enumeration(&["likely", "maybe", "unlikely"])),
+                    ("reason", text()),
+                ])),
+            ),
             ("evidence", reference("evidence")),
         ]),
         object(vec![
@@ -954,14 +986,17 @@ mod tests {
     /// The step schema is part of the cached prefix of EVERY triage call, so
     /// its encoded size is a cost line item. The bound is the `$defs` version's
     /// size with headroom; inlining the shared sub-schemas again roughly
-    /// doubles it, and this is what notices.
+    /// doubles it, and this is what notices. Raised from 9,000 when the
+    /// calendar event fields (about 860 bytes) and `reading_kind` landed
+    /// together at 9,027: a new field should fit under it, a second copy of
+    /// the shared definitions should not.
     #[test]
     fn step_schema_stays_compact_and_its_refs_resolve() {
         let schema = step_schema();
         let encoded = serde_json::to_string(&schema).unwrap();
         eprintln!("step schema: {} bytes", encoded.len());
         assert!(
-            encoded.len() < 9_000,
+            encoded.len() < 9_500,
             "step schema grew to {} bytes",
             encoded.len()
         );
@@ -996,6 +1031,46 @@ mod tests {
             let name = target.strip_prefix("#/$defs/").unwrap();
             assert!(alone["$defs"].get(name).is_some(), "dangling {target}");
         }
+    }
+    /// The calendar fields are in the event record's schema and required (the
+    /// strict structured-output mode needs every key listed), with the optional
+    /// ones nullable.
+    #[test]
+    fn event_record_schema_carries_the_calendar_fields() {
+        let schema = decision_schema();
+        let event = schema["properties"]["records"]["items"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["properties"]["kind"]["enum"][0] == "event")
+            .expect("event record schema");
+        let required: Vec<&str> = event["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        for key in [
+            "end",
+            "duration_estimate",
+            "event_kind",
+            "commitment",
+            "change",
+            "identity_refs",
+            "likelihood",
+        ] {
+            assert!(required.contains(&key), "{key} missing from {required:?}");
+        }
+        for key in ["end", "duration_estimate", "likelihood"] {
+            assert!(
+                event["properties"][key]["anyOf"][1]["type"] == "null",
+                "{key} should be nullable"
+            );
+        }
+        assert_eq!(
+            event["properties"]["commitment"]["enum"],
+            json!(["committed", "invited", "proposed", "unknown"])
+        );
     }
     fn valid() -> MessageDecision {
         let evidence = vec![EvidenceRef {

@@ -852,6 +852,8 @@ struct NotificationsSection: View {
     /// What the last test banner did, shown until the next one. nil before the
     /// first press — no verdict to report yet.
     @State private var delivered: Bool?
+    /// The system said no when "Respect Do Not Disturb" asked to read the Focus.
+    @State private var focusRefused = false
 
     var body: some View {
         @Bindable var prefs = prefs
@@ -864,6 +866,35 @@ struct NotificationsSection: View {
                     options: NotificationSound.allCases.map { ($0, $0.label) },
                     selection: $prefs.notificationSound)
             }
+            // The panel is an AppKit window over other apps. The phone has
+            // no such place, and its code banners are the system's to draw.
+            #if os(macOS)
+                RowDivider()
+                SettingsRow(
+                    title: "Float login codes",
+                    detail:
+                        "A fresh code appears over whatever app you are in, with a Copy button. It does not take the keyboard. Off, it arrives as a banner."
+                ) {
+                    Toggle("", isOn: $prefs.floatLoginCodes)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                if prefs.floatLoginCodes {
+                    RowDivider()
+                    SettingsRow(
+                        title: "Respect Do Not Disturb",
+                        detail: focusRefused
+                            ? "Passband is not allowed to see your Focus. Allow it in System Settings, Privacy & Security, Focus, then turn this on again."
+                            : "While a Focus is on, codes do not float. They arrive as banners, which your Focus handles like any other."
+                    ) {
+                        Toggle("", isOn: $prefs.loginCodesRespectFocus)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                }
+            #endif
             RowDivider()
             // Three states, because two of them look identical from the outside:
             // a banner that never came because the grant is off, and one that
@@ -878,6 +909,18 @@ struct NotificationsSection: View {
             }
         }
         .onChange(of: prefs.notificationSound) { _, choice in preview(choice) }
+        #if os(macOS)
+            // Turning it on is the moment to ask: a switch that reads on while
+            // the system refuses to say whether a Focus is up would be a lie.
+            .onChange(of: prefs.loginCodesRespectFocus) { _, on in
+                guard on else { return }
+                Task {
+                    let allowed = await FocusGate.request()
+                    focusRefused = !allowed
+                    if !allowed { prefs.loginCodesRespectFocus = false }
+                }
+            }
+        #endif
     }
 
     private var hint: String {
@@ -907,29 +950,50 @@ struct NotificationsSection: View {
 /// and the release notes. The what's-new card is shown once per version and
 /// then never again, which is the right behaviour and also means the one place
 /// somebody can go looking for it afterwards has to exist.
+///
+/// ON THE IPHONE IT IS ONE ROW. The practice inbox is a lesson over the Mac's
+/// shell and the phone has no tour, so only the release notes are here, and
+/// they are the phone's own (Lib/PhoneReleaseNotes.swift), shown full screen.
+/// With no note to show the section is not drawn at all: a build older than
+/// the first phone note has nothing behind the button.
 struct HelpSection: View {
     @Environment(AppStore.self) private var store
 
     var body: some View {
-        SectionCard(label: "Help") {
-            SettingsRow(
-                title: "Practice inbox",
-                detail: "Try the categories and a sender rule on example mail, then come back."
-            ) {
-                Button("Open") { store.tour.replay(store: store) }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+        #if os(macOS)
+            SectionCard(label: "Help") {
+                SettingsRow(
+                    title: "Practice inbox",
+                    detail: "Try the categories and a sender rule on example mail, then come back."
+                ) {
+                    Button("Open") { store.tour.replay(store: store) }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                }
+                RowDivider()
+                SettingsRow(
+                    title: "What's new",
+                    detail: "What this version brought, in the app and in the daemon behind it."
+                ) {
+                    Button("Show") { store.whatsNew.replay() }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                }
             }
-            RowDivider()
-            SettingsRow(
-                title: "What's new",
-                detail: "What this version brought, in the app and in the daemon behind it."
-            ) {
-                Button("Show") { store.whatsNew.replay() }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+        #else
+            if let note = WhatsNew.replayable {
+                SectionCard(label: "Help") {
+                    SettingsRow(
+                        title: "What's new",
+                        detail: "What version \(note.version) brought to the iPhone, a page at a time."
+                    ) {
+                        Button("Show") { store.whatsNew.replay() }
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                    }
+                }
             }
-        }
+        #endif
     }
 }
 

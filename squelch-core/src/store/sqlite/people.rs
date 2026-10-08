@@ -18,6 +18,10 @@
 //! - The RULE is the one Stage-1 would apply to this address today: the first
 //!   match over `list_sender_rules`' order, through the same hand-rolled glob.
 //!   Re-matching here in SQL would drift from it (see sql-predicate-drift).
+//! - The TIMEZONE is the `sender_zones` row (`zones`): the user's override
+//!   first, else what ingest inferred. It is learned from header metadata
+//!   (a `Date` offset, an invitation's start zone) rather than content, and
+//!   the account's own address never has one.
 
 use super::*;
 use crate::triage::rules::match_sender_rule;
@@ -55,6 +59,10 @@ pub struct PersonThread {
     pub last_at: DateTime<Utc>,
 }
 
+/// A person's timezone as the card shows it: zone, where it came from (`user`,
+/// `invite`, `offsets`) and how sure the inference is.
+pub type PersonTimezone = crate::timezone::InferredZone;
+
 /// Everything the card shows about one address.
 #[derive(Debug, Clone)]
 pub struct PersonRecord {
@@ -70,6 +78,8 @@ pub struct PersonRecord {
     pub rule: Option<SenderRule>,
     pub groups: Vec<PersonGroup>,
     pub recent_threads: Vec<PersonThread>,
+    /// `None` when nothing is known and the user has not said.
+    pub timezone: Option<PersonTimezone>,
 }
 
 impl SqliteStore {
@@ -199,6 +209,12 @@ impl SqliteStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
+        let timezone = if is_self {
+            None
+        } else {
+            super::zones::person_timezone_conn(&conn, account_id, addr)?
+        };
+
         Ok(PersonRecord {
             addr: addr.to_string(),
             display_name,
@@ -209,6 +225,7 @@ impl SqliteStore {
             rule,
             groups,
             recent_threads,
+            timezone,
         })
     }
 }

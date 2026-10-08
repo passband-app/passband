@@ -8,8 +8,16 @@ final class Prefs {
     static let shared = Prefs()
     var tourCompleted = false
 }
+/// Counts the one thing the controller asks of the changelog: that whoever
+/// first finishes the tour is stamped current.
+@MainActor
+final class WhatsNew {
+    var newcomers = 0
+    func meetNewcomer() { newcomers += 1 }
+}
 @MainActor
 final class AppStore {
+    let whatsNew = WhatsNew()
     enum View { case sitrep, settings }
     enum Connection { case loading, connected, disconnected }
     struct Undo { let id: UUID }
@@ -50,6 +58,12 @@ enum Analytics {
     static func capture(_ event: String, _ properties: [String: Any] = [:]) {
         events.append((event, properties))
     }
+}
+/// The real Move vocabulary (DiscoveryLedger.swift rides along), a recording
+/// shell: the question here is only which tour exits grant `clear`.
+enum Discovery {
+    nonisolated(unsafe) static var moves: [Move] = []
+    static func note(_ move: Move) { moves.append(move) }
 }
 
 @main
@@ -172,6 +186,7 @@ struct TourControllerTests {
         let skips = Analytics.events.count
         tour.skip()
         precondition(Analytics.events.count == skips, "A second skip under the veil counts nothing twice")
+        precondition(Discovery.moves.isEmpty, "Skipping the tour discovers nothing")
         try await settle()
         precondition(store.exits == 1, "A second skip joins the departure under way")
         precondition(!RehearsalMode.isEnabled && tour.phase == .summary && tour.active && tour.veil == nil,
@@ -236,13 +251,20 @@ struct TourControllerTests {
         precondition(tour.practiceStep == .wrap && tour.veil == nil && tour.wantsBlur,
                      "The closing practice modal mirrors the blurred welcome")
         let exitsBefore = store.exits
+        let newcomersBefore = store.whatsNew.newcomers
         tour.advancePractice()
         precondition(Analytics.events.last?.0 == "tour_completed")
         precondition(Analytics.events.last?.1["step"] as? Int == PracticeTourStep.allCases.count)
+        precondition(Discovery.moves == [.tourCompleted], "Seeing the tour through finds clear, once")
         try await settle()
         precondition(store.exits == exitsBefore + 1 && tour.phase == .summary && tour.active)
         tour.finish()
         precondition(!tour.active && Prefs.shared.tourCompleted)
+        precondition(store.whatsNew.newcomers == newcomersBefore + 1,
+                     "Finishing the tour for the first time stamps the changelog current")
+        tour.finish()
+        precondition(store.whatsNew.newcomers == newcomersBefore + 1,
+                     "Somebody already introduced is not a newcomer twice")
 
         tour.replay(store: store)
         try await settle()

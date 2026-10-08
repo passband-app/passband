@@ -168,6 +168,7 @@ final class TourController {
     func completePractice() {
         guard active, phase == .practice, leaving == nil else { return }
         Analytics.capture("tour_completed", ["step": practiceStep.rawValue + 1])
+        Discovery.note(.tourCompleted)
         exploreInbox()
     }
 
@@ -233,8 +234,15 @@ final class TourController {
     }
 
     func finish() {
+        let firstTime = !Prefs.shared.tourCompleted
         cancel()
         Prefs.shared.tourCompleted = true
+        #if os(macOS)
+            // Whoever just finished the tour for the first time has been shown
+            // this build by the tour itself, and is not owed its release notes
+            // on their second launch.
+            if firstTime { AppStore.shared.whatsNew.meetNewcomer() }
+        #endif
     }
 
     func advancePractice() {

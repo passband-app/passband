@@ -29,6 +29,13 @@ struct RehearsalAPITests {
         precondition(exact.message_id == 1 && exact.thread.messages[0].id == 1)
         let initial = try await read("stats", as: StoreStats.self)
         precondition(initial.total == 18 && initial.bands.standing == 3 && initial.catch_up == nil)
+        // The calendar page is unreachable in practice (no timeline, no grant
+        // to ask for), and the timeline answers empty if anything asks.
+        precondition(initial.timeline == nil && initial.calendar == nil)
+        let timeline = try await read("timeline", as: TimelineFeed.self)
+        precondition(timeline.ghosts.isEmpty && timeline.events == nil)
+        let (_, kicked) = try await api.response(for: request("timeline/refresh", method: "POST"))
+        precondition(kicked.statusCode == 200)
         let standing = try await read("updates?band=standing", as: Page<AttentionUpdate>.self)
         precondition(Set(standing.items.map(\.id)) == [1, 4, 11])
         let maya = standing.items.first { $0.id == 1 }!

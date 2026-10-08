@@ -329,6 +329,7 @@
 		9D101A5516F87BD3E71E368C /* WriteVignette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 027B4127993B2C2DC557435C /* WriteVignette.swift */; };
 		9DA60570A748B7066E7C4125 /* UnsubscribeJobs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A865EB6EF8703D9C957D2B /* UnsubscribeJobs.swift */; };
 		9EA7C093CFE335E233A6411C /* AuthCodeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A47FA6986F50A4E81628452 /* AuthCodeModal.swift */; };
+		9EF51BD9AD6C1BA430DF3C63 /* ImageSniff.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1B6AB6E0E62E2C69D9FD1F /* ImageSniff.swift */; };
 		9F54901230BBCD7044B85B48 /* Haptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DBFA0EDE4D57FC2CB095671 /* Haptics.swift */; };
 		A11CBD2D92BD4E50185AC54B /* SenderSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBC81A5D09703AAB2D2F092C /* SenderSuggestions.swift */; };
 		A137B52A5F6BC3F6ACC2C0F8 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D19065EB7E9BFE9E846675B /* Keychain.swift */; };
@@ -352,6 +353,7 @@
 		AADD994E591986FD39D5240F /* EventGuests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A56FFEB4B951280A750AED3 /* EventGuests.swift */; };
 		AB169C9A19D62418DBAD4C3D /* ThreadPrefetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F62561CEB4911BA0E72FEDD /* ThreadPrefetch.swift */; };
 		AD2A4B8AAC3EEEA381980AEE /* UserNotifications.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F2064377C33D5ECB0B915EAF /* UserNotifications.framework */; };
+		AD7E2C515C344DC3C8091C53 /* ImageSniff.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1B6AB6E0E62E2C69D9FD1F /* ImageSniff.swift */; };
 		AD901499DD9D820E6C4D9F87 /* SettingsSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 673B876D08EF2BB9C1FA0E19 /* SettingsSearch.swift */; };
 		ADCD91460923247021793032 /* Analytics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A46105028AEB554882E2D72 /* Analytics.swift */; };
 		AE9F688F49884E6B3BC14D14 /* PracticeProductTour.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE10FD89ABF645A3F0617E5 /* PracticeProductTour.swift */; };
@@ -770,6 +772,7 @@
 		B4DCCB43DE3B800210E77D2D /* UpdateAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateAlert.swift; sourceTree = "<group>"; };
 		B5C36FCC4B2230B257E66F84 /* FromOperator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FromOperator.swift; sourceTree = "<group>"; };
 		B97BB8DF0B7CB3C4E9EC791B /* ComposePane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposePane.swift; sourceTree = "<group>"; };
+		BB1B6AB6E0E62E2C69D9FD1F /* ImageSniff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageSniff.swift; sourceTree = "<group>"; };
 		BB2FD6FC0F4BAE985E3E8E70 /* SidebarRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarRail.swift; sourceTree = "<group>"; };
 		BB5FEFF987265DA1E7F85007 /* AuthCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthCode.swift; sourceTree = "<group>"; };
 		BBA1338A4CA4B001850F8140 /* AssistantKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantKey.swift; sourceTree = "<group>"; };
@@ -1008,6 +1011,7 @@
 				CE514B2862480E62EB8936A3 /* ImageFill.swift */,
 				39D5C019641DC37B55D7D922 /* ImageProxy.swift */,
 				EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */,
+				BB1B6AB6E0E62E2C69D9FD1F /* ImageSniff.swift */,
 				17A72FA204008ACE31765EA1 /* ImageTrim.swift */,
 				1A74374DEAEE21CDF9A5067D /* Loadable.swift */,
 				C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */,
@@ -1588,6 +1592,7 @@
 				B09D9943663FA2E8ECBE1933 /* ImageProxy.swift in Sources */,
 				D4A4EA8324A57E2B01720266 /* ImageRepeats.swift in Sources */,
 				A59188FDC250262DEBA28AAE /* ImageSchemeHandler.swift in Sources */,
+				9EF51BD9AD6C1BA430DF3C63 /* ImageSniff.swift in Sources */,
 				EC28A617F2EBC9CFCA992B82 /* ImageStore.swift in Sources */,
 				BBEE5699B3270D49E8BAF3C5 /* ImageTrim.swift in Sources */,
 				553D7088D2A4B65FCAA59E61 /* ImageWarmer.swift in Sources */,
@@ -1832,6 +1837,7 @@
 				C2102B9052FF6E97DAAA2AB4 /* ImageProxy.swift in Sources */,
 				007DD445499A552534B3CD28 /* ImageRepeats.swift in Sources */,
 				07461CBC4F5237E689A02449 /* ImageSchemeHandler.swift in Sources */,
+				AD7E2C515C344DC3C8091C53 /* ImageSniff.swift in Sources */,
 				837D6250A05319ED273F3C1F /* ImageStore.swift in Sources */,
 				CE36E3CB614F3B5BADFCEEC2 /* ImageTrim.swift in Sources */,
 				B2EE10EBD8C634AC7069FB8B /* ImageWarmer.swift in Sources */,

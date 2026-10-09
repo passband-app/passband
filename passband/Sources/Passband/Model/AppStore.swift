@@ -1628,6 +1628,10 @@ final class AppStore {
             epoch &+= 1
             wipeAccountState()
             wipeAccountCaches()
+            // A record reused by host match can be an account that was parked
+            // in the background, and these credentials may open a different
+            // mailbox behind the same host.
+            boardSnapshots[account.id] = nil
             // Arriving from the Connect gate the feeds are down, so this is a
             // no-op and the `.connected` transition below is what raises them
             // — the same route the single-account build took. Kept as a
@@ -1819,6 +1823,7 @@ final class AppStore {
             SitrepPoller.shared.stop()
         }
         await AccountManager.shared.remove(id)
+        boardSnapshots[id] = nil
         // The saved headline can name people and plans from the mailbox just
         // forgotten. It is keyed by board, so it could never show for another
         // account, but it should not outlive the account either.
@@ -1964,6 +1969,13 @@ final class AppStore {
             }
         }
 
+        // (2b) The board on screen, kept for the way back. BEFORE the fence:
+        //     whether it is this account's and whole is read off the epoch
+        //     the next line retires. Not on the removal path, where the index
+        //     has already handed `activeId` to the survivor and the world on
+        //     screen is the forgotten account's.
+        if !currentWorldGone { keepBoardSnapshot() }
+
         // (3) From here, every answer still in flight belongs to the old
         //     account and every writer that captured the old epoch is inert.
         epoch &+= 1
@@ -2013,6 +2025,12 @@ final class AppStore {
         AuthDecisions.shared.reload()
         ThreadStyleLedger.shared.reload()
         RecentSearchStore.shared.reload()
+        // The board this account had when it was last on screen, if it has
+        // been on screen this session. AFTER `markActive` and the client, not
+        // with the wipe in step (7): a row painted while the client still
+        // pointed at the old daemon could be clicked into it. Everything in
+        // (9) then runs as it would over an empty world, and replaces this.
+        restoreBoardSnapshot(for: record.id)
 
         // (9) Restart by hand. `connStatus` was never dropped, so the
         //     `.connected` transition that normally does this never fires.
@@ -2068,10 +2086,100 @@ final class AppStore {
         connError = error
     }
 
+    // MARK: - board snapshots
+
+    /// One account's board as it stood when the app last switched away from
+    /// it: what a switch back paints at once instead of an empty board and
+    /// three round trips. The READ MODEL only, and only the part a first
+    /// frame is made of. Nothing that acts (undos, held sends, overlays) and
+    /// nothing a daemon is still answering for.
+    ///
+    /// The id collision the wipe exists for does not apply: a snapshot is
+    /// held under its account's id, swapped in whole, and only ever shown
+    /// while the client points at the daemon that minted its ids.
+    private struct BoardSnapshot {
+        var sitrep: SitrepData
+        var stats: StoreStats?
+        var fyeHeadline: String?
+        var fyeHeadlineKey: String?
+        var zones: SitrepZoneCache
+        var mailPages: [MailMode: [AttentionUpdate]]
+        var mailKeyset: Bool
+        var resolvedIds: Set<Int>
+        var selectedId: Int?
+        var lastRefresh: Date?
+    }
+
+    /// IN MEMORY ONLY, and only for accounts that are NOT live: an entry is
+    /// made when its account leaves the screen and taken when it comes back.
+    /// Mail on disk is a decision this cache does not get to make.
+    @ObservationIgnored private var boardSnapshots: [UUID: BoardSnapshot] = [:]
+
+    /// True from a snapshot's repaint until the daemon has answered for the
+    /// bands and the zones: the board on screen is what this mailbox held the
+    /// last time it was looked at, not what it holds now. Read by whatever
+    /// must not treat the difference between the two as something the person
+    /// just did (the clear chime).
+    private(set) var boardIsSnapshot = false
+
+    /// The poller's word that the board is the daemon's again.
+    func noteBoardConfirmed() {
+        if boardIsSnapshot { boardIsSnapshot = false }
+    }
+
+    /// Keep the live board under the live account's id, when there is one
+    /// worth keeping: a board the daemon has answered for under THIS epoch.
+    /// Stats stamped with an older epoch, or never, mean the rows on screen
+    /// cannot be vouched for (a switch made before the first pull landed, the
+    /// wait for a daemon that is not answering), and a snapshot of that would
+    /// repaint an empty or half-loaded board as if it were the mailbox.
+    private func keepBoardSnapshot() {
+        guard connStatus == .connected, !RehearsalMode.isEnabled, statsEpoch == epoch,
+            lastRefresh != nil, let id = AccountManager.shared.activeId
+        else { return }
+        var bands = sitrep
+        // Sealed mail is login codes: minutes old is expired, and a stale
+        // list would be handed to watchers that raise prompts. Asked for
+        // again every time.
+        bands.sealed = []
+        boardSnapshots[id] = BoardSnapshot(
+            sitrep: bands, stats: stats, fyeHeadline: fyeHeadline, fyeHeadlineKey: fyeHeadlineKey,
+            zones: zones,
+            // The head of each page: the scroll refills the rest, and the
+            // head is what the refresh behind the repaint merges into.
+            mailPages: mailPages.compactMapValues { $0.value.map { Array($0.prefix(Self.mailLimit)) } },
+            mailKeyset: mailKeyset, resolvedIds: resolvedIds, selectedId: selectedId,
+            lastRefresh: lastRefresh)
+    }
+
+    /// Paint `id`'s kept board over the world `wipeAccountState` just
+    /// emptied. The TTL stamps stay nil, so every refresh a switch starts
+    /// still asks; each lands through its usual compare-and-assign and the
+    /// snapshot is simply the rows they compare against.
+    private func restoreBoardSnapshot(for id: UUID) {
+        guard let kept = boardSnapshots.removeValue(forKey: id) else { return }
+        sitrep = kept.sitrep
+        stats = kept.stats
+        // These ARE this account's stats, which is all the stamp claims.
+        statsEpoch = epoch
+        fyeHeadline = kept.fyeHeadline
+        fyeHeadlineKey = kept.fyeHeadlineKey
+        zones = kept.zones
+        mailPages = kept.mailPages.mapValues { Loadable(value: $0, error: nil, isLoading: false) }
+        mailKeyset = kept.mailKeyset
+        resolvedIds = kept.resolvedIds
+        selectedId = kept.selectedId
+        // The account's own last sync, not the one just left: a daemon that
+        // has since gone quiet shows this board as stale, which it is.
+        lastRefresh = kept.lastRefresh
+        boardIsSnapshot = true
+    }
+
     /// Everything in this store that belongs to ONE account. Message ids are
     /// per-daemon SQLite ints, so "looks plausible" is precisely the failure
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
+        boardIsSnapshot = false
         // The unsubscribe tray's rows and buttons belong to the old account:
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.

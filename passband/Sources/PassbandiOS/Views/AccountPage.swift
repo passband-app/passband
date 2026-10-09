@@ -32,17 +32,17 @@
 // on the device has — the one place in this app where matching the platform's
 // habit beats having a house style.
 //
-// RULES AND GROUPS ARE HERE TOO, and they are not settings. On the Mac they are
-// pages on the rail, beside Sitrep and Emails; a phone's bar has three tabs and
+// RULES AND GROUPS ARE HERE TOO, above the settings. On the Mac they lead the
+// Settings sub-nav, with the accounts; a phone's bar has three tabs and
 // neither of these is somewhere you live. But a rule made from a swipe has to
 // be findable afterwards, and the place a thumb goes looking for "what have I
 // told this thing" is the screen about you. So they get a pane of their own,
 // ABOVE the settings and directly under the switcher: they belong to the
 // mailbox the switcher just named (a second account has different rules),
 // where everything below them belongs to the install. Their rows wear the same
-// shape as the settings rows so the screen still reads as one index, and they
-// are not `SettingsSection` cases, because that enum is the Mac's sub-nav and
-// the Mac already has a door to each.
+// shape as the settings rows so the screen still reads as one index. They ARE
+// `SettingsSection` cases (the Mac's sub-nav lists them, and the label and
+// icon come from there), but not in `order`: here they are pushed as pages.
 //
 // A LIST AND NOT A `List`. The app paints its own canvas and floats glass on it,
 // and `insetGrouped` brings a grouped system background plus separator insets
@@ -58,6 +58,9 @@ struct AccountPage: View {
     /// sub-nav keeps its own order — `SettingsSection.allCases` — since a rail
     /// beside the pane is a map, and a map you can read at a glance has no
     /// reason to lead with anything.
+    ///
+    /// Rules and Groups are NOT here: the Mac files them as settings panes, and
+    /// the phone gives them rows of their own above this list (`pages`).
     private static let order: [SettingsSection] = [
         .account, .general, .mail, .assistant, .agents, .privacy, .audit,
     ]
@@ -137,8 +140,8 @@ struct AccountPage: View {
         .padding(.top, 4)
     }
 
-    /// WHAT THIS MAILBOX HAS BEEN TOLD: the two pages the Mac keeps on its
-    /// rail. The views are the Mac's own (`RulesView`, `GroupsView`), each
+    /// WHAT THIS MAILBOX HAS BEEN TOLD: the two pages the Mac keeps at the top
+    /// of its Settings sub-nav. The views are the Mac's own (`RulesView`, `GroupsView`), each
     /// with a phone layout inside it, so a rule edited here is edited by the
     /// same code that edits it there.
     ///
@@ -148,14 +151,14 @@ struct AccountPage: View {
         VStack(spacing: 0) {
             NavigationLink { RulesView() } label: {
                 row(
-                    symbol: MainView.rules.symbol, title: MainView.rules.label,
+                    symbol: SettingsSection.rules.symbol, title: SettingsSection.rules.label,
                     blurb: "what you asked for from each sender")
             }
             .buttonStyle(.plain)
             Hairline()
             NavigationLink { GroupsView() } label: {
                 row(
-                    symbol: MainView.groups.symbol, title: MainView.groups.label,
+                    symbol: SettingsSection.groups.symbol, title: SettingsSection.groups.label,
                     blurb: "people you write to together")
             }
             .buttonStyle(.plain)
@@ -182,7 +185,7 @@ struct AccountPage: View {
     }
 
     private func row(_ section: SettingsSection) -> some View {
-        row(symbol: symbol(section), title: section.label, blurb: blurb(section))
+        row(symbol: section.symbol, title: section.label, blurb: blurb(section))
     }
 
     /// The one row shape on this screen, for a settings pane or a page.
@@ -236,6 +239,10 @@ struct AccountPage: View {
                     SearchSection()
                     SignatureSection()
                     ReadTrackingSection()
+                // Not panes here: the phone pushes these two from `pages`, as
+                // pages of their own, so nothing asks this switch for either.
+                case .rules, .groups:
+                    EmptyView()
                 case .assistant:
                     AssistantSection()
                 case .agents:
@@ -256,26 +263,18 @@ struct AccountPage: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    /// Icons and one-line blurbs live HERE rather than on `SettingsSection`,
-    /// which is shared with the Mac and needs neither: the rail names the pane
-    /// and the pane itself is already on screen beside it. A list row has to say
-    /// what is behind it before you commit a tap to finding out.
-    private func symbol(_ section: SettingsSection) -> String {
-        switch section {
-        case .general: "gearshape"
-        case .mail: "envelope"
-        case .assistant: "sparkles"
-        case .agents: "point.3.connected.trianglepath.dotted"
-        case .privacy: "hand.raised"
-        case .audit: "scroll"
-        case .account: "person.crop.circle"
-        }
-    }
+    /// The one-line blurbs live HERE rather than on `SettingsSection`, which is
+    /// shared with the Mac and does not need them: its pane is already on
+    /// screen beside the row. A list row has to say what is behind it before
+    /// you commit a tap to finding out. (The icons used to live here too; the
+    /// Mac's sub-nav shows them now, so they are `SettingsSection.symbol`.)
 
     private func blurb(_ section: SettingsSection) -> String {
         switch section {
         case .general: "your name, theme, chime"
         case .mail: "images, search order, signature, read tracking"
+        case .rules: "how each sender's mail is handled"
+        case .groups: "people you write to together"
         case .assistant: "your own api key, and which model"
         case .agents: "connect Claude, OpenClaw, Hermes Agent and others"
         case .privacy: "what telemetry leaves the app"

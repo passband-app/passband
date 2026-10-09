@@ -18,6 +18,10 @@ struct FromOperatorTests {
         acceptingCompletesTheOperator()
         acceptingOutsideTheOperatorChangesNothing()
         bareOperatorsAreNotASearchYet()
+        plainWordsAskTheDirectory()
+        aHeldRowMustStillMatch()
+        pickingASenderListsTheirMail()
+        operatorsAloneAreAListing()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -92,7 +96,89 @@ struct FromOperatorTests {
         awaiting("   ", is: false)
     }
 
+    static func plainWordsAskTheDirectory() {
+        senderFragment(of: "dan", is: "dan")
+        senderFragment(of: "dan@ex", is: "dan@ex")
+        senderFragment(of: "  Dan   Smith ", is: "Dan Smith")
+        // One character matches nearly every sender, so it asks nothing.
+        senderFragment(of: "d", is: nil)
+        senderFragment(of: "", is: nil)
+        senderFragment(of: "   ", is: nil)
+        // An operator anywhere means the reader has already said who, or is
+        // saying it through the from: menu.
+        senderFragment(of: "from:dan", is: nil)
+        senderFragment(of: "invoice from:dan", is: nil)
+        senderFragment(of: "dan after:2026-01-01", is: nil)
+        senderFragment(of: "From:", is: nil)
+        // Four words is a description of mail, not a name.
+        senderFragment(of: "abstract conference wifi", is: "abstract conference wifi")
+        senderFragment(of: "abstract conference wifi password", is: nil)
+    }
+
+    static func aHeldRowMustStillMatch() {
+        matches("dan@example.com", "Dan Smith", "dan", is: true)
+        matches("d.smith@example.com", "Dan Smith", "DAN SM", is: true)
+        matches("billing@stripe.com", nil, "Stripe", is: true)
+        matches("dan@example.com", "Dan Smith", "dana", is: false)
+        matches("billing@stripe.com", nil, "dan", is: false)
+    }
+
+    static func pickingASenderListsTheirMail() {
+        checks += 1
+        let query = FromOperator.listing(of: "dan@example.com")
+        if query != "from:dan@example.com " {
+            failures += 1
+            print("FAIL listing(of:) = \(query.debugDescription)")
+        }
+        // What picking writes is a listing, has no sender left to suggest, and
+        // does not reopen the from: menu under itself.
+        listing(query, is: true)
+        senderFragment(of: query, is: nil)
+        fragment(of: query, is: nil)
+    }
+
+    static func operatorsAloneAreAListing() {
+        listing("from:dan@example.com", is: true)
+        listing("FROM:dan", is: true)
+        listing("from:dan after:2026-01-01", is: true)
+        listing("after:2026-01-01", is: true)
+        // Words are ranked, so the order is the search's and not the calendar's.
+        listing("invoice from:dan", is: false)
+        listing("dan", is: false)
+        // A bare operator is not a value.
+        listing("from:", is: false)
+        listing("from:dan before:", is: false)
+        listing("", is: false)
+    }
+
     // MARK: - helpers
+
+    static func senderFragment(of query: String, is expected: String?) {
+        checks += 1
+        let got = FromOperator.senderFragment(in: query)
+        if got != expected {
+            failures += 1
+            print("FAIL senderFragment(\(query.debugDescription)) = \(String(describing: got)), expected \(String(describing: expected))")
+        }
+    }
+
+    static func matches(_ addr: String, _ name: String?, _ fragment: String, is expected: Bool) {
+        checks += 1
+        let got = FromOperator.matches(addr: addr, name: name, fragment: fragment)
+        if got != expected {
+            failures += 1
+            print("FAIL matches(\(addr), \(String(describing: name)), \(fragment)) = \(got), expected \(expected)")
+        }
+    }
+
+    static func listing(_ query: String, is expected: Bool) {
+        checks += 1
+        let got = FromOperator.isListing(query)
+        if got != expected {
+            failures += 1
+            print("FAIL isListing(\(query.debugDescription)) = \(got), expected \(expected)")
+        }
+    }
 
     static func awaiting(_ query: String, is expected: Bool) {
         checks += 1

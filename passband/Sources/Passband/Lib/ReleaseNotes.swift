@@ -78,6 +78,7 @@ enum ReleaseSurface: String, CaseIterable, Sendable {
 enum ReleaseVignette: String, CaseIterable, Sendable {
     case mailList, flow, unsubscribe, clearStack
     case smartBlock
+    case loginCode, agentWrite, smartUnsubscribe
     /// Not a drawn scene: the agent ad's own conversation, live.
     case agentSession
 }
@@ -260,6 +261,35 @@ struct ReleaseCatchUp: Sendable, Equatable {
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
+        ReleaseNote(
+            version: "0.0.14",
+            date: "2026-10-08",
+            headline: "Hands Free",
+            items: [
+                ReleaseItem(
+                    .app, "Login codes come to you",
+                    detail: "A sign-in code floats over the app you are in. Copy it without opening Passband",
+                    symbol: "key", vignette: .loginCode),
+                ReleaseItem(
+                    .app, "Agent MCP can write",
+                    detail: "Your agent drafts, you send. Choose how much it may do in Settings, under Agents",
+                    symbol: "square.and.pencil", vignette: .agentWrite),
+                ReleaseItem(
+                    .app, "Smart unsubscribe",
+                    detail: "`u` now gets through preference pages and forms on its own",
+                    symbol: "wand.and.stars", vignette: .smartUnsubscribe),
+                ReleaseItem(.app, "Profile photo"),
+                ReleaseItem(.app, "Delete drafts"),
+                ReleaseItem(.app, "Better reply composer"),
+                ReleaseItem(.app, "Better toasts"),
+                ReleaseItem(.app, "Muse support"),
+                ReleaseItem(.app, "UX improvements"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Reads PINs and passcodes as login codes"),
+                ReleaseItem(.daemon, "Lets your agent draft and send, when you allow it"),
+                ReleaseItem(.daemon, "Finishes unsubscribes that need a form"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ]),
         ReleaseNote(
             version: "0.0.13",
             date: "2026-10-05",

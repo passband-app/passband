@@ -836,6 +836,9 @@ enum UnsubscribeMethod: String, LenientRawEnum {
     case auto
     /// Done by reading the sender's page and, at most, pressing its one button.
     case page
+    /// Done in a remote browser the daemon steered through the sender's page:
+    /// a preference center switched off, a form filled in.
+    case agent
     static var unknownFallback: UnsubscribeMethod { .browser }
 }
 
@@ -884,7 +887,9 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     var status: UnsubStatus? = nil
     /// The ORIGINAL link, for `needs_you`.
     var status_url: String? = nil
-    /// choose_topics | needs_browser | link_error | unclear, for `needs_you`.
+    /// choose_topics | needs_browser | link_error | unclear, and from the
+    /// daemon's browser sign_in | captcha | check_email | your_call, for
+    /// `needs_you`. Copy for each is `UnsubscribeTray.why`.
     var status_reason: String? = nil
     var status_at: String? = nil
     /// The smart block the daemon has worked out for this sender, and whether
@@ -2010,6 +2015,27 @@ struct ContactHit: Codable, Sendable, Equatable, Identifiable {
     var last_sent_at: String?
 
     var id: String { addr }
+}
+
+/// One answer to "who is steven" (GET /client/calendar/people): somebody the
+/// user has written to whose name starts that way, most recent exchange
+/// first. The event pane offers the first as a guest; it never adds one.
+struct NamedPerson: Codable, Sendable, Hashable {
+    var addr: String
+    var name: String?
+}
+
+/// The route's envelope. Lenient: a daemon that answers without the list
+/// offers nobody.
+struct NamedPeople: Codable, Sendable, Equatable {
+    var people: [NamedPerson]
+
+    init(people: [NamedPerson] = []) { self.people = people }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        people = (try? c.decodeIfPresent([NamedPerson].self, forKey: .people)) ?? []
+    }
 }
 
 /// One row of the daemon's sender directory (GET /client/senders): somebody who

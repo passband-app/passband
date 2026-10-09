@@ -305,6 +305,21 @@ private struct ShellWatchers: View {
                     store.returnParkedEventEditor()
                 }
             }
+            // A proposal made while an email was open over the Calendar page
+            // itself is parked without the page ever changing: it comes back
+            // when the email closes.
+            .onChange(of: store.threadId) { _, thread in
+                if thread == nil, store.activeView == .calendar { store.returnParkedEventEditor() }
+            }
+            // A proposal kept parked because mail was being written (it
+            // never closes a typed-in composer or inline reply) is asked
+            // again when the composer is sent or closed. An inline reply
+            // lives in an open email, so its end is the hook above.
+            // `composeOpen`, not `compose`: that one changes on every key.
+            // A no-op with nothing parked.
+            .onChange(of: store.composeOpen) { _, open in
+                if !open, store.activeView == .calendar, store.threadId == nil { store.returnParkedEventEditor() }
+            }
             .onChange(of: store.lastRefresh) { old, new in
                 if old == nil, new != nil {
                     store.tour.maybeStart()
@@ -663,8 +678,6 @@ struct MainShell: View {
         case .calendar: RoutedHost(view: .calendar) { CalendarPage() }
         case .emails: EmailsView()
         case .auth: RoutedHost(view: .auth) { AuthView() }
-        case .rules: RoutedHost(view: .rules) { RulesView() }
-        case .groups: RoutedHost(view: .groups) { GroupsView() }
         case .usage: UsageView()
         case .settings: SettingsView()
         case .process: RoutedHost(view: .process) { ProcessView() }
@@ -674,7 +687,8 @@ struct MainShell: View {
         }
     }
 
-    /// Digit view nav + ⌘[ back / ⌘] forward + ⌘K ask bar. The ⌘ chords use the
+    /// Digit view nav (the rail's pages, then the Rules and Groups panes in
+    /// Settings) + ⌘[ back / ⌘] forward + ⌘K ask bar. The ⌘ chords use the
     /// `meta` flag so a bare "[" / "]" never triggers them; `allowInInput` keeps
     /// them working with a search/compose field focused, since a chord is not a
     /// typed character.
@@ -706,10 +720,21 @@ struct MainShell: View {
         // would make the whole shell a reader of the stats poll. One more
         // digit is bound than there are pages without the calendar; it
         // passes on while the calendar is not offered.
+        //
+        // AND THEN THE TWO THAT OUTLIVED THEIR RAIL SLOTS. Rules and Groups
+        // moved into Settings, and their digits went with them rather than
+        // going dead: they still follow the last page on the rail (4 and 5,
+        // or 5 and 6 with the calendar), so a key somebody already has in
+        // their fingers lands on the page it always did, wherever that page
+        // is filed now. Which is why the order is one of DOORS, not views.
         var bindings: [KeyBinding] = PageKeys.digits(
-            count: MainView.numberKeyCount,
-            pages: { MainView.numberedViews(calendar: store.calendarPageAvailable) },
-            go: { store.setView($0) })
+            count: MainView.numberKeyCount + 2,
+            pages: { () -> [@MainActor () -> Void] in
+                MainView.numberedViews(calendar: store.calendarPageAvailable).map { view in
+                    { store.setView(view) }
+                } + [{ store.openSettings(.rules) }, { store.openSettings(.groups) }]
+            },
+            go: { $0() })
         // ⇧C OPENS THE CALENDAR TOO, as it did before the page had a digit
         // (`PageKeys.calendar`: exact case, declining). With the gate closed,
         // and while a sign-in code is on screen (whose modal copies on `c`,
@@ -757,7 +782,7 @@ struct MainShell: View {
     }
 }
 
-/// Host for the full main views behind the rail: Auth / Rules / Groups.
+/// Host for the full main views behind the rail: Auth / Process.
 ///
 /// These inner views register their list-style keys into the "modal" KeyContext
 /// and never push a context themselves, so this host pushes it while mounted.
@@ -773,13 +798,10 @@ struct RoutedHost<Content: View>: View {
     ///
     /// Two values rather than one string with a dash in it: the subtitle is set
     /// in the sitrep masthead's own small caps, so it has to reach the header as
-    /// its own text. (It read "Rules — sender rules", which also put an em dash
-    /// in user-facing copy, which this app does not do.)
+    /// its own text.
     private var heading: (title: String, subtitle: String?) {
         switch view {
-        case .calendar: ("Calendar", store.calendarMode == .month ? "month" : "agenda")
-        case .rules: ("Rules", "sender rules")
-        case .groups: ("Groups", "named audiences")
+        case .calendar: ("Calendar", store.calendarMode.label.lowercased())
         default: (view.label, nil)
         }
     }
@@ -794,7 +816,7 @@ struct RoutedHost<Content: View>: View {
                 VStack(alignment: .leading, spacing: 0) {
                     RoutedHeader(title: heading.title, subtitle: heading.subtitle) {
                         // The calendar's one header control: which way the
-                        // page is drawn (`a` / `m`).
+                        // page is drawn (`m` / `w` / `a`).
                         if view == .calendar { CalendarModeSwitch() }
                     }
                     content

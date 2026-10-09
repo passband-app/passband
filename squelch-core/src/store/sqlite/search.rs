@@ -852,7 +852,11 @@ impl SqliteStore {
     /// ([`ExternalLeg`], then [`Self::external_search_hits`]) like any other.
     ///
     /// COST: one vector read and one 384-wide distance per readable row of
-    /// the account, with no index.
+    /// the account, with no index, plus one pass over the account's messages
+    /// to build the set of closed threads (the flat form of the prefilter;
+    /// the correlated form re-scans a row's siblings for every row, which on
+    /// hundred-message threads took this leg from 0.3 s to 2 s at 10,000
+    /// rows). All of it under the store lock.
     /// `the_external_vector_leg_over_ten_thousand_readable_rows` in
     /// tests/archive.rs times it.
     pub(super) fn nearest_readable(
@@ -880,7 +884,7 @@ impl SqliteStore {
                AND m.is_spam = 0
                AND +v.account_id = ?2
                AND ",
-            external_candidate_sql!(),
+            external_candidate_flat_sql!("?2"),
             " ORDER BY vec_distance_l2(v.embedding, ?1), m.id
              LIMIT ?3"
         ))?;
@@ -895,6 +899,21 @@ impl SqliteStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// The ids the flat prefilter passes, for the test that holds it equal to
+    /// the correlated one.
+    #[cfg(test)]
+    pub(crate) fn external_flat_prefilter_ids(&self, account_id: AccountId) -> Result<Vec<i64>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(concat!(
+            "SELECT m.id FROM messages m WHERE m.account_id = ?2 AND ?1 IS NULL AND ",
+            external_candidate_flat_sql!("?2")
+        ))?;
+        let ids = stmt
+            .query_map(params![Option::<i64>::None, account_id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<i64>, _>>()?;
+        Ok(ids)
     }
 
     /// HYBRID RECALL: merge FTS5 keyword rank and vector distance with Reciprocal

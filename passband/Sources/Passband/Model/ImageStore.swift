@@ -270,9 +270,16 @@ actor ImageStore {
         // only ever save us a transfer we were going to refuse anyway.
         guard let (stream, response) = try? await session.bytes(for: request, delegate: policy),
             let http = response as? HTTPURLResponse, http.statusCode == 200,
-            let mime = response.mimeType?.lowercased(), mime.hasPrefix("image/"),
             response.expectedContentLength <= Int64(Self.maxImageBytes)
         else { return nil }
+
+        // A header that says image is believed. One that does not is NOT a
+        // refusal by itself: image CDNs routinely serve a PNG as
+        // `application/octet-stream`, and a browser decodes an <img> from its
+        // bytes without ever reading the type. So those are judged the same
+        // way, by their opening bytes, and dropped the moment the bytes say no.
+        let declared = response.mimeType?.lowercased()
+        let trustsHeader = declared?.hasPrefix("image/") ?? false
 
         var bytes: [UInt8] = []
         bytes.reserveCapacity(
@@ -284,9 +291,17 @@ actor ImageStore {
                 // and closes the connection. The cap has to stop us RECEIVING,
                 // not merely counting.
                 if bytes.count > Self.maxImageBytes { return nil }
+                if !trustsHeader, bytes.count == ImageSniff.prefixLength,
+                    ImageSniff.mime(of: bytes) == nil
+                {
+                    return nil
+                }
             }
         } catch { return nil }
         guard !bytes.isEmpty else { return nil }
+        // Sniffed again at the end rather than remembered from the loop: a body
+        // shorter than the prefix never reached the check above.
+        guard let mime = trustsHeader ? declared : ImageSniff.mime(of: bytes) else { return nil }
         return Fetched(data: Data(bytes), mime: mime)
         // What this does NOT bound is CFNetwork's own decompression: a
         // content-coded body is inflated below us, so a burst that arrives all

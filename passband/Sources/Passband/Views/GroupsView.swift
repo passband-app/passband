@@ -11,8 +11,10 @@
 //
 // Keys: j/k select · n new · e/Enter edit · x delete.
 //
-// The rail slot is ⌘6, appended below Audit rather than inserted, so no digit
-// anybody already has in their fingers moved.
+// ON THE MAC IT IS A SETTINGS PANE, NOT A ROUTED PAGE. It had a rail slot of
+// its own until the rail got crowded; a group is something you set up once and
+// then address from the composer, so it is filed with the other things you set
+// up. Its digit still opens it. SettingsView gives it the pane's whole height.
 //
 // ON THE PHONE there is no beside, so the two columns are two screens: the
 // list hangs off the Account page (PassbandiOS/Views/AccountPage.swift) and a
@@ -67,7 +69,7 @@ struct GroupsView: View {
         // children rather than to the group as a whole, and the populated
         // branch below has two: the scrolling body and the bar under it. The
         // `maxHeight: .infinity` on the frame was therefore claimed TWICE, so
-        // the enclosing VStack in RoutedHost split the window between them and
+        // the enclosing VStack (RoutedHost then, the settings pane now) split the window between them and
         // the page rendered at half height with its footer stranded in the
         // middle. One real container means one frame, and the bar keeps its
         // natural height while the body takes what is left.

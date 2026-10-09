@@ -102,7 +102,7 @@ const BLANK_BODY_HEAL_MAX_FETCHES: usize = 400;
 
 /// `wake_budget.thread_id` sentinel for the per-account-per-day Stage-2 budget.
 /// Gmail thread ids are hex, so no real thread can collide with it.
-const GLOBAL_BUDGET_KEY: &str = "__global__";
+const GLOBAL_BUDGET_KEY: &str = crate::triage::agent_config::TOTAL_BUDGET_KEY;
 
 /// The `wake_budget` sentinel for the NOTIFY FAST LANE (docs/NOTIFY.md §11.5).
 /// Its own key beside the other three, and for the sharpest version of the same
@@ -1580,7 +1580,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// Nothing else asks this. Live mail is stored whatever it answers.
     ///
     /// THE FREE-SPACE FLOOR is `sync.archive_min_free_mb` or a fifth of the
-    /// whole filesystem ([`ARCHIVE_FLOOR_VOLUME_SHARE`], capped at 10 GiB),
+    /// whole filesystem ([`ARCHIVE_FLOOR_VOLUME_SHARE`], capped at 5 GiB),
     /// whichever is larger,
     /// measured on the filesystem the database file is on. The share is there
     /// because that filesystem can be one every tenant's database is on: a
@@ -1632,7 +1632,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             if state.disk_short {
                 state.room_note = format!(
                     "{} MiB free on the database volume; the floor is {} MiB (the larger of \
-                     sync.archive_min_free_mb and a fifth of the volume, capped at 10 GiB) and it resumes at {} MiB",
+                     sync.archive_min_free_mb and a fifth of the volume, capped at 5 GiB) and it resumes at {} MiB",
                     disk.free_bytes / MIB,
                     floor / MIB,
                     floor.saturating_add(floor / ARCHIVE_FLOOR_RESUME_MARGIN) / MIB
@@ -3815,7 +3815,7 @@ const ARCHIVE_FLOOR_VOLUME_SHARE: u64 = 5;
 /// The most the volume share may ask for. A fifth of a 50 GiB tenant volume
 /// is a sensible reserve; a fifth of a laptop's terabyte is 200 GiB the walk
 /// has no claim on, and would hold it on any ordinarily full disk.
-const ARCHIVE_FLOOR_SHARE_CAP: u64 = 10 * 1024 * 1024 * 1024;
+const ARCHIVE_FLOOR_SHARE_CAP: u64 = 5 * 1024 * 1024 * 1024;
 
 /// The free-space floor in bytes: the configured floor, or the volume share
 /// capped at [`ARCHIVE_FLOOR_SHARE_CAP`], whichever is larger.
@@ -9057,11 +9057,11 @@ mod tests {
     #[tokio::test]
     async fn the_disk_floor_is_a_fifth_of_the_volume_and_resumes_with_a_margin() {
         use std::sync::atomic::AtomicU64;
-        // A 50 GiB volume: the floor is 10 GiB and the walk resumes at 11.
+        // A 25 GiB volume: the floor is 5 GiB and the walk resumes at 5.5.
         const GIB: u64 = 1024;
         static FREE_MB: AtomicU64 = AtomicU64::new(0);
         fn shared() -> Option<crate::store::ArchiveDisk> {
-            Some(disk_mb(FREE_MB.load(Ordering::SeqCst), 50 * GIB, 0))
+            Some(disk_mb(FREE_MB.load(Ordering::SeqCst), 25 * GIB, 0))
         }
         let (store, acct) = store_at_cursor(Some(100));
         let cursor = days_ago(40);
@@ -9080,14 +9080,14 @@ mod tests {
             eng.archive_walk_chunk(&mut rx).await.unwrap()
         };
 
-        // Four times the configured floor free, and still short of a fifth.
-        assert_eq!(step(8 * GIB).await, ArchiveStep::Held);
+        // Twice the configured floor free, and still short of a fifth.
+        assert_eq!(step(4 * GIB).await, ArchiveStep::Held);
         assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::Disk));
         assert_eq!(changes(), 1);
         assert!(g.seen().is_empty(), "held means off the wire");
         // Back at the floor, and anywhere under floor plus a tenth: held, and
         // nothing more said about it.
-        for free_mb in [10 * GIB - 1, 10 * GIB, 10 * GIB + 512, 11 * GIB - 1] {
+        for free_mb in [5 * GIB - 1, 5 * GIB, 5 * GIB + 256, 5 * GIB + 511] {
             assert_eq!(step(free_mb).await, ArchiveStep::Held, "{free_mb} MiB free");
         }
         assert_eq!(changes(), 1, "one line for the whole stretch");
@@ -9106,26 +9106,27 @@ mod tests {
         assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::Disk));
 
         // The margin reached: it walks, and says so once.
-        assert_eq!(step(11 * GIB).await, ArchiveStep::Walked);
+        assert_eq!(step(5 * GIB + 512).await, ArchiveStep::Walked);
         assert_eq!(eng.metrics.archive_hold(), None);
         assert_eq!(changes(), 2);
         // Not held, so the floor itself is room again: no second threshold
         // for a walk that never stopped.
-        assert_eq!(step(10 * GIB).await, ArchiveStep::Walked);
+        assert_eq!(step(5 * GIB).await, ArchiveStep::Walked);
         assert_eq!(changes(), 2);
-        assert_eq!(step(10 * GIB - 1).await, ArchiveStep::Held);
+        assert_eq!(step(5 * GIB - 1).await, ArchiveStep::Held);
         assert_eq!(changes(), 3);
     }
 
-    /// The volume share stops growing at 10 GiB, so a large, ordinarily full
+    /// The volume share stops growing at 5 GiB, so a large, ordinarily full
     /// disk does not hold the walk; the configured floor still wins when it
     /// is the larger.
     #[test]
     fn the_volume_share_of_the_disk_floor_is_capped() {
         const GIB: u64 = 1024 * 1024 * 1024;
         assert_eq!(archive_floor_bytes(2048, 5 * GIB), 2 * GIB);
-        assert_eq!(archive_floor_bytes(2048, 50 * GIB), 10 * GIB);
-        assert_eq!(archive_floor_bytes(2048, 926 * GIB), 10 * GIB);
+        assert_eq!(archive_floor_bytes(2048, 20 * GIB), 4 * GIB);
+        assert_eq!(archive_floor_bytes(2048, 50 * GIB), 5 * GIB);
+        assert_eq!(archive_floor_bytes(2048, 926 * GIB), 5 * GIB);
         assert_eq!(archive_floor_bytes(20 * 1024, 926 * GIB), 20 * GIB);
     }
 

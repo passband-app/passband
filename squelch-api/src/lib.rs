@@ -29,6 +29,8 @@ mod sharing;
 mod state;
 pub mod tracking;
 mod triage;
+mod unsub_browser;
+mod unsub_cdp;
 mod unsub_fetch;
 mod unsub_html;
 mod unsub_job;
@@ -400,6 +402,14 @@ fn calendar_routes(state: ApiState) -> Router<ApiState> {
         .route(
             "/client/calendar/events/{calendar_id}/{id}",
             patch(calendar_write::edit_event).delete(calendar_write::delete_event),
+        )
+        // The event pane's guest suggestion: people the user has written to
+        // whose name a title mentions. A read, and HUMAN DOOR ONLY: it is a
+        // lookup into who the user writes to, which the agent door, the agent
+        // routes and the assistant relay never get.
+        .route(
+            "/client/calendar/people",
+            get(handlers::get_calendar_people),
         )
         // The user's correction of a person's inferred timezone (docs/
         // CALENDAR.md §7). A local write, human door only, for the reason the

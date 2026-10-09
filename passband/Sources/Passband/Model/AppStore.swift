@@ -40,20 +40,20 @@ enum OpenSource: String, Sendable {
 }
 
 enum MainView: String, Sendable, Hashable, CaseIterable {
-    case sitrep, calendar, emails, auth, rules, groups, usage, settings, process, discovery
+    case sitrep, calendar, emails, auth, usage, settings, process, discovery
 
     /// The TOP rail group — also the 1..N number-key mapping, taken from
     /// POSITION in this array. Usage/Settings are excluded so that adding one
     /// never renumbers the rest. `process` is off the rail entirely: its one door
     /// is the all-mail header's peer-review chip.
     ///
-    /// `groups` is APPENDED rather than inserted: anywhere earlier and every
-    /// digit above it shifts, and the keys people have in their fingers are
-    /// worth more than alphabetical tidiness. Audit used to sit between the two,
-    /// and taking a destination OUT does renumber — it is the one edit that
-    /// cannot be made additively, and it was worth it once, to give the ledger
-    /// back the window it was spending (see Views/AuditView.swift).
-    static let mainViews: [MainView] = [.sitrep, .emails, .auth, .rules, .groups]
+    /// Rules and Groups used to be the fourth and fifth, and are Settings panes
+    /// now (`SettingsSection.rules` / `.groups`), the move Audit made before
+    /// them: each is a page you visit to set something up, not one you work
+    /// from, and the rail is for the second kind. They came off the END, so no
+    /// digit that is left moved, and the two digits after the rail's last page
+    /// still open them where they live (see `RootView.globalBindings`).
+    static let mainViews: [MainView] = [.sitrep, .emails, .auth]
     /// The BOTTOM rail group, pinned below a divider.
     ///
     /// `discovery` is in neither group: its one door is the ring, alone above
@@ -91,8 +91,6 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .calendar: "Calendar"
         case .emails: "Emails"
         case .auth: "Auth"
-        case .rules: "Rules"
-        case .groups: "Groups"
         case .usage: "Usage"
         case .settings: "Settings"
         case .process: "Process"
@@ -106,8 +104,6 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .calendar: "calendar"
         case .emails: "envelope"
         case .auth: "key"
-        case .rules: "slider.horizontal.3"
-        case .groups: "person.2"
         case .usage: "waveform.path.ecg"
         case .settings: "gearshape"
         case .process: "checkmark.seal"
@@ -731,6 +727,13 @@ final class AppStore {
     /// A write to Google is out: the card's buttons wait, so one Enter is
     /// one event.
     var calendarWriting = false
+    /// Where the event pane's write stands (`EventPaneState`): editable,
+    /// out, frozen after an answer that never came, or done. Reset with the
+    /// pane.
+    var calendarPaneState: EventPaneState = .editing
+    /// What the pane last sent, kept whole while it is frozen: "send again"
+    /// sends exactly this, "check again" looks for exactly this.
+    var calendarPaneSent: SentWrite?
     /// Bumped by every timeline request and every local write to the feed;
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
@@ -743,6 +746,14 @@ final class AppStore {
     /// the draft are kept, the pane is not drawn, and coming back to the
     /// Calendar page brings it back as it was (`parkEventEditor`).
     var calendarEditorParked = false
+    /// The pane on screen (or parked) was filled in by THE ASSISTANT, not by
+    /// the user's hands (`proposeEvent`). While it is, and until
+    /// `calendarPaneEngaged`, the pane takes no keyboard and ↵ / ⌘↵ do
+    /// nothing in it (`EventProposals.keysMayAct`). Reset with the pane.
+    var calendarPaneProposed = false
+    /// The user has clicked or typed inside a proposed pane: its keys are
+    /// theirs from here.
+    var calendarPaneEngaged = false
     /// When the last full zone refresh COMPLETED. nil = never loaded. OUT of
     /// the observed struct: it is a TTL stamp, and stamping it invalidated
     /// every zone view once per pass whether or not a row had changed.
@@ -4677,20 +4688,33 @@ final class AppStore {
             }
             // Already the one on screen, or already on its way out.
             guard !isInert(draft), !isHeld(draft) else { return }
-            let writing = [compose, inlineReply].compactMap { $0 }.contains { open in
-                // An agent's draft nobody has touched is not somebody writing.
-                if open.fromAgent, let id = open.draftId, let row = rows.first(where: { $0.id == id }),
-                    row.body == open.body, open.attachments.isEmpty
-                {
-                    return false
-                }
-                return DraftSaver.hasContent(open) || !open.attachments.isEmpty
-            }
+            // Mail being written, OR AN EVENT (verify7 D5): a pane with
+            // something in it, parked or frozen, is the user's writing too.
+            // Coming forward over it would hand a typed-ahead ↵ or ⌘↵ to a
+            // pane that adds an event and can invite its guests.
+            let writing = mailBeingWritten(agentRows: rows) || eventPaneHeldByUser
             guard !writing else {
                 pushToast("Your agent left a draft. It is in your drafts when you are done here.")
                 return
             }
             openDraft(draft)
+            // NOTHING COMES FORWARD FOR A DRAFT THE COMPOSER DID NOT TAKE.
+            // `openDraft` can decline (the composer refused, the parent gone)
+            // and a forward opens only after a fetch.
+            lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+            var holds = agentDraftOnScreen(draft)
+            if !holds, draft.forward_of_message_id != nil {
+                for _ in 0..<12 where !holds {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard e == epoch else { return }
+                    holds = agentDraftOnScreen(draft)
+                    lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+                }
+            }
+            // Asked again after any wait: an event may have been started.
+            guard
+                EventPaneTravel.agentDraftMayComeForward(writing: eventPaneHeldByUser, composerHoldsIt: holds)
+            else { return }
             // Marked on whichever slot the draft landed in. A reply restores
             // into the inline composer a moment later, so the mark is set
             // again once that fetch has had time to fill it.
@@ -4704,6 +4728,36 @@ final class AppStore {
             lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
             MainWindow.find()?.makeFirstResponder(nil)
         #endif
+    }
+
+    /// A composer or an inline reply holds something somebody typed. The one
+    /// that does not count is an agent's draft still exactly as the agent
+    /// left it (known only with the drafts list in hand: `agentRows`), which
+    /// the next request may replace. Shared by the agent door's `open_draft`
+    /// and the assistant's event proposal (`proposeEvent`): neither ever
+    /// closes mail that is being written.
+    func mailBeingWritten(agentRows rows: [DraftView]? = nil) -> Bool {
+        [compose, inlineReply].compactMap { $0 }.contains { open in
+            // An agent's draft nobody has touched is not somebody writing.
+            if open.fromAgent, let id = open.draftId, let row = rows?.first(where: { $0.id == id }),
+                row.body == open.body, open.attachments.isEmpty
+            {
+                return false
+            }
+            return DraftSaver.hasContent(open) || !open.attachments.isEmpty
+        }
+    }
+
+    /// The composer (or, for a reply, the reader its inline composer fills
+    /// into) really holds this draft.
+    private func agentDraftOnScreen(_ draft: DraftView) -> Bool {
+        if draft.forward_of_message_id != nil {
+            return compose?.forwardOfMessageId == draft.forward_of_message_id && compose?.page != .drafts
+        }
+        if draft.reply_to_message_id != nil {
+            return threadId != nil && threadId == draft.thread_id
+        }
+        return compose?.draftId == draft.id
     }
 
     /// Set `keyboardSendLocked` on the composer holding this draft: the pane,

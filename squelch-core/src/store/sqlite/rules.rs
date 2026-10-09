@@ -238,7 +238,7 @@ impl SqliteStore {
         let row = conn
             .query_row(
                 "SELECT m.from_addr, m.list_unsubscribe, m.list_unsub_one_click, m.body_html,
-                        m.auth_pass, m.is_spam
+                        m.auth_pass, m.is_spam, m.to_addrs
                  FROM messages m
                  WHERE m.account_id = ?1 AND m.id = ?2",
                 params![account_id, message_id],
@@ -250,12 +250,13 @@ impl SqliteStore {
                         r.get::<_, Option<String>>(3)?,
                         r.get::<_, Option<i64>>(4)?,
                         r.get::<_, i64>(5)?,
+                        r.get::<_, Option<String>>(6)?,
                     ))
                 },
             )
             .optional()?;
         Ok(row.map(
-            |(from_addr, list_unsubscribe, one_click, body_html, auth_pass, is_spam)| {
+            |(from_addr, list_unsubscribe, one_click, body_html, auth_pass, is_spam, to_addrs)| {
                 MessageUnsub {
                     from_addr,
                     list_unsubscribe,
@@ -263,6 +264,7 @@ impl SqliteStore {
                     body_html,
                     auth_pass: auth_pass.map(|v| v != 0),
                     is_spam: is_spam != 0,
+                    to_addrs,
                 }
             },
         ))

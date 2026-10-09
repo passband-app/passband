@@ -23,6 +23,9 @@ extension ReleaseVignette {
         case .unsubscribe: UnsubscribeScene.self
         case .clearStack: ClearStackScene.self
         case .smartBlock: SmartBlockScene.self
+        case .loginCode: LoginCodeScene.self
+        case .agentWrite: AgentWriteScene.self
+        case .smartUnsubscribe: SmartUnsubscribeScene.self
         case .agentSession: nil
         }
     }
@@ -842,5 +845,587 @@ enum SmartBlockScene: VignetteDrawing {
                 &layer, CGRect(x: rect.minX + 5, y: rect.midY - 1.1, width: rect.width - 10, height: 2.2),
                 actor ? (pressed > 0.5 ? Color.white : VignettePalette.phosphorHot) : VignettePalette.dim)
         }
+    }
+}
+
+// MARK: - parts the 0.0.14 scenes share
+
+extension VignetteKit {
+    /// A browser window: three dots, an address field and a rule under them.
+    /// Somebody else's page in somebody else's app, which is what two of
+    /// these scenes need the eye to know at a glance: this is not mail.
+    static func browser(_ ctx: inout GraphicsContext, _ rect: CGRect) {
+        let shape = Path(roundedRect: rect, cornerRadius: 7, style: .continuous)
+        ctx.fill(shape, with: .color(VignettePalette.card.opacity(0.7)))
+        ctx.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        for index in 0..<3 {
+            ctx.fill(
+                Path(ellipseIn: CGRect(x: rect.minX + 7 + CGFloat(index) * 5.5, y: rect.minY + 5, width: 3, height: 3)),
+                with: .color(Color.white.opacity(0.16)))
+        }
+        let field = CGRect(x: rect.minX + 30, y: rect.minY + 3, width: rect.width - 40, height: 7)
+        ctx.fill(Path(roundedRect: field, cornerRadius: 3.5), with: .color(VignettePalette.faint))
+        bar(&ctx, CGRect(x: field.minX + 5, y: field.midY - 1, width: 30, height: 2), VignettePalette.dim.opacity(0.7))
+        ctx.fill(
+            Path(CGRect(x: rect.minX, y: rect.minY + 13, width: rect.width, height: 0.5)),
+            with: .color(VignettePalette.edge))
+    }
+
+    /// The agent's mark: two four-point glints, after the `sparkles` the
+    /// composer sets beside "Your agent drafted this". Nobody's logo.
+    static func sparkles(_ ctx: inout GraphicsContext, center: CGPoint, size: CGFloat, color: Color) {
+        func glint(_ c: CGPoint, _ r: CGFloat) -> Path {
+            var path = Path()
+            let k = r * 0.16
+            path.move(to: CGPoint(x: c.x, y: c.y - r))
+            path.addQuadCurve(to: CGPoint(x: c.x + r, y: c.y), control: CGPoint(x: c.x + k, y: c.y - k))
+            path.addQuadCurve(to: CGPoint(x: c.x, y: c.y + r), control: CGPoint(x: c.x + k, y: c.y + k))
+            path.addQuadCurve(to: CGPoint(x: c.x - r, y: c.y), control: CGPoint(x: c.x - k, y: c.y + k))
+            path.addQuadCurve(to: CGPoint(x: c.x, y: c.y - r), control: CGPoint(x: c.x - k, y: c.y - k))
+            return path
+        }
+        ctx.fill(glint(CGPoint(x: center.x - size * 0.22, y: center.y + size * 0.2), size * 0.8), with: .color(color))
+        ctx.fill(glint(CGPoint(x: center.x + size * 0.62, y: center.y - size * 0.6), size * 0.36), with: .color(color))
+    }
+}
+
+// MARK: - login code
+
+/// LOGIN CODES COME TO YOU: you are in a browser, on a page that wants a code,
+/// and Passband is nowhere on screen. The panel drops in at the top of the
+/// screen, over the page, carrying the sender's mark and the code. Copy is the
+/// one thing it asks for: pressed, it says so with a check, the code goes down
+/// into the field that was waiting for it, and the panel leaves. The page
+/// takes the code (its button's check) and that is the whole errand.
+///
+/// The code is six cells in two threes, never numerals. The panel's own cells
+/// stay put while their copies travel: copying leaves the original where it
+/// was.
+///
+/// No key: the gesture is a button on a panel, so the actor is that button.
+///
+/// The seam: the page that took the code lets go of it (the cells empty, the
+/// button's check goes out), which leaves the empty form the loop began on.
+enum LoginCodeScene: VignetteDrawing {
+    /// Copied: the check on the button, the code in the panel and in the
+    /// field under it, the panel not yet gone.
+    static let posterTime: Double = 2.52
+
+    private static let service = 1
+    private static let window = CGRect(x: 26, y: 18, width: 188, height: 92)
+    private static let panel = CGRect(x: 80, y: 10, width: 80, height: 51)
+    private static let glyph = CGSize(width: 7, height: 10)
+    private static let codeMid: CGFloat = 32.5
+    private static let fieldTop: CGFloat = 66
+    private static let cell = CGSize(width: 12, height: 15)
+
+    // The beats.
+    private static let panelIn: Double = 0.45
+    private static let press: Double = 1.6
+    private static let flyFrom: Double = 1.82
+    private static let flyStagger: Double = 0.03
+    private static let flySpan: Double = 0.4
+    private static let panelOut: Double = 2.64
+    private static let accepted: Double = 2.92
+    private static let reset: Double = 4.0
+
+    /// Centre of the panel's `index`th code cell, in two threes.
+    private static func panelX(_ index: Int) -> CGFloat {
+        panel.midX - 30.5 + CGFloat(index) * 10 + (index >= 3 ? 4 : 0) + glyph.width / 2
+    }
+
+    /// Centre of the form's `index`th field cell, spaced the same way.
+    private static func fieldX(_ index: Int) -> CGFloat {
+        window.midX - 45.5 + CGFloat(index) * 15 + (index >= 3 ? 4 : 0) + cell.width / 2
+    }
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let cleared = ease(t, reset, reset + 0.4)
+        let taken = ease(t, accepted, accepted + 0.2) * (1 - cleared)
+        let landed = (0..<6).map { ease(t, flyFrom + flyStagger * Double($0), flyFrom + flyStagger * Double($0) + flySpan) }
+
+        drawForm(&ctx, landed: landed, taken: taken, check: ease(t, accepted + 0.04, accepted + 0.22), cleared: cleared)
+        drawPanel(&ctx, t: t)
+
+        // The copies on their way down, over everything.
+        for (index, p) in landed.enumerated() where p > 0 && p < 1 {
+            var hot = ctx
+            hot.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 3))
+            drawGlyph(
+                &hot,
+                center: CGPoint(
+                    x: VignetteClock.mix(panelX(index), fieldX(index), p),
+                    y: VignetteClock.mix(codeMid, fieldTop + cell.height / 2, p)),
+                color: VignettePalette.phosphorHot)
+        }
+    }
+
+    private static func drawGlyph(_ ctx: inout GraphicsContext, center: CGPoint, color: Color) {
+        ctx.fill(
+            Path(
+                roundedRect: CGRect(
+                    x: center.x - glyph.width / 2, y: center.y - glyph.height / 2, width: glyph.width,
+                    height: glyph.height),
+                cornerRadius: 2.2, style: .continuous),
+            with: .color(color))
+    }
+
+    /// The other app: a browser on a sign-in page. The site's mark, a line
+    /// asking for the code, the six-cell field with the first cell focused,
+    /// and the button under it.
+    private static func drawForm(
+        _ ctx: inout GraphicsContext, landed: [Double], taken: Double, check: Double, cleared: Double
+    ) {
+        VignetteKit.browser(&ctx, window)
+        VignetteKit.avatar(&ctx, center: CGPoint(x: window.midX, y: 40), diameter: 10, tint: service)
+        VignetteKit.bar(&ctx, CGRect(x: window.midX - 20, y: 49, width: 40, height: 3), VignettePalette.ink.opacity(0.8))
+        VignetteKit.bar(&ctx, CGRect(x: window.midX - 30, y: 55.5, width: 60, height: 2.4), VignettePalette.dim)
+
+        for index in 0..<6 {
+            let filled = landed[index] >= 1 ? 1 - cleared : 0
+            let rect = CGRect(
+                x: fieldX(index) - cell.width / 2, y: fieldTop, width: cell.width, height: cell.height)
+            let shape = Path(roundedRect: rect, cornerRadius: 3.5, style: .continuous)
+            ctx.fill(shape, with: .color(VignettePalette.faint))
+            // The cell the cursor is in, until the code fills it.
+            let focus = index == 0 ? 0.42 : 0.16
+            ctx.stroke(shape, with: .color(Color.white.opacity(focus * (1 - filled))), lineWidth: 0.6)
+            if filled > 0 {
+                ctx.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.7 * filled)), lineWidth: 0.7)
+                drawGlyph(
+                    &ctx, center: CGPoint(x: rect.midX, y: rect.midY), color: VignettePalette.phosphor.opacity(filled))
+            }
+        }
+
+        // The page's own button: it takes the code.
+        let button = CGRect(x: window.midX - 45.5, y: 88, width: 91, height: 12)
+        let cap = Path(roundedRect: button, cornerRadius: 6)
+        ctx.fill(cap, with: .color(VignettePalette.faint))
+        ctx.fill(cap, with: .color(VignettePalette.phosphor.opacity(0.16 * taken)))
+        ctx.stroke(cap, with: .color(VignettePalette.edge.opacity(1 - taken)), lineWidth: 0.5)
+        ctx.stroke(cap, with: .color(VignettePalette.phosphor.opacity(0.6 * taken)), lineWidth: 0.6)
+        VignetteKit.bar(
+            &ctx, CGRect(x: button.midX - 13, y: button.midY - 1.2, width: 26, height: 2.4),
+            VignettePalette.dim.opacity(1 - taken))
+        VignetteKit.check(
+            &ctx, center: CGPoint(x: button.midX, y: button.midY), size: 2.8, progress: check, opacity: taken)
+    }
+
+    /// The panel, after LoginCodePanel's card: who sent it, the code, and
+    /// Copy beside Dismiss. Copy is the actor, lit at rest and pressed.
+    private static func drawPanel(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let arrive = ease(t, panelIn, panelIn + 0.32)
+        let leave = ease(t, panelOut, panelOut + 0.3)
+        guard arrive > 0, leave < 1 else { return }
+        let pressed = VignetteClock.press(t, at: press)
+        let copied = ease(t, press + 0.1, press + 0.24)
+
+        var layer = ctx
+        layer.opacity *= arrive * (1 - leave)
+        layer.translateBy(x: 0, y: -9 * CGFloat(1 - arrive) - 7 * CGFloat(leave))
+        // It floats: an even shadow all round sets it above the window.
+        let shape = Path(roundedRect: panel, cornerRadius: 9, style: .continuous)
+        var lifted = layer
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.6), radius: 7))
+        lifted.fill(shape, with: .color(VignettePalette.cap))
+        layer.fill(shape, with: .color(VignettePalette.phosphor.opacity(0.07)))
+        layer.stroke(shape, with: .color(Color.white.opacity(0.16)), lineWidth: 0.5)
+
+        VignetteKit.avatar(&layer, center: CGPoint(x: panel.minX + 12, y: panel.minY + 10.5), diameter: 8, tint: service)
+        VignetteKit.bar(
+            &layer, CGRect(x: panel.minX + 19.5, y: panel.minY + 7, width: 22, height: 2.6),
+            VignettePalette.ink.opacity(0.85))
+        VignetteKit.bar(&layer, CGRect(x: panel.minX + 19.5, y: panel.minY + 11.8, width: 30, height: 2), VignettePalette.dim)
+
+        for index in 0..<6 {
+            drawGlyph(&layer, center: CGPoint(x: panelX(index), y: codeMid), color: VignettePalette.phosphor)
+        }
+
+        let copy = CGRect(x: panel.minX + 7, y: panel.minY + 33 + CGFloat(pressed), width: 45, height: 11)
+        let cap = Path(roundedRect: copy, cornerRadius: 5.5)
+        var button = layer
+        if pressed > 0 {
+            button.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8 * pressed), radius: 5))
+        }
+        button.fill(cap, with: .color(VignettePalette.phosphor.opacity(0.18 + 0.77 * pressed)))
+        layer.stroke(cap, with: .color(VignettePalette.phosphor.opacity(0.9)), lineWidth: 0.7)
+        VignetteKit.bar(
+            &layer, CGRect(x: copy.midX - 8, y: copy.midY - 1.1, width: 16, height: 2.2),
+            (pressed > 0.5 ? Color.white : VignettePalette.phosphorHot).opacity(1 - copied))
+        VignetteKit.check(&layer, center: CGPoint(x: copy.midX, y: copy.midY), size: 2.4, progress: copied)
+
+        let dismiss = CGRect(x: panel.minX + 55, y: panel.minY + 33, width: 18, height: 11)
+        let other = Path(roundedRect: dismiss, cornerRadius: 5.5)
+        layer.fill(other, with: .color(VignettePalette.faint))
+        layer.stroke(other, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        VignetteKit.bar(
+            &layer, CGRect(x: dismiss.minX + 5, y: dismiss.midY - 1.1, width: 8, height: 2.2), VignettePalette.dim)
+    }
+}
+
+// MARK: - agent write
+
+/// AGENT MCP CAN WRITE: the agent on the left, outside Passband; your
+/// composer on the right, empty. The agent wakes, its mark crosses the wire
+/// into the composer (the notice that says an agent wrote this), and the
+/// draft writes itself on in the actor colour: who it goes to, the subject,
+/// the body, line by line. Then the agent is done and the light goes off it:
+/// the words cool to ordinary ink, the notice stays, and nothing has been
+/// sent. `⌘↵` is yours. Pressed, the draft takes its check and goes, and an
+/// empty composer rises where it was.
+///
+/// The agent's light and the key are never on together, which is the lesson:
+/// the agent writes, the human sends.
+///
+/// The seam: the composer that rises is the empty one the loop began on.
+enum AgentWriteScene: VignetteDrawing {
+    /// `⌘↵` down, the check drawn on a finished draft that still carries
+    /// the agent's notice.
+    static let posterTime: Double = 3.24
+
+    private static let agent = CGPoint(x: 30, y: 48)
+    private static let card = CGRect(x: 66, y: 10, width: 164, height: 76)
+    private static let notice = CGRect(x: 76, y: 43, width: 144, height: 10)
+    private static let key = CGPoint(x: 204, y: 91)
+    private static let body: [CGFloat] = [138, 124, 142, 72]
+
+    // The beats.
+    private static let wake: Double = 0.35
+    private static let toFrom: Double = 0.9
+    private static let subjectFrom: Double = 1.14
+    private static let bodyFrom: Double = 1.5
+    private static let bodyStep: Double = 0.24
+    private static let rest: Double = 2.55
+    private static let press: Double = 3.1
+    private static let leaveFrom: Double = 3.36
+    private static let nextFrom: Double = 3.46
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let working = ease(t, wake, wake + 0.25) - ease(t, rest, rest + 0.35)
+        drawAgent(&ctx, on: working)
+
+        let leaving = ease(t, leaveFrom, leaveFrom + 0.3)
+        if leaving < 1 {
+            drawComposer(&ctx, t: t, written: true, dy: -8 * CGFloat(leaving), opacity: 1 - leaving)
+        }
+        if t >= nextFrom {
+            let back = ease(t, nextFrom, nextFrom + 0.4)
+            drawComposer(&ctx, t: t, written: false, dy: 10 * CGFloat(1 - back), opacity: back)
+        }
+
+        // The mark crossing over, from the agent into the notice.
+        let cross = ease(t, wake + 0.12, wake + 0.5)
+        if cross > 0, cross < 1 {
+            var hot = ctx
+            hot.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 3))
+            VignetteKit.sparkles(
+                &hot, center: CGPoint(x: VignetteClock.mix(agent.x, notice.minX + 7, cross), y: agent.y),
+                size: VignetteClock.mix(6, 3.2, cross), color: VignettePalette.phosphorHot)
+        }
+
+        VignetteKit.keycap(&ctx, "⌘↵", origin: key, width: 26, pressed: VignetteClock.press(t, at: press))
+    }
+
+    /// The agent: its mark in a round chip, a name under it, and the wire to
+    /// your mailbox. Lit only while it is writing.
+    private static func drawAgent(_ ctx: inout GraphicsContext, on: Double) {
+        var wire = Path()
+        wire.move(to: CGPoint(x: agent.x + 15, y: agent.y))
+        wire.addLine(to: CGPoint(x: card.minX - 2, y: agent.y))
+        ctx.stroke(
+            wire, with: .color(Color.white.opacity(0.16 * (1 - on))),
+            style: StrokeStyle(lineWidth: 0.8, lineCap: .round, dash: [2, 3]))
+        if on > 0 {
+            var glow = ctx
+            glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.85 * on), radius: 3))
+            glow.stroke(
+                wire, with: .color(VignettePalette.phosphor.opacity(0.95 * on)),
+                style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+        }
+
+        let chip = Path(ellipseIn: CGRect(x: agent.x - 12, y: agent.y - 12, width: 24, height: 24))
+        var layer = ctx
+        if on > 0 { layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.6 * on), radius: 4)) }
+        layer.fill(chip, with: .color(VignettePalette.cap))
+        layer.fill(chip, with: .color(VignettePalette.phosphor.opacity(0.16 * on)))
+        ctx.stroke(chip, with: .color(Color.white.opacity(0.14 * (1 - on))), lineWidth: 0.5)
+        ctx.stroke(chip, with: .color(VignettePalette.phosphor.opacity(0.9 * on)), lineWidth: 0.7)
+        VignetteKit.sparkles(
+            &ctx, center: agent, size: 6, color: VignettePalette.phosphor.opacity(VignetteClock.mix(0.6, 1, on)))
+        VignetteKit.bar(&ctx, CGRect(x: agent.x - 10, y: agent.y + 17, width: 20, height: 2.4), VignettePalette.dim)
+    }
+
+    /// One written thing: phosphor while the agent is at it, ink once the
+    /// agent has stopped, with a hot tip where the writing is.
+    private static func write(_ ctx: inout GraphicsContext, _ rect: CGRect, progress: Double, cool: Double, ink: Double) {
+        guard progress > 0 else { return }
+        let drawn = CGRect(x: rect.minX, y: rect.minY, width: max(rect.height, rect.width * CGFloat(progress)), height: rect.height)
+        VignetteKit.bar(&ctx, drawn, VignettePalette.phosphor.opacity(1 - cool))
+        VignetteKit.bar(&ctx, drawn, VignettePalette.ink.opacity(ink * cool))
+        if progress < 1 {
+            var hot = ctx
+            hot.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.9), radius: 2.5))
+            VignetteKit.bar(
+                &hot, CGRect(x: drawn.maxX - rect.height, y: rect.minY, width: rect.height, height: rect.height),
+                VignettePalette.phosphorHot)
+        }
+    }
+
+    /// The composer: To, subject, body. `written` is the one the agent
+    /// fills; the other is the empty one that takes its place.
+    private static func drawComposer(_ ctx: inout GraphicsContext, t: Double, written: Bool, dy: CGFloat, opacity: Double) {
+        guard opacity > 0.001 else { return }
+        let ease = VignetteClock.ease
+        var layer = ctx
+        layer.opacity *= opacity
+        layer.translateBy(x: 0, y: dy)
+        let shape = Path(roundedRect: card, cornerRadius: 7, style: .continuous)
+        layer.fill(shape, with: .color(VignettePalette.card))
+        layer.fill(shape, with: .color(VignettePalette.faint))
+        layer.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+
+        // The fields' own labels and the rules between them: an empty
+        // composer is these and nothing else.
+        let x = card.minX + 10
+        VignetteKit.bar(&layer, CGRect(x: x, y: 18.9, width: 7, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: x, y: 31.9, width: 12, height: 2.2), VignettePalette.dim)
+        for y in [27, 39] as [CGFloat] {
+            layer.fill(Path(CGRect(x: x, y: y, width: card.width - 20, height: 0.5)), with: .color(VignettePalette.edge))
+        }
+        guard written else { return }
+        let cool = ease(t, rest, rest + 0.35)
+
+        // The notice: the mark that travels with the words, and stays.
+        let marked = ease(t, wake + 0.42, wake + 0.62)
+        if marked > 0 {
+            var strip = layer
+            strip.opacity *= marked
+            let pill = Path(roundedRect: notice, cornerRadius: 4, style: .continuous)
+            strip.fill(pill, with: .color(VignettePalette.phosphor.opacity(0.14)))
+            strip.stroke(pill, with: .color(VignettePalette.phosphor.opacity(0.45)), lineWidth: 0.5)
+            VignetteKit.sparkles(
+                &strip, center: CGPoint(x: notice.minX + 7, y: notice.midY), size: 3.2, color: VignettePalette.phosphorHot)
+            VignetteKit.bar(
+                &strip, CGRect(x: notice.minX + 14, y: notice.midY - 1.1, width: 84, height: 2.2),
+                VignettePalette.phosphorHot.opacity(0.75))
+        }
+
+        // Who it goes to: a person's chip.
+        let to = ease(t, toFrom, toFrom + 0.2)
+        if to > 0 {
+            var chip = layer
+            chip.opacity *= to
+            let rect = CGRect(x: x + 12, y: 15.5, width: 36, height: 9)
+            let pill = Path(roundedRect: rect, cornerRadius: 4.5)
+            chip.fill(pill, with: .color(VignettePalette.faint))
+            chip.stroke(pill, with: .color(VignettePalette.edge.opacity(cool)), lineWidth: 0.5)
+            chip.stroke(pill, with: .color(VignettePalette.phosphor.opacity(0.8 * (1 - cool))), lineWidth: 0.6)
+            VignetteKit.avatar(&chip, center: CGPoint(x: rect.minX + 5.5, y: rect.midY), diameter: 5, tint: 2)
+            write(&chip, CGRect(x: rect.minX + 10.5, y: rect.midY - 1.1, width: 20, height: 2.2), progress: to, cool: cool, ink: 0.8)
+        }
+        write(
+            &layer, CGRect(x: x + 17, y: 31.4, width: 76, height: 3.2),
+            progress: VignetteClock.ramp(t, subjectFrom, subjectFrom + 0.28), cool: cool, ink: 0.88)
+        for (index, width) in body.enumerated() {
+            let from = bodyFrom + bodyStep * Double(index)
+            write(
+                &layer, CGRect(x: x, y: 58 + CGFloat(index) * 6.5, width: width, height: 2.6),
+                progress: VignetteClock.ramp(t, from, from + 0.22), cool: cool, ink: 0.6)
+        }
+
+        // Sent: the check, as the page takes one in flow mode.
+        VignetteKit.check(
+            &layer, center: CGPoint(x: card.maxX - 14, y: 20), size: 4, progress: ease(t, press + 0.03, press + 0.18))
+    }
+}
+
+// MARK: - smart unsubscribe
+
+/// SMART UNSUBSCRIBE: `u` on a newsletter whose sender does not make it one
+/// click. Their page opens beside the email: a preference page, every list
+/// ticked, a button at the bottom. This used to be handed back to you. Now a
+/// pointer in the actor colour, nobody's hand on it, works down the page:
+/// one list unticked, the next, the last, then the page's own button. The
+/// page answers with its confirmation, the sender's mark on the email is
+/// struck through, and both go. The next newsletter rises where the last one
+/// was.
+///
+/// The key is pressed once, in the first half second, and never again: every
+/// thing after it is done for you. The 0.0.12 scene is a deck and a tray;
+/// this one is the web page, which is the part that is new.
+///
+/// The seam: every newsletter is drawn alike, so the one that rises is the
+/// one the loop began on, and the page has gone the way it came.
+enum SmartUnsubscribeScene: VignetteDrawing {
+    /// The pointer down on the second list, the first already unticked, the
+    /// third still waiting: a page being worked, and by what.
+    static let posterTime: Double = 1.86
+
+    private static let sender = 1
+    private static let mail = CGRect(x: 10, y: 30, width: 78, height: 30)
+    private static let key = CGPoint(x: 40, y: 72)
+    private static let page = CGRect(x: 102, y: 10, width: 128, height: 100)
+    private static let rows: [(mid: CGFloat, width: CGFloat)] = [(50, 60), (62, 46), (74, 68)]
+    private static let button = CGRect(x: 112, y: 86, width: 50, height: 12)
+
+    // The beats.
+    private static let press: Double = 0.3
+    private static let pageIn: Double = 0.42
+    private static let clicks: [Double] = [1.32, 1.82, 2.32]
+    private static let submit: Double = 2.95
+    private static let done: Double = 3.12
+    private static let leave: Double = 4.05
+
+    /// Where the pointer's tip rests on a tick box, and on the button.
+    private static func target(_ index: Int) -> CGPoint {
+        index < rows.count
+            ? CGPoint(x: page.minX + 15.5, y: rows[index].mid + 1.5)
+            : CGPoint(x: button.midX + 8, y: button.midY + 1.5)
+    }
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let finished = ease(t, done, done + 0.25)
+        let going = ease(t, leave, leave + 0.3)
+
+        // The newsletter, struck when the page says it is done; then the
+        // next one, rising as it lifts away.
+        drawMail(
+            &ctx, dy: -12 * CGFloat(going), opacity: 1 - going, struck: ease(t, done + 0.14, done + 0.34))
+        if t >= leave + 0.08 {
+            let back = ease(t, leave + 0.08, leave + 0.46)
+            drawMail(&ctx, dy: 10 * CGFloat(1 - back), opacity: back, struck: 0)
+        }
+        VignetteKit.keycap(&ctx, "u", origin: key, width: 18, pressed: VignetteClock.press(t, at: press))
+
+        let arrive = ease(t, pageIn, pageIn + 0.3)
+        guard arrive > 0, going < 1 else { return }
+        var layer = ctx
+        layer.opacity *= arrive * (1 - going)
+        layer.translateBy(x: -10 * CGFloat(1 - arrive) + 8 * CGFloat(going), y: 0)
+        drawPage(&layer, t: t, finished: finished)
+
+        // The pointer: in with the page, from box to box to button, and out
+        // once there is nothing left to press.
+        var at = CGPoint(x: page.maxX - 34, y: page.maxY - 30)
+        let stops = clicks + [submit]
+        for (index, click) in stops.enumerated() {
+            let move = ease(t, click - (index == stops.count - 1 ? 0.42 : 0.34), click - 0.06)
+            let to = target(index)
+            at = CGPoint(x: VignetteClock.mix(at.x, to.x, move), y: VignetteClock.mix(at.y, to.y, move))
+        }
+        let down = stops.map { VignetteClock.press(t, at: $0) }.max() ?? 0
+        drawPointer(&layer, tip: at, down: down, opacity: ease(t, pageIn + 0.2, pageIn + 0.44) * (1 - finished))
+    }
+
+    /// One newsletter: the sender's mark, a title, a line. Lit, because it
+    /// is the one the key acts on, until its sender is struck.
+    private static func drawMail(_ ctx: inout GraphicsContext, dy: CGFloat, opacity: Double, struck: Double) {
+        guard opacity > 0.001 else { return }
+        var layer = ctx
+        layer.opacity *= opacity
+        layer.translateBy(x: 0, y: dy)
+        let shape = Path(roundedRect: mail, cornerRadius: 6, style: .continuous)
+        layer.fill(shape, with: .color(VignettePalette.card))
+        layer.fill(shape, with: .color(VignettePalette.faint))
+        layer.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        layer.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.85 * (1 - struck))), lineWidth: 0.7)
+        let mark = CGPoint(x: mail.minX + 13, y: mail.midY)
+        VignetteKit.avatar(&layer, center: mark, diameter: 10, tint: sender, opacity: VignetteClock.mix(0.9, 0.4, struck))
+        VignetteKit.bar(
+            &layer, CGRect(x: mail.minX + 24, y: mail.minY + 10, width: 30, height: 3),
+            VignettePalette.ink.opacity(VignetteClock.mix(0.8, 0.4, struck)))
+        VignetteKit.bar(
+            &layer, CGRect(x: mail.minX + 24, y: mail.minY + 17, width: 44, height: 2.5),
+            VignettePalette.dim.opacity(VignetteClock.mix(1, 0.6, struck)))
+        if struck > 0 {
+            var slash = Path()
+            slash.move(to: CGPoint(x: mark.x - 5, y: mark.y + 5))
+            slash.addLine(to: CGPoint(x: mark.x + 5, y: mark.y - 5))
+            layer.stroke(
+                slash.trimmedPath(from: 0, to: struck), with: .color(VignettePalette.phosphorHot),
+                style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
+        }
+    }
+
+    /// The sender's preference page: a heading, a line, three lists each
+    /// with its tick box, and the button that saves it. Then the page it
+    /// turns into: a ring and a check.
+    private static func drawPage(_ ctx: inout GraphicsContext, t: Double, finished: Double) {
+        let ease = VignetteClock.ease
+        VignetteKit.browser(&ctx, page)
+        var form = ctx
+        form.opacity *= 1 - finished
+        let x = page.minX + 10
+        VignetteKit.bar(&form, CGRect(x: x, y: 30, width: 46, height: 3.2), VignettePalette.ink.opacity(0.85))
+        VignetteKit.bar(&form, CGRect(x: x, y: 36.5, width: 78, height: 2.4), VignettePalette.dim)
+
+        for (index, row) in rows.enumerated() {
+            let ticked = 1 - ease(t, clicks[index] + 0.05, clicks[index] + 0.17)
+            let box = CGRect(x: x, y: row.mid - 4, width: 8, height: 8)
+            let shape = Path(roundedRect: box, cornerRadius: 2.2, style: .continuous)
+            form.fill(shape, with: .color(VignettePalette.ink.opacity(0.82 * ticked)))
+            form.stroke(shape, with: .color(Color.white.opacity(0.3 * (1 - ticked))), lineWidth: 0.6)
+            if ticked > 0 {
+                var tick = Path()
+                tick.move(to: CGPoint(x: box.midX - 2.3, y: box.midY + 0.1))
+                tick.addLine(to: CGPoint(x: box.midX - 0.7, y: box.midY + 1.7))
+                tick.addLine(to: CGPoint(x: box.midX + 2.4, y: box.midY - 1.8))
+                form.stroke(
+                    tick.trimmedPath(from: 0, to: ticked), with: .color(VignettePalette.groundBottom.opacity(ticked)),
+                    style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
+            }
+            VignetteKit.bar(
+                &form, CGRect(x: x + 14, y: row.mid - 1.4, width: row.width, height: 2.8),
+                VignettePalette.ink.opacity(VignetteClock.mix(0.28, 0.75, ticked)))
+        }
+
+        // The page's button, pressed by the pointer and not by you.
+        let pressed = VignetteClock.press(t, at: submit)
+        let rect = button.offsetBy(dx: 0, dy: CGFloat(pressed))
+        let cap = Path(roundedRect: rect, cornerRadius: 6)
+        var glow = form
+        if pressed > 0 { glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8 * pressed), radius: 5)) }
+        glow.fill(cap, with: .color(Color.white.opacity(0.1)))
+        glow.fill(cap, with: .color(VignettePalette.phosphor.opacity(0.95 * pressed)))
+        form.stroke(cap, with: .color(Color.white.opacity(0.2 * (1 - pressed))), lineWidth: 0.5)
+        VignetteKit.bar(
+            &form, CGRect(x: rect.minX + 9, y: rect.midY - 1.2, width: rect.width - 18, height: 2.4),
+            pressed > 0.5 ? Color.white : VignettePalette.ink.opacity(0.75))
+
+        // Done: what the sender's page says back.
+        let center = CGPoint(x: page.midX, y: page.minY + 13 + (page.height - 13) / 2 - 4)
+        var hot = ctx
+        hot.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.7 * finished), radius: 4))
+        VignetteKit.ring(
+            &hot, center: center, radius: 11, progress: ease(t, done + 0.14, done + 0.4),
+            color: VignettePalette.phosphorHot, lineWidth: 1.4)
+        VignetteKit.check(&ctx, center: center, size: 5, progress: ease(t, done + 0.32, done + 0.48))
+        VignetteKit.bar(
+            &ctx, CGRect(x: center.x - 19, y: center.y + 18, width: 38, height: 2.6),
+            VignettePalette.ink.opacity(0.7 * ease(t, done + 0.3, done + 0.5)))
+    }
+
+    /// The pointer: an arrow in the actor colour with an even light edge.
+    /// Down, it shrinks a touch toward its tip and glows.
+    private static func drawPointer(_ ctx: inout GraphicsContext, tip: CGPoint, down: Double, opacity: Double) {
+        guard opacity > 0.001 else { return }
+        let s = 0.86 * VignetteClock.mix(1, 0.93, down)
+        let shape: [(CGFloat, CGFloat)] = [(0, 0), (0, 10.4), (2.7, 8), (4.6, 12), (6.5, 11.1), (4.6, 7.2), (8, 7.2)]
+        var arrow = Path()
+        for (index, p) in shape.enumerated() {
+            let point = CGPoint(x: tip.x + p.0 * s, y: tip.y + p.1 * s)
+            if index == 0 { arrow.move(to: point) } else { arrow.addLine(to: point) }
+        }
+        arrow.closeSubpath()
+        var layer = ctx
+        layer.opacity *= opacity
+        layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.45 + 0.5 * down), radius: 2.5 + 2.5 * down))
+        layer.fill(arrow, with: .color(down > 0.5 ? VignettePalette.phosphorHot : VignettePalette.phosphor))
+        layer.stroke(
+            arrow, with: .color(Color.white.opacity(0.9)), style: StrokeStyle(lineWidth: 0.6, lineJoin: .round))
     }
 }

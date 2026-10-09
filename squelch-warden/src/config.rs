@@ -64,6 +64,12 @@ pub const DEFAULT_OAUTH_SECRET_NAME: &str = "google-oauth-client";
 /// [`Config::relay_url`] is set. See `deploy/hosted/apns-relay.example.yaml`.
 pub const DEFAULT_RELAY_SECRET_NAME: &str = "apns-relay";
 
+/// Secret holding the fleet's Browserbase API key (key `api-key`): what the
+/// automatic unsubscribe's browser rung rents its remote browser with. Always
+/// referenced, optionally, from every tenant pod; see
+/// [`Config::browserbase_secret_name`] for why the name can change.
+pub const DEFAULT_BROWSERBASE_SECRET_NAME: &str = "browserbase";
+
 /// k3s's built-in dynamic provisioner.
 pub const DEFAULT_STORAGE_CLASS: &str = "local-path";
 
@@ -408,6 +414,22 @@ pub struct Config {
     /// [`Config::namespace`].
     /// See [`DEFAULT_RELAY_SECRET_NAME`].
     pub relay_secret_name: String,
+    /// Secret holding the fleet's Browserbase API key (key `api-key`), in
+    /// [`Config::namespace`], handed to EVERY tenant as an optional
+    /// `SQUELCH_BROWSERBASE_API_KEY` reference. See
+    /// [`DEFAULT_BROWSERBASE_SECRET_NAME`].
+    ///
+    /// NOT A SWITCH. The reference is always rendered; the name is
+    /// configurable for one reason, rotation: a Secret edited in place reaches
+    /// no running pod, so a new key is a Secret under a new name and this
+    /// pointed at it, which changes the rendered pod and lets the roller
+    /// deliver it. A cluster with no such Secret has daemons with no browser
+    /// rung, and nothing else wrong with them.
+    ///
+    /// ONE KEY, EVERY TENANT, the same custody as the OAuth client: a tenant
+    /// cannot read its own pod's environment, and the key rents browsers and
+    /// nothing else.
+    pub browserbase_secret_name: String,
     /// The APNs topic tenant daemons push under, handed on as
     /// `SQUELCH_RELAY_TOPIC`. Refused at boot without [`Config::relay_url`].
     ///
@@ -459,6 +481,7 @@ impl std::fmt::Debug for Config {
             // Secret's NAME, and the kubelet resolves the value into the pod.
             .field("relay_url", &self.relay_url)
             .field("relay_secret_name", &self.relay_secret_name)
+            .field("browserbase_secret_name", &self.browserbase_secret_name)
             .field("relay_topic", &self.relay_topic)
             .finish()
     }
@@ -888,6 +911,11 @@ impl Config {
                 DEFAULT_RELAY_SECRET_NAME,
             )?,
             relay_topic,
+            browserbase_secret_name: name_var(
+                get,
+                "SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME",
+                DEFAULT_BROWSERBASE_SECRET_NAME,
+            )?,
         })
     }
 
@@ -1734,6 +1762,13 @@ mod tests {
         assert_eq!(c.relay_topic.as_deref(), Some("app.passband.client.ios"));
         // Nothing about the relay turns the LLM block on, or the reverse.
         assert!(c.llm_base_url.is_none());
+
+        // The browser key's Secret has a name without being asked, can be
+        // renamed (that is how a key is rotated), and a name is a name.
+        assert_eq!(c.browserbase_secret_name, "browserbase");
+        let c = with("SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME", "browserbase-2").unwrap();
+        assert_eq!(c.browserbase_secret_name, "browserbase-2");
+        assert!(with("SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME", "Not A Name").is_err());
 
         // The URL alone is a complete configuration; the topic is an override.
         let c = with("SQUELCH_WARDEN_RELAY_URL", "https://relay.squelch.sh").unwrap();

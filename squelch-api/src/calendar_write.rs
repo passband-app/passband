@@ -2,7 +2,8 @@
 //! one event, a direct action on the calendar page (docs/CALENDAR.md §8,
 //! "Creating and editing events").
 //!
-//! - `POST   /client/calendar/events` creates, 201 with the served event.
+//! - `POST   /client/calendar/events` creates, 201 with the served event
+//!   (200 when the id it names was already created: see below).
 //! - `PATCH  /client/calendar/events/{calendar_id}/{id}` edits, 200 with it.
 //! - `DELETE /client/calendar/events/{calendar_id}/{id}?notify=` deletes, 204.
 //!
@@ -62,14 +63,60 @@
 //! still stored and the row still written, so a write that may have mailed
 //! guests is never left unaudited.
 //!
-//! WHEN GOOGLE'S ANSWER IS LOST. A refusal from Google (any HTTP error) is a
-//! 502, [`GOOGLE_REFUSED`]: nothing changed. A write that went out and got no
-//! usable answer (a timeout or a lost connection after sending, a 2xx body
-//! that does not read: [`CallError::Uncertain`]) is a 504,
-//! [`GOOGLE_UNCERTAIN`], and kicks a sync: Google may have made the change,
-//! so the client refreshes before offering to try again, and a "save and
-//! tell guests" is not sent twice on a guess. A delete Google answers 404 or
-//! 410 found the event already gone, and removes the local row (204).
+//! WHEN GOOGLE'S ANSWER IS LOST. A refusal from Google (a 4xx: it read the
+//! request and said no) is a 502, [`GOOGLE_REFUSED`], code `google_refused`:
+//! nothing changed. A write that went out and got no usable answer (a timeout
+//! or a lost connection after sending, a 2xx body that does not read, or
+//! Google's OWN 5xx, which does not say the write was not applied:
+//! [`CallError::Uncertain`]) is
+//! a 504, [`GOOGLE_UNCERTAIN`], code `uncertain`, and kicks a sync: Google
+//! may have made the change, so the client refreshes before offering to try
+//! again, and a "save and tell guests" is not sent twice on a guess. So is a
+//! write Google ACCEPTED whose answer could not be read or stored here: it
+//! happened, and only a 504 makes the app hold the pane rather than offer
+//! the draft back for editing.
+//!
+//! EVERY ERROR BODY CARRIES A `code` from a closed list ([`code`]), which the
+//! app keys on: a code that says nothing reached Google lets the pane be
+//! edited again, and anything else (no code, an unknown one) holds it.
+//!
+//! ONE DEADLINE PER WRITE. Each Google call has its own 30 second timeout,
+//! and a write can make three (a token refresh, the guest list's reread, the
+//! write), more than the app waits. So the whole of a write's work runs under
+//! [`WRITE_DEADLINE`], well inside the app's 45 seconds: past it the answer is
+//! the same 504 and the same kick, since the write may have gone out. The
+//! task keeps no Google call running past it.
+//!
+//! A CREATE SENT AGAIN FINDS THE FIRST. The app names the new event's `id`
+//! itself (Google allows a client-chosen id: lowercase `a`-`v` and digits, 5
+//! to 1024 characters, [`write::event_id`]), one per pane, and after an
+//! uncertain answer can only resend the same body. Google "cannot guarantee
+//! that ID collisions will be detected at event creation time", so the daemon
+//! does not rely on its 409: a create naming an id READS it first
+//! ([`CalendarApi::get_event`]). An event already there is answered 200 as it
+//! stands, with no insert and so no second invitation (audited `ok:existing
+//! notified=false`), but ONLY when it is the event this create would make
+//! ([`write::is_same_create`]: title, place, notes, times, all-day and
+//! guests, on the calendar read; not `notify`, which Google's event does not
+//! record, and which a resend from the app never changes). The same id with anything else is a 409, [`ID_IN_USE`],
+//! with no write. An insert Google answers 409 (`duplicate`) is read and
+//! judged the same way. One already made and since deleted is a 409,
+//! [`ALREADY_DELETED`]. A second create with the same id while the first is
+//! still running is a 409, [`ALREADY_CREATING`], before Google hears it
+//! ([`InFlight`]). What this does NOT close: a read that lags an insert just
+//! made, followed by an insert Google fails to flag, can still make two; and
+//! the read is per calendar. A create with no `id` (an older app) lets Google
+//! choose, as before.
+//!
+//! A DELETE GOOGLE ANSWERS 410 found the event already gone, and removes the
+//! local row (204). A 404 says the same only while the calendar is still the
+//! user's: Google answers 404 too for a calendar the user can no longer
+//! reach, or an event they can no longer see. So on a calendar other than
+//! the primary one a 404 is checked against the calendar list
+//! ([`CalendarApi::calendar_listed`]): still listed with an `owner` or
+//! `writer` role is done (204); anything else is a 410, [`CALENDAR_GONE`],
+//! the row is left for the kicked sync, and the app does not say "deleted".
+//! A list read that fails is a 502 and deletes nothing.
 //!
 //! Error bodies are fixed strings that never echo the request, and logs carry
 //! the action and an error kind only (a calendar id is usually an address).
@@ -113,8 +160,63 @@ pub(crate) const GOOGLE_UNCERTAIN: &str =
 pub(crate) const CANNOT_NOTIFY: &str = "guests can only be told about changes on your own calendar";
 pub(crate) const UNREADABLE_ANSWER: &str =
     "Google Calendar saved the change, but its answer could not be read";
+pub(crate) const UNSTORED_ANSWER: &str =
+    "Google Calendar saved the change, but Passband could not store it";
 pub(crate) const CANNOT_INVITE: &str = "guests can only be added on your own calendar";
 pub(crate) const GUESTS_READ_ONLY: &str = "this event's guest list cannot be changed from Passband";
+pub(crate) const CALENDAR_GONE: &str = "that calendar is no longer available to you";
+pub(crate) const ALREADY_DELETED: &str =
+    "that event was already created and has since been deleted";
+pub(crate) const ID_IN_USE: &str = "that event id is already used for a different event";
+pub(crate) const ALREADY_CREATING: &str = "that event is already being created";
+
+/// EVERY ERROR BODY NAMES ITS KIND, `{"error", "code"}`: a closed list the
+/// app reads (docs/CALENDAR.md §8, "What a refusal says"). The app keys on
+/// the code, never the status alone, and treats anything not on the list,
+/// or no code at all, as a write that may have happened.
+///
+/// NOTHING HAPPENED: refused before any write reached Google, or refused by
+/// Google itself.
+/// - [`code::INVALID`] 400: the body, a guest address, the delete's query.
+/// - [`code::UNKNOWN_CALENDAR`], [`code::READ_ONLY`],
+///   [`code::CANNOT_INVITE`], [`code::GUESTS_READ_ONLY`],
+///   [`code::CANNOT_NOTIFY`] 400.
+/// - [`code::NOT_GRANTED`], [`code::NOT_EDITABLE`] 403.
+/// - [`code::NOT_FOUND`] 404: no such stored event.
+/// - [`code::ID_IN_USE`], [`code::ALREADY_CREATING`],
+///   [`code::ALREADY_DELETED`] 409.
+/// - [`code::CALENDAR_GONE`] 410: Google answered a delete 404 and the
+///   calendar is no longer the user's to write.
+/// - [`code::GOOGLE_REFUSED`] 502: Google answered the write (or a read or
+///   a token refresh before it) with an error.
+///
+/// MAY HAVE HAPPENED:
+/// - [`code::UNCERTAIN`] 504: the answer was lost or the deadline passed
+///   after the write may have gone out, or Google ACCEPTED the write and
+///   its answer could not be read or stored.
+/// - [`code::INTERNAL`] 500: anything else.
+pub(crate) mod code {
+    pub(crate) const INVALID: &str = "invalid";
+    pub(crate) const UNKNOWN_CALENDAR: &str = "unknown_calendar";
+    pub(crate) const READ_ONLY: &str = "read_only";
+    pub(crate) const CANNOT_INVITE: &str = "cannot_invite";
+    pub(crate) const GUESTS_READ_ONLY: &str = "guests_read_only";
+    pub(crate) const CANNOT_NOTIFY: &str = "cannot_notify";
+    pub(crate) const NOT_GRANTED: &str = "not_granted";
+    pub(crate) const NOT_EDITABLE: &str = "not_editable";
+    pub(crate) const NOT_FOUND: &str = "not_found";
+    pub(crate) const ID_IN_USE: &str = "id_in_use";
+    pub(crate) const ALREADY_CREATING: &str = "already_creating";
+    pub(crate) const ALREADY_DELETED: &str = "already_deleted";
+    pub(crate) const CALENDAR_GONE: &str = "calendar_gone";
+    pub(crate) const GOOGLE_REFUSED: &str = "google_refused";
+    pub(crate) const UNCERTAIN: &str = "uncertain";
+    pub(crate) const INTERNAL: &str = "internal";
+}
+
+/// The most one calendar write may take in all ([`within`]): below the app's
+/// own 45 second wait, so the app hears the 504 rather than giving up first.
+pub(crate) const WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(35);
 
 /// A refused request: its audit detail and its answer.
 struct Refusal {
@@ -123,28 +225,49 @@ struct Refusal {
 }
 
 impl Refusal {
-    fn new(detail: &'static str, status: StatusCode, message: &'static str) -> Self {
+    fn new(
+        detail: &'static str,
+        status: StatusCode,
+        code: &'static str,
+        message: &'static str,
+    ) -> Self {
         Self {
             detail,
-            error: ApiError::new(status, message),
+            error: ApiError::new(status, message).with_code(code),
         }
     }
     fn body(Invalid(message): Invalid) -> Self {
-        Self::new("rejected:body", StatusCode::BAD_REQUEST, message)
+        Self::new(
+            "rejected:body",
+            StatusCode::BAD_REQUEST,
+            code::INVALID,
+            message,
+        )
     }
     fn not_granted() -> Self {
-        Self::new("rejected:not_granted", StatusCode::FORBIDDEN, NOT_GRANTED)
+        Self::new(
+            "rejected:not_granted",
+            StatusCode::FORBIDDEN,
+            code::NOT_GRANTED,
+            NOT_GRANTED,
+        )
     }
     /// A READ before the write failed (the guest list's fresh read): nothing
     /// was asked to change, so every failure is a plain refusal.
     fn google(action: &str, error: CallError) -> Self {
         eprintln!("squelch-api: {action}: Google refused the write ({error})");
-        Self::new("failed:google", StatusCode::BAD_GATEWAY, GOOGLE_REFUSED)
+        Self::new(
+            "failed:google",
+            StatusCode::BAD_GATEWAY,
+            code::GOOGLE_REFUSED,
+            GOOGLE_REFUSED,
+        )
     }
-    /// The WRITE itself failed. An answer Google gave is a refusal (502); no
-    /// usable answer after sending ([`CallError::Uncertain`]) means the change
-    /// may have happened: 504 with its own message, and a sync is kicked so
-    /// the client's refresh shows what Google holds.
+    /// The WRITE itself failed. A 4xx Google gave is a refusal (502). No
+    /// usable answer after sending, or a 5xx from Google
+    /// ([`CallError::Uncertain`]), means the change may have happened: 504
+    /// with its own message, and a sync is kicked so the client's refresh
+    /// shows what Google holds.
     fn written(state: &ApiState, action: &str, error: CallError) -> Self {
         if error != CallError::Uncertain {
             return Self::google(action, error);
@@ -154,11 +277,29 @@ impl Refusal {
         Self::new(
             "failed:uncertain",
             StatusCode::GATEWAY_TIMEOUT,
+            code::UNCERTAIN,
             GOOGLE_UNCERTAIN,
         )
     }
+    /// Google ACCEPTED the write, and its answer could not be read
+    /// (`failed:answer`) or stored (`failed:store`): the change happened, so
+    /// it is answered as one that may have, never as a refusal. The caller
+    /// has kicked the sync that brings the event in.
+    fn accepted_unseen(detail: &'static str, message: &'static str) -> Self {
+        Self::new(
+            detail,
+            StatusCode::GATEWAY_TIMEOUT,
+            code::UNCERTAIN,
+            message,
+        )
+    }
     fn internal(detail: &'static str) -> Self {
-        Self::new(detail, StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        Self::new(
+            detail,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            code::INTERNAL,
+            "internal error",
+        )
     }
 }
 
@@ -184,16 +325,17 @@ impl GuestNote {
 }
 
 /// Write the audit row for `outcome` and answer it. `note` is None until
-/// the request has been understood that far.
+/// the request has been understood that far. `ok` is a success's detail.
 async fn finish<T>(
     state: &ApiState,
     action: &'static str,
     target: Option<String>,
     note: Option<GuestNote>,
+    ok: &'static str,
     outcome: Result<T, Refusal>,
 ) -> Result<T, ApiError> {
     let (detail, result) = match outcome {
-        Ok(value) => ("ok", Ok(value)),
+        Ok(value) => (ok, Ok(value)),
         Err(refusal) => (refusal.detail, Err(refusal.error)),
     };
     let detail = match note {
@@ -240,6 +382,7 @@ async fn google(
             return Err(Refusal::new(
                 "failed:token",
                 StatusCode::BAD_GATEWAY,
+                code::GOOGLE_REFUSED,
                 GOOGLE_REFUSED,
             ));
         }
@@ -274,7 +417,14 @@ async fn stored_event(
     calendar_id: &str,
     event_id: &str,
 ) -> Result<(StoredCalendar, SyncedEvent), Refusal> {
-    let missing = || Refusal::new("failed:target", StatusCode::NOT_FOUND, "not found");
+    let missing = || {
+        Refusal::new(
+            "failed:target",
+            StatusCode::NOT_FOUND,
+            code::NOT_FOUND,
+            "not found",
+        )
+    };
     if calendar_id.chars().count() > PATH_ID_CAP || event_id.chars().count() > PATH_ID_CAP {
         return Err(missing());
     }
@@ -303,6 +453,7 @@ fn may_carry_guests(
         return Err(Refusal::new(
             "rejected:cannot_invite",
             StatusCode::BAD_REQUEST,
+            code::CANNOT_INVITE,
             CANNOT_INVITE,
         ));
     }
@@ -318,10 +469,30 @@ fn refuse_notify_unless_own(calendar: &StoredCalendar, notify: Notify) -> Result
         return Err(Refusal::new(
             "rejected:cannot_notify",
             StatusCode::BAD_REQUEST,
+            code::CANNOT_NOTIFY,
             CANNOT_NOTIFY,
         ));
     }
     Ok(())
+}
+
+/// THE WRITE'S DEADLINE: `work` (everything from the grant check to the
+/// stored answer) gets [`ApiState::calendar_write_deadline`] in all. Past it
+/// the work is dropped, Google calls and all, and the answer is the 504 a
+/// lost answer gets, with its sync kick: a write already sent may have
+/// happened.
+async fn within<T>(
+    state: &ApiState,
+    action: &str,
+    work: impl std::future::Future<Output = Result<T, Refusal>>,
+) -> Result<T, Refusal> {
+    match tokio::time::timeout(state.calendar_write_deadline, work).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            eprintln!("squelch-api: {action}: the write ran past its deadline");
+            Err(Refusal::written(state, action, CallError::Uncertain))
+        }
+    }
 }
 
 /// Run a handler's work in a task of its own and wait for it. Dropping the
@@ -332,25 +503,60 @@ async fn detached<T: Send + 'static>(
     work: impl std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
 ) -> Result<T, ApiError> {
     tokio::spawn(work).await.unwrap_or_else(|_| {
-        Err(ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal error",
-        ))
+        Err(
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+                .with_code(code::INTERNAL),
+        )
     })
+}
+
+/// One create naming its own id, held in
+/// [`ApiState::calendar_creates_in_flight`] for as long as this value lives.
+/// Dropped on every way out of the work, an answer, a refusal, the deadline
+/// dropping the work, or a panic unwinding it, so a key is never left
+/// behind.
+pub(crate) struct InFlight {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<(i64, String, String)>>>,
+    key: (i64, String, String),
+}
+
+impl InFlight {
+    /// Take the key, or None when a create holding it is still running.
+    fn take(state: &ApiState, calendar_id: &str, id: &str) -> Option<Self> {
+        let key = (state.account_id, calendar_id.to_string(), id.to_string());
+        let set = state.calendar_creates_in_flight.clone();
+        let fresh = set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone());
+        fresh.then_some(Self { set, key })
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
 }
 
 fn guests_read_only() -> Refusal {
     Refusal::new(
         "rejected:guests_read_only",
         StatusCode::BAD_REQUEST,
+        code::GUESTS_READ_ONLY,
         GUESTS_READ_ONLY,
     )
 }
 
 /// Google said yes: store its answer under the calendar, kick the sync, and
-/// serve the event (and hand back the row that was stored). An answer that cannot be read is stored nowhere (the
-/// kicked sync brings the event in) and is a 502 with its own message, since
-/// the change DID happen at Google.
+/// serve the event (and hand back the row that was stored). An answer that
+/// cannot be read is stored nowhere (the kicked sync brings the event in),
+/// and one that cannot be stored is not served: both are the 504
+/// [`code::UNCERTAIN`], never a refusal, since the change DID happen at
+/// Google.
 async fn keep_answer(
     state: &ApiState,
     calendar: &StoredCalendar,
@@ -359,11 +565,7 @@ async fn keep_answer(
 ) -> Result<(EventRow, Value), Refusal> {
     let Some(row) = read_written_event(answer, calendar.time_zone.as_deref()) else {
         state.calendar_refresh.kick_now(state.account_id);
-        return Err(Refusal::new(
-            "failed:answer",
-            StatusCode::BAD_GATEWAY,
-            UNREADABLE_ANSWER,
-        ));
+        return Err(Refusal::accepted_unseen("failed:answer", UNREADABLE_ANSWER));
     };
     let stored = put(state, &calendar.calendar_id, &row).await;
     state.calendar_refresh.kick_now(state.account_id);
@@ -389,7 +591,7 @@ async fn put(state: &ApiState, calendar_id: &str, row: &EventRow) -> Result<(), 
     .map(|_| ())
     .map_err(|_| {
         eprintln!("squelch-api: calendar write: Google accepted it; storing the answer failed");
-        Refusal::internal("failed:store")
+        Refusal::accepted_unseen("failed:store", UNSTORED_ANSWER)
     })
 }
 
@@ -403,14 +605,15 @@ pub async fn create_event(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
-    let view = detached(create(state, body)).await?;
-    Ok((StatusCode::CREATED, no_store(), Json(view)))
+    let (status, view) = detached(create(state, body)).await?;
+    Ok((status, no_store(), Json(view)))
 }
 
-async fn create(state: ApiState, body: Bytes) -> Result<Value, ApiError> {
+async fn create(state: ApiState, body: Bytes) -> Result<(StatusCode, Value), ApiError> {
     let mut audit_target = None;
     let mut note = None;
-    let outcome = async {
+    let mut ok = "ok";
+    let outcome = within(&state, CREATE, async {
         let creds = granted(&state).await?;
         let draft = write::parse_create(&json_body(&body)?).map_err(Refusal::body)?;
         note = Some(GuestNote {
@@ -424,6 +627,7 @@ async fn create(state: ApiState, body: Bytes) -> Result<Value, ApiError> {
                 Refusal::new(
                     "rejected:calendar",
                     StatusCode::BAD_REQUEST,
+                    code::UNKNOWN_CALENDAR,
                     UNKNOWN_CALENDAR,
                 )
             })?;
@@ -432,6 +636,7 @@ async fn create(state: ApiState, body: Bytes) -> Result<Value, ApiError> {
             return Err(Refusal::new(
                 "rejected:read_only",
                 StatusCode::BAD_REQUEST,
+                code::READ_ONLY,
                 READ_ONLY_CALENDAR,
             ));
         }
@@ -439,17 +644,92 @@ async fn create(state: ApiState, body: Bytes) -> Result<Value, ApiError> {
             may_carry_guests(&cal, &draft.guests, creds.account_email())?;
         }
         let google_body = write::insert_body(&draft).map_err(Refusal::body)?;
+        // One create per id at a time: a second send while the first is
+        // still out is refused before Google hears it, not raced.
+        let _in_flight = match &draft.id {
+            None => None,
+            Some(id) => Some(InFlight::take(&state, &cal.calendar_id, id).ok_or_else(|| {
+                Refusal::new(
+                    "rejected:in_flight",
+                    StatusCode::CONFLICT,
+                    code::ALREADY_CREATING,
+                    ALREADY_CREATING,
+                )
+            })?),
+        };
         let (token, api) = google(&state, &creds, CREATE).await?;
-        let answer = api
-            .insert_event(&token, &cal.calendar_id, &google_body, draft.notify)
-            .await
-            .map_err(|e| Refusal::written(&state, CREATE, e))?;
+        // A create naming its own id may have been sent before: read it, and
+        // an event already there is the answer. Nothing is inserted, nobody
+        // is invited again.
+        let existing = match &draft.id {
+            None => None,
+            Some(id) => match api.get_event(&token, &cal.calendar_id, id).await {
+                Ok(event) => Some(event),
+                Err(CallError::NotFound) => None,
+                Err(e) => return Err(Refusal::google(CREATE, e)),
+            },
+        };
+        let answer = match existing {
+            Some(event) => event,
+            None => match api
+                .insert_event(&token, &cal.calendar_id, &google_body, draft.notify)
+                .await
+            {
+                Ok(answer) => {
+                    let (row, view) =
+                        keep_answer(&state, &cal, &answer, creds.account_email()).await?;
+                    audit_target = Some(target(&cal.calendar_id, Some(&row.event_id)));
+                    return Ok((StatusCode::CREATED, view));
+                }
+                // Google noticed the id is taken: the first send made it.
+                Err(CallError::Duplicate) if draft.id.is_some() => {
+                    let id = draft.id.as_deref().unwrap_or_default();
+                    api.get_event(&token, &cal.calendar_id, id)
+                        .await
+                        .map_err(|_| Refusal::written(&state, CREATE, CallError::Uncertain))?
+                }
+                Err(e) => return Err(Refusal::written(&state, CREATE, e)),
+            },
+        };
+        // An event already under the id. This send writes nothing and tells
+        // nobody, whatever it answers.
+        audit_target = Some(target(&cal.calendar_id, draft.id.as_deref()));
+        note = note.map(|n| GuestNote {
+            notify: Notify::Nobody,
+            ..n
+        });
+        if answer.get("status").and_then(Value::as_str) == Some("cancelled") {
+            return Err(Refusal::new(
+                "rejected:already_deleted",
+                StatusCode::CONFLICT,
+                code::ALREADY_DELETED,
+                ALREADY_DELETED,
+            ));
+        }
+        // It is the answer only when it is the event THIS create would make.
+        // The same id with another title, time or guest list (an edited
+        // draft, or someone else's event) is refused, never answered with
+        // what is there: that would drop the edit, or claim an invitation
+        // nobody sent.
+        let zone = cal.time_zone.as_deref();
+        let ours = read_written_event(&answer, zone)
+            .is_some_and(|found| write::is_same_create(&draft, &found, zone));
+        if !ours {
+            return Err(Refusal::new(
+                "rejected:id_in_use",
+                StatusCode::CONFLICT,
+                code::ID_IN_USE,
+                ID_IN_USE,
+            ));
+        }
         let (row, view) = keep_answer(&state, &cal, &answer, creds.account_email()).await?;
         audit_target = Some(target(&cal.calendar_id, Some(&row.event_id)));
-        Ok(view)
-    }
+        note = Some(GuestNote::of(&row, Notify::Nobody));
+        ok = "ok:existing";
+        Ok((StatusCode::OK, view))
+    })
     .await;
-    finish(&state, CREATE, audit_target, note, outcome).await
+    finish(&state, CREATE, audit_target, note, ok, outcome).await
 }
 
 // --- PATCH /client/calendar/events/{calendar_id}/{id} ------------------------
@@ -477,7 +757,7 @@ async fn edit(
 ) -> Result<Value, ApiError> {
     let mut audit_target = None;
     let mut note = None;
-    let outcome = async {
+    let outcome = within(&state, EDIT, async {
         let creds = granted(&state).await?;
         let edit = write::parse_edit(&json_body(&body)?, &calendar_id).map_err(Refusal::body)?;
         let (cal, stored) = stored_event(&state, &calendar_id, &event_id).await?;
@@ -487,6 +767,7 @@ async fn edit(
             return Err(Refusal::new(
                 "rejected:not_editable",
                 StatusCode::FORBIDDEN,
+                code::NOT_EDITABLE,
                 NOT_EDITABLE,
             ));
         }
@@ -526,9 +807,9 @@ async fn edit(
         let (row, view) = keep_answer(&state, &cal, &answer, creds.account_email()).await?;
         note = Some(GuestNote::of(&row, edit.notify));
         Ok(view)
-    }
+    })
     .await;
-    finish(&state, EDIT, audit_target, note, outcome).await
+    finish(&state, EDIT, audit_target, note, "ok", outcome).await
 }
 
 // --- DELETE /client/calendar/events/{calendar_id}/{id} -----------------------
@@ -548,8 +829,9 @@ fn delete_notify(query: &[(String, String)]) -> Result<Notify, Refusal> {
 }
 
 /// `DELETE /client/calendar/events/{calendar_id}/{id}?notify=true|false`:
-/// 204. An event Google says is already deleted (410) or does not know (404)
-/// is deleted here too. With `notify=true` Google mails the event's guests a
+/// 204. An event Google says is already deleted (410) is deleted here too,
+/// and so is one it does not know (404) while its calendar is still the
+/// user's (410 [`CALENDAR_GONE`] otherwise; see the module doc). With `notify=true` Google mails the event's guests a
 /// cancellation; absent or `false`, nobody is told.
 pub async fn delete_event(
     State(state): State<ApiState>,
@@ -568,7 +850,7 @@ async fn delete(
 ) -> Result<(), ApiError> {
     let mut audit_target = None;
     let mut note = None;
-    let outcome = async {
+    let outcome = within(&state, DELETE, async {
         let creds = granted(&state).await?;
         let notify = delete_notify(&query)?;
         let (cal, stored) = stored_event(&state, &calendar_id, &event_id).await?;
@@ -578,6 +860,7 @@ async fn delete(
             return Err(Refusal::new(
                 "rejected:not_editable",
                 StatusCode::FORBIDDEN,
+                code::NOT_EDITABLE,
                 NOT_EDITABLE,
             ));
         }
@@ -587,8 +870,27 @@ async fn delete(
             .delete_event(&token, &calendar_id, &event_id, notify)
             .await
         {
-            // Gone (410) or unknown (404) at Google: already deleted there.
-            Ok(()) | Err(CallError::Gone | CallError::NotFound) => {}
+            // Gone (410) at Google: already deleted there.
+            Ok(()) | Err(CallError::Gone) => {}
+            // Unknown (404): already deleted, OR the calendar is no longer
+            // the user's. The primary calendar always is; any other is asked
+            // after.
+            Err(CallError::NotFound) if !cal.is_primary => {
+                match api.calendar_listed(&token, &calendar_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        state.calendar_refresh.kick_now(state.account_id);
+                        return Err(Refusal::new(
+                            "failed:calendar_gone",
+                            StatusCode::GONE,
+                            code::CALENDAR_GONE,
+                            CALENDAR_GONE,
+                        ));
+                    }
+                    Err(e) => return Err(Refusal::google(DELETE, e)),
+                }
+            }
+            Err(CallError::NotFound) => {}
             Err(e) => return Err(Refusal::written(&state, DELETE, e)),
         }
         let (c, e) = (calendar_id.clone(), event_id.clone());
@@ -597,9 +899,10 @@ async fn delete(
         })
         .await;
         state.calendar_refresh.kick_now(state.account_id);
-        removed.map_err(|_| Refusal::internal("failed:store"))?;
+        // Google deleted it: a store that failed now is not a refusal.
+        removed.map_err(|_| Refusal::accepted_unseen("failed:store", UNSTORED_ANSWER))?;
         Ok(())
-    }
+    })
     .await;
-    finish(&state, DELETE, audit_target, note, outcome).await
+    finish(&state, DELETE, audit_target, note, "ok", outcome).await
 }

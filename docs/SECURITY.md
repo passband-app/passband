@@ -171,7 +171,8 @@ refuses it before the handler is reached).
   spell `passband-img:` itself in a kept `<style>` block, which `rewrite` neuters to
   `passband-img-blocked:` before minting anything.
 - `Model/ImageStore.swift` owns the fetch: ephemeral session, no cookies, empty
-  referrer, `image/*` only, redirects re-guarded per hop, files named `sha256(url)`
+  referrer, images only (an `image/*` header, or failing that a raster magic number
+  per `Lib/ImageSniff.swift`, never svg), redirects re-guarded per hop, files named `sha256(url)`
   and a manifest holding **no URLs** — a directory listing the reader's mail URLs
   would be a readable index of their correspondence.
 - **`cid:` references are the local mirror of all this.** `Lib/CidImages.swift`
@@ -251,9 +252,10 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   queues the SAME job for the thread's newest unassessed archive siblings, at
   most eight an open. A row the vector leg alone returned is never queued:
   nearest neighbours are not matches. A row that already has a job at its
-  revision (finished, or parked on the daily budget) is never queued again; one
-  whose job FAILED may be asked for again once that failure is a day old, and
-  comes back as `archive_access` whatever queued it first.
+  revision (finished, or parked on the daily budget) is not queued again; the
+  one exception is a row whose latest check FAILED, which may be asked for
+  again once that failure is a day old, and comes back as `archive_access`
+  whatever queued it first.
 - Three ceilings bound what a caller can make the daemon spend on archive mail,
   and every agent-door path that queues work on an archive row goes through the
   one function that keeps them (`request_archive_access_conn`): ten rows per
@@ -358,8 +360,10 @@ row does not exist yet, which is a different thing from "pending" on live mail:
      every readable vector of the account on each semantic or hybrid agent
      search, where the vec0 index would not. Its time depends on how much mail
      the account holds, not on the query, so it says nothing about any word.
-     Measured in a debug build over 10,000 readable rows: about 245 ms for
-     the leg. A readable row beyond the 4,096 nearest READABLE rows is still
+     It also holds the store lock for that long, so live ingest and the
+     human door wait behind it. Measured in a debug build over 10,000
+     readable rows, one message per thread: about 245 ms for the leg, and
+     more on mailboxes with long threads; a release build has not been timed. A readable row beyond the 4,096 nearest READABLE rows is still
      found by the keyword leg or not at all.
 - PROMOTION is the one way `is_archive` changes, 1 to 0 and never back: the
   owner, at the human door, re-triages one archive message or corrects how it
@@ -952,6 +956,57 @@ it. That move is what the guard below exists for.
 - **The link stays out of logs and the audit.** Audit rows carry the sender and the
   verdict; transport errors are reduced to their kind before they can be printed.
 
+**The browser rung** (`squelch-api/src/unsub_browser.rs`, `unsub_cdp.rs`,
+`squelch-core/src/triage/unsub_agent.rs`). Everything above describes the plain
+reader, which holds on every daemon. A daemon that was given a Browserbase key
+(every hosted tenant; a self-host only if it brings its own) has one more
+rung: a page the reader gave up on for a reason a real browser could fix
+(`choose_topics`, `needs_browser`, `unclear`; never a dead link) is opened in a
+rented remote browser that the notify model steers. On that rung the "one
+action, nothing typed" rule above is deliberately replaced by this one:
+
+- **The page's scripts never run near the daemon.** The browser is Browserbase's,
+  on their network, reached over one WebSocket. Nothing the page executes can
+  reach the daemon, its volume, its loopback doors or its neighbours. The same
+  per-hop URL check the fetcher uses still decides whether a link is handed over
+  at all.
+- **The agent has a closed vocabulary, enforced on the page and not in the
+  prompt** (`unsub_browser::permit`). Press a link or button, turn a checkbox,
+  radio or switch on or off, choose a select's option, fill an email field. Every
+  action names a control by number, and the number is checked against the
+  controls the daemon itself found, kind included. A short list of labels is
+  never pressed whoever asks: resubscribe, undo, sign in, create or delete an
+  account, download, buy.
+- **Exactly one string can be typed**, the address the mail was sent to
+  (`unsub_job::address_to_type`: the account's address, or its plus address when
+  that is what the message was addressed to), and only into a field that is for
+  an email address. The model's answer carries no text of its own: there is no
+  action that types what the model says, and no free-text field in its output
+  for a page to have it fill in. A password, a name or a card number cannot be
+  entered because nothing can enter one.
+- **What the model reads is what a person would see.** The page is read from an
+  isolated JavaScript world the page's own scripts cannot see into. Text that is
+  in the markup but not on screen (hidden, collapsed, clipped, off the page) is
+  not read, because the agent's "done" is taken from this text. The page's own
+  square brackets are rewritten, so it cannot draw a control that is not there.
+  It goes to the model inside the usual fence.
+- **Bounded and billed.** Eight steps a job, sixteen actions a step, 100 seconds
+  on top of the plain ladder, two browsers at once, a daily cap on steps, and
+  usage under `unsub_agent`. A step that changes nothing twice ends the job.
+- **A person is asked when a person is what the page wants.** A sign-in, a
+  captcha (sessions are created with captcha solving OFF), a confirmation link
+  sent by mail, a question only the user can answer: each ends the job as
+  `needs_you` with that reason and the original link.
+- **Failure of the machinery changes nothing.** No browser to rent, a dropped
+  socket, the model's cap: the outcome is whatever the plain reader had already
+  decided.
+- **What Browserbase learns.** The unsubscribe link (which already names the
+  recipient to the sender), the page it leads to, and the address if a form asks
+  for it. Sessions are created with recording and logging off. No mail, no
+  credentials and no other mailbox data are reachable from the rung; it has no
+  route to the store at all. Browserbase is a subprocessor for every hosted
+  mailbox.
+
 **What a maintainer must not break.**
 - Do not build a second outbound client for sender-chosen URLs, or call
   `reqwest` directly on one: `Fetcher` is the guard, and a client without it is an
@@ -961,6 +1016,14 @@ it. That move is what the guard below exists for.
   sender's choice at every hop, so there is no site an address could be safely
   typed into, and the account's primary address is not necessarily the one the
   list knows.
+- Do not give the browser agent a way to type anything but the one address, and
+  do not add a free-text field to its output. The vocabulary is the fence.
+- Do not move a check out of `permit` and into the prompt. The prompt is advice
+  to a model reading a hostile page; `permit` is what actually happens.
+- Do not run the browser inside a tenant pod or on a self-host's own machine
+  without first giving it the fetcher's network guard: a real browser loads
+  subresources and runs scripts, and the public-only resolver covers neither.
+- Do not turn session recording, logging or captcha solving on.
 - `needs_you` sends the user to the ORIGINAL link, not a post-redirect hop that may
   depend on this job's cookies.
 
@@ -1219,8 +1282,44 @@ write that went out and got no usable answer (a timeout or a lost connection aft
 sending, a 2xx body that does not read: `CallError::Uncertain`) is a 504 saying
 Google may have made the change, kicks a sync and stores nothing, so the client
 refreshes before offering to send again (a "tell guests" is not repeated on a
-guess). A delete Google answers 404 or 410 found the event gone and removes the
-local row. Event and calendar ids of `.` or `..` (or empty) are refused at read
+guess). A write Google accepted whose answer the daemon could not read or store
+is that same 504, never a refusal. Every error body names its kind in a `code`
+from a closed list (docs/CALENDAR.md section 8, "What a refusal says"), and the
+app gives a pane's fields back ONLY on a code that says nothing reached Google
+(or Google refused it), with that code's own status; anything else, including
+no code, an unknown code, any 500 and a bare 502, freezes the pane. The whole write (token refresh, guest reread, write) runs under one 35
+second deadline, below the app's 45 second wait; past it the answer is the same
+504 and kick, and the app treats a wait of its own that runs out, or a
+connection lost mid-request, as that 504 too. A create may name its own event id
+(base32hex, 5 to 1024 characters, else a 400); the daemon reads that id before
+inserting. An event already there (or found after a 409 `duplicate` from Google)
+is answered, with no insert and no second invitation (audited `ok:existing ...
+notified=false`), ONLY when it is the event the create would make: same
+calendar, laundered title, location and notes, start, end, all-day flag and
+guest set. Anything else under the id is a 409 with no write
+(`rejected:id_in_use`), so an id cannot be used to claim an event with another
+title, place, notes, time or guest list than the request described. What it does
+NOT compare is `notify`: Google's event does not say whether its guests were
+mailed, so a create asking for invitations could be answered by an event made
+without them. The app never sends that, because a create is resent only from a
+frozen pane and only as the exact body first sent, so a resend never changes
+`notify`; a different client could, and would be told 200 with nobody invited
+(the audit row says `notified=false`). A second
+create with an id whose first create is still in flight (an in-memory set of
+account, calendar and id, released however the first ends) is a 409 before
+Google hears it (`rejected:in_flight`). This makes a duplicate from a retried
+create unlikely, not impossible: Google does not guarantee to catch a taken id
+at insert time and a read may lag one just made, and the read is per calendar.
+The app closes the rest from its side: after an uncertain save it freezes the
+pane and can only send the same body again (docs/CALENDAR.md section 5). A delete
+Google answers 410 found the event gone and removes the local row; a 404 does the
+same only on the primary calendar or on a calendar `calendarList.get` still
+lists, not deleted, with an `accessRole` of `owner` or `writer`; otherwise it is
+a 410 "that calendar is no longer available to you" that leaves the row for the
+kicked sync (Google answers 404 for a calendar the user lost, and for an event
+they can no longer see). A calendar list read that fails is a 502 and deletes
+nothing. The app refuses a "delete and tell guests" whose calendar may no
+longer tell them rather than deleting silently. Event and calendar ids of `.` or `..` (or empty) are refused at read
 and again when the URL is built, because a URL path would read them as "here"
 and "up one". Error bodies are fixed strings that never
 echo the request; logs carry the action and an error kind, never an id. Every
@@ -1234,7 +1333,8 @@ row is written even when the client disconnects mid-request: each write's checks
 Google call and audit run in a task of their own that the handler awaits, so
 dropping the request does not cancel them. The `calendar:` prefix keeps the
 audit listing's join to `messages` (a numeric target) from matching a calendar id
-that starts with digits. The in-app assistant has no tool for any of it.
+that starts with digits. The in-app assistant has no tool that reaches any of
+these routes (see "The assistant's calendar tool" below).
 
 **Guests: a human-door route can make Google email third parties**
 (docs/CALENDAR.md §8, "Guests, invited by Google"). Since wave 5 the three write
@@ -1250,8 +1350,11 @@ reaches people outside the account and cannot be undone. What gates it:
   (`gcal/client.rs:Notify`) has two values and defaults to the silent one, and
   `sendUpdates` is always named, never left to Google's default.
 - **The human door alone.** The three routes are bearer authed on `/client`; no
-  agent route, MCP tool or assistant tool can name a guest or set `notify`, and
-  nothing the daemon does on its own (the sync, triage, ghosts) calls a write.
+  agent route or MCP tool can name a guest or set `notify`, and nothing the
+  daemon does on its own (the sync, triage, ghosts) calls a write. The
+  assistant's one calendar tool can put addresses in the event pane's guests
+  line, where the user sees them as pills; it cannot send the request, and
+  `notify` is decided only by which save control the user then presses.
 - **Whose calendar.** Guests only on the user's own calendar (the primary one, or
   one they are `owner` of): `gcal/mod.rs:may_invite`. A shared calendar the user
   can write to cannot be made to invite anyone, nor to mail an update or a
@@ -1283,6 +1386,110 @@ not mean it (the client's controls must say what they send, and offer it only
 where the daemon would accept it; the daemon cannot tell intent), and Google's own behaviour with `sendUpdates=none`, which the reference
 hedges ("some emails might still be sent") and which has not been tested against
 a real account.
+
+**The assistant's calendar tool (client, wave 6).** The embedded assistant
+(§6) has one calendar tool, `create_calendar_event`, and it is a draft, not a
+write (`passband/Sources/Passband/Lib/EventProposal.swift`,
+`AgentTools.createCalendarEvent`).
+- **It calls no route.** The tool reads the model's proposal, validates it with
+  the event pane's own rules, and opens the pane on the Calendar page filled
+  in. The create route is reached only by the user pressing the pane's save
+  control, with the same body rules, create id and uncertain-write handling as
+  an event they typed. So a prompt injection in mail the assistant read can at
+  worst put a filled-in pane in front of the user. It cannot add an event or
+  cause an invitation BY ITSELF. Exactly: an event is added, or an invitation
+  sent, only by (a) a click on the pane's own save control, or (b) `↵` or
+  `⌘↵` pressed after the user has clicked or typed inside that pane
+  (`EventProposals.keysMayAct`; `↵` never saves a draft with guests in any
+  case). What the claim does NOT cover is the user's own judgement: someone
+  who clicks "add and invite N" on a pane whose title, place and guests an
+  injected email chose has added it. The pane shows all of them whole
+  (below), which is the whole of that defence.
+- **It never takes the screen or the keyboard from somebody**
+  (`EventProposals.landing`, `CalendarStore.proposeEvent`). A run goes on
+  after the assistant's bar is closed (a citation clicked, "edit in
+  composer"), so a tool call can land while the user is doing something else.
+  The proposal is REFUSED, with a fixed sentence, unless the assistant's bar
+  is open at that moment, and while a composer or an inline reply holds
+  anything typed: mail being written is never closed for it. An email being
+  read is not closed either; the pane is then parked, whole, and shown when
+  the user goes to the Calendar page. The pane it opens never takes the
+  caret, and `↵` and `⌘↵` do nothing in it (a toast says to click add) until
+  the user has clicked or typed in it, so a key typed ahead, or meant for the
+  composer or the reader that was on screen, cannot add or invite. Modelled
+  on the agent door's `open_draft` (`ComposeState.keyboardSendLocked`). That
+  path in turn treats an event pane holding anything (typed, parked, or with
+  a write out or in doubt) as something being written: the agent's draft
+  waits in drafts and Passband does not come forward over it, nor for a
+  draft the composer did not actually take (`EventPaneTravel.heldByUser`,
+  `agentDraftMayComeForward`).
+- **The title and the place are the only text the assistant supplies.** Each
+  is one line of at most 200 characters (the daemon's own caps, and what the
+  pane's one-line fields show whole); longer, or with a line break or a tab
+  in it, the call is refused, not trimmed (`EventProposals.oneLine`). The
+  tool has no notes or description parameter, and `EventProposals.read`
+  refuses a call that carries one under any of the names a model reaches for
+  (`notes`, `note`, `description`, `body`, `details`, `agenda`, `summary`,
+  `message`), in any case. Any OTHER field the tool does not list is refused
+  by name too ("unknown field"), so nothing is dropped in silence and the
+  model is told rather than left to believe something was saved. The reason
+  is the guests: Google emails an event's description and place to them, and
+  model-written prose must never reach other people through Passband. The
+  notes line of the pane it opens is always empty.
+- **It never invites.** Proposed guests are shown as guest pills. Google emails
+  them only if the user presses the control labelled "add and invite N"; plain
+  Enter does not save an event with guests (§ "Guests" above).
+- **It does not read the calendar.** No event reaches the model. A proposal
+  names a calendar or leaves it to the primary; a name that matches no writable
+  calendar is refused with a fixed sentence that lists none of them. The one
+  thing the tool may ask the daemon is the page's own timeline read
+  (`refreshCalendar`), once, when the client holds no feed yet (the Calendar
+  page has not been opened this session): the answer stays in the store and
+  none of it goes to the model. A feed that still is not there is "could not
+  reach the calendar", never "no calendar".
+- **It never replaces the user's work.** A pane holding anything (typed, or an
+  earlier proposal, on screen or parked) refuses the tool with a fixed sentence
+  the model relays.
+- **It follows the page.** Offered only on the Mac and only while
+  `calendarPageAvailable`; with the flag off the tool definitions and system
+  prompt sent to the model are the ones from before the tool existed, and a
+  call naming it is answered as any unknown tool. No edit or delete tool.
+  Nothing was added to `/mcp`, `/client/agent/*` or the relay.
+
+**Who a name is: `GET /client/calendar/people` (wave 6).** The event pane reads
+"with steven" out of a new event's title (a deterministic parser in the client,
+no model) and asks the daemon who that most likely is, to SUGGEST a guest.
+- Behind `require_calendar` with the other calendar routes (404 with the flag
+  off), bearer authed on the human door, `no-store`, at most three answers. Not
+  on the agent door, `/mcp` or the assistant relay.
+- **A candidate is somebody the user has written to** (`contacts`, `sent_count >
+  0`), never the account's own address. Receiving mail from someone never makes
+  them a candidate, so mail under a matching display name cannot plant a guest.
+- **A list or a help desk is not a person.** A candidate with no name from the
+  user's own Sent mail is named by the newest From name on its readable mail,
+  and a group or a desk the user once wrote to sends as `"Steven Ng via Team"`
+  or `"Steven from Acme"`. So an address with no stored name is not offered AT
+  ALL when any of its readable mail carries `List-Unsubscribe` or a From name
+  of that shape (a later word that is "via", "from" or "at";
+  `contacts.rs::list_shaped`). It is offered only under a name the user's own
+  Sent mail gave it. What this does not catch: a relay that rewrites From to
+  the bare poster's name and sends no `List-Unsubscribe`.
+- **Ranking reads mail only where mail may be read.** Inbound mail counts toward
+  "most recently exchanged" only when it is not sent, not spam, not sealed (the
+  ghosts' `ELIGIBLE` test plus the legacy column, never `triage.sensitivity`
+  alone) and passed sender authentication (`auth_pass = 1`; never evaluated
+  reads as no).
+- **Nothing is added by the answer.** The client draws it as a dashed
+  suggestion with a checkmark and an x; it is not in the draft's guests, does
+  not change the save control and is never sent until the user accepts it, and
+  then only as any typed guest would be.
+- A name under two characters (empty included) is a 400 with a fixed body and
+  never reaches the store: one letter matches a large part of anybody's
+  contacts, and every match is a probe of that person's mail under the
+  store's one mutex. Over-long (more than 64 characters) or `@`-bearing input
+  answers an empty list. The input is never echoed. The probes are index
+  seeks on one sender with no sort (`MAX(received_at)`, or one unsorted pass
+  for a contact with no stored name).
 
 **What the event pane sends to Apple (client).** The location line of the
 client's event pane suggests places from Apple's MapKit
@@ -1359,6 +1566,21 @@ minute.
   or run a write's Google call and audit inside the request future alone.
 - Do not gate ghosts on `triage.sensitivity`; use the sealed test
   `sealed_messages` uses.
+- Do not give the assistant's calendar tool a notes or description parameter,
+  or let anything it supplies but the title, the place and the times reach an
+  event's body; do not trim an over-long title or place, or drop a field it
+  does not know, in silence.
+- Do not let the assistant's calendar tool call a write route, set `notify`,
+  skip the pane, replace a pane that holds anything, or be offered while the
+  Calendar page is not; do not hand the model an event or a list of calendars.
+- Do not let a proposed pane take the caret, act on `↵` or `⌘↵` before the
+  user has clicked or typed in it, open while the assistant's bar is closed,
+  or close mail being written or an email being read. Do not let an agent's
+  `open_draft` bring Passband forward over an event pane that holds anything.
+- Do not offer a contact with no stored name under a list-shaped From name.
+- Do not let `/client/calendar/people` return somebody the user has not written
+  to, read sealed, spam or auth-failed mail for its ranking, or move to the
+  agent door.
 - Do not let a mail path load the Calendar slot, or the calendar loop load the
   Write slot: the token in either can do more than its job.
 - Do not loosen `google_link`, drop the `fields` mask or `maxAttendees`, or ask

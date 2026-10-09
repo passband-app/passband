@@ -3,7 +3,7 @@ resolver = "3"
 members = ["squelch-core", "squelch-httpauth", "squelch-ratelimit", "squelch-mcp", "squelch-tui", "squelch-api", "squelch-relay", "squelch-broker", "squelch-control", "squelch-warden", "squelchd"]
 
 [workspace.package]
-version = "0.0.12"
+version = "0.0.13"
 edition = "2024"
 license = "MIT"
 
@@ -13,6 +13,19 @@ license = "MIT"
 [profile.release]
 lto = "thin"
 strip = "symbols"
+
+# Dev and test builds keep line tables only, and none at all for dependencies.
+# At the default `debug = 2` one worktree's target dir runs 10 to 50 GB (every
+# test binary links the whole dependency tree, debuginfo included), and with a
+# worktree per branch that has filled the disk repeatedly. Line tables keep
+# file:line in panic backtraces for our crates; frames inside dependencies
+# still show function names. For a debugger session with locals, override per
+# run: CARGO_PROFILE_DEV_DEBUG=2 cargo build.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

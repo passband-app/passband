@@ -867,7 +867,7 @@ struct MonthGridTests {
 
     static func theMonthComesFirst() {
         expect(CalendarViewMode.initial == .month, "the page opens on the month")
-        expect(CalendarViewMode.pickerOrder == [.month, .agenda], "Month | Agenda, in that order")
+        expect(CalendarViewMode.pickerOrder == [.month, .week, .agenda], "Month | Week | Agenda, in that order")
     }
 
     // MARK: colour

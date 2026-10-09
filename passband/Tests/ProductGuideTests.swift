@@ -30,6 +30,7 @@ struct ProductGuideTests {
         theGuideAgreesWithTheKeymapTable()
         theCalendarIsListedOnlyWhereItIsOffered()
         withTheCalendarOffTheGuideIsMains()
+        aPagesDigitIsTheSheets()
         settingsAreFoundByDescription()
         settingsWithNoQueryOrNoMatchListEverything()
         whatsNewReadsTheReleaseTable()
@@ -195,10 +196,66 @@ struct ProductGuideTests {
         expect(off.contains("- 2 Emails:") && off.contains("- 5 Groups:"), "off: Emails 2 to Groups 5")
         expect(!off.contains("- 6 "), "off: no sixth page")
         expect(off.contains("modifier):\n- 1 Sitrep"), "the list sits right under its heading")
-        expect(off.contains("named sets of recipients.\n- Usage and Settings"), "and runs straight on")
+        expect(off.contains("the key opens Settings > Groups.\n- Usage and Settings"), "and runs straight on")
         let on = ProductGuide.text(.gettingAround, runningVersion: nil, calendar: true)
         expect(on.contains("- 2 Calendar:") && on.contains("- 3 Emails:"), "on: Calendar 2, Emails 3")
         expect(on.contains("- 6 Groups:"), "on: Groups 6")
+    }
+
+    /// verify8 V8-14: every topic that names the digit of a page takes it
+    /// from the Navigate row the `?` sheet draws for this mailbox. With the
+    /// Calendar page on, Emails is 3, Auth 4, Rules 5 and Groups 6 in the
+    /// prose as on the keys; with it off, the sentences are main's own.
+    static func aPagesDigitIsTheSheets() {
+        func text(_ topic: ProductGuide.Topic, _ calendar: Bool) -> String {
+            ProductGuide.text(topic, runningVersion: "0.0.12", calendar: calendar)
+        }
+        // Main's sentences, spelled out: the page off changes no byte of them.
+        let mains: [(ProductGuide.Topic, String)] = [
+            (.writingMail, "- Groups are made in Settings > Groups (key 5): n new"),
+            (.writingMail, "- Scheduled mail waits on the Emails page (key 2) under \"sent\""),
+            (.mailList, "The Emails page (key 2) is every message in one list."),
+            (.senderRules, "- From Settings > Rules (key 4, or T on the Emails page): n."),
+            (.reminders, "- Emails page (key 2), then the Reminders pill"),
+            (.loginCodes, "on the Auth page (key 3, or g on the Emails page)"),
+        ]
+        for (topic, sentence) in mains {
+            expect(text(topic, false).contains(sentence), "off: \(topic.rawValue) says main's \"\(sentence)\"")
+            expect(!text(topic, true).contains(sentence), "on: \(topic.rawValue) no longer gives the page-off digit")
+        }
+        let shifted: [(ProductGuide.Topic, String)] = [
+            (.writingMail, "Settings > Groups (key 6)"),
+            (.writingMail, "the Emails page (key 3) under"),
+            (.mailList, "The Emails page (key 3) is"),
+            (.senderRules, "Settings > Rules (key 5, or T"),
+            (.reminders, "- Emails page (key 3), then"),
+            (.loginCodes, "the Auth page (key 4, or g"),
+            (.calendar, "key 2, or ⇧C from anywhere. Emails is then key 3, Auth 4, Rules 5 and Groups 6."),
+        ]
+        for (topic, phrase) in shifted {
+            expect(text(topic, true).contains(phrase), "on: \(topic.rawValue) says \"\(phrase)\"")
+        }
+        // The digits ARE the sheet's: each page's key in the prose is the key
+        // beside its name in the Navigate row, for both tables.
+        for calendar in [false, true] {
+            let row = ShortcutCatalog.groups(calendar: calendar).first { $0.title == "Navigate" }!.items[0]
+            let names = row.desc.components(separatedBy: " · ")
+            expect(names.count == row.keys.count, "one digit a page (calendar \(calendar))")
+            for (name, key) in zip(names, row.keys) {
+                expect(ProductGuide.keyed("x {key:\(name)} y", calendar: calendar) == "x \(key) y",
+                       "\(name) is \(key) (calendar \(calendar))")
+            }
+            for topic in ProductGuide.topics(calendar: calendar) {
+                expect(!text(topic, calendar).contains("{key:"), "\(topic.rawValue): every digit was filled in (calendar \(calendar))")
+            }
+            // The getting-around list, numbered on its own, agrees with it.
+            let around = text(.gettingAround, calendar)
+            for (name, key) in zip(names, row.keys) {
+                expect(around.contains("- \(key) \(name.prefix(1).uppercased() + name.dropFirst()):"),
+                       "the pages list puts \(name) on \(key) too (calendar \(calendar))")
+            }
+        }
+        expect(ProductGuide.keyed("{key:nowhere}", calendar: true) == "{key:nowhere}", "a page the row lacks is left to be caught")
     }
 
     // MARK: - settings

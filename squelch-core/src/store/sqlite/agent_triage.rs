@@ -2191,8 +2191,7 @@ pub const ARCHIVE_ACCESS_OUTSTANDING_MAX: u32 = 20;
 /// The daily sub-cap's key in `wake_budget`, charged by the worker for every
 /// `archive_access` job on top of the global and background budgets.
 pub const ARCHIVE_ACCESS_BUDGET_KEY: &str = "__agent_archive_access__";
-/// The budget every access check and all refresh work draws on.
-pub const BACKGROUND_BUDGET_KEY: &str = "__agent_background__";
+pub use crate::triage::agent_config::BACKGROUND_BUDGET_KEY;
 /// A failed access check on an archive row may be asked for again this long
 /// after it was last scheduled, so a row is not pending for good.
 const ARCHIVE_ACCESS_RETRY_HOURS: i64 = 24;

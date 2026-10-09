@@ -152,6 +152,37 @@ macro_rules! external_candidate_sql {
         )
     };
 }
+/// [`external_candidate_sql!`] for a query that walks EVERY row of one account
+/// (the external vector leg), where the correlated sibling scan of term 3 is
+/// run once per row and is quadratic in thread length. The same three terms,
+/// with the third turned inside out: the set of threads a sibling closes is
+/// built once, for the account bound at `$account`, and a row passes when its
+/// thread is not in it. Equal to the correlated form for any row that passes
+/// terms 1 and 2, since such a row is never itself in the closing set;
+/// `the_external_prefilter_is_implied_by_the_authority` holds the two equal
+/// over its fixture.
+macro_rules! external_candidate_flat_sql {
+    ($account:literal) => {
+        concat!(
+            "(EXISTS(SELECT 1 FROM agent_message_state xa WHERE xa.account_id=m.account_id
+                 AND xa.message_id=m.id AND xa.access='allowed')
+              AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections xc
+                 WHERE xc.account_id=m.account_id AND xc.message_id=m.id
+                   AND xc.field='external_access' AND xc.value_json='true')
+              AND m.thread_id NOT IN (SELECT s.thread_id FROM messages s
+                 LEFT JOIN agent_message_state sa
+                   ON sa.account_id=s.account_id AND sa.message_id=s.id
+                 WHERE s.account_id=",
+            $account,
+            " AND NOT ",
+            archive_unassessed_sql_as!("s", "sa"),
+            " AND (sa.access IS NULL OR sa.access!='allowed'
+                     OR EXISTS(SELECT 1 FROM agent_triage_corrections sc
+                         WHERE sc.account_id=s.account_id AND sc.message_id=s.id
+                           AND sc.field='external_access' AND sc.value_json='true'))))"
+        )
+    };
+}
 mod agent_deliveries;
 mod agent_triage;
 mod attention;
@@ -203,12 +234,12 @@ use crate::store::{
     DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken,
     LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer, MessageMissingRecipients,
     MessageOpen, MessageUnsub, MintedPairingCode, MissingVector, NewAuditEntry, NewEvent,
-    NewNotifyDecision, NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody,
-    SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow,
-    SenderDomainEntry, SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope,
-    Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
-    TriagedMessage, UsageTokens,
+    NewNotifyDecision, NotifyDecisionRow, PersonNamed, RevisitQueued, SPAM_SYNCED_AT_KEY,
+    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict,
+    SenderDigestRow, SenderDomainEntry, SenderEntry, SenderHistory, SentMessage, SitrepBand,
+    SpamScope, Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued,
+    Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage,
+    TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
@@ -1045,6 +1076,15 @@ impl Store for SqliteStore {
         limit: u32,
     ) -> Result<Vec<ContactEntry>> {
         self.search_contacts(account_id, q, limit)
+    }
+
+    fn people_named(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<PersonNamed>> {
+        self.people_named(account_id, name, limit)
     }
 
     fn merge_harvested_contacts(

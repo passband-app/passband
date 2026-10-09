@@ -182,6 +182,18 @@ pub struct ApiState {
     /// API ([`squelch_core::gcal::client::API_BASE`]); a test's local fake
     /// otherwise. Never read from the environment or a config file.
     pub(crate) calendar_api_base: Option<Arc<str>>,
+    /// How long one calendar write may take in all, Google's token refresh,
+    /// the guest list's reread and the write itself together
+    /// ([`crate::calendar_write::WRITE_DEADLINE`]). Past it the write is
+    /// answered 504, "may have happened". Shorter only in tests.
+    pub(crate) calendar_write_deadline: std::time::Duration,
+    /// The creates naming their own event id that are in flight, as
+    /// (account, calendar, id), shared by every clone: a second create with
+    /// the same key while the first is still running is refused at once
+    /// rather than racing it to Google
+    /// ([`crate::calendar_write::InFlight`]).
+    pub(crate) calendar_creates_in_flight:
+        Arc<std::sync::Mutex<std::collections::HashSet<(AccountId, String, String)>>>,
     /// The one Google Calendar consent this daemon may have in flight for the
     /// app's Connect button (`POST /client/calendar/connect`, self-host only),
     /// and the loopback listener that waits for its redirect. Shared by every
@@ -545,6 +557,8 @@ impl ApiState {
             calendar: None,
             calendar_refresh: CalendarRefresh::default(),
             calendar_api_base: None,
+            calendar_write_deadline: crate::calendar_write::WRITE_DEADLINE,
+            calendar_creates_in_flight: Default::default(),
             calendar_consent: Default::default(),
             calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
             calendar_consent_endpoints: Default::default(),
@@ -838,6 +852,13 @@ impl ApiState {
         self
     }
 
+    /// A shorter overall deadline on a calendar write. TESTS ONLY.
+    #[doc(hidden)]
+    pub fn with_calendar_write_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.calendar_write_deadline = deadline;
+        self
+    }
+
     /// The loopback port the self-host calendar consent's listener binds.
     /// `0` binds an ephemeral port (tests), and the consent URL then carries
     /// the port that was bound.
@@ -920,6 +941,16 @@ impl ApiState {
     /// when the page says so, and one action only when it is the obvious one.
     pub fn with_unsub_page_reader(mut self, client: Option<UnsubPageClient>) -> Self {
         self.unsub.page_reader = client.map(Arc::new);
+        self
+    }
+
+    /// Where the automatic unsubscribe's browser rung rents its browser
+    /// (`crate::unsub_browser`). `None` and that rung does not exist here.
+    pub(crate) fn with_unsub_browser(
+        mut self,
+        browser: Option<crate::unsub_browser::Browserbase>,
+    ) -> Self {
+        self.unsub.browser = browser.map(Arc::new);
         self
     }
 
@@ -1226,6 +1257,9 @@ impl ApiState {
             // The unsubscribe page reader rides the same key and the notify
             // model, billed under its own ledger category.
             .with_unsub_page_reader(UnsubPageClient::from_config(cfg))
+            // The browser rung, for a daemon that was given a Browserbase key.
+            // The key is the whole switch: no key, no rung.
+            .with_unsub_browser(crate::unsub_browser::Browserbase::from_env())
             // The assistant relay resolves only when BOTH the gateway base URL
             // and the assistant key are present; anything less is `None` and
             // the route 404s (see `Stage2Config::resolve_assistant`).

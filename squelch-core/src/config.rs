@@ -270,8 +270,8 @@ pub struct SyncConfig {
     /// the largest thing this daemon writes, and a full disk fails the LIVE
     /// ingest, not the walk.
     ///
-    /// THE FLOOR IN FORCE IS THIS OR A FIFTH OF THE WHOLE FILESYSTEM,
-    /// WHICHEVER IS LARGER. A volume can be shared (every hosted tenant's
+    /// THE FLOOR IN FORCE IS THIS OR A FIFTH OF THE WHOLE FILESYSTEM (AT MOST
+    /// 5 GiB), WHICHEVER IS LARGER. A volume can be shared (every hosted tenant's
     /// database sits on one), and a fixed number of MiB is then a floor for
     /// all of them together; a share of the volume is one that still means
     /// something there. Once held, the walk resumes at the floor plus a

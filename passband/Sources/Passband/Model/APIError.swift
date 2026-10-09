@@ -31,13 +31,96 @@ struct APIError: Error, Sendable {
     var message: String
     /// Redacted guard kinds parsed from a 422 send response, if any.
     var guardKinds: [String]?
+    /// A transport failure after which the server may still have received
+    /// the request and acted on it: the wait timed out, the connection
+    /// dropped mid-request, or an answer came back that could not be read
+    /// (a bad or empty response: the server got the request). False for one
+    /// that never got there (refused, no route, bad address). Only ever true
+    /// with `kind == .network`.
+    var mayHaveArrived = false
+    /// The daemon's machine-readable name for the refusal, the body's
+    /// `code`, where the route serves one (the calendar writes:
+    /// `CalendarRefusal`). Nil when the body had none, or was not JSON.
+    var code: String?
 
-    init(_ kind: APIErrorKind, _ status: Int, _ message: String, guardKinds: [String]? = nil) {
+    init(
+        _ kind: APIErrorKind, _ status: Int, _ message: String, guardKinds: [String]? = nil, code: String? = nil
+    ) {
         self.kind = kind
         self.status = status
         self.message = message
         self.guardKinds = guardKinds
+        self.code = code
     }
+
+    /// A transport failure as the client reports it: never the URL or the
+    /// token, and whether the request may have reached the server.
+    ///
+    /// `evidence` is what the task itself recorded about the send, when the
+    /// caller has it (`APIClient.perform` does): it decides before the
+    /// error's code is even read (`neverSent`).
+    static func transport(_ error: Error, evidence: SendEvidence? = nil) -> APIError {
+        var out = APIError(.network, 0, "cannot reach squelch server")
+        out.mayHaveArrived = !neverSent(code: (error as? URLError)?.code, evidence: evidence)
+        return out
+    }
+}
+
+/// What a failed request's own task recorded about whether anything left
+/// for the server. Each half is nil when it was not collected.
+struct SendEvidence: Hashable, Sendable {
+    /// From the task's metrics: whether ANY transaction (a redirect or a
+    /// retry counts) began sending its request. Nil with no metrics.
+    var requestStarted: Bool?
+    /// The task's `countOfBytesSent`: bytes of request BODY handed to the
+    /// connection. Zero proves nothing for a request with no body.
+    var bodyBytesSent: Int64?
+    /// Whether the request had a body to send at all.
+    var hadBody = false
+}
+
+extension APIError {
+    /// WHETHER A FAILED REQUEST PROVABLY NEVER REACHED THE SERVER (verify6
+    /// Z1). By EVIDENCE first, by the error's code only when there is none:
+    ///
+    ///   1. Anything that says the request went out wins: a transaction that
+    ///      started its request, or body bytes sent. Then it may have
+    ///      arrived, whatever the code (a "not connected" raised on a
+    ///      connection that dropped mid-request is exactly this).
+    ///   2. Metrics that show no transaction ever started a request are
+    ///      proof it was not sent, whatever the code (a timeout while still
+    ///      connecting; a true offline save, which keeps its friendly
+    ///      message).
+    ///   3. With no metrics, a request that HAD a body and sent none of it
+    ///      was not sent. A bodyless one proves nothing that way.
+    ///   4. Otherwise the code list: only failures that cannot follow a
+    ///      send. `.notConnectedToInternet` is NOT on it: CFNetwork reports
+    ///      an interface that went away under a live request the same way.
+    static func neverSent(code: URLError.Code?, evidence: SendEvidence?) -> Bool {
+        if let evidence {
+            if evidence.requestStarted == true || (evidence.bodyBytesSent ?? 0) > 0 { return false }
+            if evidence.requestStarted == false { return true }
+            if evidence.hadBody, evidence.bodyBytesSent == 0 { return true }
+        }
+        return code.map(notSentCodes.contains) ?? false
+    }
+}
+
+extension APIError {
+    /// The fallback, used only when the task left no evidence (`neverSent`).
+    /// The transport failures that provably happen BEFORE a request is sent:
+    /// no host, no connection, a TLS handshake refused. Every
+    /// other failure (a timeout, a dropped connection, an answer that did
+    /// not read, a cancellation, anything unknown, any error that is not a
+    /// URLError) may have followed the request reaching the server, so a
+    /// calendar write that ends there freezes its pane (verify5 Y2: when in
+    /// doubt, freeze).
+    static let notSentCodes: Set<URLError.Code> = [
+        .badURL, .unsupportedURL, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+        .appTransportSecurityRequiresSecureConnection, .secureConnectionFailed,
+        .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateNotYetValid,
+        .serverCertificateHasUnknownRoot, .clientCertificateRejected, .clientCertificateRequired,
+    ]
 }
 
 extension APIError: LocalizedError {

@@ -513,3 +513,186 @@ enum EventGuests {
         return "GMT\(seconds < 0 ? "-" : "+")\(hours)" + (minutes == 0 ? "" : ":\(String(format: "%02d", minutes))")
     }
 }
+
+// MARK: - a guest the title named (wave 6)
+
+/// "with steven" in the title, and who the daemon says that most likely is:
+/// OFFERED on the guests line, never added. Not a guest until the user says
+/// so, and so not in the draft's guests, not counted by the save controls and
+/// never sent anywhere.
+struct GuestSuggestion: Hashable, Sendable {
+    /// The name as typed in the title.
+    let name: String
+    /// The correspondent of that name the user most recently exchanged mail
+    /// with.
+    let best: NamedPerson
+    /// The daemon's other candidates, quietly, at most two.
+    let others: [NamedPerson]
+}
+
+extension EventGuests {
+    /// Candidates one suggestion shows at most: the daemon's own cap.
+    static let suggestionCap = 3
+
+    /// A typed name's identity: folded, single-spaced.
+    static func nameKey(_ name: String) -> String {
+        name.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// The names the daemon is asked about: every name the title carries
+    /// that has not been answered in this pane, while the guests line is open
+    /// (a calendar that may not invite offers nobody).
+    static func namesToAsk(_ d: EventDraft, reading: TitleReading?, access: GuestAccess) -> [String] {
+        guard access == .field, let reading else { return [] }
+        var seen = Set<String>()
+        return reading.names.map(nameKey).filter { !$0.isEmpty && !d.titleRead.answered.contains($0) && seen.insert($0).inserted }
+    }
+
+    /// The one suggestion on offer, or nil: the first named person, in the
+    /// title's order, who has candidates and has not been answered. A name is
+    /// answered by its checkmark, by its x, and by the user putting any of
+    /// its candidates on the line themselves. The account's own address and
+    /// anything that is not a whole address are never offered.
+    static func suggestion(
+        _ d: EventDraft, reading: TitleReading?, access: GuestAccess, people: [String: [NamedPerson]],
+        owner: String?
+    ) -> GuestSuggestion? {
+        guard access == .field, let reading else { return nil }
+        let onLine = read(d.guests).keys
+        let me = owner.map(key) ?? ""
+        for name in reading.names {
+            let id = nameKey(name)
+            guard !id.isEmpty, !d.titleRead.answered.contains(id), let found = people[id] else { continue }
+            var seen = Set<String>()
+            let candidates = found.filter { person in
+                let k = key(person.addr)
+                return isAddress(person.addr) && k != me && seen.insert(k).inserted
+            }.prefix(suggestionCap)
+            guard let best = candidates.first else { continue }
+            // Already invited by hand: there is nothing to suggest.
+            if candidates.contains(where: { onLine.contains(key($0.addr)) }) { continue }
+            return GuestSuggestion(name: name, best: best, others: Array(candidates.dropFirst()))
+        }
+        return nil
+    }
+
+    /// The checkmark: the person becomes a real guest, at the end of the
+    /// line as a whole pill, and the name is answered.
+    static func accepting(_ person: NamedPerson, for name: String, in d: EventDraft) -> EventDraft {
+        var out = d
+        let existing = split(d.guests)
+        if !existing.contains(where: { key(bare($0)) == key(person.addr) }) {
+            // A list ending in a comma is all pills.
+            out.guests = (existing + [person.addr]).joined(separator: ", ") + ","
+        }
+        out.titleRead.answered.insert(nameKey(name))
+        return out
+    }
+
+    /// The x: nobody is added, and the name is not offered again in this
+    /// pane.
+    static func dismissing(_ name: String, in d: EventDraft) -> EventDraft {
+        var out = d
+        out.titleRead.answered.insert(nameKey(name))
+        return out
+    }
+
+    /// What the daemon is asked for a typed name, most specific first: the
+    /// name as typed, then its first word alone ("ana downtown" is Ana).
+    ///
+    /// NOTHING UNDER TWO LETTERS is asked: the daemon refuses it (400),
+    /// since one letter matches a large part of anybody's contacts.
+    static func queries(for name: String) -> [String] {
+        let words = nameKey(name).split(separator: " ").map(String.init)
+        guard let first = words.first else { return [] }
+        let all = words.count > 1 ? [words.joined(separator: " "), first] : [first]
+        return all.filter(askable)
+    }
+
+    /// The daemon's own minimum (`CALENDAR_PEOPLE_NAME_MIN`).
+    static let minQuery = 2
+
+    /// Whether a name is long enough to ask about, COUNTED AS THE DAEMON
+    /// COUNTS IT (`typed_name_len`, verify8 V8-13): the letters and digits
+    /// of its first word, the punctuation around the word dropped. "s.",
+    /// "(s)" and "o'" are one letter whatever their length, and so is
+    /// "s ng": the store matches from the first word.
+    static func askable(_ name: String) -> Bool {
+        let first = name.split(whereSeparator: \.isWhitespace)
+            .map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
+            .first { !$0.isEmpty } ?? ""
+        return first.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count >= minQuery
+    }
+
+    /// How one question to the daemon about a name came out.
+    enum NameAsk: Hashable, Sendable {
+        case people([NamedPerson])
+        /// The network, a 500: no answer at all.
+        case failed
+        /// A daemon older than the route: there will never be an answer.
+        case noRoute
+    }
+
+    /// What a name's questions (`queries(for:)`, in order) add up to: the
+    /// people to remember for it, or NIL when nothing should be remembered
+    /// and the name is asked again the next time the names change.
+    ///
+    /// A FAILURE IS NOT "NOBODY" (verify7 E9). One dropped request used to be
+    /// stored as an empty answer, and the name was never asked again for the
+    /// life of the pane. Now the first question that found somebody is the
+    /// answer; a daemon without the route is nobody, for good; and with
+    /// nobody found, any question that failed leaves the name unanswered.
+    static func nameAnswer(_ asks: [NameAsk]) -> [NamedPerson]? {
+        var failed = false
+        for ask in asks {
+            switch ask {
+            case .people(let found) where !found.isEmpty: return found
+            case .people: continue
+            case .noRoute: return []
+            case .failed: failed = true
+            }
+        }
+        return failed ? nil : []
+    }
+
+    /// Whether the questions can stop here: somebody was found, or the route
+    /// is not there.
+    static func nameSettled(by ask: NameAsk) -> Bool {
+        switch ask {
+        case .people(let found): !found.isEmpty
+        case .noRoute: true
+        case .failed: false
+        }
+    }
+
+    // MARK: the keyboard and the suggestion
+
+    /// How long a suggestion has to have been on screen before Tab from the
+    /// title lands on it.
+    static let suggestionSettle: TimeInterval = 0.75
+
+    /// Whether Tab pressed in the title goes to the suggestion box (true) or
+    /// on to the day, as it does with nothing offered (false).
+    ///
+    /// A LATE ANSWER DOES NOT MOVE WHERE TAB GOES (verify7 E10). The lookup
+    /// answers behind the pane, whenever it answers; a person tabbing out of
+    /// the title at that moment is going to the day well, and would land
+    /// instead on a box they have not seen, where ↵ makes somebody a guest.
+    /// So the box takes Tab only once it has been showing for
+    /// `suggestionSettle`, and only from the title: with the caret already
+    /// past it, Tab is the fields' own whatever arrives.
+    static func tabTakesSuggestion(caretInTitle: Bool, shownFor: TimeInterval?) -> Bool {
+        guard caretInTitle, let shownFor else { return false }
+        return shownFor >= suggestionSettle
+    }
+
+    /// Whether the keyboard, which is on the suggestion box, may stay there
+    /// when the offer changes. Only while it is the SAME name's offer: when
+    /// one name is answered and the next person is offered in its place, ↵
+    /// must not add somebody the user never tabbed to.
+    static func keyboardStays(was: GuestSuggestion?, now: GuestSuggestion?) -> Bool {
+        guard let was, let now else { return false }
+        return nameKey(was.name) == nameKey(now.name) && was.best == now.best
+    }
+}
+

@@ -93,6 +93,37 @@ enum Command {
     /// live per account at a time, it expires in minutes, and it is spent on
     /// first use or after a handful of failed claims.
     Pair(PairArgs),
+    /// See where this mailbox stands against its daily triage caps, and lift
+    /// one for the rest of the day.
+    Triage(TriageArgs),
+}
+
+#[derive(Args)]
+struct TriageArgs {
+    #[command(subcommand)]
+    command: TriageCommand,
+}
+
+#[derive(Subcommand)]
+enum TriageCommand {
+    /// Print today's runs against the daily caps and how many jobs they are
+    /// holding until tomorrow.
+    Status,
+    /// Allow RUNS more investigations today and let the held jobs run now.
+    ///
+    /// Works on a running daemon: the worker reads the grant on its next job.
+    /// The grant lasts until midnight UTC and REPLACES any earlier grant for
+    /// the day, so `grant 0` takes it back. Each run is a model job, so this
+    /// spends against the LLM budget.
+    Grant {
+        /// Extra runs for today, on top of the configured cap.
+        runs: u32,
+        /// Raise the background cap (backfill, refreshes, revisits) instead of
+        /// the total. Background runs still count toward the total, so this
+        /// only helps while the total has room.
+        #[arg(long)]
+        background: bool,
+    },
 }
 
 #[derive(Args)]
@@ -664,6 +695,7 @@ fn main() -> ExitCode {
         Command::Serve(args) => cmd_serve(config, cap_sources, args),
         Command::Token(args) => cmd_token(&config, args),
         Command::Pair(args) => cmd_pair(&config, args),
+        Command::Triage(args) => cmd_triage(&config, args),
     };
 
     match result {
@@ -1241,6 +1273,59 @@ fn check_transfer_usable(transfer: &CredentialTransfer) -> Result<(), squelch_co
 // NOTHING HERE PRINTS SECRET MATERIAL EXCEPT THE ONE LINE THAT IS SUPPOSED TO.
 // `token issue` prints its plaintext once, `pair` prints its code once, and
 // `token list` prints neither, not even the stored hashes.
+
+/// `triage status` and `triage grant`: the store directly, like `token`, so
+/// they work in a tenant pod beside the running daemon.
+fn cmd_triage(config: &Config, args: &TriageArgs) -> Result<(), squelch_core::CoreError> {
+    use squelch_core::triage::agent_config::{BACKGROUND_BUDGET_KEY, TOTAL_BUDGET_KEY};
+    let (store, account_id) = open_account_store(config)?;
+    let agent = &config.triage.agent;
+    if let TriageCommand::Grant { runs, background } = args.command {
+        let key = if background {
+            BACKGROUND_BUDGET_KEY
+        } else {
+            TOTAL_BUDGET_KEY
+        };
+        let released = store.grant_daily_runs(account_id, key, runs, agent, chrono::Utc::now())?;
+        println!(
+            "granted {runs} extra {} runs until midnight UTC; released {released} held jobs",
+            if background { "background" } else { "total" }
+        );
+    }
+    let status = store.daily_budget_status(account_id, agent, chrono::Utc::now())?;
+    println!(
+        "total       {} of {} runs today",
+        status.total_used, status.total_cap
+    );
+    println!(
+        "background  {} of {} runs today",
+        status.background_used, status.background_cap
+    );
+    println!(
+        "held until tomorrow: {} new mail, {} background, {} revisits",
+        status.held_arrival, status.held_background, status.held_revisit
+    );
+    if status.total_used >= status.total_cap
+        && (status.held_background > 0
+            || matches!(
+                args.command,
+                TriageCommand::Grant {
+                    background: true,
+                    ..
+                }
+            ))
+    {
+        println!(
+            "note: the total is spent, so no background grant helps until it has room: `squelchd triage grant <runs>`"
+        );
+    }
+    if status.held_revisit > 0 {
+        println!(
+            "note: revisits also answer to [revisit].daily_cap, which a grant does not raise; they run tomorrow"
+        );
+    }
+    Ok(())
+}
 
 /// The URL scheme Passband registers for pairing deep links.
 const PAIR_LINK_SCHEME: &str = "passband://pair";
@@ -1874,6 +1959,11 @@ async fn gather_store_metrics(
             devices_paired,
             clients,
             triage_jobs: store.triage_job_counts(account_id)?,
+            triage_budget: store.daily_budget_status(
+                account_id,
+                &config.triage.agent,
+                chrono::Utc::now(),
+            )?,
             retriage: store.retriage_progress(account_id)?,
         })
     })
@@ -3559,6 +3649,19 @@ mod tests {
         // A name is not optional: an unlabeled token is one nobody can pick out
         // of `token list` to revoke.
         assert!(Cli::try_parse_from(["squelchd", "token", "issue"]).is_err());
+
+        match Cli::parse_from(["squelchd", "triage", "grant", "500", "--background"]).command {
+            Command::Triage(TriageArgs {
+                command: TriageCommand::Grant { runs, background },
+            }) => assert_eq!((runs, background), (500, true)),
+            _ => panic!("expected triage grant"),
+        }
+        assert!(matches!(
+            Cli::parse_from(["squelchd", "triage", "status"]).command,
+            Command::Triage(TriageArgs {
+                command: TriageCommand::Status
+            })
+        ));
 
         match Cli::parse_from(["squelchd", "pair"]).command {
             Command::Pair(args) => assert!(args.url.is_none()),

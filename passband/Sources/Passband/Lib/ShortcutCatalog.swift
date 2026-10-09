@@ -75,6 +75,7 @@ enum ShortcutCatalog {
         Group(
             title: "Navigate",
             items: [
+                // Rules and Groups are Settings panes; their digits still open them.
                 Item(["1", "2", "3", "4", "5"], "sitrep · emails · auth · rules · groups"),
                 Item(["⌘["], "back"),
                 Item(["⌘]"], "forward"),
@@ -84,7 +85,7 @@ enum ShortcutCatalog {
                 Item(["⌘⇧K"], "new ask chat"),
                 Item(["⌘,"], "settings"),
                 Item(["g"], "auth messages"),
-                Item(["T"], "rules"),
+                Item(["T"], "rules (in settings)"),
                 Item(["A"], "audit log (in settings)"),
             ]),
         Group(
@@ -104,7 +105,7 @@ enum ShortcutCatalog {
     static let calendarGroup = Group(
         title: "Calendar",
         items: [
-            Item(["m", "a"], "month / agenda"),
+            Item(["m", "w", "a"], "month / week / agenda"),
             Item(["j", "k"], "move selection"),
             Item(["Enter"], "open the mail behind it"),
             Item(["y"], "going (again: not going)"),
@@ -112,10 +113,12 @@ enum ShortcutCatalog {
             Item(["n"], "new event"),
             Item(["e"], "edit event"),
             Item(["⌘↵"], "save the event"),
+            Item(["Tab"], "new event: to a suggested guest"),
             Item(["⌫"], "delete event"),
             Item(["←", "→", "↑", "↓"], "month: move the day"),
-            Item(["[", "]"], "month: previous / next"),
-            Item(["t"], "month: today"),
+            Item(["←", "→"], "week: move the day"),
+            Item(["[", "]"], "month, week: previous / next"),
+            Item(["t"], "month, week: today"),
             Item(["Enter"], "month: open the day"),
         ])
 

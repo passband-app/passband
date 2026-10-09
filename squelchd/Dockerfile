@@ -16,6 +16,15 @@ ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 WORKDIR /build
 
+# The compiler is rust-toolchain.toml's, not the image's; see that file's
+# header for why, and for what a bump of it reaches. Before the platform RUN
+# below on purpose: nothing here reads TARGETPLATFORM, so the multi-arch build
+# shares this layer between its two platforms instead of downloading the
+# toolchain twice, and the target is added to this toolchain, the active one
+# in a directory that holds the toml.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update
+
 RUN set -eux; \
     case "$TARGETPLATFORM" in \
       linux/amd64) echo x86_64-unknown-linux-gnu > /rust-triple ;; \

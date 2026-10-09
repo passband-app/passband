@@ -4,11 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Passband MCP vs Slashy MCP</title>
-    <meta name="description" content="Slashy's MCP server lets your AI agent draft, send, schedule and label from your mailbox. Passband's Agent MCP briefs your agent from its triage, writes mail only as far as you allow, and sign-in codes never reach it. A sourced comparison, checked October 2026." />
+    <meta name="description" content="An AI agent with your whole inbox is a path to every account that resets by email. Slashy's MCP server lets an agent draft, send, schedule and label from your mailbox. Passband's Agent MCP briefs your agent, keeps sign-in codes and reset links away from it, and writes mail only as far as you allow. A sourced comparison, checked October 2026." />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Passband" />
     <meta property="og:title" content="Passband MCP vs Slashy MCP" />
-    <meta property="og:description" content="Slashy's MCP server lets your AI agent draft, send, schedule and label from your mailbox. Passband's Agent MCP briefs your agent from its triage, writes mail only as far as you allow, and sign-in codes never reach it. A sourced comparison, checked October 2026." />
+    <meta property="og:description" content="An AI agent with your whole inbox is a path to every account that resets by email. Slashy's MCP server lets an agent draft, send, schedule and label from your mailbox. Passband's Agent MCP briefs your agent, keeps sign-in codes and reset links away from it, and writes mail only as far as you allow. A sourced comparison, checked October 2026." />
     <meta property="og:url" content="https://passband.app/mcp-vs-slashy" />
     <meta property="og:image" content="https://passband.app/og.png" />
     <meta property="og:image:width" content="1200" />
@@ -45,7 +45,7 @@
     -->
     <link rel="stylesheet" href="/site.css" />
     <style>
-      h1 { max-width: 16ch; }
+      h1 { max-width: 19ch; }
       .lede { max-width: 42rem; }
 
       /* THE READOUT: four measurements, each read off both instruments.
@@ -166,6 +166,9 @@
       }
       .fine-print { margin: 1.5rem 0 0; color: var(--faint); font-size: 0.9rem; max-width: 46rem; }
 
+      /* THE ATTACK SURFACE: three steps on the briefs' grid, numbered. */
+      .steps code { font-size: 11px; letter-spacing: 0.1em; color: var(--accent-ink); }
+
       /* AN EMAIL THAT STEERS THE AGENT: what is in reach, side by side. */
       .cmp td code { font-size: 0.82em; overflow-wrap: anywhere; }
       .duo { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-top: 2.5rem; }
@@ -229,18 +232,19 @@
     <main>
       <section class="hero">
         <p class="matchup"><b>Passband MCP</b> <i>vs</i> <span>Slashy MCP</span> <small>Checked October 2026</small></p>
-        <h1>A briefing, or a remote control.</h1>
+        <h1>An agent with your inbox holds the keys to your life.</h1>
         <p class="lede">
-          Both connect your AI agent to your email over MCP. They make opposite
-          bets. Slashy's server hands your agent Slashy's own toolset: it can
+          Email is how every other account you own gets reset, and an AI agent
+          reads whatever lands there, including mail written to steer it.
+          Slashy's MCP server hands that agent Slashy's own toolset: it can
           &ldquo;draft, send, reply, schedule, label, and attach files,&rdquo;
-          create calendar events, research your contacts and set up
-          automations. Passband's Agent MCP hands your agent what Passband's
-          triage already worked out: what needs you and why, what is due, what
-          is on its way, and the instructions you gave it for each sender. It
-          writes mail only as far as you allow: out of the box a draft you
-          send yourself, and sending only if you turn it on. Sign-in codes and
-          password reset links never reach it.
+          with your calendar and contacts alongside, and no filter documented
+          for sign-in codes. Passband's Agent MCP is built for the day your
+          agent is fooled. It hands over what triage already worked out, what
+          needs you and why, what is due, what is on its way, and it keeps
+          back the rest. Sign-in codes and password reset links never reach
+          it, and it writes mail only as far as you allow: by default, a
+          draft you send yourself.
         </p>
         <dl class="vs">
           <div>
@@ -274,8 +278,115 @@
         </dl>
       </section>
 
+      <section class="section" id="risk">
+        <p class="num">01 &middot; THE ATTACK SURFACE</p>
+        <h2>Your inbox <em>opens everything else.</em></h2>
+        <p class="intro">
+          Almost every account you own can be reset by an email. That makes
+          your inbox the most valuable thing an attacker can reach, and an AI
+          agent is the newest way to reach it: an agent reads whatever
+          arrives, and anyone can send you mail.
+        </p>
+        <div class="brief steps">
+          <div>
+            <code>01</code>
+            <h3>Anyone can write to your agent</h3>
+            <p>An agent cannot reliably tell your instructions from text inside an email it was asked to read. A message written to steer it sits in the same inbox as everything else. This is prompt injection, and it has no complete fix today.</p>
+          </div>
+          <div>
+            <code>02</code>
+            <h3>It acts with your hands</h3>
+            <p>Whatever its tools allow, a steered agent can do: read any thread, send as you, then file or trash the evidence. The agent is not the attacker. It is the attacker's way in.</p>
+          </div>
+          <div>
+            <code>03</code>
+            <h3>Your inbox is the reset button</h3>
+            <p>Sign-in codes and password reset links arrive by email. An agent that can read them is a path to your bank, your domain, your cloud accounts and your payroll: not one mailbox, your whole life online.</p>
+          </div>
+        </div>
+        <div class="duo">
+          <div>
+            <span class="tag">Slashy MCP</span>
+            <h3>The tools in reach include sending.</h3>
+            <p>An email written to steer an agent lands among the mail it reads. Through Slashy's server, the tools that agent can call include <code>send_email</code>, with files attached from your Drive, and the ones that label mail, schedule sends and create automations.</p>
+            <p>Slashy's guide says so itself: <q>Prompts that say &ldquo;send&rdquo; will send immediately.</q> The skill file it ships tells the agent to <q>assume &ldquo;draft&rdquo; unless the user explicitly says &ldquo;send&rdquo;</q>, which is an instruction to the model, not a lock.</p>
+            <p>Slashy says it <q>sanitizes and isolates incoming email content from system instructions before it reaches any model</q>, and its Read Mode stops its own agent from sending. Its MCP docs do not say whether either applies to an outside agent you connect.</p>
+          </div>
+          <div class="pb">
+            <span class="tag">Passband Agent MCP</span>
+            <h3>Worst case out of the box: a rule, or a draft you have to send.</h3>
+            <p>A steered agent can change a sender rule inside Passband, which applies only to mail that arrives after it, or leave a draft, marked as the agent's, that goes nowhere until you press send. Nothing it can do out of the box sends mail.</p>
+            <p>Turn on &ldquo;Send, with your approval&rdquo; and the worst case grows to a message sent from your address. The agent is told to show you each one and wait for your yes, Passband's outbound guard reads all of it for anything that looks like a password or a key with no override, and every send is logged. But the yes happens in the agent's chat, where Passband cannot check it. Drafts only is the hard stop.</p>
+            <p>Every rule, draft and send by an agent is recorded as the agent's. A rule or draft whose record cannot be written is not written.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          Passband does not make an agent safe to steer. Mail your agent is
+          allowed to read can still be read by an agent that has been fooled,
+          and what happens to it next depends on the other tools you gave
+          that agent. What Passband does is take the account-takeover path
+          out of reach, keep sending off until you turn it on, and write
+          down everything an agent does.
+        </p>
+      </section>
+
+      <section class="section" id="sealed">
+        <p class="num">02 &middot; WHAT NEVER REACHES THE AGENT</p>
+        <h2>Sign-in codes <em>stay sealed.</em></h2>
+        <p class="intro">
+          So Passband cuts the path at its source. Mail carrying a live
+          sign-in code or a password reset link never reaches your agent. It is not redacted; it is absent. Ask for it by
+          id and the answer is the same not-found as a message that does not
+          exist, so even its existence stays in Passband.
+        </p>
+
+        <div class="chain" aria-label="Your Gmail feeds Passband's triage. Triage passes assessed mail to Agent MCP, which serves your agent. Sign-in codes, password reset links, spam and mail not yet assessed stay in Passband.">
+          <div class="node">
+            <span class="tag">Source</span>
+            <b>Your Gmail</b>
+            <p>Every message, as it arrives.</p>
+          </div>
+          <div class="link" aria-hidden="true"><span>sync</span></div>
+          <div class="node lit">
+            <span class="tag">Passband</span>
+            <b>Triage</b>
+            <p>Triages each message: what needs you, and what an agent may see.</p>
+          </div>
+          <div class="held">
+            <span class="tag">Stays in Passband</span>
+            <ul>
+              <li>Sign-in codes</li>
+              <li>Password reset links</li>
+              <li>Spam</li>
+              <li>Mail not yet assessed</li>
+            </ul>
+          </div>
+          <div class="link" aria-hidden="true"><span>assessed</span></div>
+          <div class="node lit">
+            <span class="tag">The door</span>
+            <b>Agent MCP</b>
+            <p>Seven tools, plus the writes you allow. Plain text only, never HTML.</p>
+          </div>
+          <div class="link" aria-hidden="true"><span>briefing</span></div>
+          <div class="node">
+            <span class="tag">Yours</span>
+            <b>Your agent</b>
+            <p>Claude, OpenClaw, Hermes Agent, Codex, Cursor.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          Passband's triage decides which messages carry a code or a reset
+          link, and a message it has not assessed yet stays closed to agents
+          until it has. A thread is readable only if every message in it is.
+          A routine &ldquo;new sign-in to your account&rdquo; notice with no
+          code in it may still be readable. The full rules are in the
+          <a href="/security">threat model</a>.
+        </p>
+
+      </section>
+
       <section class="section" id="compare">
-        <p class="num">01 &middot; SIDE BY SIDE</p>
+        <p class="num">03 &middot; SIDE BY SIDE</p>
         <h2>Where each one is <em>ahead.</em></h2>
         <p class="intro">
           Slashy is ahead on reach: it hands the agent more of the mailbox,
@@ -364,10 +475,10 @@
       </section>
 
       <section class="section" id="what-it-gets">
-        <p class="num">02 &middot; WHAT YOUR AGENT GETS</p>
+        <p class="num">04 &middot; WHAT YOUR AGENT GETS</p>
         <h2>Your agent, <em>briefed.</em></h2>
         <p class="intro">
-          Passband reads every message as it arrives and decides what needs
+          Passband triages every message as it arrives and decides what needs
           you. Agent MCP hands your agent that judgment, so it starts from an
           answer instead of a pile of mail. Seven tools, always there, in plain
           terms:
@@ -440,79 +551,8 @@
         </p>
       </section>
 
-      <section class="section" id="sealed">
-        <p class="num">03 &middot; WHAT NEVER REACHES THE AGENT</p>
-        <h2>Sign-in codes <em>stay sealed.</em></h2>
-        <p class="intro">
-          Mail carrying a live sign-in code or a password reset link never
-          reaches your agent. It is not redacted; it is absent. Ask for it by
-          id and the answer is the same not-found as a message that does not
-          exist, so even its existence stays in Passband.
-        </p>
-
-        <div class="chain" aria-label="Your Gmail feeds Passband's triage. Triage passes assessed mail to Agent MCP, which serves your agent. Sign-in codes, password reset links, spam and mail not yet assessed stay in Passband.">
-          <div class="node">
-            <span class="tag">Source</span>
-            <b>Your Gmail</b>
-            <p>Every message, as it arrives.</p>
-          </div>
-          <div class="link" aria-hidden="true"><span>sync</span></div>
-          <div class="node lit">
-            <span class="tag">Passband</span>
-            <b>Triage</b>
-            <p>Reads each message, decides what needs you, and decides what an agent may see.</p>
-          </div>
-          <div class="held">
-            <span class="tag">Stays in Passband</span>
-            <ul>
-              <li>Sign-in codes</li>
-              <li>Password reset links</li>
-              <li>Spam</li>
-              <li>Mail not yet assessed</li>
-            </ul>
-          </div>
-          <div class="link" aria-hidden="true"><span>assessed</span></div>
-          <div class="node lit">
-            <span class="tag">The door</span>
-            <b>Agent MCP</b>
-            <p>Seven tools, plus the writes you allow. Plain text only, never HTML.</p>
-          </div>
-          <div class="link" aria-hidden="true"><span>briefing</span></div>
-          <div class="node">
-            <span class="tag">Yours</span>
-            <b>Your agent</b>
-            <p>Claude, OpenClaw, Hermes Agent, Codex, Cursor.</p>
-          </div>
-        </div>
-        <p class="fine-print">
-          Passband's triage decides which messages carry a code or a reset
-          link, and a message it has not assessed yet stays closed to agents
-          until it has. A thread is readable only if every message in it is.
-          A routine &ldquo;new sign-in to your account&rdquo; notice with no
-          code in it may still be readable. The full rules are in the
-          <a href="/security">threat model</a>.
-        </p>
-
-        <div class="duo">
-          <div>
-            <span class="tag">Slashy MCP</span>
-            <h3>The tools in reach include sending.</h3>
-            <p>An email written to steer an agent lands among the mail it reads. Through Slashy's server, the tools that agent can call include <code>send_email</code>, with files attached from your Drive, and the ones that label mail, schedule sends and create automations.</p>
-            <p>Slashy's guide says so itself: <q>Prompts that say &ldquo;send&rdquo; will send immediately.</q> The skill file it ships tells the agent to <q>assume &ldquo;draft&rdquo; unless the user explicitly says &ldquo;send&rdquo;</q>, which is an instruction to the model, not a lock.</p>
-            <p>Slashy says it <q>sanitizes and isolates incoming email content from system instructions before it reaches any model</q>, and its Read Mode stops its own agent from sending. Its MCP docs do not say whether either applies to an outside agent you connect.</p>
-          </div>
-          <div class="pb">
-            <span class="tag">Passband Agent MCP</span>
-            <h3>Worst case out of the box: a rule, or a draft you have to send.</h3>
-            <p>A steered agent can change a sender rule inside Passband, which applies only to mail that arrives after it, or leave a draft, marked as the agent's, that goes nowhere until you press send. Nothing it can do out of the box sends mail.</p>
-            <p>Turn on &ldquo;Send, with your approval&rdquo; and the worst case grows to a message sent from your address. The agent is told to show you each one and wait for your yes, Passband's outbound guard reads all of it for anything that looks like a password or a key with no override, and every send is logged. But the yes happens in the agent's chat, where Passband cannot check it. Drafts only is the hard stop.</p>
-            <p>Every rule, draft and send by an agent is recorded as the agent's. A rule or draft whose record cannot be written is not written.</p>
-          </div>
-        </div>
-      </section>
-
       <section class="section" id="connect">
-        <p class="num">04 &middot; HOW IT CONNECTS</p>
+        <p class="num">05 &middot; HOW IT CONNECTS</p>
         <h2>Add it where your agent <em>already lives.</em></h2>
         <p class="intro">
           Passband for Mac writes the exact setup for your agent in Settings,
@@ -538,7 +578,7 @@
       </section>
 
       <section class="section" id="price">
-        <p class="num">05 &middot; PRICE</p>
+        <p class="num">06 &middot; PRICE</p>
         <h2>What it costs <em>to start.</em></h2>
         <div class="price">
           <div>

@@ -87,6 +87,15 @@ const server = Bun.serve({
           : undefined,
       });
     }
+    // The comparison pages' vignettes and product shots: the app's own
+    // animations rendered to video, and captures of the real app. Flat
+    // directory, names only, so a path can never walk out of it.
+    const media = path.match(/^\/media\/([a-z0-9-]+\.(?:mp4|jpg|png))$/);
+    if (media) {
+      const asset = Bun.file(`media/${media[1]}`);
+      if (await asset.exists())
+        return new Response(asset, { headers: { "Cache-Control": "public, max-age=86400" } });
+    }
     // The homepage's download button. The appcast in this image is the truth
     // about what shipped last (newest entry first), so redirect through the
     // versioned URL below; with no releases yet, fall back to the releases page.

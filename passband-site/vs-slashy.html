@@ -132,19 +132,26 @@
       .zones h3 { margin: 0 0 0.4rem; font-size: 0.98rem; font-weight: 600; }
       .zones p { margin: 0; color: var(--dim); font-size: 0.92rem; line-height: 1.6; }
 
-      /* THE KEYS: one letter each, what it does in a line. */
-      .keys { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 clamp(1.5rem, 4vw, 3rem);
-        margin-top: 2.75rem; border-top: 1px solid var(--hair); }
-      @media (max-width: 900px) { .keys { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-      @media (max-width: 600px) { .keys { grid-template-columns: minmax(0, 1fr); } }
-      .keys > div { display: grid; grid-template-columns: 3.4rem minmax(0, 1fr); gap: 0.9rem; align-items: start;
-        padding: 1rem 0; border-bottom: 1px solid var(--hair); }
+      /* THE KEYS: one letter each, over the animation the app itself plays to
+         teach it. The videos are rendered from the app's vignette code
+         (passband/Sources/Passband/Views/Vignette and Views/Discovery), never
+         redrawn here; re-render them when a scene changes. */
+      .vigs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.8rem; margin-top: 2.75rem; }
+      @media (max-width: 900px) { .vigs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+      @media (max-width: 600px) { .vigs { grid-template-columns: minmax(0, 1fr); } }
+      .vigs figure { margin: 0; border-radius: 14px; overflow: hidden; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .vigs video { display: block; width: 100%; height: auto; background: #0b111b; }
+      .vigs figcaption { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.9rem; align-items: start;
+        padding: 1rem 1.1rem 1.15rem; border-top: 1px solid var(--hair); }
       kbd { justify-self: start; display: inline-grid; place-items: center; min-width: 2.1rem; height: 2.1rem; padding: 0 0.5rem; box-sizing: border-box;
         border-radius: 8px; background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong), 0 2px 0 rgba(0, 0, 0, 0.4);
         font: 600 0.85rem/1 var(--mono); color: var(--ink); }
-      kbd.wide { font-size: 0.68rem; letter-spacing: 0.04em; }
-      .keys b { display: block; font-weight: 600; font-size: 0.95rem; }
-      .keys p { margin: 0.15rem 0 0; color: var(--dim); font-size: 0.9rem; line-height: 1.55; }
+      kbd.wide { font-size: 0.68rem; letter-spacing: 0.04em; white-space: nowrap; }
+      .vigs b { display: block; font-weight: 600; font-size: 0.95rem; }
+      .vigs p { margin: 0.15rem 0 0; color: var(--dim); font-size: 0.9rem; line-height: 1.55; }
+      .vigs q { quotes: "\201C" "\201D"; color: var(--ink); }
+      .fine-print kbd { min-width: 1.5rem; height: 1.5rem; font-size: 0.75rem; border-radius: 6px; vertical-align: 1px; }
 
       /* TWO WAYS, side by side: Slashy in plain, Passband lit. */
       .duo { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-top: 2.5rem; }
@@ -157,7 +164,7 @@
       .duo .pb .tag { color: var(--accent-ink); }
       .duo h3 { margin: 0.6rem 0 0.6rem; font-family: var(--serif); font-weight: 500; font-size: 1.55rem; line-height: 1.12; }
       .duo p { margin: 0.55rem 0 0; color: var(--dim); font-size: 0.93rem; }
-      .duo q, .keys q { quotes: "\201C" "\201D"; color: var(--ink); }
+      .duo q { quotes: "\201C" "\201D"; color: var(--ink); }
       .duo kbd { min-width: 1.5rem; height: 1.5rem; font-size: 0.75rem; border-radius: 6px; vertical-align: 1px; }
       .fine-print { margin: 1.5rem 0 0; color: var(--faint); font-size: 0.9rem; max-width: 46rem; }
 
@@ -376,14 +383,37 @@
           </div>
         </div>
 
-        <div class="keys">
-          <div><kbd>e</kbd><span><b>Done</b><p>It leaves the board and stays in Gmail. Done is Passband's own status, so nothing is archived or deleted.</p></span></div>
-          <div><kbd>h</kbd><span><b>Remind me</b><p>Pick a preset or type a time, like &ldquo;friday&rdquo; or &ldquo;in 3 hours&rdquo;. Then it comes back to For your eyes.</p></span></div>
-          <div><kbd>v</kbd><span><b>Fix triage</b><p>Move one email in or out of For your eyes, or change what kind of mail it is. The correction is kept.</p></span></div>
-          <div><kbd>t</kbd><span><b>A rule in your words</b><p>Tell Passband what you want from a sender: <q>only tell me when the amount changes.</q> It applies from then on.</p></span></div>
-          <div><kbd class="wide">space</kbd><span><b>Flow mode</b><p>Walk For your eyes one email at a time. e is done and next; s skips and leaves it on the board.</p></span></div>
-          <div><kbd>u</kbd><span><b>Unsubscribe</b><p>Passband asks first, then usually does it in the background while you move on.</p></span></div>
+        <div class="vigs">
+          <figure>
+            <video src="/media/flow.mp4" poster="/media/flow.jpg" width="1160" height="580" autoplay muted loop playsinline preload="metadata" aria-label="Flow mode: space opens the first email, a key finishes it and the next one opens, another sets one aside."></video>
+            <figcaption><kbd class="wide">space</kbd><span><b>Flow mode</b><p>Walk For your eyes one email at a time. One key marks it done and opens the next; another skips it and leaves it on the board.</p></span></figcaption>
+          </figure>
+          <figure>
+            <video src="/media/unsubscribe.mp4" poster="/media/unsubscribe.jpg" width="1160" height="580" autoplay muted loop playsinline preload="metadata" aria-label="Unsubscribe: u sends a newsletter's sender to a tray that works through it and checks it off while the next email steps up."></video>
+            <figcaption><kbd>u</kbd><span><b>Unsubscribe</b><p>Passband asks first, then usually does it in the background while you move on.</p></span></figcaption>
+          </figure>
+          <figure>
+            <video src="/media/clearstack.mp4" poster="/media/clearstack.jpg" width="1160" height="580" autoplay muted loop playsinline preload="metadata" aria-label="Clear a sender: holding e closes a ring round the key and every email in a sender's stack is checked off."></video>
+            <figcaption><kbd class="wide">hold e</kbd><span><b>Clear a sender</b><p>In Reading, hold e and every email from that sender is done at once.</p></span></figcaption>
+          </figure>
+          <figure>
+            <video src="/media/clear.mp4" poster="/media/clear.jpg" width="840" height="480" autoplay muted loop playsinline preload="metadata" aria-label="Done: e checks one email off the board and it slides away; u brings it back."></video>
+            <figcaption><kbd>e</kbd><span><b>Done</b><p>It leaves the board and stays in Gmail. Done is Passband's own status, so nothing is archived or deleted. u brings it back.</p></span></figcaption>
+          </figure>
+          <figure>
+            <video src="/media/later.mp4" poster="/media/later.jpg" width="840" height="480" autoplay muted loop playsinline preload="metadata" aria-label="Remind me: h lifts an email off the board, it travels along the day, and drops back in."></video>
+            <figcaption><kbd>h</kbd><span><b>Remind me</b><p>Pick a preset or type a time, like &ldquo;friday&rdquo; or &ldquo;in 3 hours&rdquo;. Then it comes back to For your eyes.</p></span></figcaption>
+          </figure>
+          <figure>
+            <video src="/media/teach.mp4" poster="/media/teach.jpg" width="840" height="480" autoplay muted loop playsinline preload="metadata" aria-label="A rule: t writes a rule about one sender, then their routine mail steps aside while the one that matters stays."></video>
+            <figcaption><kbd>t</kbd><span><b>A rule in your words</b><p>Tell Passband what you want from a sender: <q>only tell me when the amount changes.</q> It applies from then on.</p></span></figcaption>
+          </figure>
         </div>
+        <p class="fine-print">
+          These loops are the app's own. Passband draws them to teach each
+          key, and they are rendered here from the same code. Press
+          <kbd>v</kbd> on any email to fix how it was triaged.
+        </p>
 
         <div class="duo">
           <div>
@@ -770,5 +800,11 @@
         <a href="/terms">Terms</a>
       </nav>
     </footer>
+    <script>
+      // The vignettes loop on their own. Someone who asked for less motion
+      // gets each one's poster, the frame the app itself shows them.
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches)
+        document.querySelectorAll("video").forEach(function (v) { v.removeAttribute("autoplay"); v.pause(); });
+    </script>
   </body>
 </html>

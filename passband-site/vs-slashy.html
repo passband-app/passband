@@ -1,0 +1,813 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Passband vs Slashy</title>
+    <meta name="description" content="Slashy drafts your replies and gives you an agent that acts on your inbox. Passband reads every message and tells you what needs you and why, so you open less of it, and never writes your email for you. A sourced comparison, checked October 2026." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Passband" />
+    <meta property="og:title" content="Passband vs Slashy" />
+    <meta property="og:description" content="Slashy drafts your replies and gives you an agent that acts on your inbox. Passband reads every message and tells you what needs you and why, so you open less of it, and never writes your email for you. A sourced comparison, checked October 2026." />
+    <meta property="og:url" content="https://passband.app/vs-slashy" />
+    <meta property="og:image" content="https://passband.app/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="4,312 emails. Three need you. Passband, over a spectrum analyzer with three marked peaks." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/icon.svg"
+      media="(prefers-color-scheme: light)"
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/icon-dark.svg"
+      media="(prefers-color-scheme: dark)"
+    />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <link
+      rel="preload"
+      href="/newsreader-var.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <!--
+      The Slashy client comparison, sibling of /mcp-vs-slashy and built on
+      /vs-superhuman: static, so a crawler reads it without running anything.
+      Every line about Slashy cites one of the sources at the bottom, read on
+      October 8, 2026, and quotes are from Slashy's own pages; every
+      line about Passband is true of the product today (ProductGuide.swift,
+      docs/TRIAGE-OPERATIONS.md, /trust, /self-host). Re-check both before
+      editing a number. The board and the Auth list are illustrations with
+      made-up mail, the same mail the landing page's mock uses.
+    -->
+    <link rel="stylesheet" href="/site.css" />
+    <style>
+      h1 { max-width: 17ch; }
+      .lede { max-width: 42rem; }
+
+      /* THE READOUT: four measurements, each read off both instruments.
+         Passband's line is the lit one. Same component as the MCP page. */
+      .vs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: clamp(2.5rem, 5vw, 3.5rem) 0 0;
+        border: 1px solid rgba(130, 186, 245, 0.2); border-radius: 12px; background: rgba(9, 13, 22, 0.7);
+        -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); overflow: hidden; }
+      .vs > div { padding: 1rem 1.1rem 1.1rem; border-left: 1px solid rgba(130, 186, 245, 0.1); }
+      .vs > div:first-child { border-left: 0; }
+      .vs dt { font: 500 10px/1.3 var(--mono); letter-spacing: 0.1em; color: var(--faintest); text-transform: uppercase;
+        min-height: 2.6em; }
+      .vs dd { margin: 0.7rem 0 0; display: grid; gap: 0.55rem; }
+      .vs dd p { margin: 0; display: grid; gap: 0.1rem; }
+      .vs dd span { font: 600 10px/1.2 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+      .vs dd b { font-family: var(--serif); font-weight: 500; font-size: 1.3rem; line-height: 1.15; color: var(--dim); }
+      .vs dd .pb span { color: var(--accent-ink); }
+      .vs dd .pb b { color: var(--ink); }
+      @media (max-width: 900px) {
+        .vs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .vs > div:nth-child(3) { border-left: 0; }
+        .vs > div:nth-child(n + 3) { border-top: 1px solid rgba(130, 186, 245, 0.1); }
+      }
+      @media (max-width: 520px) {
+        .vs { grid-template-columns: minmax(0, 1fr); }
+        .vs > div { border-left: 0; }
+        .vs > div:nth-child(n + 2) { border-top: 1px solid rgba(130, 186, 245, 0.1); }
+        .vs dt { min-height: 0; }
+        .vs dd { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; }
+      }
+
+      /* THE BOARD: a still of the Sitrep, the three zones and the record rail.
+         Made-up mail. Stacks on a phone. */
+      .board { border-radius: 16px; background: linear-gradient(180deg, #111926, #0d131c);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.22), 0 30px 80px -40px rgba(78, 155, 234, 0.45);
+        padding: clamp(1rem, 2.5vw, 1.6rem); }
+      .board-hd { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 0.6rem 1rem;
+        padding-bottom: 1rem; border-bottom: 1px solid var(--hair); }
+      .board-hd small { display: block; font: 500 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+      .board-hd b { display: block; margin-top: 0.4rem; font-family: var(--serif); font-weight: 500; font-size: 1.6rem; line-height: 1.1; }
+      .need { font: 600 10px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-ink);
+        padding: 0.4rem 0.7rem; border-radius: 99px; background: rgba(78, 155, 234, 0.14); }
+      .board-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) minmax(0, 0.95fr); gap: 1.4rem; margin-top: 1.1rem; }
+      @media (max-width: 960px) { .board-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+        .board-grid .zone:first-child { grid-column: 1 / -1; } }
+      @media (max-width: 620px) { .board-grid { grid-template-columns: minmax(0, 1fr); } }
+      .zone-h { display: flex; align-items: baseline; gap: 0.45rem; margin-bottom: 0.55rem;
+        font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+      .zone-h em { font-style: normal; color: var(--faintest); }
+      .eye { display: grid; grid-template-columns: 1.9rem minmax(0, 1fr) auto; gap: 0.1rem 0.7rem; align-items: start;
+        padding: 0.6rem 0.65rem; border-radius: 10px; }
+      .eye + .eye { margin-top: 0.15rem; }
+      .eye.over { background: rgba(255, 122, 104, 0.06); box-shadow: inset 2px 0 0 var(--danger); }
+      .av { grid-row: span 2; width: 1.9rem; height: 1.9rem; border-radius: 99px; display: grid; place-items: center;
+        font: 600 10px/1 var(--sans); }
+      .eye b { font-size: 0.88rem; font-weight: 600; }
+      .eye .line { grid-column: 2 / 4; font-size: 0.84rem; color: var(--dim); line-height: 1.45; }
+      .chip { font: 600 9.5px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap;
+        padding: 0.28rem 0.45rem; border-radius: 6px; color: var(--warn); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.5); }
+      .chip.past { color: #1b0f0c; background: var(--danger); box-shadow: none; }
+      .shelf { display: grid; gap: 0.45rem; }
+      .shelf > div { display: grid; grid-template-columns: 1.7rem minmax(0, 1fr); gap: 0.1rem 0.6rem; padding: 0.6rem 0.65rem;
+        border-radius: 10px; background: var(--canvas); box-shadow: inset 0 0 0 1px var(--hair); }
+      .tile { grid-row: span 2; width: 1.7rem; height: 1.7rem; border-radius: 6px; display: grid; place-items: center;
+        font: 700 0.8rem/1 var(--serif); }
+      .shelf b { font-size: 0.82rem; font-weight: 600; }
+      .shelf b i { font-style: normal; font-weight: 500; color: var(--faintest); margin-left: 0.3rem; }
+      .shelf span { font-size: 0.78rem; color: var(--faint); line-height: 1.4; }
+      .rail { display: grid; gap: 0.45rem; }
+      .rec { padding: 0.55rem 0.7rem 0.6rem; border-radius: 10px; background: var(--canvas); box-shadow: inset 0 0 0 1px var(--hair); }
+      .rec small { display: block; font: 600 9.5px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+      .rec p { margin: 0.35rem 0 0; font-size: 0.8rem; color: var(--dim); line-height: 1.4; }
+      .rec p b { color: var(--ink); font-weight: 600; }
+      .board-ft { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem 1rem; margin-top: 1.1rem; padding-top: 0.9rem;
+        border-top: 1px solid var(--hair); font-size: 0.82rem; color: var(--faint); }
+      .board-ft b { color: var(--dim); font-weight: 600; }
+      .board-ft small { font: 500 10px/1.5 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faintest); }
+
+      /* THE ZONES, explained, under the board. */
+      .zones { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.5rem clamp(1.25rem, 3vw, 2.5rem); margin-top: 2.25rem; }
+      @media (max-width: 900px) { .zones { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+      @media (max-width: 520px) { .zones { grid-template-columns: minmax(0, 1fr); } }
+      .zones h3 { margin: 0 0 0.4rem; font-size: 0.98rem; font-weight: 600; }
+      .zones p { margin: 0; color: var(--dim); font-size: 0.92rem; line-height: 1.6; }
+
+      /* THE KEYS: one letter each, what it does in a line. */
+      .keys { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 clamp(1.5rem, 4vw, 3rem);
+        margin-top: 2.75rem; border-top: 1px solid var(--hair); }
+      @media (max-width: 900px) { .keys { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+      @media (max-width: 600px) { .keys { grid-template-columns: minmax(0, 1fr); } }
+      .keys > div { display: grid; grid-template-columns: 3.4rem minmax(0, 1fr); gap: 0.9rem; align-items: start;
+        padding: 1rem 0; border-bottom: 1px solid var(--hair); }
+      kbd { justify-self: start; display: inline-grid; place-items: center; min-width: 2.1rem; height: 2.1rem; padding: 0 0.5rem; box-sizing: border-box;
+        border-radius: 8px; background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong), 0 2px 0 rgba(0, 0, 0, 0.4);
+        font: 600 0.85rem/1 var(--mono); color: var(--ink); }
+      kbd.wide { font-size: 0.68rem; letter-spacing: 0.04em; }
+      .keys b { display: block; font-weight: 600; font-size: 0.95rem; }
+      .keys p { margin: 0.15rem 0 0; color: var(--dim); font-size: 0.9rem; line-height: 1.55; }
+
+      /* TWO WAYS, side by side: Slashy in plain, Passband lit. */
+      .duo { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-top: 2.5rem; }
+      @media (max-width: 820px) { .duo { grid-template-columns: minmax(0, 1fr); } }
+      .duo > div { padding: 1.2rem 1.25rem 1.3rem; border-radius: 14px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .duo > div.pb { background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35), 0 0 60px -24px rgba(78, 155, 234, 0.45); }
+      .duo .tag { font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+      .duo .pb .tag { color: var(--accent-ink); }
+      .duo h3 { margin: 0.6rem 0 0.6rem; font-family: var(--serif); font-weight: 500; font-size: 1.55rem; line-height: 1.12; }
+      .duo p { margin: 0.55rem 0 0; color: var(--dim); font-size: 0.93rem; }
+      .duo q, .keys q { quotes: "\201C" "\201D"; color: var(--ink); }
+      .duo kbd { min-width: 1.5rem; height: 1.5rem; font-size: 0.75rem; border-radius: 6px; vertical-align: 1px; }
+      .fine-print { margin: 1.5rem 0 0; color: var(--faint); font-size: 0.9rem; max-width: 46rem; }
+
+      /* WHAT THAT IS WORTH: two dials and a readout. The share of mail that
+         needed nothing is measured (see the fine print under it); the seconds
+         are the reader's own. Without script it shows the default reading. */
+      .worth { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 0.8rem; margin-top: 2.75rem; }
+      @media (max-width: 820px) { .worth { grid-template-columns: minmax(0, 1fr); } }
+      .worth > div { padding: 1.3rem 1.35rem 1.4rem; border-radius: 14px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .worth h3 { margin: 0 0 1.1rem; font-family: var(--serif); font-weight: 500; font-size: 1.55rem; line-height: 1.12; }
+      .worth h3 em { font-style: normal; color: var(--accent-ink); }
+      .worth label { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem 1rem; align-items: baseline; }
+      .worth label + label { margin-top: 1.15rem; }
+      .worth label span { color: var(--dim); font-size: 0.93rem; }
+      .worth output { font: 600 0.95rem/1 var(--mono); color: var(--ink); }
+      .worth input { grid-column: 1 / -1; width: 100%; margin: 0; accent-color: var(--accent); }
+      .worth .out { display: grid; align-content: center; background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35), 0 0 60px -24px rgba(78, 155, 234, 0.45); }
+      .worth .out small { font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-ink); }
+      .worth .out b { display: block; margin: 0.6rem 0 0.5rem; font-family: var(--serif); font-weight: 500;
+        font-size: clamp(1.9rem, 3.4vw, 2.6rem); line-height: 1.05; }
+      .worth .out p { margin: 0; color: var(--dim); font-size: 0.93rem; }
+
+      /* THE AUTH PAGE: a still of the list, codes hidden until revealed. */
+      .seal { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: clamp(1.5rem, 4vw, 3.5rem); align-items: start; }
+      @media (max-width: 900px) { .seal { grid-template-columns: minmax(0, 1fr); } }
+      .auth { border-radius: 16px; background: linear-gradient(180deg, #111926, #0d131c); padding: 0.5rem;
+        box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.3), 0 30px 80px -45px rgba(79, 192, 138, 0.4); }
+      .auth-hd { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem 1rem; padding: 0.7rem 0.8rem 0.8rem;
+        font: 600 10px/1.3 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--positive); }
+      .auth-hd span { color: var(--faintest); font-weight: 500; }
+      .arow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.25rem 1rem; align-items: center;
+        padding: 0.75rem 0.8rem; border-top: 1px solid var(--hair); }
+      .arow b { font-size: 0.88rem; font-weight: 600; }
+      .arow .sub { grid-column: 1; font-size: 0.82rem; color: var(--faint); }
+      .arow .code { grid-row: 1 / span 2; grid-column: 2; display: grid; justify-items: end; gap: 0.3rem; }
+      .dots { font: 600 0.95rem/1 var(--mono); letter-spacing: 0.18em; color: var(--dim); }
+      .tick { font: 500 10px/1 var(--mono); color: var(--positive); }
+      .ask { grid-row: 1 / span 2; grid-column: 2; display: flex; flex-wrap: wrap; justify-content: end; gap: 0.35rem; }
+      .ask span { font: 600 10px/1 var(--mono); letter-spacing: 0.04em; padding: 0.4rem 0.55rem; border-radius: 99px;
+        color: var(--dim); box-shadow: inset 0 0 0 1px var(--hair-strong); white-space: nowrap; }
+      .ask span.no { color: var(--danger); box-shadow: inset 0 0 0 1px rgba(255, 122, 104, 0.45); }
+      .auth-ft { padding: 0.7rem 0.8rem 0.5rem; border-top: 1px solid var(--hair); font: 500 10px/1.5 var(--mono);
+        letter-spacing: 0.06em; text-transform: uppercase; color: var(--faintest); }
+      @media (max-width: 480px) {
+        .arow { grid-template-columns: minmax(0, 1fr); }
+        .arow .code, .ask { grid-row: auto; grid-column: 1; justify-items: start; justify-content: start; margin-top: 0.35rem; }
+      }
+      .points { margin: 0; padding: 0; list-style: none; display: grid; gap: 1.1rem; }
+      .points b { display: block; font-weight: 600; margin-bottom: 0.15rem; }
+      .points span { color: var(--dim); font-size: 0.93rem; }
+
+      /* AGENT: one paragraph and the way to the long version. */
+      .more { display: inline-block; margin-top: 0.25rem; font-weight: 600; }
+
+      /* THE COMPARISON: site.css's table, plus a verdict column. On a phone
+         each row becomes its own card instead of scrolling sideways. */
+      .cmp table { min-width: 0; }
+      .cmp th:nth-child(1) { width: 16%; }
+      .cmp th:nth-child(2), .cmp th:nth-child(3) { width: 34%; }
+      .cmp td:first-child { white-space: normal; }
+      .cmp td.pb { color: var(--ink); }
+      .cmp td q { quotes: "\201C" "\201D"; color: var(--dim); }
+      .cmp td.pb q { color: var(--ink); }
+      .win { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 99px; white-space: nowrap;
+        font: 600 10px/1.4 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+      .win.pb { color: var(--accent-ink); background: rgba(78, 155, 234, 0.14); }
+      .win.sh { color: var(--dim); background: rgba(168, 180, 196, 0.1); }
+      .win.even { color: var(--faint); box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .cmp td small { margin-top: 0.35rem; }
+      @media (max-width: 760px) {
+        .cmp.table-wrap { box-shadow: none; border-radius: 0; overflow: visible; }
+        .cmp table, .cmp tbody, .cmp tr, .cmp td { display: block; width: auto; }
+        .cmp thead { display: none; }
+        .cmp tr { margin-bottom: 0.7rem; border-radius: 12px; background: var(--canvas);
+          box-shadow: inset 0 0 0 1px var(--hair); padding: 0.85rem 1rem 0.95rem; }
+        .cmp td { border-top: 0; padding: 0.3rem 0; }
+        .cmp td:first-child { font-family: var(--serif); font-weight: 500; font-size: 1.2rem; padding-bottom: 0.45rem; }
+        .cmp td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 0.1rem;
+          font: 600 10px/1.3 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+        .cmp td.verdict { padding-top: 0.6rem; }
+      }
+
+      /* WHO: the two recommendations, then the way in. */
+      .who h3 { font-size: 1.7rem; }
+      .who ul { margin: 0.8rem 0 0; padding: 0; list-style: none; display: grid; gap: 0.5rem; }
+      .who li { display: flex; gap: 0.6rem; color: var(--dim); font-size: 0.93rem; }
+      .who li::before { content: "\2022"; color: var(--faintest); }
+      .who .pb li::before { color: var(--accent-ink); }
+      .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.4rem; margin-top: 2rem; }
+
+      /* SOURCES */
+      .sources { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.55rem; max-width: 50rem;
+        border-top: 1px solid var(--hair); padding-top: 1.25rem; font-size: 0.88rem; color: var(--faint); }
+      .sources a { overflow-wrap: anywhere; }
+      .sources small { color: var(--faintest); }
+      .src-h { margin: 1.75rem 0 0.6rem; font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+      .checked { margin: 0 0 1rem; font: 600 11px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+        color: var(--accent-ink); }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="/"><img src="/mark.svg" alt="" width="42" height="23" /><span>passband</span></a>
+      <nav class="nav">
+        <a class="keep" href="/self-host">Self-host</a>
+        <a class="keep" href="/trust">Trust</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="matchup"><b>Passband</b> <i>vs</i> <span>Slashy</span> <small>Checked October 2026</small></p>
+        <h1>An inbox that writes back, or one that stays quiet.</h1>
+        <p class="lede">
+          Slashy is an AI email client that does more of your email for you.
+          In its own words it &ldquo;drafts replies in your tone, triages your
+          inbox before you see it, and makes sure no follow-up slips,&rdquo;
+          with an agent you can text to search, schedule and send. Passband is
+          a different idea. It reads every message as it arrives and tells you
+          what needs you and why, so you open fewer emails, and it never
+          writes your email for you. Sign-in codes get a sealed page of their
+          own. The rest is squelched.
+        </p>
+        <dl class="vs">
+          <div>
+            <dt>Price</dt>
+            <dd>
+              <p class="sh"><span>Slashy</span><b>$25 to $30 a user a month</b></p>
+              <p class="pb"><span>Passband</span><b>Free in Beta</b></p>
+            </dd>
+          </div>
+          <div>
+            <dt>Who writes your replies</dt>
+            <dd>
+              <p class="sh"><span>Slashy</span><b>A draft in your voice, waiting</b></p>
+              <p class="pb"><span>Passband</span><b>You do</b></p>
+            </dd>
+          </div>
+          <div>
+            <dt>Where your mail is kept</dt>
+            <dd>
+              <p class="sh"><span>Slashy</span><b>Slashy's servers, on AWS</b></p>
+              <p class="pb"><span>Passband</span><b>Your machine, or an instance of your own</b></p>
+            </dd>
+          </div>
+          <div>
+            <dt>Sign-in codes</dt>
+            <dd>
+              <p class="sh"><span>Slashy</span><b>Read and forwarded by its agent</b></p>
+              <p class="pb"><span>Passband</span><b>Sealed on a page of their own</b></p>
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="section" id="open-less">
+        <p class="num">01 &middot; OPEN LESS MAIL</p>
+        <h2>Know what <em>needs you.</em></h2>
+        <p class="intro">
+          Slashy sorts your inbox into tabs and has a reply waiting. Passband
+          changes what the inbox asks of you. Every email still arrives. Passband reads each
+          one, pulls forward the few that need you with a line saying why, and
+          files the rest where you can find them when you want to.
+        </p>
+
+        <div class="board" role="img" aria-label="An illustration of the Passband Sitrep. For your eyes: a lease renewal three days past due, an appointment to confirm today, a venue choice due Friday, and a reply from a colleague. Reading: three newsletters, one card per sender. Records: an appointment, a package out for delivery, a bill and a receipt. Everything else is filed as noise.">
+          <div class="board-hd">
+            <div><small>Good morning</small><b>Two items for your eyes.</b></div>
+            <span class="need">2 need you now</span>
+          </div>
+          <div class="board-grid">
+            <div class="zone">
+              <div class="zone-h">For your eyes <em>4</em></div>
+              <div class="eye over">
+                <span class="av" style="background:#3E2E1B;color:#E2C078">PP</span>
+                <b>Parkline Properties</b><span class="chip past">3d past due</span>
+                <span class="line">Your lease renewal still needs a signature before the new rate lapses.</span>
+              </div>
+              <div class="eye">
+                <span class="av" style="background:#22392E;color:#9AD3B6">DO</span>
+                <b>Dr. Ortiz's Office</b><span class="chip">due today</span>
+                <span class="line">Confirm Thursday's 2:30 appointment or call to reschedule.</span>
+              </div>
+              <div class="eye">
+                <span class="av" style="background:#24384F;color:#A9CBF0">JC</span>
+                <b>Jamie Chen</b><span class="chip">due Fri</span>
+                <span class="line">Needs your pick between two offsite venues so they can hold the date.</span>
+              </div>
+              <div class="eye">
+                <span class="av" style="background:#2F2A4A;color:#B8ACF2">AR</span>
+                <b>Alex Rivera</b><span></span>
+                <span class="line">Replied to your offsite dates: the 14th works for everyone.</span>
+              </div>
+            </div>
+            <div class="zone">
+              <div class="zone-h">Reading <em>3</em></div>
+              <div class="shelf">
+                <div><span class="tile" style="background:#f2f2ee;color:#111">M</span><b>Medium Daily Digest<i>7</i></b><span>10 Habits of Highly Effective Engineers, and six more stories.</span></div>
+                <div><span class="tile" style="background:#3a2a22;color:#f08a5d">P</span><b>Product Hunt Daily<i>5</i></b><span>An AI notetaker for your AI notetaker, and eight more launches.</span></div>
+                <div><span class="tile" style="background:#f3eee6;color:#c2531f">S</span><b>Substack<i>3</i></b><span>Three new posts from writers you follow.</span></div>
+              </div>
+            </div>
+            <div class="zone">
+              <div class="zone-h">Records</div>
+              <div class="rail">
+                <div class="rec"><small>Calendar</small><p><b>Dr. Ortiz</b> &middot; Thu 2:30 PM</p></div>
+                <div class="rec"><small>Shipments</small><p><b>Desk lamp</b> &middot; out for delivery</p></div>
+                <div class="rec"><small>Billing</small><p><b>City Electric</b> &middot; $84.12, due Oct 14</p></div>
+                <div class="rec"><small>Receipts</small><p><b>Corner Market</b> &middot; $23.40</p></div>
+              </div>
+            </div>
+          </div>
+          <div class="board-ft">
+            <span><b>Everything else is noise.</b> Still in your mail, never on this page, never a notification.</span>
+            <small>Illustration &middot; made-up mail</small>
+          </div>
+        </div>
+
+        <div class="zones">
+          <div>
+            <h3>For your eyes</h3>
+            <p>Mail with a real obligation or a date, and live conversations with people you write to. It works like a to-do list: an email stays until you mark it done.</p>
+          </div>
+          <div>
+            <h3>Reading</h3>
+            <p>Newsletters, announcements and offers, one card per sender, with articles above promotions. Read them when you feel like it, or clear a whole sender with one key.</p>
+          </div>
+          <div>
+            <h3>Records</h3>
+            <p>Appointments, packages with the carrier's own status, bills with their amount and due date, and today's receipts. Click one and the email it came from opens.</p>
+          </div>
+          <div>
+            <h3>Noise</h3>
+            <p>Everything else. It is filed, not deleted: still in your mail and in search, never on the board and never a notification.</p>
+          </div>
+        </div>
+
+        <div class="keys">
+          <div><kbd>e</kbd><span><b>Done</b><p>It leaves the board and stays in Gmail. Done is Passband's own status, so nothing is archived or deleted.</p></span></div>
+          <div><kbd>h</kbd><span><b>Remind me</b><p>Pick a preset or type a time, like &ldquo;friday&rdquo; or &ldquo;in 3 hours&rdquo;. Then it comes back to For your eyes.</p></span></div>
+          <div><kbd>v</kbd><span><b>Fix triage</b><p>Move one email in or out of For your eyes, or change what kind of mail it is. The correction is kept.</p></span></div>
+          <div><kbd>t</kbd><span><b>A rule in your words</b><p>Tell Passband what you want from a sender: <q>only tell me when the amount changes.</q> It applies from then on.</p></span></div>
+          <div><kbd class="wide">space</kbd><span><b>Flow mode</b><p>Walk For your eyes one email at a time. e is done and next; s skips and leaves it on the board.</p></span></div>
+          <div><kbd>u</kbd><span><b>Unsubscribe</b><p>Passband asks first, then usually does it in the background while you move on.</p></span></div>
+        </div>
+
+        <div class="duo">
+          <div>
+            <span class="tag">Slashy</span>
+            <h3>A label, and a tab for it.</h3>
+            <p>Slashy <q>uses AI to classify every incoming email into an importance label</q>, and each label is a tab: Important, Calendar, Billing, Newsletter and Other out of the box. You can add labels described in your own words, and <code>from:</code>, <code>to:</code> and <code>subject:</code> filters that <q>bypass AI entirely.</q></p>
+            <p>Important is for <q>emails requiring your response.</q> When one lands in the wrong tab you move it, and <q>your past corrections improve accuracy.</q></p>
+          </div>
+          <div class="pb">
+            <span class="tag">Passband</span>
+            <h3>A judgment, with its reason.</h3>
+            <p>Triage decides, thread by thread, whether something needs you, what it asks of you and by when, and records why. Bills, packages and appointments come out of the mail as records instead of sitting in a tab. Your sender rules reach it as instructions in your own words.</p>
+            <p>It is a model's judgment, so it will sometimes be wrong. Press <kbd>v</kbd> and that email is fixed, and the correction is kept. Press <kbd>t</kbd> and you change how that sender is handled from now on.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          When the model cannot be reached, new mail waits to be judged rather
+          than being filed on a guess. A correction you make by hand stands:
+          triage does not overrule it.
+        </p>
+
+        <div class="worth">
+          <div>
+            <h3>What that is <em>worth.</em></h3>
+            <label><span>Emails you get a day</span><output id="w-n-o">50</output>
+              <input id="w-n" type="range" min="10" max="300" step="5" value="50" /></label>
+            <label><span>Seconds you spend on one that did not need you</span><output id="w-s-o">20</output>
+              <input id="w-s" type="range" min="5" max="60" step="5" value="20" /></label>
+          </div>
+          <div class="out" aria-live="polite">
+            <small>Estimate</small>
+            <b id="w-h">About 1.6 hours a week</b>
+            <p id="w-d">About 290 of your 350 emails a week needed nothing from you.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          An estimate, not a promise. The share is measured and the seconds
+          are yours to set. In one of our own mailboxes, 836 emails arrived
+          between September 6 and October 7, 2026, and 695 of them, 83%,
+          needed nothing from their owner: newsletters, receipts, shipping
+          updates and noise. Your share will differ. Mail that does need you
+          takes the same time either way, so it is not counted, and neither is
+          any time you choose to spend in Reading.
+        </p>
+        <script>
+          // The estimate above: emails a day x 7 x the measured share that
+          // needed nothing (695 of 836) x the reader's seconds, in hours.
+          (function () {
+            var n = document.getElementById("w-n"), s = document.getElementById("w-s");
+            function draw() {
+              var week = n.value * 7, quiet = Math.round((week * 695) / 836 / 10) * 10;
+              var mins = (week * 695 * s.value) / 836 / 60;
+              document.getElementById("w-n-o").textContent = n.value;
+              document.getElementById("w-s-o").textContent = s.value;
+              document.getElementById("w-h").textContent = mins < 55
+                ? "About " + Math.round(mins / 5) * 5 + " minutes a week"
+                : "About " + (mins / 60).toFixed(1).replace(/\.0$/, "") + " hours a week";
+              document.getElementById("w-d").textContent =
+                "About " + quiet + " of your " + week + " emails a week needed nothing from you.";
+            }
+            n.addEventListener("input", draw); s.addEventListener("input", draw); draw();
+          })();
+        </script>
+      </section>
+
+      <section class="section" id="sealed">
+        <p class="num">02 &middot; SIGN-IN CODES</p>
+        <h2>Sign-in codes <em>stay sealed.</em></h2>
+        <p class="intro">
+          Sign-in codes and password reset links do not sit in your inbox
+          between a newsletter and a bill. They go to a page of their own, and
+          they are kept out of search, out of Passband's assistant, and away
+          from any agent you connect.
+        </p>
+        <div class="seal">
+          <div class="auth" role="img" aria-label="An illustration of the Auth page. A sign-in code from GitHub, hidden, from a minute ago. A password reset from a bank asking 'That was me' or 'Not me'. A login code from a streaming service, from two hours ago.">
+            <div class="auth-hd">Auth <span>Codes hidden until you reveal them</span></div>
+            <div class="arow">
+              <b>GitHub</b>
+              <span class="sub">Your sign-in code</span>
+              <span class="code"><span class="dots">&bull;&bull;&bull; &bull;&bull;&bull;</span><span class="tick">1 min ago</span></span>
+            </div>
+            <div class="arow">
+              <b>Harbor Bank</b>
+              <span class="sub">Reset your password</span>
+              <span class="ask"><span>That was me</span><span class="no">Not me</span></span>
+            </div>
+            <div class="arow">
+              <b>Streamly</b>
+              <span class="sub">Your login code</span>
+              <span class="code"><span class="dots">&bull;&bull;&bull; &bull;&bull;&bull;</span><span class="tick" style="color:var(--faintest)">2 h ago</span></span>
+            </div>
+            <div class="auth-ft">Illustration &middot; made-up mail</div>
+          </div>
+          <ul class="points">
+            <li><b>Shown when you ask.</b><span>The list shows who sent it and the subject. A code's digits appear when you reveal it, and c copies them. Every reveal is written to the audit log.</span></li>
+            <li><b>That was me, or not me.</b><span>Sign-in alerts and resets from the last week ask you to say which.</span></li>
+            <li><b>The shredder.</b><span>Old auth mail can move to Gmail's trash on its own, after the number of days you choose.</span></li>
+            <li><b>No waiting.</b><span>Auth mail shows up within seconds, without waiting for triage, and live codes count down on the rail.</span></li>
+          </ul>
+        </div>
+        <p class="fine-print">
+          Passband decides which messages carry a code or a reset link, and a
+          message it has not assessed yet stays closed to agents until it has.
+          A routine &ldquo;new sign-in to your account&rdquo; notice with no
+          code in it may still be readable. The full rules are in the
+          <a href="/security">threat model</a>.
+        </p>
+        <p class="fine-print">
+          Slashy makes the opposite call, for convenience. Its help center
+          offers an automation that &ldquo;instantly forwards verification
+          codes from email to iMessage,&rdquo; in which &ldquo;the agent
+          extracts just the code number,&rdquo; and its iPhone app can
+          AutoFill emailed codes. Passband shows you a code the moment it
+          lands too. The difference is that no agent is ever handed it.
+        </p>
+      </section>
+
+      <section class="section" id="custody">
+        <p class="num">03 &middot; CUSTODY</p>
+        <h2>Where your mail <em>is kept.</em></h2>
+        <p class="intro">
+          Both products send mail to cloud models to do their work, and both
+          say no one trains on it. The difference is where your mail is kept
+          in the meantime, and who holds it.
+        </p>
+        <div class="duo" style="margin-top:0">
+          <div>
+            <span class="tag">Slashy</span>
+            <h3>Stored with Slashy.</h3>
+            <p>Slashy's help center lists what it stores: <q>Email metadata and content</q>, <q>cached for fast access</q>, with your calendar events, agent conversations and memories. Where: <q>Encrypted servers in the United States, hosted on AWS with SOC 2 compliance.</q></p>
+            <p>It names Anthropic, OpenAI, Google and Groq as AI providers, and gives their retention as <q>30-day logs, then deleted</q> for Anthropic and OpenAI and none for the other two. On its own staff: <q>No one reads your email unless you explicitly share it for debugging.</q></p>
+            <p>Its commitment, stated plainly: your mail is <q>never used to train any AI model</q>, <q>not ours, not our providers'.</q> And it has the paperwork: SOC 2 Type II, Google's CASA Tier 2, quarterly penetration tests.</p>
+          </div>
+          <div class="pb">
+            <span class="tag">Passband</span>
+            <h3>Your machine, or an instance of your own.</h3>
+            <p><b>Self-host</b> and Passband runs on your own Mac, NAS or server. Your mail, search index and Google tokens live on your disk; we hold no copy and no key. Triage uses an Anthropic or OpenAI key you supply, under your own account.</p>
+            <p><b>Hosted</b>, your account is its own isolated instance with its own database. Your Google token is sealed to a key only your instance holds, and backups are encrypted before they leave the server. Triage reaches Anthropic through our gateway, which keeps no bodies. Training on your mail: never, not by us, not by our model provider.</p>
+            <p>We do not have a SOC 2 report yet, and the people who run Passband can, in principle, reach a hosted mailbox. <a href="/trust">The trust page</a> says so, and names every subprocessor and how long each keeps what.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="agent">
+        <p class="num">04 &middot; YOUR AGENT</p>
+        <h2>Your agent, <em>briefed.</em></h2>
+        <p class="intro">
+          Both connect to AI agents over MCP, and they make opposite bets.
+          Slashy's server hands your agent Slashy's own toolset: it can
+          &ldquo;draft, send, reply, schedule, label, and attach files,&rdquo;
+          and it reaches your calendar, contact research and automations too.
+          Passband's Agent MCP hands your agent what triage already worked
+          out: what needs you and why, what is due, what is on its way. It
+          writes mail only as far as you allow: out of the box a draft you
+          send yourself, and sending only if you turn it on. Sign-in codes
+          never reach it. It is available on self-host today and rolling out
+          to hosted.
+        </p>
+        <a class="more" href="/mcp-vs-slashy">Agent MCP vs Slashy MCP, side by side &rarr;</a>
+      </section>
+
+      <section class="section" id="compare">
+        <p class="num">05 &middot; SIDE BY SIDE</p>
+        <h2>Where each one is <em>ahead.</em></h2>
+        <p class="intro">
+          Slashy is ahead on reach, on teams and on how much it will do for
+          you. Passband is ahead on judgment, custody and what it keeps
+          sealed. Both are true, so here are both.
+        </p>
+        <div class="table-wrap cmp">
+          <table>
+            <thead><tr><th>&nbsp;</th><th>Slashy</th><th>Passband</th><th>Ahead</th></tr></thead>
+            <tbody>
+            <tr>
+              <td>Price</td>
+              <td data-label="Slashy">Professional: $30 a user a month, or $25 billed annually. Enterprise: custom. A 7-day trial, card required</td>
+              <td data-label="Passband" class="pb">Free in beta. Self-host is MIT licensed and you bring a model key. Hosted is an invitation-only preview</td>
+              <td class="verdict"><span class="win pb">Passband</span><small>while in beta</small></td>
+            </tr>
+            <tr>
+              <td>Email accounts</td>
+              <td data-label="Slashy">Gmail, Google Workspace, Outlook.com and Microsoft 365, unlimited inboxes</td>
+              <td data-label="Passband" class="pb">Gmail only, several accounts</td>
+              <td class="verdict"><span class="win sh">Slashy</span></td>
+            </tr>
+            <tr>
+              <td>Platforms</td>
+              <td data-label="Slashy">Web, Mac, iPhone and iPad. On Android, the browser</td>
+              <td data-label="Passband" class="pb">Mac, and iPhone through TestFlight</td>
+              <td class="verdict"><span class="win sh">Slashy</span></td>
+            </tr>
+            <tr>
+              <td>How mail is sorted</td>
+              <td data-label="Slashy">AI importance labels, each a tab: Important, Calendar, Billing, Newsletter, Other. Your own labels in plain language, plus sender and subject filters</td>
+              <td data-label="Passband" class="pb">A model reads every message and decides what needs you, with a reason. Your sender rules are instructions in your own words</td>
+              <td class="verdict"><span class="win even">Different bets</span></td>
+            </tr>
+            <tr>
+              <td>When it gets one wrong</td>
+              <td data-label="Slashy">Move it to the right label. <q>Your past corrections improve accuracy</q></td>
+              <td data-label="Passband" class="pb">v fixes that email and the correction is kept. t sets how that sender is handled from now on</td>
+              <td class="verdict"><span class="win even">Both</span></td>
+            </tr>
+            <tr>
+              <td>Bills, packages, appointments</td>
+              <td data-label="Slashy">A Billing tab and a Calendar tab. No package tracking documented</td>
+              <td data-label="Passband" class="pb">Pulled out of the mail onto the board: amounts and due dates, carrier status, times</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>Follow-ups and reminders</td>
+              <td data-label="Slashy">Auto-reminders on mail you sent when a reply is expected, a scan for dropped threads, and reminders you set</td>
+              <td data-label="Passband" class="pb">h, with a preset or a typed time; the email comes back to For your eyes</td>
+              <td class="verdict"><span class="win sh">Slashy</span></td>
+            </tr>
+            <tr>
+              <td>Sign-in codes and reset links</td>
+              <td data-label="Slashy">No separate handling documented. An automation has the agent forward codes to iMessage; the iPhone app can AutoFill them</td>
+              <td data-label="Passband" class="pb">A sealed page of their own: shown when you ask, every reveal logged, kept out of search, the assistant and agents</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>AI drafting</td>
+              <td data-label="Slashy">A draft <q>in your voice</q> waiting on incoming mail, inline autocomplete, rewrites and voice dictation</td>
+              <td data-label="Passband" class="pb">None built in. Passband never writes your email for you. An agent you connect can leave a draft, marked as the agent's, for you to send</td>
+              <td class="verdict"><span class="win even">Different bets</span></td>
+            </tr>
+            <tr>
+              <td>Sending without you</td>
+              <td data-label="Slashy">The agent asks before sending in chat. A goal you hand off, or a thread you CC the assistant on, sends <q>without asking you to approve each email.</q> Read Mode blocks it all</td>
+              <td data-label="Passband" class="pb">Nothing sends that you did not write and send. Scheduled send is your own message at your own time</td>
+              <td class="verdict"><span class="win even">Different bets</span></td>
+            </tr>
+            <tr>
+              <td>Questions about your mail</td>
+              <td data-label="Slashy">An agent in the sidebar, and the same agent over iMessage and Slack</td>
+              <td data-label="Passband" class="pb">The &#8984;K assistant reads mail, bills, packages and calendar items. It cannot see sign-in codes</td>
+              <td class="verdict"><span class="win even">Both</span></td>
+            </tr>
+            <tr>
+              <td>Search</td>
+              <td data-label="Slashy">Operators and filters, and plain-language search</td>
+              <td data-label="Passband" class="pb">Keyword and meaning together. A search that reads like a question gets an answer pointing at the email</td>
+              <td class="verdict"><span class="win even">Both</span></td>
+            </tr>
+            <tr>
+              <td>Calendar</td>
+              <td data-label="Slashy">A full calendar: events, shared availability, RSVP from mail, teammates' busy time</td>
+              <td data-label="Passband" class="pb">A card of invites and reservations pulled from your mail. A calendar of its own is in progress</td>
+              <td class="verdict"><span class="win sh">Slashy</span></td>
+            </tr>
+            <tr>
+              <td>Teams</td>
+              <td data-label="Slashy">Private comments and @-mentions, thread assignment, shared links, and HubSpot, Attio and Salesforce</td>
+              <td data-label="Passband" class="pb">None. One person, one mailbox</td>
+              <td class="verdict"><span class="win sh">Slashy</span></td>
+            </tr>
+            <tr>
+              <td>Snippets</td>
+              <td data-label="Slashy">Yes, with AI-filled variables</td>
+              <td data-label="Passband" class="pb">No. A signature, markdown, send groups and scheduled send</td>
+              <td class="verdict"><span class="win sh">Slashy</span></td>
+            </tr>
+            <tr>
+              <td>Where your mail is kept</td>
+              <td data-label="Slashy">On Slashy's servers: <q>Encrypted servers in the United States, hosted on AWS</q></td>
+              <td data-label="Passband" class="pb">Self-host: your disk. Hosted: your own instance; model calls pass through our gateway, which keeps no bodies</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>Training on your mail</td>
+              <td data-label="Slashy"><q>Never used to train any AI model</q></td>
+              <td data-label="Passband" class="pb">Never, not by us, not by our model provider</td>
+              <td class="verdict"><span class="win even">Both</span></td>
+            </tr>
+            <tr>
+              <td>Self-host and source</td>
+              <td data-label="Slashy">No self-host option documented</td>
+              <td data-label="Passband" class="pb">Run it on your own machine. MIT licensed, daemon and apps alike</td>
+              <td class="verdict"><span class="win pb">Passband</span></td>
+            </tr>
+            <tr>
+              <td>Certifications</td>
+              <td data-label="Slashy">SOC 2 Type II, CASA Tier 2, quarterly penetration tests</td>
+              <td data-label="Passband" class="pb">None yet. No SOC 2 report</td>
+              <td class="verdict"><span class="win sh">Slashy</span></td>
+            </tr>
+            <tr>
+              <td>Agent access</td>
+              <td data-label="Slashy">An MCP server that drafts, sends, schedules and labels, with calendar and contact research</td>
+              <td data-label="Passband" class="pb">Agent MCP with 7 tools, and up to 3 more as you allow: a draft you send yourself by default, sending only if you turn it on. Sign-in codes never reach it</td>
+              <td class="verdict"><span class="win even">Different bets</span><small><a href="/mcp-vs-slashy">compare</a></small></td>
+            </tr>
+            <tr>
+              <td>Maturity</td>
+              <td data-label="Slashy">On the App Store, with team and enterprise plans</td>
+              <td data-label="Passband" class="pb">Version 0.0.13. Hosted is an invitation-only preview</td>
+              <td class="verdict"><span class="win sh">Slashy</span></td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="who">
+        <p class="num">06 &middot; WHICH ONE</p>
+        <h2>Who should pick <em>which.</em></h2>
+        <div class="duo who" style="margin-top:0">
+          <div>
+            <span class="tag">Pick Slashy</span>
+            <h3>If you want it done for you.</h3>
+            <p>You send a lot of mail and you want a first draft of every reply, an agent you can text, and your calendar and CRM in the same window.</p>
+            <ul>
+              <li>You use Outlook or Microsoft 365, or want your mail in a browser.</li>
+              <li>You work with a team: comments, assigned threads, a CRM.</li>
+              <li>You want AI to draft in your voice and chase your follow-ups.</li>
+              <li>Your company needs a SOC 2 report before it signs.</li>
+            </ul>
+          </div>
+          <div class="pb">
+            <span class="tag">Pick Passband</span>
+            <h3>If you would rather open less.</h3>
+            <p>You want to know what needs you without reading everything to find out, you write your own email, and you want your mail in your custody.</p>
+            <ul>
+              <li>You use Gmail, on a Mac and an iPhone.</li>
+              <li>Bills, packages, newsletters and sign-in codes bury the mail that matters.</li>
+              <li>You want to run it yourself, or have an instance of your own.</li>
+              <li>You want to hand your agent a briefing, not your mailbox.</li>
+            </ul>
+          </div>
+        </div>
+        <p class="fine-print">
+          Passband is early. It is Gmail only, the iPhone app is on TestFlight,
+          and hosted is an invitation-only preview. Slashy's costs are real
+          too, and its own help center is candid about them: the trial needs a
+          card, a handed-off goal emails people without asking each time, and
+          it lists as a known issue that &ldquo;sometimes the agent says
+          &lsquo;I've sent the email&rsquo; when it actually created a
+          draft.&rdquo;
+        </p>
+      </section>
+
+      <section class="section" id="start">
+        <p class="num">07 &middot; START</p>
+        <h2>Find a little <em>breathing room.</em></h2>
+        <p class="intro">
+          Self-host is free and MIT licensed: Docker, a Google account and a
+          Mac, and no account with us. The hosted version is an
+          invitation-only preview.
+        </p>
+        <div class="actions" style="margin-top:0">
+          <a class="cta" href="/self-host">Self-host Passband &rarr;</a>
+          <a href="/waitlist">or join the waitlist for hosted</a>
+        </div>
+      </section>
+
+      <section class="section" id="sources">
+        <p class="checked">Checked October 2026</p>
+        <h2>Sources.</h2>
+        <p class="intro">
+          Everything said here about Slashy comes from Slashy's own pages,
+          read on October 8, 2026. Products change; if one of these has, tell
+          us at <a href="mailto:braelyn@passband.app">braelyn@passband.app</a>
+          and we will fix this page.
+        </p>
+        <ul class="sources">
+          <li><a href="https://www.slashy.com/llms.txt">Slashy, in its own summary</a> <small>slashy.com. &ldquo;Drafts replies in your tone, triages your inbox before you see it&rdquo;; plans and prices.</small></li>
+          <li><a href="https://www.slashy.com/pricing">Pricing</a> and <a href="https://help.slashy.com/getting-started/trial-and-billing">Free Trial &amp; Billing</a> <small>Professional and Enterprise; the 7-day trial and the card.</small></li>
+          <li><a href="https://help.slashy.com/features/email/labels">Importance Labels &amp; AI Classification</a> <small>Slashy help center. Default labels, custom labels, filters, corrections.</small></li>
+          <li><a href="https://help.slashy.com/getting-started/why-slashy">What does Slashy do that my inbox doesn't?</a> <small>Slashy help center. Providers, drafts, follow-ups, CRM, iMessage and Slack.</small></li>
+          <li><a href="https://help.slashy.com/getting-started/ai-sending-control">Does Slashy send emails on its own?</a> and <a href="https://help.slashy.com/features/ai-agent/autonomy">Understanding Agent Autonomy</a> <small>Slashy help center. What asks first, goals and the assistant, Read Mode.</small></li>
+          <li><a href="https://help.slashy.com/troubleshooting/unexpected-behavior">When Slashy Does Something Unexpected</a> <small>Slashy help center. The known issue quoted above.</small></li>
+          <li><a href="https://help.slashy.com/how-to-guides/10-automations">10 Automations Every User Should Set Up</a> and <a href="https://help.slashy.com/getting-started/mobile">Getting Started with Slashy Mobile</a> <small>Slashy help center. Forwarding verification codes to iMessage; code AutoFill; iPhone and iPad.</small></li>
+          <li><a href="https://help.slashy.com/getting-started/security-privacy">Security &amp; Privacy</a> and <a href="https://help.slashy.com/getting-started/ai-privacy">AI Privacy &amp; Data Protection</a> <small>Slashy help center. What is stored and where, AI providers and retention, training, certifications.</small></li>
+          <li><a href="https://www.slashy.com/security">Security</a> <small>slashy.com. SOC 2 Type II and CASA Tier 2.</small></li>
+          <li><a href="https://help.slashy.com/getting-started/connecting-outlook">Connecting Outlook or Microsoft 365</a>, <a href="https://help.slashy.com/how-to-guides/multiple-accounts">Manage Multiple Email Accounts</a> and <a href="https://help.slashy.com/troubleshooting/faq">Frequently Asked Questions</a> <small>Slashy help center. Providers, accounts, Android.</small></li>
+          <li><a href="https://help.slashy.com/features/automations/auto-reminders">Auto-Reminders</a>, <a href="https://help.slashy.com/features/email/snippets">Snippets &amp; Templates</a>, <a href="https://help.slashy.com/features/email/comments-and-mentions">Comments and @-mentions</a> and <a href="https://help.slashy.com/features/calendar/availability">Sharing your availability</a> <small>Slashy help center.</small></li>
+          <li><a href="https://help.slashy.com/features/integrations/mcp">Connect Slashy to your AI tools</a> <small>Slashy help center. What the MCP server does.</small></li>
+        </ul>
+        <p class="src-h">Passband</p>
+        <ul class="sources">
+          <li><a href="/trust">Trust</a> <small>Where your mail goes on hosted, every subprocessor, retention, and what we do not have yet.</small></li>
+          <li><a href="/self-host">Self-host</a> <small>What runs where, and what reaches us.</small></li>
+          <li><a href="/security">Threat model</a> <small>What the seal covers, and what agents can and cannot see.</small></li>
+          <li><a href="/mcp-vs-slashy">Agent MCP vs Slashy MCP</a> <small>The agent side of this comparison, with its own sources.</small></li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span>Passband</span>
+      <nav>
+        <a href="/about">About</a>
+        <a href="/self-host">Self-host</a>
+        <a href="/trust">Trust</a>
+        <a href="/vs-superhuman">Passband vs Superhuman</a>
+        <a href="/mcp-vs-superhuman">Agent MCP vs Superhuman</a>
+        <a href="/vs-slashy" aria-current="page">Passband vs Slashy</a>
+        <a href="/mcp-vs-slashy">Agent MCP vs Slashy</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+      </nav>
+    </footer>
+  </body>
+</html>

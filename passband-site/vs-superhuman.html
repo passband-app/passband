@@ -160,6 +160,27 @@
       .duo kbd { min-width: 1.5rem; height: 1.5rem; font-size: 0.75rem; border-radius: 6px; vertical-align: 1px; }
       .fine-print { margin: 1.5rem 0 0; color: var(--faint); font-size: 0.9rem; max-width: 46rem; }
 
+      /* WHAT THAT IS WORTH: two dials and a readout. The share of mail that
+         needed nothing is measured (see the fine print under it); the seconds
+         are the reader's own. Without script it shows the default reading. */
+      .worth { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 0.8rem; margin-top: 2.75rem; }
+      @media (max-width: 820px) { .worth { grid-template-columns: minmax(0, 1fr); } }
+      .worth > div { padding: 1.3rem 1.35rem 1.4rem; border-radius: 14px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      .worth h3 { margin: 0 0 1.1rem; font-family: var(--serif); font-weight: 500; font-size: 1.55rem; line-height: 1.12; }
+      .worth h3 em { font-style: normal; color: var(--accent-ink); }
+      .worth label { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem 1rem; align-items: baseline; }
+      .worth label + label { margin-top: 1.15rem; }
+      .worth label span { color: var(--dim); font-size: 0.93rem; }
+      .worth output { font: 600 0.95rem/1 var(--mono); color: var(--ink); }
+      .worth input { grid-column: 1 / -1; width: 100%; margin: 0; accent-color: var(--accent); }
+      .worth .out { display: grid; align-content: center; background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35), 0 0 60px -24px rgba(78, 155, 234, 0.45); }
+      .worth .out small { font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-ink); }
+      .worth .out b { display: block; margin: 0.6rem 0 0.5rem; font-family: var(--serif); font-weight: 500;
+        font-size: clamp(1.9rem, 3.4vw, 2.6rem); line-height: 1.05; }
+      .worth .out p { margin: 0; color: var(--dim); font-size: 0.93rem; }
+
       /* THE AUTH PAGE: a still of the list, codes hidden until revealed. */
       .seal { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: clamp(1.5rem, 4vw, 3.5rem); align-items: start; }
       @media (max-width: 900px) { .seal { grid-template-columns: minmax(0, 1fr); } }
@@ -249,7 +270,7 @@
 
     <main>
       <section class="hero">
-        <p class="eyebrow"><b>Passband vs Superhuman</b> &middot; checked October 2026</p>
+        <p class="matchup"><b>Passband</b> <i>vs</i> <span>Superhuman</span> <small>Checked October 2026</small></p>
         <h1>Faster email, or less of it.</h1>
         <p class="lede">
           Superhuman Mail is a faster way to do email yourself: keyboard
@@ -264,7 +285,7 @@
             <dt>Price</dt>
             <dd>
               <p class="sh"><span>Superhuman</span><b>$30 to $40 a month</b></p>
-              <p class="pb"><span>Passband</span><b>Free to self-host</b></p>
+              <p class="pb"><span>Passband</span><b>Free in Beta</b></p>
             </dd>
           </div>
           <div>
@@ -401,6 +422,49 @@
           than being filed on a guess. A correction you make by hand stands:
           triage does not overrule it.
         </p>
+
+        <div class="worth">
+          <div>
+            <h3>What that is <em>worth.</em></h3>
+            <label><span>Emails you get a day</span><output id="w-n-o">50</output>
+              <input id="w-n" type="range" min="10" max="300" step="5" value="50" /></label>
+            <label><span>Seconds you spend on one that did not need you</span><output id="w-s-o">20</output>
+              <input id="w-s" type="range" min="5" max="60" step="5" value="20" /></label>
+          </div>
+          <div class="out" aria-live="polite">
+            <small>Estimate</small>
+            <b id="w-h">About 1.6 hours a week</b>
+            <p id="w-d">About 290 of your 350 emails a week needed nothing from you.</p>
+          </div>
+        </div>
+        <p class="fine-print">
+          An estimate, not a promise. The share is measured and the seconds
+          are yours to set. In one of our own mailboxes, 836 emails arrived
+          between September 6 and October 7, 2026, and 695 of them, 83%,
+          needed nothing from their owner: newsletters, receipts, shipping
+          updates and noise. Your share will differ. Mail that does need you
+          takes the same time either way, so it is not counted, and neither is
+          any time you choose to spend in Reading.
+        </p>
+        <script>
+          // The estimate above: emails a day x 7 x the measured share that
+          // needed nothing (695 of 836) x the reader's seconds, in hours.
+          (function () {
+            var n = document.getElementById("w-n"), s = document.getElementById("w-s");
+            function draw() {
+              var week = n.value * 7, quiet = Math.round((week * 695) / 836 / 10) * 10;
+              var mins = (week * 695 * s.value) / 836 / 60;
+              document.getElementById("w-n-o").textContent = n.value;
+              document.getElementById("w-s-o").textContent = s.value;
+              document.getElementById("w-h").textContent = mins < 55
+                ? "About " + Math.round(mins / 5) * 5 + " minutes a week"
+                : "About " + (mins / 60).toFixed(1).replace(/\.0$/, "") + " hours a week";
+              document.getElementById("w-d").textContent =
+                "About " + quiet + " of your " + week + " emails a week needed nothing from you.";
+            }
+            n.addEventListener("input", draw); s.addEventListener("input", draw); draw();
+          })();
+        </script>
       </section>
 
       <section class="section" id="sealed">
@@ -506,8 +570,8 @@
             <tr>
               <td>Price</td>
               <td data-label="Superhuman">Starter: <q>$30/month or $300/year.</q> Business: <q>$40/month or $396/year.</q> No free Mail plan</td>
-              <td data-label="Passband" class="pb">Self-host: free and MIT licensed; you bring a model key. Hosted: invitation-only preview</td>
-              <td class="verdict"><span class="win pb">Passband</span><small>if you self-host</small></td>
+              <td data-label="Passband" class="pb">Free in beta. Self-host is MIT licensed and you bring a model key. Hosted is an invitation-only preview</td>
+              <td class="verdict"><span class="win pb">Passband</span><small>while in beta</small></td>
             </tr>
             <tr>
               <td>Email accounts</td>
@@ -728,6 +792,8 @@
         <a href="/trust">Trust</a>
         <a href="/vs-superhuman" aria-current="page">Passband vs Superhuman</a>
         <a href="/mcp-vs-superhuman">Agent MCP vs Superhuman</a>
+        <a href="/vs-slashy">Passband vs Slashy</a>
+        <a href="/mcp-vs-slashy">Agent MCP vs Slashy</a>
         <a href="/privacy">Privacy</a>
         <a href="/terms">Terms</a>
       </nav>

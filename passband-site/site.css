@@ -59,6 +59,16 @@ code { font-family: var(--mono); font-size: 0.88em; }
 .eyebrow { margin: 0 0 1.1rem; font: 500 11px/1 var(--mono); letter-spacing: 0.12em;
   color: var(--faintest); text-transform: uppercase; }
 .eyebrow b { color: var(--accent-ink); font-weight: 600; }
+/* The comparison pages' eyebrow: the matchup itself, set large enough to read
+   as the page's subject before the headline makes its argument. */
+.matchup { margin: 0 0 1.4rem; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 0.7rem;
+  font-family: var(--serif); font-weight: 500; font-size: clamp(1.55rem, 2.9vw, 2.15rem); line-height: 1.1;
+  letter-spacing: -0.005em; color: var(--ink); }
+.matchup b { font-weight: 500; color: var(--accent-ink); }
+.matchup i { font: 600 0.42em/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--faintest);
+  position: relative; top: -0.18em; }
+.matchup small { flex-basis: 100%; margin-top: 0.55rem; font: 500 11px/1 var(--mono); letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--faintest); }
 h1 { margin: 0; font-family: var(--serif); font-weight: 500; font-size: clamp(2.6rem, 5.4vw, 4rem);
   line-height: 1.02; letter-spacing: -0.012em; max-width: 14ch; }
 .lede { margin: 1.25rem 0 0; font-size: 1.1rem; color: var(--dim); max-width: 36rem; }

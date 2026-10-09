@@ -1688,6 +1688,14 @@ final class AppStore {
             await APIClient.shared.configure(baseURL: serverURL, token: apiToken)
             AccountManager.shared.restartFeeds(account.id, with: fresh)
             settings = fresh
+            // The board on screen was read from the server these credentials
+            // replaced, which may not be the one they open. Nothing vouches
+            // for it until that one has been asked: the stamps go, so the
+            // next tick asks for everything, and a switch away before then
+            // keeps no snapshot (`keepBoardSnapshot` reads `statsEpoch`).
+            statsEpoch = nil
+            zonesLoadedAt = nil
+            mailLoadedAt = [:]
             #if os(iOS)
                 await PushRegistration.shared.registerAndSync()
             #endif
@@ -1898,9 +1906,16 @@ final class AppStore {
             return
         }
         // (1) Never two at once — the awaits below are windows a second
-        //     switch could start in. The world may also have moved while the
-        //     target was being asked.
-        guard !accountActionsBlocked, !switching, record.id != AccountManager.shared.activeId
+        //     switch could start in. One already inside its teardown is
+        //     WAITED OUT, not lost to: the rail is showing this account's
+        //     mark, and a press dropped here put the old one back with
+        //     nothing said. The newest pick still wins, and the world may
+        //     have moved while the target was being asked, so everything is
+        //     read again on the far side.
+        while switching { try? await Task.sleep(for: .milliseconds(25)) }
+        guard switchIntent == intent, !accountActionsBlocked,
+            record.id != AccountManager.shared.activeId,
+            AccountManager.shared.accounts.contains(where: { $0.id == record.id })
         else { return }
         switching = true
         // (10) Whichever path we leave by.
@@ -2103,7 +2118,9 @@ final class AppStore {
     /// it: what a switch back paints at once instead of an empty board and
     /// three round trips. The READ MODEL only, and only the part a first
     /// frame is made of. Nothing that acts (undos, held sends, overlays) and
-    /// nothing a daemon is still answering for.
+    /// nothing a daemon is still answering for: `resolvedIds` in particular
+    /// stays behind, because a resolve still on the wire at the switch can
+    /// fail, and the id would then hide its mail for the rest of the session.
     ///
     /// The id collision the wipe exists for does not apply: a snapshot is
     /// held under its account's id, swapped in whole, and only ever shown
@@ -2116,7 +2133,6 @@ final class AppStore {
         var zones: SitrepZoneCache
         var mailPages: [MailMode: [AttentionUpdate]]
         var mailKeyset: Bool
-        var resolvedIds: Set<Int>
         var selectedId: Int?
         var lastRefresh: Date?
     }
@@ -2133,9 +2149,12 @@ final class AppStore {
     /// just did (the clear chime).
     private(set) var boardIsSnapshot = false
 
-    /// The poller's word that the board is the daemon's again.
+    /// The poller's word that the board is the daemon's again: asked after
+    /// a pull and the zone pass behind it. NOT after a pass that missed a
+    /// zone, which kept the snapshot's rows for it; the retry confirms.
     func noteBoardConfirmed() {
-        if boardIsSnapshot { boardIsSnapshot = false }
+        guard boardIsSnapshot, zonesLoadedAt != nil, !zoneRetryOwed else { return }
+        boardIsSnapshot = false
     }
 
     /// Keep the live board under the live account's id, when there is one
@@ -2157,10 +2176,14 @@ final class AppStore {
             sitrep: bands, stats: stats, fyeHeadline: fyeHeadline, fyeHeadlineKey: fyeHeadlineKey,
             zones: zones,
             // The head of each page: the scroll refills the rest, and the
-            // head is what the refresh behind the repaint merges into.
-            mailPages: mailPages.compactMapValues { $0.value.map { Array($0.prefix(Self.mailLimit)) } },
-            mailKeyset: mailKeyset, resolvedIds: resolvedIds, selectedId: selectedId,
-            lastRefresh: lastRefresh)
+            // head is what the refresh behind the repaint merges into. ONLY
+            // from a daemon that pages by arrival. One that pages by cursor
+            // gets its cursor from a head fetched over an EMPTY page, and a
+            // repainted head would leave the scroll with nowhere to go.
+            mailPages: mailKeyset
+                ? mailPages.compactMapValues { $0.value.map { Array($0.prefix(Self.mailLimit)) } }
+                : [:],
+            mailKeyset: mailKeyset, selectedId: selectedId, lastRefresh: lastRefresh)
     }
 
     /// Paint `id`'s kept board over the world `wipeAccountState` just
@@ -2178,7 +2201,6 @@ final class AppStore {
         zones = kept.zones
         mailPages = kept.mailPages.mapValues { Loadable(value: $0, error: nil, isLoading: false) }
         mailKeyset = kept.mailKeyset
-        resolvedIds = kept.resolvedIds
         selectedId = kept.selectedId
         // The account's own last sync, not the one just left: a daemon that
         // has since gone quiet shows this board as stale, which it is.
@@ -6500,8 +6522,12 @@ final class AppStore {
             }
         }
 
+        // The bands this hands back are the account's that was live when the
+        // row left them. A verb that fails after a switch must not lay them
+        // over the mailbox that is on screen by then.
+        let e = epoch
         return { [weak self] in
-            guard let self else { return }
+            guard let self, self.epoch == e else { return }
             self.sitrep.standing = prev.standing
             self.sitrep.new = prev.new
             self.sitrep.open = prev.open

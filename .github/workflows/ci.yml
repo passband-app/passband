@@ -6,11 +6,11 @@
 # Path-filtered so a client-only or docs-only PR does not build the workspace.
 # The filter is the workspace's real input set: every member crate (all named
 # squelch-* or squelchd; the glob also catches a crate added later without
-# anyone editing this list), the two Cargo manifests, and the toolchain pin.
+# anyone editing this list, and would catch any squelch-* directory, crate or
+# not), the two Cargo manifests, and the toolchain pin.
 # Nothing under deploy/, docs/, scripts/ or passband/ reaches a Rust build —
 # every include_str! points inside its own crate and there is no build.rs —
-# so a change there is correctly not a reason to run this. squelch-desktop is
-# retired and not a member; the glob would run on it, but nothing touches it.
+# so a change there is correctly not a reason to run this.
 #
 # Consequence, same as ci-passband: do NOT mark this check required in branch
 # protection. A path-skipped workflow reports no status at all, and a

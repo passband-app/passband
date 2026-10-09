@@ -1883,7 +1883,15 @@ final class AppStore {
         defer { if switchIntent == intent { switchingTo = nil } }
         // One attempt, no retries: somebody is watching this one, and "that
         // server is not answering" now beats the same sentence in 15 seconds.
-        let checked = await switchPreflight(record, retrying: false)
+        //
+        // NOT ASKED AT ALL of an account whose board is being held: it has
+        // answered with these credentials this session, and there is a board
+        // to stand on if it no longer does. The round trip was the whole of
+        // what a switch back still waited for. A daemon that has died since
+        // shows its last board under the stale banner, which the first pull
+        // raises, and every other account is one press away as before.
+        let checked = await switchPreflight(
+            record, retrying: false, probing: boardSnapshots[record.id] == nil)
         guard switchIntent == intent else { return }
         guard case .ready(let next) = checked else {
             if case .refused(let why) = checked { reportSwitchFailure(why, for: record) }
@@ -1914,7 +1922,9 @@ final class AppStore {
     /// access panel, but nothing has been suspended or wiped yet, so blocking
     /// here is safe. The probe is built from the candidate credentials, so the
     /// live client is not touched either.
-    private func switchPreflight(_ record: AccountRecord, retrying: Bool) async -> SwitchPreflight {
+    private func switchPreflight(
+        _ record: AccountRecord, retrying: Bool, probing: Bool = true
+    ) async -> SwitchPreflight {
         let loaded = await AccountManager.shared.credentialLoad(for: record.id)
         guard case .ok(let next) = loaded else {
             if case .unreadable = loaded {
@@ -1922,6 +1932,7 @@ final class AppStore {
             }
             return .refused("no credentials for \(record.displayName) in the keychain")
         }
+        guard probing else { return .ready(next) }
         do {
             try await APIClient.shared.probe(
                 baseURL: next.serverURL, token: next.apiToken, retrying: retrying)
@@ -2173,6 +2184,11 @@ final class AppStore {
         // has since gone quiet shows this board as stale, which it is.
         lastRefresh = kept.lastRefresh
         boardIsSnapshot = true
+        // What a zone pass does once its rows are in, done for these rows:
+        // the caches were wiped with the last account, and the cards are on
+        // screen a round trip before the pass that would refill them.
+        HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
+        warmZoneThreads()
     }
 
     /// Everything in this store that belongs to ONE account. Message ids are

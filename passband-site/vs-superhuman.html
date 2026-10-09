@@ -41,8 +41,9 @@
       cites one of the sources at the bottom, as checked in October 2026; every
       line about Passband is true of the product today (ProductGuide.swift,
       docs/TRIAGE-OPERATIONS.md, /trust, /self-host). Re-check both before
-      editing a number. The board and the Auth list are illustrations with
-      made-up mail, the same mail the landing page's mock uses.
+      editing a number. The product is shown only as itself: a capture of the
+      real app on its practice inbox (media/sitrep.png) and the app's own
+      vignettes rendered to video. Nothing is redrawn in HTML.
     -->
     <link rel="stylesheet" href="/site.css" />
     <style>
@@ -77,52 +78,15 @@
         .vs dd { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; }
       }
 
-      /* THE BOARD: a still of the Sitrep, the three zones and the record rail.
-         Made-up mail. Stacks on a phone. */
-      .board { border-radius: 16px; background: linear-gradient(180deg, #111926, #0d131c);
-        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.22), 0 30px 80px -40px rgba(78, 155, 234, 0.45);
-        padding: clamp(1rem, 2.5vw, 1.6rem); }
-      .board-hd { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 0.6rem 1rem;
-        padding-bottom: 1rem; border-bottom: 1px solid var(--hair); }
-      .board-hd small { display: block; font: 500 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
-      .board-hd b { display: block; margin-top: 0.4rem; font-family: var(--serif); font-weight: 500; font-size: 1.6rem; line-height: 1.1; }
-      .need { font: 600 10px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-ink);
-        padding: 0.4rem 0.7rem; border-radius: 99px; background: rgba(78, 155, 234, 0.14); }
-      .board-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) minmax(0, 0.95fr); gap: 1.4rem; margin-top: 1.1rem; }
-      @media (max-width: 960px) { .board-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-        .board-grid .zone:first-child { grid-column: 1 / -1; } }
-      @media (max-width: 620px) { .board-grid { grid-template-columns: minmax(0, 1fr); } }
-      .zone-h { display: flex; align-items: baseline; gap: 0.45rem; margin-bottom: 0.55rem;
-        font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
-      .zone-h em { font-style: normal; color: var(--faintest); }
-      .eye { display: grid; grid-template-columns: 1.9rem minmax(0, 1fr) auto; gap: 0.1rem 0.7rem; align-items: start;
-        padding: 0.6rem 0.65rem; border-radius: 10px; }
-      .eye + .eye { margin-top: 0.15rem; }
-      .eye.over { background: rgba(255, 122, 104, 0.06); box-shadow: inset 2px 0 0 var(--danger); }
-      .av { grid-row: span 2; width: 1.9rem; height: 1.9rem; border-radius: 99px; display: grid; place-items: center;
-        font: 600 10px/1 var(--sans); }
-      .eye b { font-size: 0.88rem; font-weight: 600; }
-      .eye .line { grid-column: 2 / 4; font-size: 0.84rem; color: var(--dim); line-height: 1.45; }
-      .chip { font: 600 9.5px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap;
-        padding: 0.28rem 0.45rem; border-radius: 6px; color: var(--warn); box-shadow: inset 0 0 0 1px rgba(232, 172, 76, 0.5); }
-      .chip.past { color: #1b0f0c; background: var(--danger); box-shadow: none; }
-      .shelf { display: grid; gap: 0.45rem; }
-      .shelf > div { display: grid; grid-template-columns: 1.7rem minmax(0, 1fr); gap: 0.1rem 0.6rem; padding: 0.6rem 0.65rem;
-        border-radius: 10px; background: var(--canvas); box-shadow: inset 0 0 0 1px var(--hair); }
-      .tile { grid-row: span 2; width: 1.7rem; height: 1.7rem; border-radius: 6px; display: grid; place-items: center;
-        font: 700 0.8rem/1 var(--serif); }
-      .shelf b { font-size: 0.82rem; font-weight: 600; }
-      .shelf b i { font-style: normal; font-weight: 500; color: var(--faintest); margin-left: 0.3rem; }
-      .shelf span { font-size: 0.78rem; color: var(--faint); line-height: 1.4; }
-      .rail { display: grid; gap: 0.45rem; }
-      .rec { padding: 0.55rem 0.7rem 0.6rem; border-radius: 10px; background: var(--canvas); box-shadow: inset 0 0 0 1px var(--hair); }
-      .rec small { display: block; font: 600 9.5px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
-      .rec p { margin: 0.35rem 0 0; font-size: 0.8rem; color: var(--dim); line-height: 1.4; }
-      .rec p b { color: var(--ink); font-weight: 600; }
-      .board-ft { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem 1rem; margin-top: 1.1rem; padding-top: 0.9rem;
-        border-top: 1px solid var(--hair); font-size: 0.82rem; color: var(--faint); }
-      .board-ft b { color: var(--dim); font-weight: 600; }
-      .board-ft small { font: 500 10px/1.5 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faintest); }
+      /* THE PRODUCT, as it is: a capture of the real app on its practice
+         inbox, or one of its own animations. Nothing here is redrawn in HTML;
+         reshoot rather than retouch. */
+      .shot { margin: 0; }
+      .shot img, .shot video { display: block; width: 100%; height: auto; border-radius: 14px; }
+      .shot img { filter: drop-shadow(0 30px 60px rgba(78, 155, 234, 0.22)); }
+      .shot.vig video { box-shadow: inset 0 0 0 1px var(--hair-strong); background: #0b111b; }
+      .shot figcaption { margin-top: 0.9rem; color: var(--faint); font-size: 0.86rem; }
+      .shot kbd { min-width: 1.5rem; height: 1.5rem; font-size: 0.75rem; border-radius: 6px; vertical-align: 1px; }
 
       /* THE ZONES, explained, under the board. */
       .zones { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.5rem clamp(1.25rem, 3vw, 2.5rem); margin-top: 2.25rem; }
@@ -167,31 +131,9 @@
       .duo kbd { min-width: 1.5rem; height: 1.5rem; font-size: 0.75rem; border-radius: 6px; vertical-align: 1px; }
       .fine-print { margin: 1.5rem 0 0; color: var(--faint); font-size: 0.9rem; max-width: 46rem; }
 
-      /* THE AUTH PAGE: a still of the list, codes hidden until revealed. */
+      /* SIGN-IN CODES: the app's own animation beside what the page does. */
       .seal { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: clamp(1.5rem, 4vw, 3.5rem); align-items: start; }
       @media (max-width: 900px) { .seal { grid-template-columns: minmax(0, 1fr); } }
-      .auth { border-radius: 16px; background: linear-gradient(180deg, #111926, #0d131c); padding: 0.5rem;
-        box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.3), 0 30px 80px -45px rgba(79, 192, 138, 0.4); }
-      .auth-hd { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem 1rem; padding: 0.7rem 0.8rem 0.8rem;
-        font: 600 10px/1.3 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--positive); }
-      .auth-hd span { color: var(--faintest); font-weight: 500; }
-      .arow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.25rem 1rem; align-items: center;
-        padding: 0.75rem 0.8rem; border-top: 1px solid var(--hair); }
-      .arow b { font-size: 0.88rem; font-weight: 600; }
-      .arow .sub { grid-column: 1; font-size: 0.82rem; color: var(--faint); }
-      .arow .code { grid-row: 1 / span 2; grid-column: 2; display: grid; justify-items: end; gap: 0.3rem; }
-      .dots { font: 600 0.95rem/1 var(--mono); letter-spacing: 0.18em; color: var(--dim); }
-      .tick { font: 500 10px/1 var(--mono); color: var(--positive); }
-      .ask { grid-row: 1 / span 2; grid-column: 2; display: flex; flex-wrap: wrap; justify-content: end; gap: 0.35rem; }
-      .ask span { font: 600 10px/1 var(--mono); letter-spacing: 0.04em; padding: 0.4rem 0.55rem; border-radius: 99px;
-        color: var(--dim); box-shadow: inset 0 0 0 1px var(--hair-strong); white-space: nowrap; }
-      .ask span.no { color: var(--danger); box-shadow: inset 0 0 0 1px rgba(255, 122, 104, 0.45); }
-      .auth-ft { padding: 0.7rem 0.8rem 0.5rem; border-top: 1px solid var(--hair); font: 500 10px/1.5 var(--mono);
-        letter-spacing: 0.06em; text-transform: uppercase; color: var(--faintest); }
-      @media (max-width: 480px) {
-        .arow { grid-template-columns: minmax(0, 1fr); }
-        .arow .code, .ask { grid-row: auto; grid-column: 1; justify-items: start; justify-content: start; margin-top: 0.35rem; }
-      }
       .points { margin: 0; padding: 0; list-style: none; display: grid; gap: 1.1rem; }
       .points b { display: block; font-weight: 600; margin-bottom: 0.15rem; }
       .points span { color: var(--dim); font-size: 0.93rem; }
@@ -309,58 +251,10 @@
           files the rest where you can find them when you want to.
         </p>
 
-        <div class="board" role="img" aria-label="An illustration of the Passband Sitrep. For your eyes: a lease renewal three days past due, an appointment to confirm today, a venue choice due Friday, and a reply from a colleague. Reading: three newsletters, one card per sender. Records: an appointment, a package out for delivery, a bill and a receipt. Everything else is filed as noise.">
-          <div class="board-hd">
-            <div><small>Good morning</small><b>Two items for your eyes.</b></div>
-            <span class="need">2 need you now</span>
-          </div>
-          <div class="board-grid">
-            <div class="zone">
-              <div class="zone-h">For your eyes <em>4</em></div>
-              <div class="eye over">
-                <span class="av" style="background:#3E2E1B;color:#E2C078">PP</span>
-                <b>Parkline Properties</b><span class="chip past">3d past due</span>
-                <span class="line">Your lease renewal still needs a signature before the new rate lapses.</span>
-              </div>
-              <div class="eye">
-                <span class="av" style="background:#22392E;color:#9AD3B6">DO</span>
-                <b>Dr. Ortiz's Office</b><span class="chip">due today</span>
-                <span class="line">Confirm Thursday's 2:30 appointment or call to reschedule.</span>
-              </div>
-              <div class="eye">
-                <span class="av" style="background:#24384F;color:#A9CBF0">JC</span>
-                <b>Jamie Chen</b><span class="chip">due Fri</span>
-                <span class="line">Needs your pick between two offsite venues so they can hold the date.</span>
-              </div>
-              <div class="eye">
-                <span class="av" style="background:#2F2A4A;color:#B8ACF2">AR</span>
-                <b>Alex Rivera</b><span></span>
-                <span class="line">Replied to your offsite dates: the 14th works for everyone.</span>
-              </div>
-            </div>
-            <div class="zone">
-              <div class="zone-h">Reading <em>3</em></div>
-              <div class="shelf">
-                <div><span class="tile" style="background:#f2f2ee;color:#111">M</span><b>Medium Daily Digest<i>7</i></b><span>10 Habits of Highly Effective Engineers, and six more stories.</span></div>
-                <div><span class="tile" style="background:#3a2a22;color:#f08a5d">P</span><b>Product Hunt Daily<i>5</i></b><span>An AI notetaker for your AI notetaker, and eight more launches.</span></div>
-                <div><span class="tile" style="background:#f3eee6;color:#c2531f">S</span><b>Substack<i>3</i></b><span>Three new posts from writers you follow.</span></div>
-              </div>
-            </div>
-            <div class="zone">
-              <div class="zone-h">Records</div>
-              <div class="rail">
-                <div class="rec"><small>Calendar</small><p><b>Dr. Ortiz</b> &middot; Thu 2:30 PM</p></div>
-                <div class="rec"><small>Shipments</small><p><b>Desk lamp</b> &middot; out for delivery</p></div>
-                <div class="rec"><small>Billing</small><p><b>City Electric</b> &middot; $84.12, due Oct 14</p></div>
-                <div class="rec"><small>Receipts</small><p><b>Corner Market</b> &middot; $23.40</p></div>
-              </div>
-            </div>
-          </div>
-          <div class="board-ft">
-            <span><b>Everything else is noise.</b> Still in your mail, never on this page, never a notification.</span>
-            <small>Illustration &middot; made-up mail</small>
-          </div>
-        </div>
+        <figure class="shot">
+          <img src="/media/sitrep.png" width="2560" height="1640" loading="lazy" alt="The Passband Sitrep on its practice inbox. For your eyes holds three emails, each with a line saying what it is: a plan to read, a personal invitation waiting for a reply, a terms update. Reading holds three newsletters, one card per sender. On the right, cards for Calendar, Shipments, Billing and Receipts." />
+          <figcaption>The Sitrep in Passband for Mac, on the practice inbox it ships with. The mail is made up; the app is not.</figcaption>
+        </figure>
 
         <div class="zones">
           <div>
@@ -467,25 +361,10 @@
           from any agent you connect.
         </p>
         <div class="seal">
-          <div class="auth" role="img" aria-label="An illustration of the Auth page. A sign-in code from GitHub, hidden, from a minute ago. A password reset from a bank asking 'That was me' or 'Not me'. A login code from a streaming service, from two hours ago.">
-            <div class="auth-hd">Auth <span>Codes hidden until you reveal them</span></div>
-            <div class="arow">
-              <b>GitHub</b>
-              <span class="sub">Your sign-in code</span>
-              <span class="code"><span class="dots">&bull;&bull;&bull; &bull;&bull;&bull;</span><span class="tick">1 min ago</span></span>
-            </div>
-            <div class="arow">
-              <b>Harbor Bank</b>
-              <span class="sub">Reset your password</span>
-              <span class="ask"><span>That was me</span><span class="no">Not me</span></span>
-            </div>
-            <div class="arow">
-              <b>Streamly</b>
-              <span class="sub">Your login code</span>
-              <span class="code"><span class="dots">&bull;&bull;&bull; &bull;&bull;&bull;</span><span class="tick" style="color:var(--faintest)">2 h ago</span></span>
-            </div>
-            <div class="auth-ft">Illustration &middot; made-up mail</div>
-          </div>
+          <figure class="shot vig">
+            <video src="/media/glance.mp4" poster="/media/glance.jpg" width="840" height="480" autoplay muted loop playsinline preload="metadata" aria-label="A sign-in code sits hidden on its row until c copies it; below it, a package's track runs to delivered."></video>
+            <figcaption>From the app: <kbd>c</kbd> copies a code off its row without opening the email.</figcaption>
+          </figure>
           <ul class="points">
             <li><b>Shown when you ask.</b><span>The list shows who sent it and the subject. A code's digits appear when you reveal it, and c copies them. Every reveal is written to the audit log.</span></li>
             <li><b>That was me, or not me.</b><span>Sign-in alerts and resets from the last week ask you to say which.</span></li>

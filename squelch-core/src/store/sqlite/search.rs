@@ -172,8 +172,13 @@ pub(super) fn escape_like(value: &str) -> String {
 /// Shared by the keyword path and the filter-only listing so the two cannot
 /// drift apart in what `from:2026-01-01` means.
 fn push_filter_clauses(sql: &mut String, args: &mut Vec<Value>, filter: &SearchFilter) {
+    // AN ARCHIVE ROW READS AS DONE, here and in every hit this module builds
+    // (the same expression, so the `done:` operator, the unfinished-first
+    // grouping and a hit's own flag cannot disagree). Its triage row says
+    // 'new' for good, because nothing ever triages it; taken at its word, a
+    // year of old mail would sort ahead of everything the reader has finished.
     if let Some(done) = filter.done {
-        sql.push_str(" AND (COALESCE(t.status, 'new') = 'done') = ?");
+        sql.push_str(" AND (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1) = ?");
         args.push(Value::Integer(i64::from(done)));
     }
     if let Some(from) = &filter.from {
@@ -210,8 +215,8 @@ fn push_filter_clauses(sql: &mut String, args: &mut Vec<Value>, filter: &SearchF
 /// blend has to happen BEFORE the top-`k` truncation, which is exactly when a
 /// hydrated `SearchHit` does not exist yet.
 #[derive(Clone, Copy)]
-struct Candidate {
-    id: i64,
+pub(super) struct Candidate {
+    pub(super) id: i64,
     received_at: DateTime<Utc>,
 }
 
@@ -280,11 +285,97 @@ fn fuse_ranked(lists: &[&[Candidate]], sort: SearchSort, now: DateTime<Utc>) -> 
     ranked.into_iter().map(|(c, _)| c).collect()
 }
 
+/// The widest recall window an external search may grow to, counted in rows
+/// that passed the external prefilter (`external_candidate_sql!`): mail the
+/// caller cannot be shown never takes a place in it. It bounds the per-row
+/// authority checks one search can run under the store mutex.
+pub const EXTERNAL_RECALL_MAX: usize = 4096;
+
+/// WHO A RECALL LEG IS FETCHING FOR. `Internal` is the human door and the
+/// daemon's own reads, and adds nothing to any statement: their SQL is
+/// byte-for-byte what it was before this type existed. `External` appends the
+/// prefilter to the leg's WHERE, so the rows a leg ranks, counts and cuts a
+/// window out of are already the ones an external reader might be shown.
+///
+/// NEVER A PERMISSION. An `External` leg's output still goes through
+/// [`SqliteStore::external_search_hits`] before any field of it is returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Audience {
+    Internal,
+    External,
+}
+
+impl Audience {
+    /// The clause this audience adds to a WHERE over alias `m`. No bound
+    /// parameters, so it can sit anywhere among the anonymous `?`s.
+    fn clause(self) -> &'static str {
+        match self {
+            Self::Internal => "",
+            Self::External => concat!(" AND ", external_candidate_sql!()),
+        }
+    }
+}
+
+/// Which legs an external search runs. The HTTP agent door lets its caller
+/// choose; the MCP door is always [`Self::Hybrid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalSearchMode {
+    /// Keyword and vector, fused. Keyword alone while no embedder is attached.
+    Hybrid,
+    /// The vector leg alone. Errors without an embedder.
+    Semantic,
+    /// The keyword leg alone, operators applied in SQL; operators with no
+    /// text are a newest-first listing.
+    Keyword,
+}
+
+/// One recall leg of an external search: its ranked candidates (already
+/// through the prefilter) and what the authority has said about each so far.
+///
+/// THE AUTHORITY IS APPLIED HERE, PER LEG, AND NOT ONLY TO THE FUSED PAGE. A
+/// row the prefilter passes and the authority refuses (its decision rests on
+/// a source that has since changed) would otherwise hold a rank on this list,
+/// and rank is what fusion scores by.
+struct ExternalLeg {
+    ranked: Vec<Candidate>,
+    /// How many rows `ranked` was fetched to hold; 0 before the first fetch.
+    depth: usize,
+    /// Whether a deeper fetch can return more (the keyword leg), or `ranked`
+    /// is all there will be (the vector leg, fetched once at its ceiling).
+    grows: bool,
+    verdicts: HashMap<i64, bool>,
+}
+
+impl ExternalLeg {
+    fn fixed(ranked: Vec<Candidate>) -> Self {
+        Self {
+            depth: ranked.len(),
+            ranked,
+            grows: false,
+            verdicts: HashMap::new(),
+        }
+    }
+
+    fn growing() -> Self {
+        Self {
+            ranked: Vec::new(),
+            depth: 0,
+            grows: true,
+            verdicts: HashMap::new(),
+        }
+    }
+}
+
 impl SqliteStore {
     /// Rehydrate externally returned hits under the same lock as current access
     /// validation. Search indexes may contain old/restricted content; their
     /// cached snippets and fields are never themselves permission to disclose it.
     /// Preserve the retrieval order after removing unavailable candidates.
+    ///
+    /// THIS IS THE AUTHORITY for every external search result: the full
+    /// per-message check (its own assessment, the owner's seal, and every
+    /// source its decision consumed) and then the thread guard. Whatever a
+    /// recall leg filtered beforehand, nothing is returned that fails here.
     pub fn external_search_hits(
         &self,
         account_id: AccountId,
@@ -292,17 +383,17 @@ impl SqliteStore {
     ) -> Result<Vec<SearchHit>> {
         let conn = self.lock()?;
         let mut allowed = Vec::new();
-        for candidate in hits {
-            if !super::messages::external_message_allowed_conn(&conn, account_id, candidate.id)? {
+        for id in hits.iter().map(|hit| hit.id) {
+            if !super::messages::external_message_allowed_conn(&conn, account_id, id)? {
                 continue;
             }
             let hit = conn
                 .query_row(
                     "SELECT m.id,m.thread_id,m.from_addr,m.from_name,m.subject,m.received_at,m.snippet,
-                        (COALESCE(t.status, 'new') = 'done')
+                        (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
                  FROM messages m LEFT JOIN triage t ON t.message_id=m.id
                  WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0",
-                    params![account_id, candidate.id],
+                    params![account_id, id],
                     map_search_hit,
                 )
                 .optional()?;
@@ -318,9 +409,88 @@ impl SqliteStore {
         Ok(allowed)
     }
 
-    /// Apply external access before the public result limit. Hidden leading hits
-    /// must not consume an agent's result window. Recall expands until enough
-    /// readable results are found or the underlying search is exhausted.
+    /// ASSESS ON SURFACING, the choosing half: the unassessed archive rows the
+    /// KEYWORD leg matches for `text` that a check can still be bought for
+    /// (`archive_askable_sql!`), best match first, at most
+    /// [`ARCHIVE_SURFACE_CAP`](crate::store::ARCHIVE_SURFACE_CAP) of them.
+    /// Strict matches before any-term ones, exactly as the leg itself ranks.
+    ///
+    /// ITS OWN QUERY, and a bounded one. These rows are hidden from the
+    /// search proper (see [`Audience`]), so they cannot be read off its
+    /// window; and nothing wider than what one call may queue is ever
+    /// collected, so no caller's result or latency grows with how much
+    /// unreadable mail a word matches.
+    ///
+    /// A KEYWORD MATCH OR NOTHING. No text an index can look up (operators
+    /// alone, punctuation) is an empty list, whatever the filter says: a date
+    /// range or a sender is not a match, and must not buy checks for whatever
+    /// mail falls inside it. The vector leg never contributes for the same
+    /// reason: nearest neighbours are not matches.
+    ///
+    /// Crate-private on purpose: an id here is a row the caller has not been
+    /// allowed to see, and neither door can read, count or branch on it. Its
+    /// one consumer is `store::archive_surface`, which queues the checks.
+    pub(crate) fn archive_surface_candidates(
+        &self,
+        account_id: AccountId,
+        text: &str,
+        filter: &SearchFilter,
+        include_sent: bool,
+    ) -> Result<Vec<i64>> {
+        let fts = FtsQuery::build(text, false);
+        if fts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cap = crate::store::ARCHIVE_SURFACE_CAP;
+        let conn = self.lock()?;
+        let pass = |expr: &str, exclude: Option<&str>, limit: usize| -> Vec<i64> {
+            let mut sql = String::from(concat!(
+                "SELECT m.id
+                 FROM messages_fts f
+                 CROSS JOIN messages m ON m.id = f.rowid
+                 LEFT JOIN triage t ON t.message_id = m.id
+                 LEFT JOIN agent_message_state a
+                   ON a.account_id = m.account_id AND a.message_id = m.id
+                 WHERE m.account_id = ?
+                   AND messages_fts MATCH ?
+                   AND ",
+                archive_askable_sql!()
+            ));
+            let mut args = vec![Value::Integer(account_id), Value::Text(expr.to_string())];
+            if let Some(exclude) = exclude {
+                sql.push_str(
+                    " AND f.rowid NOT IN (
+                         SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)",
+                );
+                args.push(Value::Text(exclude.to_string()));
+            }
+            if !include_sent {
+                sql.push_str(" AND m.is_sent = 0");
+            }
+            push_filter_clauses(&mut sql, &mut args, filter);
+            sql.push_str(&format!(
+                " ORDER BY {BM25}, m.received_at DESC, m.id DESC LIMIT ?"
+            ));
+            args.push(Value::Integer(limit as i64));
+            // Same reading as every other MATCH on this leg: a query the
+            // index cannot run matched nothing.
+            let Ok(mut stmt) = conn.prepare(&sql) else {
+                return Vec::new();
+            };
+            let Ok(rows) = stmt.query_map(params_from_iter(args), |r| r.get::<_, i64>(0)) else {
+                return Vec::new();
+            };
+            rows.map_while(std::result::Result::ok).collect()
+        };
+        let mut out = pass(&fts.strict, None, cap);
+        if fts.terms.len() > 1 && out.len() < cap {
+            out.extend(pass(&fts.any, Some(&fts.strict), cap - out.len()));
+        }
+        Ok(out)
+    }
+
+    /// The MCP door's search: [`Self::external_search_filtered`] in hybrid
+    /// mode with no operators.
     pub fn external_search(
         &self,
         account_id: AccountId,
@@ -328,28 +498,245 @@ impl SqliteStore {
         sort: SearchSort,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        self.external_search_filtered(
+            account_id,
+            query,
+            &SearchFilter::default(),
+            sort,
+            ExternalSearchMode::Hybrid,
+            limit,
+        )
+    }
+
+    /// THE ONE SEARCH BOTH AGENT DOORS RUN. Up to `limit` hits an external
+    /// reader may be shown, in rank order.
+    ///
+    /// HIDDEN MAIL NEVER SHAPES THE ANSWER. Two steps keep it out, and the
+    /// second is the one that decides anything:
+    /// 1. each leg fetches as [`Audience::External`], so the rows it ranks
+    ///    already pass the prefilter (`external_candidate_sql!`);
+    /// 2. each leg's list is then cut down to the rows the AUTHORITY allows
+    ///    ([`ExternalLeg`]) BEFORE the legs are fused. Fusion scores a row by
+    ///    its rank on each list, so one unreadable row left on a list would
+    ///    shift every readable row beneath it and reorder the page.
+    ///
+    /// What is fused, windowed and paged is therefore readable mail only, and
+    /// the hits are rehydrated through [`Self::external_search_hits`] on the
+    /// way out, which asks the authority once more.
+    ///
+    /// THE QUERY IS EMBEDDED ONCE and the vector leg is asked once
+    /// ([`Self::nearest_readable`]), for the [`EXTERNAL_RECALL_MAX`] nearest
+    /// rows AMONG THOSE THAT PASS THE PREFILTER; each wider window is a longer
+    /// prefix of that same list. It is not the human door's KNN, which picks
+    /// its neighbours over the whole account and would let mail the caller
+    /// cannot read fill the list.
+    pub fn external_search_filtered(
+        &self,
+        account_id: AccountId,
+        text: &str,
+        filter: &SearchFilter,
+        sort: SearchSort,
+        mode: ExternalSearchMode,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let knn = |required: bool| -> Result<ExternalLeg> {
+            let Some(embedder) = self.embedder() else {
+                if required {
+                    return Err(CoreError::InvalidInput("no embedder attached".into()));
+                }
+                return Ok(ExternalLeg::fixed(Vec::new()));
+            };
+            let qvec = embedder.embed(&crate::embed::query_embed_text(text))?;
+            Ok(ExternalLeg::fixed(self.nearest_readable(
+                account_id,
+                &qvec,
+                EXTERNAL_RECALL_MAX,
+            )?))
+        };
+        match mode {
+            ExternalSearchMode::Hybrid => {
+                let mut neighbours = knn(false)?;
+                let fts = FtsQuery::build(text, false);
+                let mut keyword = ExternalLeg::growing();
+                self.external_recall(account_id, limit, |window| {
+                    let vec_hits =
+                        self.external_leg(account_id, &mut neighbours, window, |_| Ok(Vec::new()))?;
+                    let fts_hits = self.external_leg(account_id, &mut keyword, window, |n| {
+                        self.fts_recall(account_id, &fts, n, Audience::External)
+                    })?;
+                    // No snippet windows: every hit is rehydrated by the loop.
+                    let (legs, full) = self.hybrid_fuse(
+                        account_id,
+                        &fts,
+                        vec_hits,
+                        fts_hits,
+                        filter,
+                        sort,
+                        0..0,
+                        window,
+                    )?;
+                    Ok((legs.into_iter().map(|leg| leg.hit).collect(), full))
+                })
+            }
+            ExternalSearchMode::Semantic => {
+                let mut neighbours = knn(true)?;
+                self.external_recall(account_id, limit, |window| {
+                    let candidates =
+                        self.external_leg(account_id, &mut neighbours, window, |_| Ok(Vec::new()))?;
+                    let full = candidates.len() == window;
+                    let hits =
+                        self.semantic_hits_from(account_id, &candidates, None, filter, sort)?;
+                    Ok((hits, full))
+                })
+            }
+            // ONE RANKED LIST and nothing fused, so a row the authority
+            // refuses costs a wider window and never a different order.
+            ExternalSearchMode::Keyword => self.external_recall(account_id, limit, |window| {
+                let conn = self.lock()?;
+                let (hits, _) = self.search_filtered_locked(
+                    &conn,
+                    account_id,
+                    text,
+                    filter,
+                    sort,
+                    false,
+                    window as u32,
+                    0,
+                    Audience::External,
+                )?;
+                let full = hits.len() == window;
+                Ok((hits, full))
+            }),
+        }
+    }
+
+    /// The best `want` READABLE candidates of one external leg, in the leg's
+    /// own order: walk its ranked list, ask the authority about each row
+    /// (once; the answers are kept for the rest of this search), stop when
+    /// `want` have passed. A growing leg that runs out of fetched rows while
+    /// the index may hold more is fetched again, twice as deep, up to
+    /// [`EXTERNAL_RECALL_MAX`] rows; `fetch(n)` returns its best `n`.
+    fn external_leg(
+        &self,
+        account_id: AccountId,
+        leg: &mut ExternalLeg,
+        want: usize,
+        mut fetch: impl FnMut(usize) -> Result<Vec<Candidate>>,
+    ) -> Result<Vec<Candidate>> {
+        loop {
+            if leg.depth == 0 && leg.grows {
+                leg.depth = want.clamp(1, EXTERNAL_RECALL_MAX);
+                leg.ranked = fetch(leg.depth)?;
+            }
+            let mut readable = Vec::with_capacity(want.min(leg.ranked.len()));
+            {
+                let conn = self.lock()?;
+                for candidate in &leg.ranked {
+                    if readable.len() >= want {
+                        break;
+                    }
+                    let allowed = match leg.verdicts.get(&candidate.id) {
+                        Some(allowed) => *allowed,
+                        None => {
+                            let allowed = super::messages::external_contributor_allowed_conn(
+                                &conn,
+                                account_id,
+                                candidate.id,
+                            )?;
+                            leg.verdicts.insert(candidate.id, allowed);
+                            allowed
+                        }
+                    };
+                    if allowed {
+                        readable.push(*candidate);
+                    }
+                }
+            }
+            let may_hold_more =
+                leg.grows && leg.ranked.len() == leg.depth && leg.depth < EXTERNAL_RECALL_MAX;
+            if readable.len() >= want || !may_hold_more {
+                return Ok(readable);
+            }
+            leg.depth = leg.depth.saturating_mul(2).min(EXTERNAL_RECALL_MAX);
+            leg.ranked = fetch(leg.depth)?;
+        }
+    }
+
+    /// THE ONE RECALL LOOP every external search runs. `fetch(window)` returns
+    /// the best `window` candidates and whether that window was full; the
+    /// authority is applied to them, and the window doubles until `limit`
+    /// readable hits survive, the corpus is exhausted, or it reaches
+    /// [`EXTERNAL_RECALL_MAX`]. With legs that hand over readable rows only,
+    /// what makes a window come up short is the caller's own operators
+    /// (`from:`, a date), applied after the ranking.
+    fn external_recall(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+        fetch: impl FnMut(usize) -> Result<(Vec<SearchHit>, bool)>,
+    ) -> Result<Vec<SearchHit>> {
+        self.external_recall_within(account_id, limit, EXTERNAL_RECALL_MAX, fetch)
+    }
+
+    /// [`Self::external_recall`] with the ceiling as a parameter, so a test
+    /// can reach it without four thousand rows.
+    pub(crate) fn external_recall_within(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+        max_window: usize,
+        mut fetch: impl FnMut(usize) -> Result<(Vec<SearchHit>, bool)>,
+    ) -> Result<Vec<SearchHit>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut window = limit;
+        let mut window = limit.min(max_window);
         loop {
-            let (hits, full) = self.hybrid_search_legs(
-                account_id,
-                query,
-                &SearchFilter::default(),
-                sort,
-                false,
-                false,
-                window,
-            )?;
-            let candidates: Vec<_> = hits.into_iter().map(|hit| hit.hit).collect();
-            let mut allowed = self.external_search_hits(account_id, &candidates)?;
-            if allowed.len() >= limit || !full {
-                allowed.truncate(limit);
-                return Ok(allowed);
+            let (candidates, full) = fetch(window)?;
+            let mut found = self.external_search_hits(account_id, &candidates)?;
+            if found.len() >= limit || !full || window >= max_window {
+                found.truncate(limit);
+                return Ok(found);
             }
-            window = window.saturating_mul(2);
+            window = window.saturating_mul(2).min(max_window);
         }
+    }
+
+    /// The date search reaches back to when there is no archive walk to ask:
+    /// the oldest `received_at` date that has at least three non-spam,
+    /// agent-readable messages in the seven days from it. ONE ROW NEVER SETS
+    /// IT. `received_at` prefers the `Date` header, so a single message
+    /// claiming 2011 would otherwise make the horizon promise years of
+    /// coverage, and a horizon read off one row's timestamp would hand that
+    /// row's date to whoever asked. Dates before 1990 are broken headers.
+    ///
+    /// ONLY MAIL ASSESSED AS ALLOWED COUNTS, because this date is reported at
+    /// the agent door: built from every row, it would move with the arrival
+    /// dates of mail that door may not read. It is the horizon of what an
+    /// external caller can find, which is the question it was asked.
+    pub fn indexed_since(&self, account_id: AccountId) -> Result<Option<chrono::NaiveDate>> {
+        let conn = self.lock()?;
+        let oldest: Option<String> = conn
+            .query_row(
+                "SELECT date(m.received_at) FROM messages m
+                 JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+                 WHERE m.account_id=?1 AND m.is_spam=0 AND m.received_at>='1990-01-01'
+                   AND a.access='allowed'
+                   AND (SELECT COUNT(*) FROM (SELECT 1 FROM messages n
+                        JOIN agent_message_state b
+                          ON b.account_id=n.account_id AND b.message_id=n.id
+                        WHERE n.account_id=m.account_id AND n.is_spam=0
+                          AND b.access='allowed'
+                          AND n.received_at>=m.received_at
+                          AND n.received_at<strftime('%Y-%m-%dT%H:%M:%S',m.received_at,'+7 days')
+                        LIMIT 3))>=3
+                 ORDER BY m.received_at ASC LIMIT 1",
+                params![account_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(oldest.and_then(|date| chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()))
     }
 
     // ON-BOX SEMANTIC RECALL. Inherent methods rather than `Store` ones because
@@ -402,6 +789,11 @@ impl SqliteStore {
     /// Lower-level KNN used by [`semantic_knn`](Self::semantic_knn) (and reused
     /// by [`hybrid_search`]): given an already-computed query vector, return the
     /// `k` nearest account-owned messages for the account, each with its distance.
+    ///
+    /// THE HUMAN DOOR AND THE DAEMON ONLY. vec0 picks its `k` over the whole
+    /// account and the joins filter afterwards, so this cannot be narrowed to
+    /// what an external caller may read; that caller's vector leg is
+    /// [`Self::nearest_readable`].
     fn knn_by_vector(
         &self,
         account_id: AccountId,
@@ -443,6 +835,85 @@ impl SqliteStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// THE EXTERNAL VECTOR LEG: the `k` nearest messages AMONG THOSE THAT PASS
+    /// THE PREFILTER (`external_candidate_sql!`), nearest first. An exact
+    /// scan, not vec0's KNN: the readable rows are chosen first, each one's
+    /// stored vector is read by its key, and the distance is computed in SQL.
+    /// A row the caller cannot be shown is never measured, so no number of
+    /// them, however near, moves a readable row down this list or off it.
+    ///
+    /// `vec_distance_l2` because `message_vecs` declares no `distance_metric`
+    /// and L2 is vec0's default: the same number [`Self::knn_by_vector`]
+    /// orders by, so the two doors rank the same rows the same way.
+    ///
+    /// STILL ONLY A PREFILTER. Every row returned goes through the authority
+    /// ([`ExternalLeg`], then [`Self::external_search_hits`]) like any other.
+    ///
+    /// COST: one vector read and one 384-wide distance per readable row of
+    /// the account, with no index, plus one pass over the account's messages
+    /// to build the set of closed threads (the flat form of the prefilter;
+    /// the correlated form re-scans a row's siblings for every row, which on
+    /// hundred-message threads took this leg from 0.3 s to 2 s at 10,000
+    /// rows). All of it under the store lock.
+    /// `the_external_vector_leg_over_ten_thousand_readable_rows` in
+    /// tests/archive.rs times it.
+    pub(super) fn nearest_readable(
+        &self,
+        account_id: AccountId,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<Candidate>> {
+        if query.len() != VEC_DIMS {
+            return Err(CoreError::InvalidInput(format!(
+                "query embedding len {} != vec0 width {VEC_DIMS}",
+                query.len()
+            )));
+        }
+        let conn = self.lock()?;
+        // CROSS JOIN pins the order: readable rows first, then a point read of
+        // each one's vector. `+v.account_id` keeps that test out of vec0's
+        // planner, which would otherwise be offered it as a KNN constraint.
+        // Ties break on the id so the list is the same list every time.
+        let mut stmt = conn.prepare_cached(concat!(
+            "SELECT m.id, m.received_at
+             FROM messages m
+             CROSS JOIN message_vecs v ON v.message_id = m.id
+             WHERE m.account_id = ?2
+               AND m.is_spam = 0
+               AND +v.account_id = ?2
+               AND ",
+            external_candidate_flat_sql!("?2"),
+            " ORDER BY vec_distance_l2(v.embedding, ?1), m.id
+             LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![query.as_bytes(), account_id, k as i64], |r| {
+            Ok(Candidate {
+                id: r.get::<_, i64>(0)?,
+                received_at: dt(r, 1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// The ids the flat prefilter passes, for the test that holds it equal to
+    /// the correlated one.
+    #[cfg(test)]
+    pub(crate) fn external_flat_prefilter_ids(&self, account_id: AccountId) -> Result<Vec<i64>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(concat!(
+            "SELECT m.id FROM messages m WHERE m.account_id = ?2 AND ?1 IS NULL AND ",
+            external_candidate_flat_sql!("?2")
+        ))?;
+        let ids = stmt
+            .query_map(params![Option::<i64>::None, account_id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<i64>, _>>()?;
+        Ok(ids)
     }
 
     /// HYBRID RECALL: merge FTS5 keyword rank and vector distance with Reciprocal
@@ -527,17 +998,15 @@ impl SqliteStore {
         snippet_range: std::ops::Range<usize>,
         k: usize,
     ) -> Result<(Vec<LeggedHit>, bool)> {
-        // ONE clock for both legs of one search.
-        let now = Utc::now();
-
         // No embedder (e.g. before the background attach) => keyword-only.
         let vec_hits: Vec<Candidate> = match self.embedder() {
             Some(embedder) => {
                 // The instruction is the QUERY side of BGE's asymmetry; the
                 // corpus vectors were embedded without it, on purpose.
                 let qvec = embedder.embed(&crate::embed::query_embed_text(query_text))?;
-                // sqlite-vec caps one nearest-neighbor query at 4096.
-                // Keyword recall can keep expanding beyond the semantic window.
+                // sqlite-vec caps one nearest-neighbor query at 4096. For the
+                // human door, which pages as deep as it likes, keyword recall
+                // keeps expanding beyond the semantic window.
                 self.knn_by_vector(account_id, &qvec, k.min(4096))?
                     .into_iter()
                     .map(|(c, _dist)| c)
@@ -545,10 +1014,39 @@ impl SqliteStore {
             }
             None => Vec::new(),
         };
-
         // FTS ranks over the SAME query text, sent mail included.
         let fts = FtsQuery::build(query_text, partial);
-        let fts_hits = self.fts_recall(account_id, &fts, k)?;
+        let fts_hits = self.fts_recall(account_id, &fts, k, Audience::Internal)?;
+        self.hybrid_fuse(
+            account_id,
+            &fts,
+            vec_hits,
+            fts_hits,
+            filter,
+            sort,
+            snippet_range,
+            k,
+        )
+    }
+
+    /// The half of a hybrid search after its two legs: fuse them, cut the
+    /// window at `k`, hydrate and apply the operators. Split out so an
+    /// external search can hand over legs it has already cut down to readable
+    /// rows, and fuse as many windows as it needs from one embed and one KNN.
+    #[allow(clippy::too_many_arguments)]
+    fn hybrid_fuse(
+        &self,
+        account_id: AccountId,
+        fts: &FtsQuery,
+        vec_hits: Vec<Candidate>,
+        fts_hits: Vec<Candidate>,
+        filter: &SearchFilter,
+        sort: SearchSort,
+        snippet_range: std::ops::Range<usize>,
+        k: usize,
+    ) -> Result<(Vec<LeggedHit>, bool)> {
+        // ONE clock for both legs of one search.
+        let now = Utc::now();
 
         let mut ranked = fuse_ranked(&[&vec_hits, &fts_hits], sort, now);
         ranked.truncate(k);
@@ -681,12 +1179,28 @@ impl SqliteStore {
         let knn = self.semantic_knn(account_id, query_text, k)?;
         let window_full = knn.len() == k;
         let candidates: Vec<Candidate> = knn.into_iter().map(|(c, _dist)| c).collect();
-        let ranked = fuse_ranked(&[&candidates], sort, Utc::now());
         // The vector leg matched by meaning, but the mail it found may still
         // SAY one of the reader's words, and if it does that sentence is worth
         // more than the head of the message. Asked with the ANY expression, so
         // a single term landing anywhere in the body wins a window.
         let fts = FtsQuery::build(query_text, partial);
+        let hits = self.semantic_hits_from(account_id, &candidates, Some(&fts), filter, sort)?;
+        Ok((hits, window_full))
+    }
+
+    /// The half of a semantic search after the KNN: order `candidates` by
+    /// distance rank and recency, hydrate, apply the operators. `windows` is
+    /// the query whose term windows replace stored snippets; `None` for a
+    /// caller that throws the snippet away.
+    fn semantic_hits_from(
+        &self,
+        account_id: AccountId,
+        candidates: &[Candidate],
+        windows: Option<&FtsQuery>,
+        filter: &SearchFilter,
+        sort: SearchSort,
+    ) -> Result<Vec<SearchHit>> {
+        let ranked = fuse_ranked(&[candidates], sort, Utc::now());
         // ONE LOCK for the whole hydration; see the twin loop in
         // [`hybrid_search_legs`](Self::hybrid_search_legs).
         let conn = self.lock()?;
@@ -695,14 +1209,16 @@ impl SqliteStore {
             if let Some(mut hit) = self.search_hit_by_id(&conn, account_id, c.id)?
                 && filter.matches(&hit)
             {
-                if let Some(window) = self.fts_snippet(&conn, account_id, c.id, &fts.any)? {
+                if let Some(fts) = windows
+                    && let Some(window) = self.fts_snippet(&conn, account_id, c.id, &fts.any)?
+                {
                     window.apply(&mut hit);
                 }
                 out.push(hit);
             }
         }
         filter.order_hits(&mut out, |hit| hit.is_done);
-        Ok((out, window_full))
+        Ok(out)
     }
 
     /// FTS5 recall helper for [`hybrid_search`]: candidates in bm25 rank order,
@@ -723,12 +1239,14 @@ impl SqliteStore {
         account_id: AccountId,
         fts: &FtsQuery,
         limit: usize,
+        audience: Audience,
     ) -> Result<Vec<Candidate>> {
         if fts.is_empty() {
             return Ok(Vec::new());
         }
         let conn = self.lock()?;
-        let mut out = self.fts_recall_pass(&conn, account_id, &fts.strict, None, limit)?;
+        let mut out =
+            self.fts_recall_pass(&conn, account_id, &fts.strict, None, limit, audience)?;
         // One term means the two expressions are identical; anything else and
         // the any-only pass fills the rest of the window BELOW the strict hits.
         if fts.terms.len() > 1 && out.len() < limit {
@@ -738,6 +1256,7 @@ impl SqliteStore {
                 &fts.any,
                 Some(&fts.strict),
                 limit - out.len(),
+                audience,
             )?;
             out.extend(rest);
         }
@@ -753,6 +1272,7 @@ impl SqliteStore {
         expr: &str,
         exclude: Option<&str>,
         limit: usize,
+        audience: Audience,
     ) -> Result<Vec<Candidate>> {
         let mut sql = String::from(
             "SELECT m.id, m.received_at
@@ -763,6 +1283,7 @@ impl SqliteStore {
                AND m.is_spam = 0
                AND messages_fts MATCH ?",
         );
+        sql.push_str(audience.clause());
         let mut args = vec![Value::Integer(account_id), Value::Text(expr.to_string())];
         if let Some(exclude) = exclude {
             // The subquery carries no sealed/spam guard and needs none: it only
@@ -777,7 +1298,17 @@ impl SqliteStore {
         // bm25 ascending is best-first (the score is negative), which is what
         // `ORDER BY rank` meant before the subject weight moved the ranking off
         // the table's default.
-        sql.push_str(&format!(" ORDER BY {BM25} LIMIT ?"));
+        //
+        // An external window also breaks bm25 ties, newest first. Without it, which of
+        // several equal matches falls inside the LIMIT is whatever order the
+        // doclist is walked in, and that is one more thing about a result
+        // that should not be left to mail the caller cannot see.
+        sql.push_str(&match audience {
+            Audience::Internal => format!(" ORDER BY {BM25} LIMIT ?"),
+            Audience::External => {
+                format!(" ORDER BY {BM25}, m.received_at DESC, m.id DESC LIMIT ?")
+            }
+        });
         args.push(Value::Integer(limit as i64));
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
@@ -818,7 +1349,7 @@ impl SqliteStore {
         let row = conn
             .prepare_cached(
                 "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                        m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done')
+                        m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
                  FROM messages m
                  LEFT JOIN triage t ON t.message_id = m.id
                  WHERE m.account_id = ?1 AND m.id = ?2
@@ -872,6 +1403,7 @@ impl SqliteStore {
         sort: SearchSort,
         limit: u32,
         offset: u32,
+        audience: Audience,
     ) -> Result<Vec<SearchHit>> {
         // The trailing column is the FTS match window; the mapper swaps it in
         // over the stored head-of-message snippet only when the body really
@@ -879,7 +1411,7 @@ impl SqliteStore {
         // snippet.
         let mut sql = format!(
             "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done'),
+                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1),
                     highlight(messages_fts, 0, char(1), char(2)), {BODY_WINDOW}
              FROM messages_fts f
              CROSS JOIN messages m ON m.id = f.rowid
@@ -888,6 +1420,7 @@ impl SqliteStore {
                AND m.is_spam = 0
                AND messages_fts MATCH ?"
         );
+        sql.push_str(audience.clause());
         let mut args = vec![Value::Integer(account_id), Value::Text(expr.to_string())];
         if let Some(exclude) = exclude {
             // The subquery carries no sealed/spam guard and needs none: it only
@@ -965,6 +1498,7 @@ impl SqliteStore {
         account_id: AccountId,
         expr: &str,
         filter: &SearchFilter,
+        audience: Audience,
     ) -> Result<u32> {
         let mut sql = String::from(
             "SELECT COUNT(*)
@@ -975,6 +1509,7 @@ impl SqliteStore {
                AND m.is_spam = 0
                AND messages_fts MATCH ?",
         );
+        sql.push_str(audience.clause());
         let mut args = vec![Value::Integer(account_id), Value::Text(expr.to_string())];
         if !filter.include_sent {
             sql.push_str(" AND m.is_sent = 0");
@@ -1050,7 +1585,15 @@ impl SqliteStore {
         if fts.is_empty() && filter.is_empty() {
             return self
                 .search_filtered_locked(
-                    &conn, account_id, text, filter, sort, partial, limit, offset,
+                    &conn,
+                    account_id,
+                    text,
+                    filter,
+                    sort,
+                    partial,
+                    limit,
+                    offset,
+                    Audience::Internal,
                 )
                 .map(|(hits, _)| hits);
         }
@@ -1069,11 +1612,19 @@ impl SqliteStore {
             push_filter_clauses(&mut sql, &mut args, &group);
             conn.query_row(&sql, params_from_iter(args), |r| r.get::<_, u32>(0))?
         } else {
-            self.keyword_total(&conn, account_id, &fts.any, &group)?
+            self.keyword_total(&conn, account_id, &fts.any, &group, Audience::Internal)?
         };
         let mut out = self
             .search_filtered_locked(
-                &conn, account_id, text, &group, sort, partial, limit, offset,
+                &conn,
+                account_id,
+                text,
+                &group,
+                sort,
+                partial,
+                limit,
+                offset,
+                Audience::Internal,
             )?
             .0;
         let owed = limit.saturating_sub(out.len() as u32);
@@ -1089,6 +1640,7 @@ impl SqliteStore {
                     partial,
                     owed,
                     offset.saturating_sub(unfinished),
+                    Audience::Internal,
                 )?
                 .0,
             );
@@ -1130,7 +1682,15 @@ impl SqliteStore {
     ) -> Result<(Vec<SearchHit>, Option<u32>)> {
         let conn = self.lock()?;
         self.search_filtered_locked(
-            &conn, account_id, text, filter, sort, partial, limit, offset,
+            &conn,
+            account_id,
+            text,
+            filter,
+            sort,
+            partial,
+            limit,
+            offset,
+            Audience::Internal,
         )
     }
 
@@ -1145,6 +1705,7 @@ impl SqliteStore {
         partial: bool,
         limit: u32,
         offset: u32,
+        audience: Audience,
     ) -> Result<(Vec<SearchHit>, Option<u32>)> {
         let fts = FtsQuery::build(text, partial);
         if fts.is_empty() {
@@ -1163,7 +1724,8 @@ impl SqliteStore {
             }
             // No MATCH ran, so there is no strict set and nothing to report a
             // count of.
-            let hits = self.filter_only_listing(conn, account_id, filter, limit, offset)?;
+            let hits =
+                self.filter_only_listing(conn, account_id, filter, limit, offset, audience)?;
             return Ok((hits, None));
         }
         // ONE TERM means strict and any are the same expression, so there is no
@@ -1181,12 +1743,22 @@ impl SqliteStore {
                 sort,
                 limit,
                 offset,
+                audience,
             )?;
             return Ok((hits, None));
         }
         if offset == 0 {
-            let mut hits =
-                self.keyword_page(conn, account_id, &fts.strict, None, filter, sort, limit, 0)?;
+            let mut hits = self.keyword_page(
+                conn,
+                account_id,
+                &fts.strict,
+                None,
+                filter,
+                sort,
+                limit,
+                0,
+                audience,
+            )?;
             if hits.len() == limit as usize {
                 return Ok((hits, None));
             }
@@ -1200,10 +1772,11 @@ impl SqliteStore {
                 sort,
                 limit - strict_total,
                 0,
+                audience,
             )?);
             return Ok((hits, Some(strict_total)));
         }
-        let strict_total = self.keyword_total(conn, account_id, &fts.strict, filter)?;
+        let strict_total = self.keyword_total(conn, account_id, &fts.strict, filter, audience)?;
         let mut out = Vec::new();
         if offset < strict_total {
             out = self.keyword_page(
@@ -1215,6 +1788,7 @@ impl SqliteStore {
                 sort,
                 limit,
                 offset,
+                audience,
             )?;
         }
         // What the page still owes comes off the any-only ranking. Its offset
@@ -1233,6 +1807,7 @@ impl SqliteStore {
                 sort,
                 owed as u32,
                 any_offset,
+                audience,
             )?;
             out.extend(rest);
         }
@@ -1381,15 +1956,17 @@ impl SqliteStore {
         filter: &SearchFilter,
         limit: u32,
         offset: u32,
+        audience: Audience,
     ) -> Result<Vec<SearchHit>> {
         let mut sql = String::from(
             "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done')
+                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id
              WHERE m.account_id = ?
                AND m.is_spam = 0",
         );
+        sql.push_str(audience.clause());
         let mut args = vec![Value::Integer(account_id)];
         if !filter.include_sent {
             sql.push_str(" AND m.is_sent = 0");

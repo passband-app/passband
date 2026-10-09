@@ -534,6 +534,7 @@ enum ProductGuide {
         What it searches:
         - Subjects and bodies, by keyword and by meaning. Subject words count more, word forms match (password finds passwords), and a quoted phrase has to appear exactly.
         - Login codes and spam are not searchable.
+        - Search covers the mail Passband has indexed. Where the older-mail archive is on, that includes up to a year of mail from before Passband was connected, added gradually in the background and listed with finished mail, and the assistant can say how far back search currently reaches.
         - Unfinished mail is listed first, and the matching words are highlighted.
 
         Finding a sender:

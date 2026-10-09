@@ -100,6 +100,19 @@ CREATE TABLE IF NOT EXISTS messages (
     -- count it twice: the per-sender histogram is always a query
     -- (`sqlite::zones`).
     date_offset_minutes INTEGER,
+    -- THE ARCHIVE TIER: 1 when the row was written by the archive walk, mail
+    -- older than the backfill window that exists to be FOUND (search, the
+    -- reader, the Sent page, a sender's history) and for nothing else. No model
+    -- reads it at ingest and nothing may spend on it unprompted: it is absent
+    -- from every band, count, inventory and queue, and from the triage agent's
+    -- evidence until an explicit agent-door surfacing has had its access
+    -- assessed.
+    --
+    -- WRITTEN ONCE, AT INSERT, AND NEVER CHANGED. Unlike `is_sent` and
+    -- `is_spam` there is no conflict rule, because there is no conflict: an
+    -- archive ingest of an id already stored is a no-op, and so is a live
+    -- sighting of an archive row (`SqliteStore::ingest_message_inner`).
+    is_archive  INTEGER NOT NULL DEFAULT 0,
     UNIQUE(account_id, gmail_msg_id)
 );
 
@@ -2005,3 +2018,21 @@ WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.account_id=a.account_id
 UPDATE agent_thread_attention SET decision_message_id=message_id
 WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.account_id=agent_thread_attention.account_id
                   AND m.id=agent_thread_attention.decision_message_id AND m.thread_id=agent_thread_attention.thread_id);
+
+-- THE ARCHIVE WALK'S CURSOR, one row per account. `walked_to` is the oldest
+-- instant the walk has fully covered: everything between it and the backfill
+-- window is stored. Created at `now - backfill_days` on first use and only ever
+-- moved backwards, a chunk at a time; the walk is complete once it reaches
+-- `now - archive_days`, and raising that setting resumes it from here.
+--
+-- `covered_to` is the FORWARD edge: the newest instant up to which mail that
+-- never carried INBOX or SENT (filed by a filter, archived before a sync) has
+-- been stored. It starts where `walked_to` started and only ever moves
+-- forwards, staying a day behind the clock. NULL on a row written before the
+-- column existed, which reads as `walked_to`.
+CREATE TABLE IF NOT EXISTS archive_walk (
+    account_id INTEGER PRIMARY KEY,
+    walked_to  TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    covered_to TEXT
+);

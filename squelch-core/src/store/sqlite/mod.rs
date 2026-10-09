@@ -53,6 +53,136 @@ macro_rules! own_mail_sql {
 const OWN_MAIL: &str = own_mail_sql!();
 
 pub(crate) mod agent_budget;
+/// An archive row nobody has assessed, over aliases `m` (messages) and `a`
+/// (its `agent_message_state`, LEFT JOINed): stored to be found, never
+/// checked. To an external reader such a row DOES NOT EXIST YET. It is left
+/// out of every thread read, subject and count, and it does not close its
+/// thread, because closing on it would shut every live conversation with a
+/// year-old ancestor until somebody paid for a model call per ancestor.
+///
+/// Exactly this and nothing wider: a restricted archive row, a row the owner
+/// sealed by hand, and any NON-archive pending row all still close the thread.
+macro_rules! archive_unassessed_sql {
+    () => {
+        archive_unassessed_sql_as!("m", "a")
+    };
+}
+/// [`archive_unassessed_sql!`] over any pair of aliases, so a subquery about a
+/// SIBLING row can ask the same question in the same words. One definition:
+/// the omission must not mean two things.
+macro_rules! archive_unassessed_sql_as {
+    ($m:literal, $a:literal) => {
+        concat!(
+            "(",
+            $m,
+            ".is_archive=1 AND (",
+            $a,
+            ".access IS NULL OR ",
+            $a,
+            ".access='pending')
+           AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections c
+               WHERE c.account_id=",
+            $m,
+            ".account_id AND c.message_id=",
+            $m,
+            ".id
+                 AND c.field='external_access' AND c.value_json='true'))"
+        )
+    };
+}
+/// An unassessed archive row an external caller may still BUY a check for:
+/// not spam, and nothing queued, running or finished at its revision. That
+/// leaves the rows never asked about and the ones whose check FAILED (which
+/// `revive_failed_archive_access` puts back once the failure is a day old).
+/// Same aliases as [`archive_unassessed_sql!`]. The search that picks ten
+/// matches to ask about and the thread open that picks eight siblings both
+/// use it, so a row already parked never takes a place a fresh one could.
+macro_rules! archive_askable_sql {
+    () => {
+        concat!(
+            "(m.is_spam=0 AND ",
+            archive_unassessed_sql!(),
+            " AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs j
+                 WHERE j.account_id=m.account_id AND j.message_id=m.id
+                   AND j.kind IN ('triage','access') AND j.state!='failed'
+                   AND j.input_revision=COALESCE(a.revision,1)))"
+        )
+    };
+}
+/// THE EXTERNAL SEARCH PREFILTER, over alias `m`: a cheap NECESSARY condition
+/// for an external reader to be shown a row, written so a recall leg can carry
+/// it in its own WHERE. IT AUTHORIZES NOTHING. The authority is
+/// `messages::external_message_allowed_conn` plus
+/// `messages::thread_guard_and_subject`, and every candidate that passes this
+/// still goes through both before a field of it leaves the store.
+///
+/// What it is for: a row an external reader cannot be shown must not take a
+/// place in a recall window, or which readable rows come back (and in what
+/// order, and how fast) becomes a function of mail the caller may not read.
+/// Three terms, each implied by the authority and none of them the whole of it:
+/// 1. the row's own assessment is `allowed`;
+/// 2. the owner has not sealed it;
+/// 3. no sibling closes its thread on its face: a sibling the thread guard
+///    counts (so not an unassessed archive row) that is itself not `allowed`
+///    or is owner-sealed.
+///
+/// What it leaves to the authority: the recursive dependency check (a decision
+/// that consumed a source since restricted, changed or deleted), on the row
+/// and on every sibling. `the_external_prefilter_is_implied_by_the_authority`
+/// in tests/archive.rs holds "necessary" over a fixture of every case; if the
+/// authority ever loosens, that test is what says this must follow.
+macro_rules! external_candidate_sql {
+    () => {
+        concat!(
+            "(EXISTS(SELECT 1 FROM agent_message_state xa WHERE xa.account_id=m.account_id
+                 AND xa.message_id=m.id AND xa.access='allowed')
+              AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections xc
+                 WHERE xc.account_id=m.account_id AND xc.message_id=m.id
+                   AND xc.field='external_access' AND xc.value_json='true')
+              AND NOT EXISTS(SELECT 1 FROM messages s
+                 LEFT JOIN agent_message_state sa
+                   ON sa.account_id=s.account_id AND sa.message_id=s.id
+                 WHERE s.account_id=m.account_id AND s.thread_id=m.thread_id AND s.id!=m.id
+                   AND NOT ",
+            archive_unassessed_sql_as!("s", "sa"),
+            " AND (sa.access IS NULL OR sa.access!='allowed'
+                     OR EXISTS(SELECT 1 FROM agent_triage_corrections sc
+                         WHERE sc.account_id=s.account_id AND sc.message_id=s.id
+                           AND sc.field='external_access' AND sc.value_json='true'))))"
+        )
+    };
+}
+/// [`external_candidate_sql!`] for a query that walks EVERY row of one account
+/// (the external vector leg), where the correlated sibling scan of term 3 is
+/// run once per row and is quadratic in thread length. The same three terms,
+/// with the third turned inside out: the set of threads a sibling closes is
+/// built once, for the account bound at `$account`, and a row passes when its
+/// thread is not in it. Equal to the correlated form for any row that passes
+/// terms 1 and 2, since such a row is never itself in the closing set;
+/// `the_external_prefilter_is_implied_by_the_authority` holds the two equal
+/// over its fixture.
+macro_rules! external_candidate_flat_sql {
+    ($account:literal) => {
+        concat!(
+            "(EXISTS(SELECT 1 FROM agent_message_state xa WHERE xa.account_id=m.account_id
+                 AND xa.message_id=m.id AND xa.access='allowed')
+              AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections xc
+                 WHERE xc.account_id=m.account_id AND xc.message_id=m.id
+                   AND xc.field='external_access' AND xc.value_json='true')
+              AND m.thread_id NOT IN (SELECT s.thread_id FROM messages s
+                 LEFT JOIN agent_message_state sa
+                   ON sa.account_id=s.account_id AND sa.message_id=s.id
+                 WHERE s.account_id=",
+            $account,
+            " AND NOT ",
+            archive_unassessed_sql_as!("s", "sa"),
+            " AND (sa.access IS NULL OR sa.access!='allowed'
+                     OR EXISTS(SELECT 1 FROM agent_triage_corrections sc
+                         WHERE sc.account_id=s.account_id AND sc.message_id=s.id
+                           AND sc.field='external_access' AND sc.value_json='true'))))"
+        )
+    };
+}
 mod agent_deliveries;
 mod agent_triage;
 mod attention;
@@ -81,7 +211,12 @@ mod tracking;
 mod triage_stages;
 mod zones;
 
+pub use self::agent_triage::{
+    ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX, ARCHIVE_SURFACE_CAP, AccessProgress,
+    ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
+};
 use self::migrate::migrate;
+pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
 
 use std::path::Path;
 use std::sync::{Mutex, Once, RwLock};
@@ -291,6 +426,14 @@ impl SqliteStore {
     /// The attached event notifier, if any. Cheap clone of the sender.
     pub fn event_notifier(&self) -> Option<tokio::sync::broadcast::Sender<i64>> {
         self.event_tx.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Run raw SQL on the store's connection. For a test outside this module
+    /// that has to break the store on purpose (a trigger that refuses one
+    /// row); nothing in the daemon has a use for it.
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &str) {
+        self.lock().unwrap().execute_batch(sql).unwrap();
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -880,6 +1023,46 @@ impl Store for SqliteStore {
         scope: HealScope,
     ) -> Result<Option<i64>> {
         self.ingest_message_fresh(triaged, scope)
+    }
+
+    fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>> {
+        self.ingest_archive_message(triaged)
+    }
+
+    fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        self.archive_walked_to(account_id)
+    }
+
+    fn message_is_archive(&self, account_id: AccountId, message_id: i64) -> Result<bool> {
+        self.message_is_archive(account_id, message_id)
+    }
+
+    fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()> {
+        self.set_archive_walked_to(account_id, walked_to)
+    }
+
+    fn archive_disk(&self) -> Result<crate::store::ArchiveDisk> {
+        self.archive_disk()
+    }
+
+    fn archive_covered_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        self.archive_covered_to(account_id)
+    }
+
+    fn set_archive_covered_to(
+        &self,
+        account_id: AccountId,
+        covered_to: DateTime<Utc>,
+    ) -> Result<()> {
+        self.set_archive_covered_to(account_id, covered_to)
+    }
+
+    fn stored_gmail_msg_ids(
+        &self,
+        account_id: AccountId,
+        gmail_msg_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        self.stored_gmail_msg_ids(account_id, gmail_msg_ids)
     }
 
     fn is_known_contact(&self, account_id: AccountId, addr: &str) -> Result<bool> {

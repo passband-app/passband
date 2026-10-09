@@ -10,7 +10,7 @@ Seven tools that are always there, read-mostly by design:
 - `get_thread` — a sanitized thread by thread id or message id
 - `get_deadlines` — bills and deadlines due within N days
 - `get_shipments` — tracked packages (en-route by default)
-- `search_mail` — hybrid keyword + semantic search
+- `search_mail` — hybrid keyword + semantic search. Returns `{results, indexed_since, archive}`: `indexed_since` is the date (`YYYY-MM-DD`) search reaches back to, and `archive` is `{target, walk_complete, older_mail}` for the older-mail walk (absent when `sync.archive_days` is 0). `older_mail` is always `"checked_on_first_match"`: older mail is access-checked the first time a keyword search matches it, so if expected old mail is missing, search once more and do not loop. Nothing in the response says whether older mail matched or is waiting. Under `squelchd serve` the search waits up to 8 seconds for the checks it queued, and only while the triage worker can run; the standalone binary queues them and returns.
 - `set_sender_rule` / `list_sender_rules` — the one write: LOCAL sender disposition (surface / squelch / filtered). It touches squelch's own database only, never Gmail, and writes an audit row.
 
 Sealed messages (2FA codes, password resets, login alerts) are absent from every response — not redacted, absent, indistinguishable from not existing.

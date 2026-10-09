@@ -332,6 +332,25 @@ pub struct SyncMetrics {
     catchup_total: AtomicU64,
     catchup_done: AtomicU64,
 
+    /// The archive walk, as the engine last saw it: the oldest instant it has
+    /// fully covered (unix seconds), and 1 once that reaches `sync.archive_days`
+    /// back. BOTH ZERO until the walk has looked at its cursor in this process,
+    /// and for good when the archive is off. Its own pair rather than a reuse
+    /// of the catch-up one: a catch-up is a wait somebody is watching, and the
+    /// walk is hours of background work that must not read as one.
+    archive_walked_to_unix: AtomicI64,
+    archive_complete: AtomicU64,
+    /// The forward pass's edge (unix seconds): how far toward now the walk has
+    /// covered mail that carries neither INBOX nor SENT. 0 until read.
+    archive_covered_to_unix: AtomicI64,
+    /// WHY THE WALK IS NOT WALKING, as an [`ArchiveHold`] index; 0 is "it is
+    /// not held". Without it a walk waiting on a hung embedder, a short disk
+    /// or a wrong clock reads on a dashboard exactly like a walk switched off.
+    archive_hold: AtomicU64,
+    /// Messages the walk has stepped over, ever in this process: deleted
+    /// before their fetch, or failing on pass after pass.
+    archive_skipped: AtomicU64,
+
     gmail_auth: AtomicU64,
     /// Unix seconds of the FIRST credential failure in the current outage, or 0
     /// while the mailbox is connected. A STATE, not a count, for the same
@@ -616,6 +635,16 @@ impl SyncMetrics {
                 at: Utc::now().timestamp(),
             });
         }
+        self.count_gmail_error(kind);
+    }
+
+    /// COUNT a Gmail error WITHOUT showing it to anyone: the per-kind counter
+    /// moves, the client-visible last error does not. For background work
+    /// whose refusals are not the mailbox being out of sync (the archive
+    /// walk): a 429 on a year-old week must not put a sync warning in front of
+    /// somebody whose inbox is current. A credential failure is never quiet;
+    /// callers send `Auth` through [`Self::record_gmail_error_reason`].
+    pub fn count_gmail_error(&self, kind: GmailErrorKind) {
         let slot = match kind {
             GmailErrorKind::Auth => &self.gmail_auth,
             GmailErrorKind::Quota => &self.gmail_quota,
@@ -660,6 +689,59 @@ impl SyncMetrics {
     pub fn catchup_end(&self) {
         self.catchup_total.store(0, Ordering::Relaxed);
         self.catchup_done.store(0, Ordering::Relaxed);
+    }
+
+    /// Where the archive walk stands: its cursor, and whether it has reached
+    /// its target. Called each time the walk reads or moves the cursor.
+    pub fn note_archive_walk(&self, walked_to: chrono::DateTime<Utc>, complete: bool) {
+        self.archive_walked_to_unix
+            .store(walked_to.timestamp(), Ordering::Relaxed);
+        self.archive_complete
+            .store(u64::from(complete), Ordering::Relaxed);
+    }
+
+    /// Where the forward pass stands. See the field.
+    pub fn note_archive_covered_to(&self, covered_to: chrono::DateTime<Utc>) {
+        self.archive_covered_to_unix
+            .store(covered_to.timestamp(), Ordering::Relaxed);
+    }
+
+    /// What is holding the walk off, or `None` when nothing is.
+    pub fn note_archive_hold(&self, hold: Option<ArchiveHold>) {
+        self.archive_hold
+            .store(hold.map_or(0, |hold| hold as u64), Ordering::Relaxed);
+    }
+
+    /// The hold last reported. `None`: walking, finished, or off.
+    pub fn archive_hold(&self) -> Option<ArchiveHold> {
+        let index = self.archive_hold.load(Ordering::Relaxed);
+        ArchiveHold::ALL
+            .into_iter()
+            .find(|hold| *hold as u64 == index)
+    }
+
+    /// The forward edge last reported, unix seconds; 0 before the first.
+    pub fn archive_covered_to(&self) -> i64 {
+        self.archive_covered_to_unix.load(Ordering::Relaxed)
+    }
+
+    /// The walk stepped over one message.
+    pub fn count_archive_skipped(&self) {
+        self.archive_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Messages the walk has stepped over in this process.
+    pub fn archive_skipped(&self) -> u64 {
+        self.archive_skipped.load(Ordering::Relaxed)
+    }
+
+    /// `(walked_to unix seconds, complete)` of the archive walk, or `None`
+    /// before it has looked at its cursor in this process.
+    pub fn archive_walk(&self) -> Option<(i64, bool)> {
+        match self.archive_walked_to_unix.load(Ordering::Relaxed) {
+            0 => None,
+            at => Some((at, self.archive_complete.load(Ordering::Relaxed) == 1)),
+        }
     }
 
     /// `(done, total)` of a catch-up in flight, or `None` when none is.
@@ -821,6 +903,52 @@ impl SyncMetrics {
 
     fn get(&self, slot: &AtomicU64) -> f64 {
         slot.load(Ordering::Relaxed) as f64
+    }
+}
+
+/// Why the archive walk is holding off. The discriminants are what the
+/// metrics slot stores, so 0 stays "not held".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveHold {
+    /// No poll has succeeded yet in this lifecycle.
+    Poll = 1,
+    /// A first backfill or a catch-up is fetching a window of mail.
+    Window = 2,
+    /// The embedder's init has not resolved either way.
+    Embedder = 3,
+    /// Under the free-space floor (`sync.archive_min_free_mb` or a fifth of
+    /// the volume, at most 5 GiB), or free space could not be read.
+    Disk = 4,
+    /// The clock reads before 2024.
+    Clock = 5,
+    /// Gmail refused the walk for quota three times this UTC day.
+    QuotaDay = 6,
+    /// The database itself is at `sync.archive_max_db_mb`.
+    DbSize = 7,
+}
+
+impl ArchiveHold {
+    pub const ALL: [Self; 7] = [
+        Self::Poll,
+        Self::Window,
+        Self::Embedder,
+        Self::Disk,
+        Self::Clock,
+        Self::QuotaDay,
+        Self::DbSize,
+    ];
+
+    /// The `reason` label, and the word the log line uses.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::Window => "window",
+            Self::Embedder => "embedder",
+            Self::Disk => "disk",
+            Self::Clock => "clock",
+            Self::QuotaDay => "quota_day",
+            Self::DbSize => "db_size",
+        }
     }
 }
 
@@ -1494,6 +1622,48 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         MetricKind::Gauge,
         "Messages listed for the current catch-up; grows when SENT is listed, 0 when idle.",
         total as f64,
+    );
+
+    // Both always emitted, 0 included, so a tenant whose walk never started
+    // reads as a 0 a dashboard can see rather than as a missing series.
+    e.scalar(
+        "squelchd_archive_walked_to_timestamp_seconds",
+        MetricKind::Gauge,
+        "Unix timestamp the archive walk has fully covered back to; 0 until the walk has run in this process, and while the archive is off.",
+        metrics.archive_walked_to_unix.load(Ordering::Relaxed) as f64,
+    );
+    e.scalar(
+        "squelchd_archive_complete",
+        MetricKind::Gauge,
+        "1 once the archive walk has reached sync.archive_days back, else 0.",
+        metrics.get(&metrics.archive_complete),
+    );
+    e.scalar(
+        "squelchd_archive_covered_to_timestamp_seconds",
+        MetricKind::Gauge,
+        "Unix timestamp the archive walk's forward pass has covered up to (mail carrying neither INBOX nor SENT); 0 until the walk has run in this process.",
+        metrics.archive_covered_to_unix.load(Ordering::Relaxed) as f64,
+    );
+    // Every reason always present, so "held on disk" is a series going to 1
+    // and not one appearing. All 0: walking, finished, or switched off.
+    e.family(
+        "squelchd_archive_held",
+        MetricKind::Gauge,
+        "1 for the reason the archive walk is currently holding off, else 0: poll (no successful poll yet), window (a backfill or catch-up is fetching), embedder (its init has not resolved), disk (free space under the larger of sync.archive_min_free_mb and a fifth of the volume capped at 5 GiB, or unreadable), clock (the clock reads before 2024), quota_day (Gmail refused the walk three times today), db_size (the database is at sync.archive_max_db_mb).",
+    );
+    let held = metrics.archive_hold();
+    for hold in ArchiveHold::ALL {
+        e.sample(
+            "squelchd_archive_held",
+            &[("reason", hold.label())],
+            f64::from(u8::from(held == Some(hold))),
+        );
+    }
+    e.scalar(
+        "squelchd_archive_skipped_messages_total",
+        MetricKind::Counter,
+        "Messages the archive walk stepped over: deleted before their fetch, or failing on three separate passes. Each is logged by Gmail id and error kind.",
+        metrics.get(&metrics.archive_skipped),
     );
 
     e.scalar(
@@ -2247,6 +2417,16 @@ mod tests {
         assert!(!text.contains("squelchd_triage_jobs"));
         assert!(!text.contains("squelchd_retriage_messages"));
         assert!(text.contains("squelchd_catchup_messages_total 0\n"));
+        assert!(text.contains("squelchd_archive_walked_to_timestamp_seconds 0\n"));
+        assert!(text.contains("squelchd_archive_complete 0\n"));
+        assert!(text.contains("squelchd_archive_covered_to_timestamp_seconds 0\n"));
+        assert!(text.contains("squelchd_archive_skipped_messages_total 0\n"));
+        for hold in ArchiveHold::ALL {
+            assert!(text.contains(&format!(
+                "squelchd_archive_held{{reason=\"{}\"}} 0\n",
+                hold.label()
+            )));
+        }
         assert!(!text.contains("squelchd_devices_paired"));
         assert!(!text.contains("squelchd_client_last_seen_timestamp_seconds"));
         assert!(text.ends_with('\n'));
@@ -2656,6 +2836,50 @@ mod sync_health_tests {
 #[cfg(test)]
 mod catchup_progress_tests {
     use super::*;
+
+    /// The archive pair renders what the walk last reported, and the catch-up
+    /// pair does not move for it.
+    #[test]
+    fn archive_exposition_tracks_the_cursor_and_completion() {
+        let m = SyncMetrics::new();
+        assert_eq!(m.archive_walk(), None);
+        let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        m.note_archive_walk(at, false);
+        assert_eq!(m.archive_walk(), Some((1_700_000_000, false)));
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_archive_walked_to_timestamp_seconds 1700000000\n"));
+        assert!(text.contains("squelchd_archive_complete 0\n"));
+        assert!(text.contains("squelchd_catchup_messages_total 0\n"));
+        m.note_archive_walk(at, true);
+        assert!(render(&m, None).contains("squelchd_archive_complete 1\n"));
+
+        // The forward edge, the skips and the one reason the walk is held.
+        m.note_archive_covered_to(at + chrono::Duration::days(1));
+        m.count_archive_skipped();
+        m.count_archive_skipped();
+        m.note_archive_hold(Some(ArchiveHold::Disk));
+        assert_eq!(m.archive_hold(), Some(ArchiveHold::Disk));
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_archive_covered_to_timestamp_seconds 1700086400\n"));
+        assert!(text.contains("squelchd_archive_skipped_messages_total 2\n"));
+        assert!(text.contains("squelchd_archive_held{reason=\"disk\"} 1\n"));
+        for hold in ArchiveHold::ALL {
+            if hold != ArchiveHold::Disk {
+                assert!(text.contains(&format!(
+                    "squelchd_archive_held{{reason=\"{}\"}} 0\n",
+                    hold.label()
+                )));
+            }
+        }
+        m.note_archive_hold(Some(ArchiveHold::DbSize));
+        assert_eq!(m.archive_hold(), Some(ArchiveHold::DbSize));
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_archive_held{reason=\"db_size\"} 1\n"));
+        assert!(text.contains("squelchd_archive_held{reason=\"disk\"} 0\n"));
+        m.note_archive_hold(None);
+        assert_eq!(m.archive_hold(), None);
+        assert!(render(&m, None).contains("squelchd_archive_held{reason=\"disk\"} 0\n"));
+    }
 
     #[test]
     fn catchup_exposition_tracks_sent_extension_and_clears_when_idle() {

@@ -246,12 +246,12 @@ pub async fn message(
     Path(message_id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
     let view = store_call(&state, move |store, account| {
-        let message = store.agent_read_message(account, message_id)?;
+        let message = store.human_read_message(account, message_id)?;
         let mut thread =
             serde_json::to_value(store.thread_view_with_html(account, &message.thread_id)?)
                 .map_err(|error| squelch_core::CoreError::Other(error.into()))?;
         thread["cache_allowed"] = store
-            .external_thread_allowed(account, &message.thread_id)?
+            .human_cache_allowed(account, &message.thread_id)?
             .into();
         Ok(json!({"message_id": message_id, "thread": thread}))
     })

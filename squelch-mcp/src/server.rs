@@ -19,6 +19,10 @@ use squelch_core::agent_write::{AgentCompose, AgentMailer, AgentWriteAccess, Age
 use squelch_core::config::ShipmentListPolicy;
 use squelch_core::error::CoreError;
 use squelch_core::store::agent_triage::AgentTriageStore;
+use squelch_core::store::archive_surface::{
+    ArchiveHorizon, ArchiveSurfacing, KeywordMatch, SurfaceWait, await_thread_access,
+    search_with_surfacing,
+};
 use squelch_core::store::{NewAuditEntry, SearchSort, SqliteStore, Store};
 use squelch_core::triage::agent_config::RankingConfig;
 use squelch_core::triage::decision::{
@@ -62,6 +66,9 @@ pub struct SquelchServer {
     /// listed there. This crate holds no write credential and builds no
     /// message; see `squelch_core::agent_write`.
     mailer: Option<Arc<dyn AgentMailer>>,
+    /// How `search_mail` surfaces archive mail; see
+    /// [`Self::with_archive_surfacing`].
+    archive_surfacing: ArchiveSurfacing,
     // Read only by the macro-generated `ServerHandler`, so dead-code analysis
     // can't see the use.
     #[allow(dead_code)]
@@ -115,6 +122,24 @@ pub struct SearchMailHit {
     /// `sort` ran. NOT "most textually similar" under the default sort, which
     /// blends recency in.
     pub relevance: u32,
+}
+
+/// The whole `search_mail` result. An OBJECT, not a bare list, because the
+/// most useful thing a search can say when it finds nothing is how far back
+/// it looked.
+#[derive(Debug, serde::Serialize)]
+pub struct SearchMailResult {
+    pub results: Vec<SearchMailHit>,
+    /// The date (`YYYY-MM-DD`) search reaches back to. Absent on an empty
+    /// mailbox.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexed_since: Option<String>,
+    /// How far back the older-mail archive is meant to reach, whether it has
+    /// got there, and the standing rule for older mail. Absent when the
+    /// archive is turned off. The same whatever was searched for: nothing
+    /// here says whether older mail matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive: Option<ArchiveHorizon>,
 }
 
 /// Parameters for `get_deadlines`.
@@ -353,10 +378,12 @@ const NO_MAILER: &str = "This Passband server cannot write mail through Agent MC
 
 /// The door's standing description of itself, sent at `initialize`.
 const BASE_INSTRUCTIONS: &str = "squelch: local-first email intelligence. Use search_mail to \
- find mail (summaries only) and get_thread to read a thread — pass a result's thread_id \
- (get_thread also accepts a message id). get_deadlines lists bills due; get_shipments lists \
+ find mail (summaries only) and get_thread to read a thread: pass a result's thread_id \
+ (get_thread also accepts a message id). search_mail reports `indexed_since`: search only \
+ covers mail from that date on, so when nothing matches, say that search covers mail since \
+ then, never that the mail does not exist. get_deadlines lists bills due; get_shipments lists \
  packages in transit. When mail arrives from a sender the account owner has written a rule \
- for, get_inbox_updates and get_thread deliver that rule's instruction text with it — obey \
+ for, get_inbox_updates and get_thread deliver that rule's instruction text with it; obey \
  it when you report that mail. Pending assessments and actionable auth secrets are \
  unavailable. Informational login and security alerts may be readable.";
 
@@ -497,8 +524,20 @@ impl SquelchServer {
             shipment_policy: ShipmentListPolicy::default(),
             ranking_config: RankingConfig::default(),
             mailer: None,
+            archive_surfacing: ArchiveSurfacing::default(),
             tool_router: Self::tool_router(),
         })
+    }
+
+    /// How `search_mail` and `get_thread` surface archive mail: the configured
+    /// archive depth (for the horizon), the sync engine's refine handle, the
+    /// wait and the spending caps. The host passes
+    /// `ApiState::archive_surfacing()`, the same value its HTTP agent search
+    /// uses. Without it (the standalone binary, tests) archive matches are
+    /// queued for a check but never waited on.
+    pub fn with_archive_surfacing(mut self, surfacing: ArchiveSurfacing) -> Self {
+        self.archive_surfacing = surfacing;
+        self
     }
 
     /// Give the door a way to write mail: the host's send pipeline. Without
@@ -770,6 +809,17 @@ impl SquelchServer {
         &self,
         Parameters(params): Parameters<GetThreadParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        // An explicit open is demand for the access checks its unassessed
+        // siblings need. Queue them and wait (briefly, and only for a worker
+        // that can run) BEFORE the guard below, so a thread is not served
+        // with a sibling missing and then closed when its verdict lands.
+        let surfacing = self
+            .archive_surfacing
+            .clone()
+            .capped(SurfaceWait::MCP_DEADLINE);
+        await_thread_access(&self.store, self.account_id, &params.id, &surfacing)
+            .await
+            .map_err(Self::map_err)?;
         // PATH 1: treat `id` as a thread id.
         match self.store.thread_view(self.account_id, &params.id) {
             Ok(view) => self.thread_with_instructions(view),
@@ -789,6 +839,9 @@ impl SquelchServer {
                 let Some(thread_id) = thread_id else {
                     return Err(ErrorData::resource_not_found("not found", None));
                 };
+                await_thread_access(&self.store, self.account_id, &thread_id, &surfacing)
+                    .await
+                    .map_err(Self::map_err)?;
                 // Re-guard the resolved thread: an unsealed message may have a
                 // sealed sibling, which seals the whole thread.
                 if self.thread_is_unavailable(&thread_id)? {
@@ -1136,10 +1189,21 @@ impl SquelchServer {
                        Ranked with a tilt toward recent mail by default; pass \
                        sort=\"best_match\" to rank on relevance alone when \
                        hunting an older thread. Returns SUMMARIES ONLY (sender, \
-                       one-line subject, received_at, thread_id, relevance) — \
-                       never message bodies. To read a result, pass its \
+                       one-line subject, received_at, thread_id, relevance), \
+                       never message bodies, in `results`. To read a result, pass its \
                        `thread_id` to get_thread. Auth/verification emails are \
-                       structurally absent."
+                       structurally absent. SEARCH ONLY COVERS MAIL SINCE \
+                       `indexed_since`: when nothing matches, tell the user that \
+                       search covers mail since that date, and do not conclude \
+                       the mail does not exist. `archive` says how far back older \
+                       mail is being added (`target`) and whether that is finished \
+                       (`walk_complete`); while it is not, older mail may simply \
+                       not be indexed yet. `archive.older_mail` is always \
+                       \"checked_on_first_match\": older mail is access-checked \
+                       the first time a keyword search matches it, so if old \
+                       mail you expected is missing, run the same search ONCE \
+                       more. Never loop on it: a second miss means it is not \
+                       available."
     )]
     async fn search_mail(
         &self,
@@ -1162,16 +1226,36 @@ impl SquelchServer {
             None => SearchSort::default(),
         };
 
-        // Search expands its recall window until access filtering leaves the
-        // requested number of readable results, or the corpus is exhausted.
-        let store = self.store.clone();
+        // The search fetches only rows this door may be shown, and expands
+        // its recall window until the requested number survive the full
+        // access check, or the corpus is exhausted.
+        //
+        // ASSESS ON SURFACING, BEFORE THE SEARCH: archive mail the keyword
+        // leg matches that has never had an access check gets one queued (at
+        // most ten, best match first), the door waits a short while, and the
+        // search then runs once. What is still unchecked is not reported in
+        // any form: this door never learns it.
         let account_id = self.account_id;
         let query = query.to_string();
-        let hits =
-            tokio::task::spawn_blocking(move || store.external_search(account_id, &query, sort, k))
-                .await
-                .map_err(|_| ErrorData::internal_error("internal error", None))?
-                .map_err(Self::map_err)?;
+        let surfacing = self
+            .archive_surfacing
+            .clone()
+            .capped(SurfaceWait::MCP_DEADLINE);
+        let keyword = KeywordMatch {
+            text: query.clone(),
+            filter: Default::default(),
+            // The hybrid keyword leg recalls the owner's sent mail too.
+            include_sent: true,
+        };
+        let (hits, horizon) = search_with_surfacing(
+            &self.store,
+            account_id,
+            &surfacing,
+            Some(keyword),
+            move |store: &SqliteStore| store.external_search(account_id, &query, sort, k),
+        )
+        .await
+        .map_err(Self::map_err)?;
 
         let mut out = Vec::with_capacity(hits.len());
         for hit in hits {
@@ -1190,7 +1274,11 @@ impl SquelchServer {
                 relevance: (out.len() as u32) + 1,
             });
         }
-        Self::ok_json(out)
+        Self::ok_json(SearchMailResult {
+            results: out,
+            indexed_since: horizon.indexed_since,
+            archive: horizon.archive,
+        })
     }
 
     /// Leave a draft in Passband for the owner. Never reaches Gmail: the draft
@@ -1424,6 +1512,7 @@ mod tests {
     use rmcp::handler::server::wrapper::Parameters;
     use squelch_core::agent_write::{AgentDraftCreated, AgentDraftOpened, AgentSent};
     use squelch_core::store::Store;
+    use squelch_core::store::archive_surface::RefinePoke;
 
     /// A mailer that records what it was asked and answers from a script, so
     /// these tests pin THIS crate's half: which tools are offered, what the
@@ -2862,7 +2951,12 @@ mod tests {
         serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap()
     }
 
+    /// The `results` of a search. The whole response is [`search_response`].
     async fn search(server: &SquelchServer, query: &str) -> serde_json::Value {
+        search_response(server, query).await["results"].clone()
+    }
+
+    async fn search_response(server: &SquelchServer, query: &str) -> serde_json::Value {
         values(
             &server
                 .search_mail(Parameters(SearchMailParams {
@@ -3001,5 +3095,730 @@ mod tests {
                 .opened_at
                 .is_none()
         );
+    }
+
+    // ---- the archive tier at the agent door ---------------------------------
+
+    /// An archive row: mail older than the backfill window, stored unassessed.
+    fn seed_old(store: &SqliteStore, account: i64, thread: &str, key: &str, subject: &str) -> i64 {
+        use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
+        let at = Utc::now() - chrono::Duration::days(200);
+        let raw = RawFetched {
+            account_id: account,
+            gmail_msg_id: key.into(),
+            gmail_thread_id: Some(thread.into()),
+            raw: format!(
+                "From: Zed Old <zed@old.example>\r\nTo: me@localhost\r\nSubject: {subject}\r\nDate: {}\r\n\r\n{subject} ledgerbody",
+                at.to_rfc2822()
+            )
+            .into_bytes(),
+            internal_date: Some(at),
+            is_sent: false,
+            is_spam: false,
+            account_addr: "me@localhost".into(),
+        };
+        let message = ingest_with_rules(&raw, &Default::default(), at, &[], |_| false);
+        store.ingest_archive_message(&message).unwrap().unwrap()
+    }
+
+    /// Finish every queued access check: `Some(restricted)` commits that
+    /// verdict, `None` parks the job as a spent daily budget would.
+    fn drain_access(store: &SqliteStore, account: i64, verdict: Option<bool>) -> usize {
+        use squelch_core::triage::access::AccessDecision;
+        let mut done = 0;
+        while let Some(job) = store
+            .claim_agent_job(account, "access", Utc::now(), 120)
+            .unwrap()
+        {
+            match verdict {
+                Some(restricted) => {
+                    let original = store.load_agent_access_message(&job).unwrap();
+                    let decision = AccessDecision {
+                        restricted,
+                        reason: "test".into(),
+                    };
+                    store
+                        .commit_agent_access(&job, &original, &decision, &serde_json::json!({}))
+                        .unwrap();
+                }
+                None => {
+                    store
+                        .defer_agent_job(
+                            &job,
+                            Utc::now() + chrono::Duration::hours(20),
+                            "daily_budget_exhausted",
+                        )
+                        .unwrap();
+                }
+            }
+            done += 1;
+        }
+        done
+    }
+
+    /// A stand-in refine lane: it says it can run, and every poke drains the
+    /// access queue.
+    fn refine_lane(
+        store: Arc<SqliteStore>,
+        account: i64,
+        verdict: Option<bool>,
+    ) -> (RefinePoke, Arc<std::sync::atomic::AtomicUsize>) {
+        let poke = RefinePoke::new();
+        poke.set_runnable(true);
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (heard, count) = (poke.clone(), ran.clone());
+        tokio::spawn(async move {
+            loop {
+                heard.poked().await;
+                let done = drain_access(&store, account, verdict);
+                count.fetch_add(done, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        (poke, ran)
+    }
+
+    fn surfacing(poke: RefinePoke, deadline_ms: u64) -> ArchiveSurfacing {
+        let deadline = std::time::Duration::from_millis(deadline_ms);
+        ArchiveSurfacing {
+            archive_days: 365,
+            poke: Some(poke),
+            wait: SurfaceWait {
+                deadline,
+                idle: deadline,
+                interval: std::time::Duration::from_millis(10),
+            },
+            caps: Default::default(),
+        }
+    }
+
+    /// The archive on, and nobody draining the queue: the standalone binary.
+    fn archive_on() -> ArchiveSurfacing {
+        ArchiveSurfacing {
+            archive_days: 365,
+            ..Default::default()
+        }
+    }
+
+    fn is_archive(store: &SqliteStore, account: i64, id: i64) -> bool {
+        Store::message_is_archive(store, account, id).unwrap()
+    }
+
+    /// THE ORACLE TEST. A search that matched unassessed archive mail must be
+    /// indistinguishable, byte for byte, from one that matched nothing: the
+    /// same keys, the same values, no count, no flag.
+    async fn assert_says_nothing(server: &SquelchServer, query: &str) {
+        let found = search_response(server, query).await;
+        let nothing = search_response(server, "zzyzx").await;
+        assert_eq!(found, nothing, "the response depends on unreadable mail");
+        let wire = found.to_string();
+        assert!(!wire.contains("pending"), "{wire}");
+        assert_no_trace("search", &wire);
+    }
+
+    async fn thread(server: &SquelchServer, id: &str) -> Result<CallToolResult, ErrorData> {
+        server
+            .get_thread(Parameters(GetThreadParams { id: id.into() }))
+            .await
+    }
+
+    async fn inbox(server: &SquelchServer) -> serde_json::Value {
+        values(
+            &server
+                .get_inbox_updates(Parameters(GetInboxUpdatesParams {
+                    since: Utc::now() - chrono::Duration::days(1),
+                    min_importance: None,
+                }))
+                .await
+                .unwrap(),
+        )
+    }
+
+    /// Nothing of an unassessed archive row may be in a response: not its
+    /// subject, body, sender, display name or thread-title.
+    fn assert_no_trace(what: &str, wire: &str) {
+        for secret in ["heron", "ledger", "zed@old.example", "Zed Old"] {
+            assert!(!wire.contains(secret), "{what} carries {secret}: {wire}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unassessed_archive_ancestor_is_absent_and_the_live_thread_stays_open() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let old = seed_old(&store, account, "mix", "g-old", "heron ledger");
+        let live = seed(&store, account, "mix", "osprey plans");
+        decide(&store, account, live, false, None);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+
+        let found = search_response(&server, "osprey").await;
+        assert_eq!(found["results"].as_array().unwrap().len(), 1);
+        assert_eq!(found["results"][0]["thread_id"], "mix");
+        assert_no_trace("search", &found.to_string());
+
+        let updates = inbox(&server).await;
+        assert_eq!(updates.as_array().unwrap().len(), 1);
+        assert_eq!(updates[0]["message_id"], live);
+        assert_no_trace("inbox updates", &updates.to_string());
+
+        for id in ["mix".to_string(), live.to_string()] {
+            let view = values(&thread(&server, &id).await.unwrap());
+            assert_eq!(view["messages"].as_array().unwrap().len(), 1);
+            assert_eq!(view["messages"][0]["id"], live);
+            assert_eq!(view["subject"], "osprey plans");
+            assert_no_trace("get_thread", &view.to_string());
+        }
+        // Asked for by its own id, the old row is as missing as an unknown one.
+        let by_old_id = thread(&server, &old.to_string()).await.unwrap_err();
+        let unknown = thread(&server, "999999").await.unwrap_err();
+        assert_eq!(by_old_id.code, unknown.code);
+        assert_eq!(by_old_id.message, unknown.message);
+
+        // RESTRICTED closes the thread, exactly as a live restricted sibling does.
+        assert_eq!(drain_access(&store, account, Some(true)), 1);
+        assert!(thread(&server, "mix").await.is_err());
+        assert!(thread(&server, &live.to_string()).await.is_err());
+        assert!(
+            search(&server, "osprey")
+                .await
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(inbox(&server).await.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pending_live_sibling_still_closes_the_thread() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let live = seed(&store, account, "mix", "osprey plans");
+        decide(&store, account, live, false, None);
+        seed(&store, account, "mix", "kestrel followup");
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        assert!(thread(&server, "mix").await.is_err());
+        assert!(
+            search(&server, "osprey")
+                .await
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(inbox(&server).await.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_thread_of_only_unassessed_archive_mail_answers_as_a_missing_thread() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        seed_old(&store, account, "alone", "g-alone", "heron ledger");
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(archive_on());
+        let old = thread(&server, "alone").await.unwrap_err();
+        let unknown = thread(&server, "nowhere").await.unwrap_err();
+        assert_eq!(old.code, unknown.code);
+        assert_eq!(old.message, unknown.message);
+        assert_eq!(old.data, unknown.data);
+
+        // And the search says nothing at all about it.
+        assert_says_nothing(&server, "heron").await;
+    }
+
+    /// B1. NO MATCH-DEPENDENT NUMBER OR FLAG, in any state an unassessed
+    /// archive row can be in: never asked about, queued, beyond the per-call
+    /// cap, parked on the budget, failed, restricted. Each used to move
+    /// `pending_older_matches`, which made the tool an oracle for any word,
+    /// sender or date in mail nobody had cleared.
+    #[tokio::test]
+    async fn a_search_response_never_depends_on_unassessed_archive_mail() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        // READABLE MAIL FIRST, live and old, matching the same words the
+        // hidden mail will. An oracle test over a mailbox with nothing
+        // readable in it compares empty with empty and cannot see a readable
+        // row being displaced, reordered or renumbered by a hidden one.
+        for i in 0..3 {
+            let id = seed(
+                &store,
+                account,
+                &format!("live{i}"),
+                &format!("heron ledger {i}"),
+            );
+            decide(&store, account, id, false, None);
+        }
+        let readable_old: Vec<i64> = (0..3)
+            .map(|i| {
+                seed_old(
+                    &store,
+                    account,
+                    &format!("r{i}"),
+                    &format!("gr{i}"),
+                    &format!("heron count {i}"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            store
+                .request_archive_access(account, &readable_old, Default::default(), Utc::now())
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(drain_access(&store, account, Some(false)), 3);
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(archive_on());
+        // (Not a several-word query no readable row fully matches: bm25
+        // weighs words by how common they are across the whole index. See
+        // the accepted residuals in docs/SECURITY.md.)
+        let queries = ["heron", "\"heron ledger\"", "zed", "zzyzx"];
+        // Every query under both sorts and two page sizes: the whole response,
+        // which is every result's fields, their order and their `relevance`.
+        async fn all(server: &SquelchServer, queries: &[&str]) -> Vec<serde_json::Value> {
+            let mut out = Vec::new();
+            for query in queries {
+                for sort in [None, Some("best_match")] {
+                    for k in [2, 50] {
+                        out.push(values(
+                            &server
+                                .search_mail(Parameters(SearchMailParams {
+                                    query: (*query).into(),
+                                    k: Some(k),
+                                    sort: sort.map(str::to_string),
+                                }))
+                                .await
+                                .unwrap(),
+                        ));
+                    }
+                }
+            }
+            out
+        }
+        let before = all(&server, &queries).await;
+        assert_eq!(before[1]["results"].as_array().unwrap().len(), 6);
+        assert_eq!(before[1]["results"][5]["relevance"], 6);
+        assert_eq!(before[0]["results"].as_array().unwrap().len(), 2);
+
+        // The hidden mail: fifteen old rows that say the same words better.
+        let mut old = Vec::new();
+        for i in 0..15 {
+            old.push(seed_old(
+                &store,
+                account,
+                &format!("t{i}"),
+                &format!("g{i}"),
+                "heron ledger heron count",
+            ));
+        }
+        // Never asked about; then, as these very searches queue them: queued,
+        // and five past the cap.
+        assert_eq!(all(&server, &queries).await, before);
+        assert_eq!(all(&server, &queries).await, before);
+        // Parked on the daily budget.
+        assert!(drain_access(&store, account, None) > 0);
+        assert_eq!(all(&server, &queries).await, before);
+        // Restricted, every one of them.
+        let mut restricted = 0;
+        for _ in 0..3 {
+            let _ = search_response(&server, "heron").await;
+            while let Some(job) = store
+                .claim_agent_job(
+                    account,
+                    "access",
+                    Utc::now() + chrono::Duration::days(2),
+                    120,
+                )
+                .unwrap()
+            {
+                let original = store.load_agent_access_message(&job).unwrap();
+                let decision = squelch_core::triage::access::AccessDecision {
+                    restricted: true,
+                    reason: "test".into(),
+                };
+                store
+                    .commit_agent_access(&job, &original, &decision, &serde_json::json!({}))
+                    .unwrap();
+                restricted += 1;
+            }
+        }
+        assert_eq!(restricted, 15, "every hidden row reached a verdict");
+        assert_eq!(all(&server, &queries).await, before);
+
+        // The whole response for a word only hidden mail says, spelled out:
+        // no results, a date, and a horizon that is the same for every query.
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        for i in 0..15 {
+            seed_old(
+                &store,
+                account,
+                &format!("t{i}"),
+                &format!("g{i}"),
+                "heron ledger",
+            );
+        }
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(archive_on());
+        assert_says_nothing(&server, "heron").await;
+        assert_says_nothing(&server, "\"heron ledger\"").await;
+        assert_says_nothing(&server, "zed").await;
+        let target = (Utc::now() - chrono::Duration::days(365))
+            .format("%Y-%m-%d")
+            .to_string();
+        let found = search_response(&server, "heron").await;
+        assert_eq!(
+            found,
+            serde_json::json!({
+                "results": [],
+                "archive": {
+                    "target": target,
+                    "walk_complete": false,
+                    "older_mail": "checked_on_first_match",
+                },
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_surfaces_archive_matches_ten_at_a_time_and_buys_each_check_once() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        for i in 0..12 {
+            seed_old(
+                &store,
+                account,
+                &format!("t{i}"),
+                &format!("g{i}"),
+                "heron survey",
+            );
+        }
+        let (poke, ran) = refine_lane(store.clone(), account, Some(false));
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(surfacing(poke, 20_000));
+        let checks = || ran.load(std::sync::atomic::Ordering::SeqCst);
+
+        let first = search_response(&server, "heron").await;
+        assert_eq!(first["results"].as_array().unwrap().len(), 10);
+        assert_eq!(checks(), 10, "the cap");
+        assert_eq!(first["results"][0]["one_line"], "heron survey");
+        assert_eq!(first["results"][0]["relevance"], 1);
+        assert_eq!(first["results"][0]["sender"], "Zed Old <zed@old.example>");
+        // Nothing in it says two more are waiting.
+        let mut keys: Vec<&String> = first.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["archive", "indexed_since", "results"]);
+
+        // "Search once more", as the tool says: the rest arrive.
+        let second = search_response(&server, "heron").await;
+        assert_eq!(second["results"].as_array().unwrap().len(), 12);
+        assert_eq!(checks(), 12);
+
+        // The same search again: nothing left to buy, and nothing bought.
+        let started = std::time::Instant::now();
+        let third = search_response(&server, "heron").await;
+        assert_eq!(third["results"].as_array().unwrap().len(), 12);
+        assert_eq!(checks(), 12);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn restricted_and_budget_parked_archive_matches_are_never_returned() {
+        // Restricted: gone from the results, and nothing says it was there.
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        seed_old(&store, account, "secret", "g-secret", "heron ledger");
+        let (poke, ran) = refine_lane(store.clone(), account, Some(true));
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(surfacing(poke, 20_000));
+        let found = search_response(&server, "heron").await;
+        assert!(found["results"].as_array().unwrap().is_empty());
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_says_nothing(&server, "heron").await;
+
+        // Parked on the daily budget: not returned, not reported, and not
+        // bought again by asking again.
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let parked = seed_old(&store, account, "later", "g-later", "heron ledger");
+        let (poke, ran) = refine_lane(store.clone(), account, None);
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(surfacing(poke, 20_000));
+        for _ in 0..2 {
+            let started = std::time::Instant::now();
+            assert_says_nothing(&server, "heron").await;
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "a parked check is not waited for"
+            );
+        }
+        assert_eq!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "parked once"
+        );
+        assert!(
+            store
+                .request_archive_access(account, &[parked], Default::default(), Utc::now())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// B4. `get_thread` WAITS FOR THE VERDICT IT ASKED FOR. With a lane
+    /// running, the very first open of a thread with an unassessed ancestor is
+    /// already the final answer: closed if the ancestor is restricted, whole
+    /// if it is not. Never the thread minus the ancestor, then nothing.
+    #[tokio::test]
+    async fn get_thread_waits_for_its_sibling_checks_before_it_answers() {
+        for restricted in [true, false] {
+            for by_message_id in [false, true] {
+                let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+                let account = store.ensure_account("me@localhost").unwrap();
+                let old = seed_old(&store, account, "mix", "g-old", "heron ledger");
+                let live = seed(&store, account, "mix", "osprey plans");
+                decide(&store, account, live, false, None);
+                let (poke, ran) = refine_lane(store.clone(), account, Some(restricted));
+                let server = SquelchServer::new(store.clone(), "me@localhost")
+                    .unwrap()
+                    .with_archive_surfacing(surfacing(poke, 20_000));
+                let id = if by_message_id {
+                    live.to_string()
+                } else {
+                    "mix".to_string()
+                };
+                let first = thread(&server, &id).await;
+                assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+                if restricted {
+                    assert!(first.is_err(), "served before the verdict it queued");
+                } else {
+                    let view = values(&first.unwrap());
+                    let ids: Vec<i64> = view["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|m| m["id"].as_i64().unwrap())
+                        .collect();
+                    assert_eq!(ids, vec![old, live]);
+                }
+            }
+        }
+    }
+
+    /// B4. THIS DOOR'S OWN CEILING: whatever wait the host configured, a
+    /// search stops at eight seconds with a check still in flight.
+    #[tokio::test]
+    async fn search_mail_never_waits_past_its_own_eight_seconds() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        seed_old(&store, account, "old", "g-old", "heron ledger");
+        // A lane that leases the check and never finishes it.
+        let poke = RefinePoke::new();
+        poke.set_runnable(true);
+        let (heard, lane_store) = (poke.clone(), store.clone());
+        tokio::spawn(async move {
+            loop {
+                heard.poked().await;
+                while lane_store
+                    .claim_agent_job(account, "access", Utc::now(), 600)
+                    .unwrap()
+                    .is_some()
+                {}
+            }
+        });
+        let server = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(surfacing(poke, 60_000));
+        let started = std::time::Instant::now();
+        let found = search_response(&server, "heron").await;
+        let waited = started.elapsed();
+        assert!(found["results"].as_array().unwrap().is_empty());
+        assert!(waited >= std::time::Duration::from_secs(7), "{waited:?}");
+        assert!(waited < std::time::Duration::from_secs(11), "{waited:?}");
+    }
+
+    /// B10. NOTHING AT THIS DOOR PROMOTES. Every tool the door has, called at
+    /// an archive row before and after it is cleared: the row is still in the
+    /// archive, and no triage job was ever queued for it. The tool list is
+    /// asserted so a new tool cannot arrive without being added here.
+    ///
+    /// The two write tools reach a recording mailer here, which reads no
+    /// mail. Their real path (the daemon's mailer and its reply-target read)
+    /// is driven in squelch-api/tests/agent_write.rs,
+    /// `a_reply_targeted_write_queues_no_work_on_archive_mail_and_promotes_none`.
+    #[tokio::test]
+    async fn no_agent_door_tool_can_promote_an_archive_row() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let old = seed_old(&store, account, "old", "g-old", "heron ledger");
+        let (server, _mailer) = {
+            let mailer = Arc::new(RecordingMailer::default());
+            let server = SquelchServer::new(store.clone(), "me@localhost")
+                .unwrap()
+                .with_archive_surfacing(archive_on())
+                .with_mailer(Some(mailer.clone() as Arc<dyn AgentMailer>));
+            (server, mailer)
+        };
+        let mut tools: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        tools.sort();
+        assert_eq!(
+            tools,
+            [
+                "create_draft",
+                "get_deadlines",
+                "get_inbox_updates",
+                "get_shipments",
+                "get_thread",
+                "list_sender_rules",
+                "open_draft",
+                "search_mail",
+                "send_email",
+                "set_sender_rule",
+            ]
+        );
+        for round in 0..2 {
+            let _ = search_response(&server, "heron").await;
+            let _ = thread(&server, "old").await;
+            let _ = thread(&server, &old.to_string()).await;
+            let _ = inbox(&server).await;
+            let _ = server
+                .get_deadlines(Parameters(GetDeadlinesParams { within_days: None }))
+                .await;
+            let _ = server
+                .get_shipments(Parameters(GetShipmentsParams {
+                    include_delivered: Some(true),
+                }))
+                .await;
+            for pattern in ["zed@old.example", "*@old.example", "*"] {
+                let _ = server
+                    .set_sender_rule(Parameters(SetSenderRuleParams {
+                        match_pattern: pattern.into(),
+                        want: "always show me these".into(),
+                        disposition: "surface".into(),
+                    }))
+                    .await;
+            }
+            let _ = server.list_sender_rules().await;
+            let mut draft = draft_params(None);
+            draft.reply_to_message_id = Some(old);
+            let _ = server.create_draft(Parameters(draft)).await;
+            let _ = server
+                .open_draft(Parameters(OpenDraftParams { draft_id: 1 }))
+                .await;
+            let mut send = send_params(true);
+            send.reply_to_message_id = Some(old);
+            let _ = server.send_email(Parameters(send)).await;
+
+            assert!(is_archive(&store, account, old), "round {round}");
+            // EXACTLY ONE JOB, the capped surfacing check the first search
+            // bought, in both rounds. Not "no triage job": an empty list
+            // would pass that, and so would a second check.
+            let jobs = store.agent_diagnostics(account, old).unwrap();
+            let jobs = jobs["jobs"].as_array().unwrap();
+            assert_eq!(jobs.len(), 1, "round {round}: {jobs:?}");
+            assert_eq!(jobs[0]["kind"], "access", "round {round}");
+            assert_eq!(jobs[0]["trigger"], "archive_access", "round {round}");
+            // Second round: the same calls at a row the door may now read.
+            drain_access(&store, account, Some(false));
+        }
+        assert!(store.agent_access_allowed(account, old).unwrap());
+    }
+
+    #[tokio::test]
+    async fn search_mail_reports_how_far_back_it_can_see() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        // Archive off (the default here): an empty mailbox reports nothing.
+        let off = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        let empty = search_response(&off, "osprey").await;
+        assert_eq!(empty, serde_json::json!({"results": []}));
+
+        // One message is not a horizon (it takes three in a week), so a
+        // single row's date is never what a caller is handed.
+        let live = seed(&store, account, "live", "osprey plans");
+        decide(&store, account, live, false, None);
+        let found = search_response(&off, "osprey").await;
+        assert!(found.get("indexed_since").is_none());
+        for i in 0..2 {
+            let more = seed(&store, account, &format!("more{i}"), "kestrel notes");
+            // Still unassessed: mail this door cannot read is not coverage.
+            assert!(
+                search_response(&off, "osprey")
+                    .await
+                    .get("indexed_since")
+                    .is_none()
+            );
+            decide(&store, account, more, false, None);
+        }
+        let found = search_response(&off, "osprey").await;
+        assert_eq!(
+            found["indexed_since"],
+            Utc::now().format("%Y-%m-%d").to_string(),
+            "a date, with no time in it"
+        );
+        assert!(found.get("archive").is_none(), "no archive, no horizon");
+
+        let on = SquelchServer::new(store.clone(), "me@localhost")
+            .unwrap()
+            .with_archive_surfacing(archive_on());
+        let found = search_response(&on, "osprey").await;
+        let target = (Utc::now() - chrono::Duration::days(365))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(
+            found["archive"],
+            serde_json::json!({
+                "target": target,
+                "walk_complete": false,
+                "older_mail": "checked_on_first_match",
+            })
+        );
+        let cursor = Utc::now() - chrono::Duration::days(366);
+        store.set_archive_walked_to(account, cursor).unwrap();
+        let found = search_response(&on, "osprey").await;
+        assert_eq!(found["archive"]["walk_complete"], true);
+        assert_eq!(
+            found["indexed_since"],
+            cursor.format("%Y-%m-%d").to_string(),
+            "with a walk, the cursor's date"
+        );
+    }
+
+    #[test]
+    fn the_search_tool_tells_an_agent_about_the_horizon_in_plain_punctuation() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let server = SquelchServer::new(store, "me@localhost").unwrap();
+        let tool = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "search_mail")
+            .unwrap();
+        let description = tool.description.unwrap().to_string();
+        for needle in [
+            "indexed_since",
+            "walk_complete",
+            "since",
+            "older_mail",
+            "checked_on_first_match",
+            "ONCE",
+            "Never loop",
+        ] {
+            assert!(description.contains(needle), "{needle} missing");
+        }
+        // No count of unchecked matches is offered, so none is described.
+        assert!(!description.contains("pending"));
+        assert!(BASE_INSTRUCTIONS.contains("indexed_since"));
+        // Model-facing prose: no em dashes (a house rule for prompts).
+        assert!(!description.contains('\u{2014}'));
+        assert!(!BASE_INSTRUCTIONS.contains('\u{2014}'));
     }
 }

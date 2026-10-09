@@ -112,6 +112,12 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // a Gmail fetch per message could fill it, and the inference learns
     // forward instead. A re-sync of a message fills its row.
     add_column_if_missing(conn, "messages", "date_offset_minutes", "INTEGER")?;
+    // The archive tier's marker. 0 on every pre-existing row, which is the
+    // honest reading: nothing stored before the walk existed came from it.
+    add_column_if_missing(conn, "messages", "is_archive", "INTEGER NOT NULL DEFAULT 0")?;
+    // The archive walk's forward edge. NULL on a cursor row written before it
+    // existed, which the store reads as that row's `walked_to`.
+    add_column_if_missing(conn, "archive_walk", "covered_to", "TEXT")?;
     // ITS INDEX, partial: only mail with a non-zero offset is an observation,
     // and most mail is stamped UTC, so the index holds a fraction of the table
     // and costs nothing on the bulk mail it leaves out. COVERING: it carries

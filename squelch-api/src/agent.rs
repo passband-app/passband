@@ -13,8 +13,9 @@ use serde_json::{Value, json};
 use squelch_core::{
     CoreError,
     store::{
-        SearchSort, Store,
+        ExternalSearchMode, SearchSort, Store,
         agent_triage::{AgentListItem, AgentTriageStore},
+        archive_surface::{KeywordMatch, SurfaceWait, await_thread_access, search_with_surfacing},
         parse_search_query,
     },
     triage::decision::{EmailKind, RecordProposal},
@@ -28,6 +29,16 @@ pub async fn thread(
     State(state): State<ApiState>,
     Path(thread_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The checks this open queues are waited on BEFORE the guard is applied,
+    // so a thread is not served with a sibling missing and then closed a
+    // moment later when that sibling's verdict lands.
+    let surfacing = state
+        .archive_surfacing
+        .clone()
+        .capped(SurfaceWait::HTTP_DEADLINE);
+    await_thread_access(&state.store, state.account_id, &thread_id, &surfacing)
+        .await
+        .map_err(ApiError::from)?;
     let view = store_call(&state, move |store, account| {
         store.thread_view(account, &thread_id)
     })
@@ -105,54 +116,60 @@ pub async fn search(
     }
     .to_owned();
     let response_mode = mode.clone();
-    let hits = store_call(&state, move |store, account| {
-        let mut window = limit as usize;
-        loop {
-            let (candidates, full) = match mode.as_str() {
-                "hybrid" => store.hybrid_search(
-                    account,
-                    &text,
-                    &filter,
-                    SearchSort::default(),
-                    false,
-                    window,
-                )?,
-                "semantic" => store.semantic_search_hits(
-                    account,
-                    &text,
-                    &filter,
-                    SearchSort::default(),
-                    false,
-                    window.min(4096),
-                )?,
-                _ => {
-                    let candidates = store.search_filtered(
-                        account,
-                        &text,
-                        &filter,
-                        SearchSort::default(),
-                        false,
-                        window.min(u32::MAX as usize) as u32,
-                        0,
-                    )?;
-                    let full = candidates.len() == window;
-                    (candidates, full)
-                }
-            };
-            // Access is applied before the public result limit. A hidden leading
-            // window must not hide a readable result farther down the ranking.
-            let mut allowed = store.external_search_hits(account, &candidates)?;
-            if allowed.len() >= limit as usize || !full || (mode == "semantic" && window >= 4096) {
-                allowed.truncate(limit as usize);
-                return Ok(allowed);
-            }
-            window = window.saturating_mul(2);
-        }
-    })
-    .await?;
-    Ok(no_store(
-        json!({"items": hits, "match_kind": response_mode, "sort": "recent"}),
-    ))
+    let account = state.account_id;
+    let (search_mode, keyword_leg) = match mode.as_str() {
+        "hybrid" => (ExternalSearchMode::Hybrid, true),
+        "semantic" => (ExternalSearchMode::Semantic, false),
+        _ => (ExternalSearchMode::Keyword, true),
+    };
+    // ASSESS ON SURFACING: archive mail the KEYWORD leg matches but that has
+    // never had an access check gets one before the search runs. See
+    // `squelch_core::store::archive_surface`.
+    //
+    // A KEYWORD MATCH OR NOTHING. Semantic mode has no keyword leg, and a
+    // query of operators alone (`from:x before:2025-03-01`) matched no word:
+    // neither buys a check, or a caller could sweep the archive by sender
+    // and date instead of by something it was actually looking for.
+    let keyword = (keyword_leg && !text.is_empty()).then(|| KeywordMatch {
+        text: text.clone(),
+        filter: filter.clone(),
+        // Keyword mode leaves out the owner's sent mail unless the query asks
+        // for it; the hybrid keyword leg always recalls it.
+        include_sent: search_mode == ExternalSearchMode::Hybrid || filter.include_sent,
+    });
+    // One store method for both agent doors: it fetches only rows this door
+    // may be shown, applies the full access check before the public result
+    // limit, and stops growing its window at the same ceiling in every mode.
+    let search = move |store: &squelch_core::store::SqliteStore| {
+        store.external_search_filtered(
+            account,
+            &text,
+            &filter,
+            SearchSort::default(),
+            search_mode,
+            limit as usize,
+        )
+    };
+    let surfacing = state
+        .archive_surfacing
+        .clone()
+        .capped(SurfaceWait::HTTP_DEADLINE);
+    let (hits, horizon) = search_with_surfacing(&state.store, account, &surfacing, keyword, search)
+        .await
+        .map_err(ApiError::from)?;
+    let mut body = json!({"items": hits, "match_kind": response_mode, "sort": "recent"});
+    // How far back this search can see, so the assistant says "search covers
+    // mail since X" instead of "that mail does not exist". Both are absent
+    // when there is nothing to say (an empty mailbox; the archive turned off).
+    // NEITHER DEPENDS ON THE QUERY: nothing here says whether older mail
+    // matched, how much, or that any is waiting on a check.
+    if let Some(indexed_since) = horizon.indexed_since {
+        body["indexed_since"] = json!(indexed_since);
+    }
+    if let Some(archive) = horizon.archive {
+        body["archive"] = json!(archive);
+    }
+    Ok(no_store(body))
 }
 
 pub async fn decision(

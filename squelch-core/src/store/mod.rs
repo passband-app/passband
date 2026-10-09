@@ -5,6 +5,7 @@
 //! `tokio::task::spawn_blocking`.
 
 pub mod agent_triage;
+pub mod archive_surface;
 pub mod recency;
 pub mod search_query;
 pub mod sqlite;
@@ -12,7 +13,10 @@ pub mod sqlite;
 pub use search_query::{
     FtsQuery, SearchDiagnostics, SearchFilter, SearchSort, TermDf, parse_search_query,
 };
-pub use sqlite::SqliteStore;
+pub use sqlite::{
+    ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX, ARCHIVE_SURFACE_CAP, AccessProgress,
+    ArchiveAccessCaps, BACKGROUND_BUDGET_KEY, EXTERNAL_RECALL_MAX, ExternalSearchMode, SqliteStore,
+};
 
 use crate::error::Result;
 // ONE closed vocabulary for the metric label and the stored ledger string; see
@@ -1513,6 +1517,27 @@ pub enum HealScope {
     TextAndTriage,
 }
 
+/// What the archive walk's disk guards measure, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveDisk {
+    /// Free to an unprivileged writer on the filesystem holding the database.
+    pub free_bytes: u64,
+    /// That whole filesystem's size. On a volume several tenants share it is
+    /// everybody's, which is why a share of it is part of the floor.
+    pub total_bytes: u64,
+    /// This database's own file plus its write-ahead log.
+    pub db_bytes: u64,
+}
+
+impl ArchiveDisk {
+    /// No disk to fill: all the room there is, and nothing used.
+    pub const UNBOUNDED: Self = Self {
+        free_bytes: u64::MAX,
+        total_bytes: 0,
+        db_bytes: 0,
+    };
+}
+
 /// The squelch local store. Implemented by [`SqliteStore`].
 ///
 /// SECURITY: every method that can feed the MCP surface (`ranked_updates`,
@@ -2055,6 +2080,63 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         triaged: &TriagedMessage,
         scope: HealScope,
     ) -> Result<Option<i64>>;
+
+    /// [`Store::ingest_message`] for the ARCHIVE WALK: mail older than the
+    /// backfill window, stored to be found and for nothing else. INSERT-ONLY:
+    /// a message the store already holds, live or archive, is left exactly as
+    /// it is and the answer is `Ok(None)`.
+    ///
+    /// The row is marked `is_archive`, which is never changed afterwards (a
+    /// later [`Store::ingest_message`] of the same id is a no-op that returns
+    /// the stored id). It carries a neutral triage row with the same `n/a`
+    /// stage markers sent mail has and no notify stamp, its text is indexed
+    /// and its attachments stored, and its agent state is written at revision
+    /// 1 with access pending and NO job: no model reads it until an agent-door
+    /// caller explicitly surfaces it. Contacts, the unsubscribe ledger and
+    /// timezone observations are not touched.
+    fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>>;
+
+    /// The archive walk's cursor: the oldest instant the walk has fully
+    /// covered, or `None` before its first chunk.
+    fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
+    /// Persist the archive walk's cursor after a fully ingested chunk. The
+    /// call that creates the row also sets the forward edge to the same
+    /// instant; no later call moves it.
+    fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()>;
+
+    /// The archive walk's FORWARD edge: the newest instant up to which mail
+    /// carrying neither INBOX nor SENT has been stored, or `None` before the
+    /// walk's first use.
+    fn archive_covered_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
+    /// Move the forward edge after a fully ingested forward chunk. Writes
+    /// nothing when the walk has no cursor row yet.
+    fn set_archive_covered_to(
+        &self,
+        account_id: AccountId,
+        covered_to: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// The three numbers the archive walk's disk guards read: see
+    /// [`ArchiveDisk`]. A database that is not a file (in memory) has no disk
+    /// to fill and answers [`ArchiveDisk::UNBOUNDED`]. An `Err` means the
+    /// numbers could not be read, which the walk treats as "do not write".
+    fn archive_disk(&self) -> Result<ArchiveDisk>;
+
+    /// Whether the stored row `message_id` is an archive row. What a live
+    /// ingest asks after [`Store::ingest_message`] hands back an id, to tell a
+    /// row it wrote from an archive row it left alone.
+    fn message_is_archive(&self, account_id: AccountId, message_id: i64) -> Result<bool>;
+
+    /// Which of `gmail_msg_ids` this account already stores, in any tier. The
+    /// walk lists a chunk and fetches only what this does not return, so a
+    /// re-listed chunk costs no `messages.get`.
+    fn stored_gmail_msg_ids(
+        &self,
+        account_id: AccountId,
+        gmail_msg_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>>;
 
     /// True if `addr` appears in this account's Sent-derived contacts (the
     /// "people I know" signal the sync engine feeds to Stage-1).

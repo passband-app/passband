@@ -970,6 +970,23 @@ struct SearchPage: Codable, Sendable {
     /// The order the hits were ranked under, echoed back.
     var sort: String?
     var diagnostics: SearchDiagnostics?
+    /// The date (`YYYY-MM-DD`) search reaches back to. Sent by the agent
+    /// search only, and absent on an empty mailbox or an older daemon.
+    var indexed_since: String?
+    /// How far back the older-mail archive is meant to reach. Absent when the
+    /// archive is off or the daemon predates it.
+    var archive: SearchArchive?
+}
+
+/// The agent search's account of the older-mail archive. Every field optional,
+/// so a daemon that adds or drops one still decodes.
+struct SearchArchive: Codable, Sendable {
+    /// The date the archive is working back to.
+    var target: String?
+    /// Whether it has got there.
+    var walk_complete: Bool?
+    /// The standing rule for older mail, always `checked_on_first_match`.
+    var older_mail: String?
 }
 
 struct AuditEntry: Codable, Sendable, Identifiable, Hashable {

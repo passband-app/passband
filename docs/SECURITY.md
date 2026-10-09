@@ -234,6 +234,162 @@ reads require the thread's sources to be allowed. MCP and dedicated
 rehydrates results under the same guard instead of releasing stale cached snippets.
 Account ownership is checked independently of access assessment.
 
+**Archive mail (issue #422).** Mail older than the backfill window is stored
+with `messages.is_archive = 1` and an `agent_message_state` row left at
+`pending`: no model call is spent on it at ingest. To an external reader such a
+row does not exist yet, which is a different thing from "pending" on live mail:
+
+- The thread guard (`thread_guard_and_subject`) OMITS an archive sibling whose
+  access is NULL or `pending` instead of closing the thread on it. The row is
+  left out of the messages, the count and the subject (the thread is titled by
+  the oldest message the reader may see). A thread of nothing but such rows is
+  not found. A `restricted` sibling, archive or not, an archive row the owner
+  sealed by hand, and any NON-archive pending sibling close the thread as before.
+- The check is bought when an external caller surfaces the row: an agent search
+  whose KEYWORD leg matches it (`search_mail`, `GET /client/agent/search`) queues
+  one `access` job with trigger `archive_access`, best-ranked first, and an
+  explicit thread open at the door (`get_thread`, `GET /client/agent/thread/{id}`)
+  queues the SAME job for the thread's newest unassessed archive siblings, at
+  most eight an open. A row the vector leg alone returned is never queued:
+  nearest neighbours are not matches. A row that already has a job at its
+  revision (finished, or parked on the daily budget) is not queued again; the
+  one exception is a row whose latest check FAILED, which may be asked for
+  again once that failure is a day old, and comes back as `archive_access`
+  whatever queued it first.
+- Three ceilings bound what a caller can make the daemon spend on archive mail,
+  and every agent-door path that queues work on an archive row goes through the
+  one function that keeps them (`request_archive_access_conn`): ten rows per
+  call, twenty `archive_access` jobs outstanding per account, and
+  `triage.agent.archive_access_daily_cap` (default 50) a day, charged on top of
+  the total and background budgets. Nothing is queued once today's background
+  budget is spent. A check that has been deferred even once loses its place
+  ahead of ordinary background work. The thread READ itself (`thread_view`,
+  which is also how create_draft and send_email check a reply target) queues
+  nothing for an archive row, and neither does the source repair the triage
+  agent's evidence tools run; `source_access` is for live mail only.
+- The door waits for the checks it queued only while the refine lane says it
+  can run (a poll has succeeded, a model is configured, the provider circuit is
+  closed), gives up after two seconds if no worker has picked one up, and stops
+  at eight seconds (MCP) or six (HTTP). `get_thread` waits the same way for the
+  sibling checks its own open queued, BEFORE it applies the guard, so a thread
+  is not served with a sibling missing and then closed when the verdict lands.
+- UNTIL THE ROW IS `allowed` NOTHING OF IT IS RETURNED. No id, subject, sender
+  or snippet, and no count or flag either. WHICH rows a search returns is the
+  same set whether or not mail the caller cannot read matched: a search that
+  matched only unassessed archive mail returns the same empty list as one that
+  matched nothing. That is a statement about membership and it is the whole
+  of the guarantee. The ORDER of the readable rows, and their `relevance`
+  numbers, are not covered by it at the keyword leg (residual 3), and neither
+  is how long the search took (residuals 1 and 2).
+  An earlier draft reported a count of pending matches; that is an oracle (ask
+  it about any word, phrase, sender or date and read the answer off mail nobody
+  has cleared) and it must not come back in any form. What the response does
+  carry is the same for every query: `indexed_since`, a DATE that is the walk's
+  cursor (or, with no walk, where agent-readable mail first becomes dense, never
+  one row's timestamp), and `archive` = `{target, walk_complete, older_mail}`
+  where `older_mail` is the constant `"checked_on_first_match"`.
+- HIDDEN MAIL TAKES NO PLACE IN AN EXTERNAL SEARCH. Both agent doors run one
+  store method (`external_search_filtered`). Its recall legs carry a PREFILTER
+  in their own SQL (`external_candidate_sql!`: the row is `allowed`, the owner
+  has not sealed it, and no sibling the thread guard counts is un-allowed or
+  sealed), so a row the caller cannot be shown is never ranked, windowed or
+  hydrated. The keyword leg carries it in its FTS query. The vector leg does
+  not use the vec0 nearest-neighbour index at all for these callers, because
+  that index picks its neighbours over the whole account and can only be
+  filtered afterwards: it selects the rows that pass the prefilter first, reads
+  each one's stored vector, and orders them by `vec_distance_l2` (the metric
+  the vec0 table ranks by), keeping the nearest 4,096 (`nearest_readable`). A
+  hidden row is never measured, so no number of hidden rows, however near the
+  query, moves a readable row down that list or off it. The human door keeps
+  the vec0 index unchanged. The prefilter is a necessary condition and
+  authorizes nothing: each
+  leg's list is then cut to what the AUTHORITY allows
+  (`external_message_allowed_conn`, with its recursive check of every source a
+  decision consumed, plus `thread_guard_and_subject`) BEFORE the legs are fused,
+  and every hit is rehydrated through the same authority on the way out. Which
+  readable rows come back is therefore decided over readable mail alone. Their
+  order is too at the vector leg and in the fusion; at the keyword leg it is
+  not quite (residual 3). Do not replace the authority
+  with the prefilter, and do not loosen one without the other:
+  `the_external_prefilter_is_implied_by_the_authority` holds them together.
+- The rows a search asks an access check for are chosen by a separate query
+  bounded at ten (`archive_surface_candidates`), before the search runs, so the
+  search itself runs once. A query with no text the index can look up
+  (operators alone: a sender, a date range) is not a keyword match and buys
+  nothing, at either door.
+- Accepted residuals. None of these returns a field of a hidden row; each is
+  something a caller can infer from a response it was entitled to.
+  1. SURFACING TIME. The time a search takes says that some unassessed archive
+     row keyword-matched and a check was queued and waited for. Bounded by the
+     ceilings above, and carries no content.
+  2. KEYWORD LATENCY. A query whose words match hidden mail is slower than one
+     whose words match nothing. FTS5 walks and scores every row a word
+     matches before the prefilter can discard it, so the time grows with how
+     many hidden rows say the word. Measured in a debug build over 4,200
+     hidden rows that all match: 18 ms when one readable row matches too,
+     17 ms when only hidden rows match, 0.3 ms for a word nobody says (it was
+     1.3 s before the prefilter). A caller who can time its searches can
+     therefore tell "some mail I cannot read says this word, and roughly how
+     much" from "none does". Not bounded by the surfacing caps: no check is
+     queued and none is needed for the effect.
+  3. KEYWORD RANKING. Full-text relevance (bm25) is computed from word
+     statistics over the whole full-text index: how many stored messages
+     contain each word, and the average length of a stored message. The index
+     holds all mail, readable or not. So the relative order of two READABLE
+     hits, and their `relevance` numbers, can change with whether, and how
+     often, a word appears in mail the caller cannot read. That includes
+     unassessed archive mail, and it equally includes `restricted` and
+     owner-sealed LIVE mail. In plain terms: a caller with two readable
+     messages that each contain a different word can search for both words,
+     see which message ranks first, and learn something about whether one of
+     those words also appears in mail it cannot see. One mail carrying the
+     word is enough to flip the order of two otherwise evenly matched hits.
+     It is about one bit per query, a word-existence signal, never a field of
+     the hidden mail. Single-word queries are affected too, through the
+     average document length: enough long hidden messages reorder two
+     readable hits of different lengths. It applies to keyword mode and to
+     hybrid mode (the keyword leg's order feeds the fusion), not to semantic
+     mode. It PREDATES the archive tier: sealed and restricted live mail sits
+     in the same index and moves the same statistics; the archive adds more
+     hidden mail to the index, not a new channel. It is
+     NOT bounded by the surfacing caps, which limit model calls and not
+     searches. Removing it means scoring against statistics of readable mail
+     only, which FTS5 cannot do; that is a ranking change and has not been
+     made.
+  4. VECTOR LEG COST. The exact scan in `nearest_readable` reads and measures
+     every readable vector of the account on each semantic or hybrid agent
+     search, where the vec0 index would not. Its time depends on how much mail
+     the account holds, not on the query, so it says nothing about any word.
+     It also holds the store lock for that long, so live ingest and the
+     human door wait behind it. Measured in a debug build over 10,000
+     readable rows, one message per thread: about 245 ms for the leg, and
+     more on mailboxes with long threads; a release build has not been timed. A readable row beyond the 4,096 nearest READABLE rows is still
+     found by the keyword leg or not at all.
+- PROMOTION is the one way `is_archive` changes, 1 to 0 and never back: the
+  owner, at the human door, re-triages one archive message or corrects how it
+  is filed (`promote_archive_conn`, called from `retriage_reset`'s
+  single-message arm and from `correct_agent_triage_conn` for every field but
+  `external_access`). Nothing at the agent door, in the walk, in a live
+  re-sighting or in a heal reaches it. A promoted row is live mail in every
+  respect: while its access is pending it CLOSES its thread like any live
+  pending row, and it is RE-JUDGED like any live row. The triage that promotion
+  queues writes access from its own decision, so a `restricted` an earlier
+  access check put on the row holds only until that triage commits and may
+  become `allowed`. The one verdict that is permanent is the owner's own seal
+  (`external_access` corrected to true), which survives promotion and every
+  later triage. Sealing or unsealing an archive row by hand does not promote it
+  and queues nothing. The owner's OWN archive mail (sent, or from their
+  address) is never promoted and never queued, whichever path names it.
+- `cache_allowed` on the human routes is stricter than the agent guard
+  (`human_cache_allowed`): the human reader is served the archive sibling, so a
+  thread carrying an unassessed one is not cacheable.
+- A reminder the owner sets on an archive message lists it at the human door
+  like any reminded row. It does not surface at the agent door until the row
+  is `allowed`.
+
+Do not widen the omission: it is exactly `is_archive = 1` AND access NULL or
+`pending` AND no owner seal (`archive_unassessed_sql!` in `store/sqlite/mod.rs`).
+
 The human `/client/v2/messages/{id}` endpoint can open the exact message immediately.
 It returns `Cache-Control: no-store`; `cache_allowed` controls client prefetch
 eligibility. Human read, attachment, draft, and reply paths do not treat a legacy

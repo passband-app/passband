@@ -366,25 +366,30 @@ impl SqliteStore {
         // answer the human with nothing.
         let ids = match message_id {
             Some(id) => {
-                let named: Option<(String, bool)> = tx
+                let named: Option<(String, bool, bool)> = tx
                     .query_row(
                         concat!(
                             "SELECT m.thread_id,",
                             own_mail_sql!(),
-                            " AND m.is_spam=0 FROM messages m WHERE m.account_id=?1 AND m.id=?2"
+                            " AND m.is_spam=0,m.is_archive
+                             FROM messages m WHERE m.account_id=?1 AND m.id=?2"
                         ),
                         params![account_id, id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
                 let inbound: Option<i64> = match &named {
-                    Some((thread, true)) if !thread.is_empty() => tx
+                    Some((thread, true, _)) if !thread.is_empty() => tx
                         .query_row(
                             concat!(
                                 "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2
                                  AND NOT ",
                                 own_mail_sql!(),
-                                " AND m.is_spam=0 ORDER BY m.received_at DESC,m.id DESC LIMIT 1"
+                                // Never into the archive: the redirect is
+                                // ours, not the owner's, and it must not
+                                // promote a message they did not name.
+                                " AND m.is_spam=0 AND m.is_archive=0
+                                 ORDER BY m.received_at DESC,m.id DESC LIMIT 1"
                             ),
                             params![account_id, thread],
                             |row| row.get(0),
@@ -392,14 +397,26 @@ impl SqliteStore {
                         .optional()?,
                     _ => None,
                 };
-                named.map(|_| inbound.unwrap_or(id)).into_iter().collect()
+                // With no live inbound message to stand for it, own mail is
+                // enqueued as itself, UNLESS IT IS IN THE ARCHIVE: the
+                // owner's old sent mail is never promoted and never queued,
+                // so naming it does nothing at all.
+                named
+                    .and_then(|(_, own, archived)| {
+                        inbound.or_else(|| (!(own && archived)).then_some(id))
+                    })
+                    .into_iter()
+                    .collect()
             }
             None => {
                 let mut stmt = tx.prepare(concat!(
                     "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.received_at>=?2
                      AND NOT ",
                     own_mail_sql!(),
-                    " AND m.is_spam=0"
+                    // A window never reaches into the archive, however many
+                    // days it names: that mail was stored on the promise that
+                    // no model reads it unasked. One named message still may.
+                    " AND m.is_spam=0 AND m.is_archive=0"
                 ))?;
                 stmt.query_map(params![account_id, cutoff], |row| row.get::<_, i64>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?
@@ -410,6 +427,12 @@ impl SqliteStore {
         // click cannot spend the reserve that new arrivals rely on.
         let foreground = message_id.is_some();
         for id in &ids {
+            // ONE NAMED ARCHIVE MESSAGE IS PROMOTED: the owner asked for this
+            // one to be triaged, so it becomes live mail in this transaction
+            // and the job below is an ordinary triage. A window holds no
+            // archive row (the select above), and must never promote one.
+            let promoted =
+                foreground && super::agent_triage::promote_archive_conn(&tx, account_id, *id)?;
             super::agent_triage::enqueue_agent_triage_lane(
                 &tx,
                 account_id,
@@ -418,6 +441,9 @@ impl SqliteStore {
                 false,
                 foreground,
             )?;
+            if promoted {
+                super::agent_triage::requeue_promoted_conn(&tx, account_id, *id, Utc::now())?;
+            }
             tx.execute(
                 "UPDATE triage SET retriage_at=?3 WHERE account_id=?1 AND message_id=?2",
                 params![account_id, id, now],
@@ -1388,7 +1414,8 @@ impl SqliteStore {
         let conn = self.lock()?;
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages
-             WHERE account_id = ?1 AND is_sent = 0 AND is_spam = 0 AND received_at >= ?2",
+             WHERE account_id = ?1 AND is_sent = 0 AND is_spam = 0 AND is_archive = 0
+               AND received_at >= ?2",
             params![account_id, since.to_rfc3339()],
             |r| r.get(0),
         )?;

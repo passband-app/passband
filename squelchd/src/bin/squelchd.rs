@@ -2099,6 +2099,8 @@ fn build_serve_router(
         // (drafts unless they chose otherwise; sending only if they chose it).
         // It never holds the write credential.
         Some(api_state.agent_mailer()),
+        // And the human door's own archive settings: one depth, one poke.
+        api_state.archive_surfacing(),
     )?;
     // The latency histogram wraps BOTH doors, outermost, so the number it
     // records is everything the daemon did for the request including auth. It
@@ -2147,6 +2149,11 @@ fn cmd_serve(
     // deliberately does not track and folding the two together would put that
     // fetch back on every ordinary refresh.
     let spam_refresh = Arc::new(tokio::sync::Notify::new());
+
+    // Refine poke: an agent search that just queued access checks for archive
+    // mail fires it (MCP `search_mail`, `GET /client/agent/search`) and the
+    // refine lane starts on them now instead of at its next interval.
+    let refine_poke = squelch_core::store::archive_surface::RefinePoke::new();
 
     // Wake channel: the store pokes it on every real `append_event`, and each
     // open `GET /client/events` stream re-reads the table past its own cursor.
@@ -2261,6 +2268,7 @@ fn cmd_serve(
         .with_agent_door(agent_door_status(&agent_door))
         .with_refresh(refresh.clone())
         .with_spam_refresh(spam_refresh.clone())
+        .with_refine_poke(refine_poke.clone())
         // THE SAME registry the sync engine writes, so `/client/stats` answers
         // "is this mailbox still connected" from live state rather than from a
         // copy taken at boot.
@@ -2433,6 +2441,7 @@ fn cmd_serve(
                 mailbox_engine(store, creds, account_id, email, config, &sync_budget)
                     .with_refresh(refresh)
                     .with_spam_refresh(spam_refresh)
+                    .with_refine_poke(refine_poke)
                     .with_metrics(sync_metrics)
                     .with_embedder_gate(embedder_gate)
                     .run(shutdown_rx)

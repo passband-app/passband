@@ -1,5 +1,7 @@
 //! Store tests, split by subject. `support` holds the shared fixtures.
 
+mod archive;
+mod archive_surface;
 mod attention;
 mod audit;
 mod device_tokens;

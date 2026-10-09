@@ -1,4 +1,5 @@
 import {
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
@@ -65,6 +66,7 @@ const PAGE_CSS = `
   --positive: #4FC08A;
   --danger: #FF7A68;
   --serif: "Newsreader", ui-serif, Georgia, serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --gutter: clamp(1rem, 4vw, 2.75rem);
 }
@@ -254,90 +256,182 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
    So the mock is the app at one fixed layout, scaled as a picture would be,
    rather than a web page that reflows into something the app never draws.
    Colours are sampled from the same shot. */
-.pb-after .pb-window { container-type: inline-size; min-height: 0; background: #262c35; }
-.pb-app { --pt: calc(100cqw / 1040); display: grid; grid-template-columns: 58pt minmax(0, 1fr);
+.pb-after .pb-window { min-height: 0; background: #262c35; }
+/* THE SHOT: the window plus the two things that float over it. It is the
+   container the points are measured against, so the login code panel can hang
+   off the window's bottom edge and still be drawn in the same points. */
+.pb-shot { position: relative; container-type: inline-size; }
+.pb-app, .pb-code { --pt: calc(100cqw / 1040); }
+.pb-app { position: relative; display: grid; grid-template-columns: 60pt minmax(0, 1fr);
   grid-template-rows: 40pt auto; font-size: 12pt; color: var(--ink); line-height: 1.25; }
 .pb-app-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 14pt; padding: 0 18pt 0 16pt; }
 .pb-lights { display: flex; gap: 8pt; }
 .pb-lights i { width: 12pt; height: 12pt; border-radius: 50%; background: #ec6a5e; }
 .pb-lights i:nth-child(2) { background: #f4bf4f; } .pb-lights i:nth-child(3) { background: #61c554; }
-.pb-app-title { display: flex; align-items: baseline; gap: 8pt; margin-left: 12pt; }
+.pb-app-title { display: flex; align-items: baseline; gap: 7pt; margin-left: 12pt; }
 .pb-app-title b { font-family: var(--serif); font-weight: 500; font-size: 19pt; }
 .pb-app-title small { font-size: 10pt; font-weight: 500; letter-spacing: 0.06em; color: var(--faintest); }
-.pb-app-tools { margin-left: auto; display: flex; align-items: center; gap: 12pt; font-size: 10pt;
-  font-weight: 500; color: var(--faint); }
-.pb-app-tools svg { width: 10pt; height: 10pt; vertical-align: -1pt; margin-right: 3pt; }
-.pb-need { display: inline-flex; align-items: center; gap: 5pt; color: var(--danger); font-size: 11pt;
-  font-weight: 500; padding: 3pt 9pt; border-radius: 99pt; background: rgba(255, 122, 104, 0.14);
-  box-shadow: inset 0 0 0 0.75pt rgba(255, 122, 104, 0.45); }
-.pb-need::before { content: ""; width: 5pt; height: 5pt; border-radius: 50%; background: var(--danger); }
-.pb-side { background: #2c323f; border-right: 1px solid #363b48; border-top-right-radius: 10pt;
-  display: flex; flex-direction: column; align-items: center; gap: 13pt; padding: 12pt 0 16pt; }
-.pb-side span { width: 36pt; height: 30pt; display: grid; place-items: center; border-radius: 8pt; color: #9aa6b6; }
-.pb-side span.on { background: rgba(78, 155, 234, 0.2); color: var(--accent); }
-.pb-side svg { width: 18pt; height: 18pt; }
+/* Compose and search, at the bar's right end. */
+.pb-app-tools { margin-left: auto; display: flex; align-items: center; gap: 2pt; color: var(--faint); }
+.pb-app-tools span { width: 30pt; height: 30pt; display: grid; place-items: center; }
+.pb-app-tools svg { width: 17pt; height: 17pt; }
+/* The rail: three destinations on the digit keys, then the discovery ring,
+   a hairline, and the account's own group. Rules and Groups live in Settings. */
+.pb-side { background: #2c323f; border-right: 1px solid #363b48; border-top-right-radius: 12pt;
+  display: flex; flex-direction: column; align-items: center; gap: 6pt; padding: 10pt 0; }
+.pb-side span { width: 44pt; height: 36pt; display: grid; place-items: center; border-radius: 11pt; color: #9aa6b6; }
+.pb-side span.on { background: rgba(78, 155, 234, 0.26); color: var(--accent); }
+.pb-side span.up { color: var(--accent); }
+.pb-side svg { width: 17pt; height: 17pt; }
 .pb-side .pb-side-gap { flex: 1; }
-.pb-side .pb-me { width: 20pt; height: 20pt; border-radius: 50%; background: #24384F; color: #A9CBF0;
-  font-size: 10pt; font-weight: 600; }
-.pb-page { padding: 6pt 22pt 22pt 30pt; display: grid; grid-template-columns: minmax(0, 1fr) 252pt;
-  column-gap: 14pt; align-items: start; }
-.pb-dash-hero { grid-column: 1 / -1; margin-bottom: 16pt; }
+.pb-side hr { width: 22pt; height: 0; margin: 4pt 0; border: 0; border-top: 1px solid var(--hair-strong); }
+.pb-side .pb-me { width: 26pt; height: 26pt; margin-top: 5pt; border-radius: 50%; background: #24384F;
+  color: #A9CBF0; font-size: 13pt; font-weight: 600; }
+.pb-page { padding: 0 24pt 128pt; display: grid; grid-template-columns: minmax(0, 1fr) 306pt;
+  column-gap: 18pt; align-items: start; }
+.pb-dash-hero { grid-column: 1 / -1; padding: 4pt 4pt 34pt; }
 .pb-dash-hero small { display: block; font-size: 10pt; font-weight: 500; letter-spacing: 0.12em;
   text-transform: uppercase; color: var(--accent); margin-bottom: 2pt; }
-.pb-dash-hero b { font-family: var(--serif); font-weight: 500; font-size: 36pt; letter-spacing: -0.01em; line-height: 1.08; }
-.pb-col { display: flex; flex-direction: column; gap: 14pt; min-width: 0; }
-.pb-zone { border-radius: 16pt; padding: 12pt 12pt 10pt; background: #1f2c3a;
+.pb-dash-hero b { position: relative; display: inline-block; font-family: var(--serif); font-weight: 500;
+  font-size: 38pt; letter-spacing: -0.01em; line-height: 1.08; }
+.pb-col { display: flex; flex-direction: column; gap: 16pt; min-width: 0; }
+.pb-zone { position: relative; border-radius: 18pt; padding: 12pt 12pt 10pt; background: #1f2c3a;
   box-shadow: inset 0 0 0 0.75pt #2f4459; }
-.pb-zone-h { display: flex; align-items: center; gap: 7pt; padding: 0 4pt 7pt; font-size: 13pt; font-weight: 600; }
+.pb-zone-h { display: flex; align-items: center; gap: 8pt; padding: 0 4pt 10pt; font-size: 13pt; font-weight: 600; }
 .pb-zone-h svg { width: 14pt; height: 14pt; color: var(--zone, var(--accent)); flex: none; }
-.pb-zone-h em { font-style: normal; font-size: 10pt; font-weight: 500; color: var(--faint);
+.pb-zone-h em { font-style: normal; font-size: 11pt; font-weight: 600; color: var(--faint);
   background: rgba(233, 238, 245, 0.08); border-radius: 99pt; padding: 1pt 6pt; }
-.pb-zone-h small { font-size: 10pt; font-weight: 500; color: var(--faintest); margin-left: 2pt; }
-.pb-eye { position: relative; display: flex; align-items: center; gap: 9pt; padding: 7pt 10pt; border-radius: 8pt;
-  white-space: nowrap; }
+.pb-zone-h small { font-size: 10pt; font-weight: 500; color: var(--faintest); }
+/* FLOW MODE, in For your eyes' corner, drawn as it looks under the pointer:
+   the key slides in on hover, and the key is what the button is there to teach. */
+.pb-flow { position: relative; margin-left: auto; display: flex; align-items: center; gap: 5pt;
+  padding: 3pt 9pt 3pt 3pt; border-radius: 99pt; background: rgba(78, 155, 234, 0.18);
+  font-size: 10pt; font-weight: 500; color: var(--ink); }
+.pb-flow kbd { font: 600 9.5pt/1.25 var(--mono); color: var(--accent); padding: 2pt 9pt; border-radius: 99pt;
+  background: rgba(78, 155, 234, 0.2); box-shadow: inset 0 0 0 0.75pt rgba(78, 155, 234, 0.5); }
+.pb-flow svg { width: 10pt; height: 10pt; color: var(--accent); }
+.pb-eye { position: relative; display: flex; align-items: center; gap: 9pt; padding: 7pt 10pt; border-radius: 9pt;
+  margin-top: 1pt; white-space: nowrap; }
 .pb-eye.cursor { background: rgba(78, 155, 234, 0.1); }
+.pb-eye.overdue.cursor { background: rgba(255, 122, 104, 0.09); }
 .pb-eye.overdue::before { content: ""; position: absolute; left: 0; top: 5pt; bottom: 5pt; width: 2pt;
   border-radius: 1pt; background: var(--danger); }
 .pb-avatar { width: 22pt; height: 22pt; border-radius: 50%; flex: none; display: grid; place-items: center;
   font-size: 9pt; font-weight: 600; }
 .pb-eye b { font-weight: 500; flex: none; }
+.pb-eye svg { width: 10pt; height: 10pt; flex: none; color: var(--faintest); margin-left: -3pt; }
 .pb-eye span.line { color: var(--dim); overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 .pb-chip { flex: none; font-size: 10pt; font-weight: 500; padding: 2.5pt 7pt; border-radius: 99pt; color: var(--c);
   box-shadow: inset 0 0 0 0.75pt color-mix(in srgb, var(--c) 30%, transparent); }
 .pb-chip.filled { background: color-mix(in srgb, var(--c) 16%, transparent); }
-.pb-reading { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8pt; }
-.pb-read { display: flex; gap: 10pt; padding: 8pt; border-radius: 12pt; background: #283647; min-width: 0; }
+/* Reading: articles first on warm paper, promotions after them on plain
+   ground. One card per sender, however many times they wrote. */
+.pb-reading { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10pt; }
+.pb-read { display: flex; gap: 9pt; padding: 9pt; border-radius: 12pt; background: rgba(233, 238, 245, 0.05); min-width: 0; }
+.pb-read.content { background: rgba(232, 207, 158, 0.16); }
 .pb-logo { width: 46pt; height: 46pt; border-radius: 8pt; flex: none; display: grid; place-items: center;
   font-weight: 700; font-size: 17pt; }
-.pb-read-text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3pt; }
-.pb-read-top { display: flex; justify-content: space-between; gap: 6pt; }
+.pb-read-text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6pt; }
+.pb-read-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6pt; }
 .pb-read-top b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pb-read-top span { font-size: 10pt; color: var(--faintest); white-space: nowrap; }
-.pb-read p { margin: 0; font-size: 10.5pt; line-height: 1.3; color: var(--faint);
+.pb-read-top span { font-size: 10pt; font-weight: 500; color: var(--faintest); white-space: nowrap; }
+.pb-read p { margin: 0; font-size: 10pt; font-weight: 500; line-height: 1.3; color: var(--faint);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 /* The records rail: one TINTED card per zone, the zone's own hue washed into
    its ground and its border, which is the single biggest thing that makes the
    sitrep read as the sitrep. */
-.pb-rail { display: flex; flex-direction: column; gap: 12pt; min-width: 0; }
-.pb-rec { border-radius: 16pt; padding: 11pt 11pt 9pt; background: var(--bg-c); box-shadow: inset 0 0 0 0.75pt var(--edge); }
-.pb-rec .pb-zone-h { padding: 0 3pt 5pt; }
+.pb-rail { display: flex; flex-direction: column; gap: 14pt; min-width: 0; }
+.pb-rec { position: relative; border-radius: 18pt; padding: 12pt 11pt 9pt; background: var(--bg-c);
+  box-shadow: inset 0 0 0 0.75pt var(--edge); }
+.pb-rec .pb-zone-h { padding: 0 3pt 8pt; }
 .pb-rec-cal { --bg-c: #253341; --edge: #3b5673; --zone: var(--accent); }
 .pb-rec-ship { --bg-c: #35332d; --edge: #6a5a3e; --zone: var(--warn); }
-.pb-rec-bill { --bg-c: #2a3540; --edge: #3f566d; --zone: var(--accent); }
+.pb-rec-bill { --bg-c: #2a3540; --edge: #3f566d; --zone: var(--accent-ink); }
 .pb-rec-rcpt { --bg-c: #233635; --edge: #2f5a49; --zone: var(--positive); }
-.pb-rec-row { display: flex; justify-content: space-between; align-items: center; gap: 8pt; padding: 4.5pt 3pt;
-  font-size: 11.5pt; white-space: nowrap; }
-.pb-rec-row b { font-weight: 400; color: #cdd5df; overflow: hidden; text-overflow: ellipsis; }
+.pb-rec-row { display: flex; align-items: center; gap: 7pt; padding: 5pt 7pt; white-space: nowrap; }
+.pb-rec-row b { flex: 1; min-width: 0; font-weight: 400; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
 .pb-rec-row span { font-size: 10pt; color: var(--faintest); font-variant-numeric: tabular-nums; }
 .pb-rec-row .pb-chip { --c: var(--faint); }
-.pb-rec-rcpt .pb-rec-row span { font-size: 11.5pt; font-weight: 600; color: var(--positive); }
-.pb-ship { background: #3f3d38; border-radius: 10pt; padding: 7pt 8pt; margin-bottom: 6pt;
-  display: flex; flex-direction: column; gap: 6pt; }
-.pb-ship-top { display: flex; align-items: center; gap: 7pt; white-space: nowrap; }
-.pb-ship-top i { width: 14pt; height: 14pt; border-radius: 3pt; flex: none; background: #5a4631;
+.pb-rec-row span.amt { font-size: 11pt; font-weight: 500; color: var(--accent-ink); }
+.pb-rec-rcpt .pb-rec-row span { font-size: 11pt; font-weight: 500; color: var(--positive); }
+/* A package: what is in the box and who sold it, with the status on the
+   title's line and the arrival under it only when there is one. */
+.pb-ship { background: rgba(233, 238, 245, 0.07); border-radius: 11pt; padding: 9pt; margin-bottom: 6pt;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 7pt; }
+.pb-ship:last-child { margin-bottom: 2pt; }
+.pb-ship-top { align-self: stretch; display: flex; align-items: center; gap: 7pt; white-space: nowrap; }
+.pb-ship-top i { width: 18pt; height: 18pt; border-radius: 4pt; flex: none; background: #5a4631;
   display: grid; place-items: center; font-style: normal; font-size: 8pt; font-weight: 700; color: #f4c47a; }
-.pb-ship-top b { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.pb-ship .pb-chip.eta { --c: var(--faint); align-self: flex-start; }
+.pb-ship-top div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2pt; }
+.pb-ship-top b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.pb-ship-top small { font-size: 10pt; font-weight: 500; color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
+.pb-ship .pb-chip.eta { --c: var(--faint); }
+
+/* AUTOMATIC UNSUBSCRIBES, bottom right of the sitrep, where the app stacks
+   them: one finished, one still working through the sender's page. */
+.pb-tray { position: absolute; right: 24pt; bottom: 22pt; display: flex; flex-direction: column;
+  align-items: flex-end; gap: 7pt; }
+.pb-unsub { position: relative; display: flex; align-items: center; gap: 10pt; padding: 9pt 12pt 9pt 10pt;
+  border-radius: 14pt; font-size: 12pt; color: var(--dim); white-space: nowrap;
+  background: #212d3b; box-shadow: inset 0 0 0 0.75pt #33485e, 0 10pt 26pt -8pt rgba(0, 0, 0, 0.6); }
+.pb-unsub.done { background: #1f3733; box-shadow: inset 0 0 0 0.75pt #2f5a49, 0 10pt 26pt -8pt rgba(0, 0, 0, 0.6); }
+.pb-unsub b { color: var(--ink); font-weight: 600; }
+.pb-unsub svg { width: 15pt; height: 15pt; color: var(--positive); }
+.pb-unsub i { width: 13pt; height: 13pt; margin: 1pt; border-radius: 50%; border: 1.5pt solid rgba(233, 238, 245, 0.18);
+  border-top-color: var(--dim); animation: pb-spin 0.9s linear infinite; }
+@keyframes pb-spin { to { transform: rotate(360deg); } }
+
+/* THE LOGIN CODE PANEL. In the app it floats over whatever you are working
+   in, so here it hangs off the window's edge rather than sitting inside it:
+   half in the picture, half out, which is the feature. */
+.pb-code { position: absolute; left: 150pt; bottom: -58pt; width: 300pt; padding: 14pt; border-radius: 22pt;
+  font-size: 12pt; line-height: 1.25; color: var(--ink);
+  background: rgba(38, 34, 68, 0.9); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  box-shadow: inset 0 0 0 0.75pt rgba(155, 140, 245, 0.4), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
+    0 0 50pt -14pt rgba(155, 140, 245, 0.45); }
+.pb-code-top { display: flex; align-items: center; gap: 10pt; }
+.pb-code-top .pb-avatar { width: 26pt; height: 26pt; font-size: 11pt; }
+.pb-code-top div { flex: 1; display: flex; flex-direction: column; gap: 1pt; }
+.pb-code-top b { font-size: 13pt; font-weight: 600; }
+.pb-code-top small { display: flex; align-items: center; gap: 4pt; font-size: 10pt; font-weight: 500; color: #9B8CF5; }
+.pb-code-top small svg { width: 10pt; height: 10pt; }
+.pb-code-top > span:last-child { font-size: 10pt; color: var(--faintest); font-variant-numeric: tabular-nums; }
+.pb-code-num { padding: 14pt 0; text-align: center; font: 600 38pt/1.1 var(--mono); letter-spacing: 0.04em; }
+.pb-code-acts { display: flex; align-items: center; gap: 8pt; font-size: 13pt; }
+.pb-code-acts span { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6pt;
+  padding: 8pt 0; border-radius: 11pt; background: var(--accent); color: #fff; font-weight: 600; }
+.pb-code-acts span svg { width: 13pt; height: 13pt; }
+.pb-code-acts em { font-style: normal; font-weight: 500; color: var(--dim); padding: 8pt 14pt; }
+
+/* PINS: numbered like the analyzer's markers, one per thing the list under
+   the window names. Each sits on the corner of the thing it points at, and
+   never shrinks below a readable size however small the picture gets. */
+.pb-pin { position: absolute; top: max(-7pt, -8px); right: max(-7pt, -8px); z-index: 3;
+  width: max(15pt, 14px); height: max(15pt, 14px); border-radius: 50%; display: grid; place-items: center;
+  font: 700 max(9pt, 9px)/1 var(--mono); letter-spacing: 0; color: #06101c; background: var(--accent-ink);
+  box-shadow: 0 0 0 max(2pt, 2px) rgba(9, 13, 22, 0.55), 0 0 max(14pt, 10px) rgba(78, 155, 234, 0.7);
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.25s ease; }
+.pb-dash-hero .pb-pin { right: max(-20pt, -18px); top: 0; }
+.pb-flow .pb-pin { right: max(-9pt, -9px); top: max(-11pt, -10px); }
+
+/* THE LIST the pins answer to. Real text, in the instrument strip's voice:
+   a marker number, the feature, one line. Pointing at a line lights its pin. */
+.pb-feats { list-style: none; padding: 0; margin: clamp(4.25rem, 8vw, 6rem) 0 0;
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: clamp(1.5rem, 3vw, 2.25rem) clamp(1.5rem, 4vw, 3rem); }
+.pb-feat { display: grid; grid-template-columns: auto 1fr; column-gap: 0.85rem; row-gap: 0.3rem; align-items: baseline; }
+.pb-feat i { font: 600 11px/1 var(--mono); font-style: normal; color: var(--accent-ink); letter-spacing: 0.08em; }
+.pb-feat b { font-size: 1rem; font-weight: 600; color: var(--ink); }
+.pb-feat p { grid-column: 2; margin: 0; color: var(--dim); font-size: 0.93rem; line-height: 1.55; }
+.pb-feat kbd { font: 600 0.78em/1 var(--mono); color: var(--accent-ink); padding: 0.18em 0.5em; border-radius: 99px;
+  box-shadow: inset 0 0 0 1px rgba(78, 155, 234, 0.4); white-space: nowrap; }
+@media (max-width: 900px) { .pb-feats { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 3.25rem; } }
+@media (max-width: 560px) { .pb-feats { grid-template-columns: minmax(0, 1fr); } }
+.pb-section:has(.pb-feat[data-n="1"]:hover) .pb-pin[data-n="1"] { transform: scale(1.35); background: #fff; }
+.pb-section:has(.pb-feat[data-n="2"]:hover) .pb-pin[data-n="2"] { transform: scale(1.35); background: #fff; }
+.pb-section:has(.pb-feat[data-n="3"]:hover) .pb-pin[data-n="3"] { transform: scale(1.35); background: #fff; }
+.pb-section:has(.pb-feat[data-n="4"]:hover) .pb-pin[data-n="4"] { transform: scale(1.35); background: #fff; }
+.pb-section:has(.pb-feat[data-n="5"]:hover) .pb-pin[data-n="5"] { transform: scale(1.35); background: #fff; }
+.pb-section:has(.pb-feat[data-n="6"]:hover) .pb-pin[data-n="6"] { transform: scale(1.35); background: #fff; }
 
 /* No phone layout, on purpose: a phone gets the same window at the same
    aspect ratio, just smaller. An accurate picture of the app beats a legible
@@ -387,13 +481,17 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   .pb-beat, .pb-cue { transition-duration: 0.01ms; }
   .pb-slot .pb-rig { animation: none; }
   .pb-cue::after { animation: none; }
+  .pb-unsub i { animation: none; }
+  .pb-pin { transition: none; }
 }
 `;
 
 // The mock's "Npt" lengths are the app's points: rewritten to multiples of
 // --pt, which scales the whole mock with its window (see THE AFTER above).
+// The sign rides inside the calc: "-7pt" has to become calc(-7 * ...), since a
+// minus in front of a calc() is not a length.
 const PAGE_CSS_RESOLVED = PAGE_CSS.replace(
-  /(\d*\.?\d+)pt\b/g,
+  /(-?\d*\.?\d+)pt\b/g,
   "calc($1 * var(--pt))",
 );
 
@@ -1173,8 +1271,8 @@ function Waitlist() {
 
 // MARK: - the "after": a fake sitrep
 
-// Stand-ins for the SF Symbols the app draws: gauge, envelope, key, sliders,
-// people and waveform in the side rail; eye, envelope.open, calendar,
+// Stand-ins for the SF Symbols the app draws: gauge, envelope, key, the
+// discovery ring, the update arrow, waveform and gear in the side rail; eye, envelope.open, calendar,
 // shippingbox, building.columns and receipt on the zones.
 const GLYPHS = {
   sitrep: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4Zm0-3.6 2.8-5M3.8 8h1M8 3.8v1m4.2 3.2h-1",
@@ -1190,7 +1288,14 @@ const GLYPHS = {
   box: "M8 1.8 14 4.6v6.8L8 14.2 2 11.4V4.6L8 1.8ZM2 4.6 8 7.4l6-2.8M8 7.4v6.8",
   bank: "M2 6 8 2.5 14 6H2Zm1.2 0v6m3.2-6v6m3.2-6v6M12.8 6v6M2 13.5h12",
   receipt: "M3.5 1.8h9v12.4l-1.5-1-1.5 1-1.5-1-1.5 1-1.5-1-1.5 1V1.8Zm2.5 4h4m-4 3h4",
-  retriage: "M13.5 8a5.5 5.5 0 1 1-1.6-3.9M12.5 1.8v2.6H9.9",
+  compose: "M13.6 8.6v4.2a1.2 1.2 0 0 1-1.2 1.2H3.2A1.2 1.2 0 0 1 2 12.8V3.6a1.2 1.2 0 0 1 1.2-1.2h4.2M11.9 1.9l2.2 2.2-5.6 5.6-2.7.5.5-2.7 5.6-5.6Z",
+  search: "M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10Zm3.6-1.4L14 14",
+  wind: "M1.8 6.2h7.4a2 2 0 1 0-2-2M1.8 9.2h10.4a2 2 0 1 1-2 2M1.8 12.2h4.2",
+  clip: "M13 7.4 7.9 12.5a3 3 0 0 1-4.3-4.3l5.3-5.3a2 2 0 0 1 2.9 2.9L6.6 11a1 1 0 0 1-1.5-1.5l4.6-4.6",
+  ring: "M8 2.2a5.8 5.8 0 1 1-5 2.9M5.2 2.9l.1 0M3.4 4.3l.1 0",
+  update: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4ZM8 4.8v6m0 0L5.6 8.4M8 10.8l2.4-2.4",
+  done: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4ZM5.3 8.2l1.9 1.9 3.6-3.9",
+  copy: "M5.5 5.5v-2a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2m-7-5h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z",
 };
 
 function Glyph({ name }: { name: keyof typeof GLYPHS }) {
@@ -1226,21 +1331,42 @@ const AVATAR = {
 // edge, exactly as SitrepView draws it; upcoming is an amber outline.
 const EYES: Array<{
   who: string; initials: string; tone: keyof typeof AVATAR; line: string;
-  chip?: string; overdue?: boolean;
+  chip?: string; overdue?: boolean; clip?: boolean;
 }> = [
-  { who: "Parkline Properties", initials: "PP", tone: "ochre", line: "Your lease renewal still needs a signature before the new rate lapses.", chip: "3d PAST DUE", overdue: true },
+  { who: "Parkline Properties", initials: "PP", tone: "ochre", line: "Your lease renewal still needs a signature before the new rate lapses.", chip: "3d PAST DUE", overdue: true, clip: true },
   { who: "Dr. Ortiz's Office", initials: "DO", tone: "green", line: "Confirm Thursday's 2:30 appointment or call to reschedule.", chip: "due today" },
   { who: "Jamie Chen", initials: "JC", tone: "blue", line: "Needs your pick between two offsite venues so they can hold the date.", chip: "due Fri" },
   { who: "Alex Rivera", initials: "AR", tone: "violet", line: "Replied to your offsite dates: the 14th works for everyone." },
   { who: "Mom", initials: "M", tone: "rose", line: "Sent photos from the weekend." },
 ];
 
-// Newsletters from the scroll, one card per sender. Lettered tiles rather
-// than anybody's real logo.
-const READING: Array<[sender: string, count: number, blurb: string, tile: [bg: string, fg: string, mark: string]]> = [
-  ["Medium Daily Digest", 7, "10 Habits of Highly Effective Engineers, and six more stories picked for you.", ["#f2f2ee", "#111", "M"]],
-  ["Product Hunt Daily", 5, "An AI notetaker for your AI notetaker, and eight more launches.", ["#3a2a22", "#f08a5d", "P"]],
-  ["Substack", 3, "Three new posts from writers you follow.", ["#f3eee6", "#c2531f", "S"]],
+// Recurring senders from the scroll, one card per sender: the ones worth
+// sitting down with first (the app tints those like paper), the offers after.
+// Lettered tiles rather than anybody's real logo.
+const READING: Array<[sender: string, count: number, blurb: string, tile: [bg: string, fg: string, mark: string], content?: boolean]> = [
+  ["Medium", 7, "10 Habits of Highly Effective Engineers, and six more stories picked for you.", ["#f2f2ee", "#111", "M"], true],
+  ["Substack", 3, "The Case Against Breakfast, and two more posts from writers you follow.", ["#f3eee6", "#c2531f", "S"], true],
+  ["Product Hunt", 5, "An AI notetaker for your AI notetaker, and eight more launches.", ["#3a2a22", "#f08a5d", "P"], true],
+  ["DoorDash", 4, "40% off orders over $35 with code FRIYAY, before midnight.", ["#3b1f1c", "#f0705a", "D"]],
+  ["Sephora", 2, "15% off your next purchase of $50 or more. Your points are waiting.", ["#1c1c1f", "#f1f1f1", "S"]],
+  ["United", 2, "1,204 miles expire at the end of the month.", ["#1d2c4d", "#9db8ee", "U"]],
+];
+
+// A numbered marker on the corner of whatever it is rendered inside. The
+// number is the key into FEATURES below the window.
+function Pin({ n }: { n: number }) {
+  return <span className="pb-pin" data-n={n} aria-hidden="true">{n}</span>;
+}
+
+// What the pins point at, in the order the eye meets them. Each is something
+// the app grew after the first version of this picture was drawn.
+const FEATURES: Array<[title: string, line: ReactNode]> = [
+  ["A headline, written for you", "The sitrep opens on one sentence about your day, and it only ever leads with good news."],
+  ["Flow mode", <>Press <kbd>space</kbd> and walk what needs you, one email at a time, until the board is clear.</>],
+  ["Reading, sorted", <>One card per sender, with articles ahead of promotions. Hold <kbd>e</kbd> to clear a whole stack.</>],
+  ["Packages by name", "What is in the box, who sold it and when it lands, kept current from the carrier."],
+  ["Login codes come to you", "A sign-in code floats over the app you are in. Copy it without opening your inbox."],
+  ["Unsubscribe that finishes", <>Press <kbd>u</kbd>. Passband gets through the preference pages and forms on its own.</>],
 ];
 
 function AppMock() {
@@ -1248,7 +1374,7 @@ function AppMock() {
     <div
       className="pb-app"
       role="img"
-      aria-label="The Passband sitrep. Two items for your eyes: a lease renewal three days past due and an appointment to confirm today, then three more conversations. Newsletters wait on a reading shelf, and a rail beside it holds the calendar, shipments, billing and receipts."
+      aria-label="The Passband sitrep. A headline reads: the offsite has a date and your keyboard lands today. Five items are for your eyes, led by a lease renewal three days past due and an appointment to confirm today, with a flow mode button to walk them in order. Newsletters wait on a reading shelf, articles ahead of promotions. A rail beside it holds the calendar, packages by name, billing and receipts. Two senders are being unsubscribed in the corner."
     >
       <div className="pb-app-bar">
         <div className="pb-lights" aria-hidden="true"><i /><i /><i /></div>
@@ -1257,8 +1383,8 @@ function AppMock() {
           <small>SITREP</small>
         </div>
         <div className="pb-app-tools">
-          <span className="pb-retriage"><Glyph name="retriage" />re-triage 7d</span>
-          <span className="pb-need">2 need you now</span>
+          <span><Glyph name="compose" /></span>
+          <span><Glyph name="search" /></span>
         </div>
       </div>
 
@@ -1266,29 +1392,40 @@ function AppMock() {
         <span className="on"><Glyph name="sitrep" /></span>
         <span><Glyph name="mail" /></span>
         <span><Glyph name="key" /></span>
-        <span><Glyph name="sliders" /></span>
-        <span><Glyph name="people" /></span>
         <i className="pb-side-gap" />
+        <span><Glyph name="ring" /></span>
+        <hr />
+        <span className="up"><Glyph name="update" /></span>
         <span><Glyph name="pulse" /></span>
         <span><Glyph name="gear" /></span>
-        <span className="pb-me">Y</span>
+        <span className="pb-me">S</span>
       </nav>
 
       <div className="pb-page">
         <div className="pb-dash-hero">
-          <small>Good morning</small>
-          <b>Two items for your eyes.</b>
+          <small>Good morning, Sam</small>
+          <b>The offsite has a date and your keyboard lands today.<Pin n={1} /></b>
         </div>
 
         <div className="pb-col">
           <section className="pb-zone">
-            <ZoneHead glyph="eye" title="For your eyes" count={EYES.length} />
-            {EYES.map(({ who, initials, tone, line, chip, overdue }, i) => {
+            <div className="pb-zone-h">
+              <Glyph name="eye" />
+              For your eyes <em>{EYES.length}</em>
+              <span className="pb-flow">
+                <kbd>space</kbd>
+                <Glyph name="wind" />
+                flow mode
+                <Pin n={2} />
+              </span>
+            </div>
+            {EYES.map(({ who, initials, tone, line, chip, overdue, clip }, i) => {
               const [bg, fg] = AVATAR[tone];
               return (
                 <div key={who} className={`pb-eye${overdue ? " overdue" : ""}${i === 0 ? " cursor" : ""}`}>
                   <span className="pb-avatar" style={{ background: bg, color: fg }}>{initials}</span>
                   <b>{who}</b>
+                  {clip && <Glyph name="clip" />}
                   <span className="line">{line}</span>
                   {chip && (
                     <span
@@ -1306,9 +1443,10 @@ function AppMock() {
           <section className="pb-zone">
             <ZoneHead glyph="reading" title="Reading" count={READING.length}
               sub="newsletters, announcements, and offers" />
+            <Pin n={3} />
             <div className="pb-reading">
-              {READING.map(([sender, count, blurb, [bg, fg, mark]]) => (
-                <div key={sender} className="pb-read">
+              {READING.map(([sender, count, blurb, [bg, fg, mark], content]) => (
+                <div key={sender} className={`pb-read${content ? " content" : ""}`}>
                   <span className="pb-logo" style={{ background: bg, color: fg }}>{mark}</span>
                   <div className="pb-read-text">
                     <div className="pb-read-top">
@@ -1326,31 +1464,32 @@ function AppMock() {
         <aside className="pb-rail">
           <section className="pb-rec pb-rec-cal">
             <ZoneHead glyph="calendar" title="Calendar" count={2} />
-            <div className="pb-rec-row"><b>Dr. Ortiz · checkup</b><span>Sep 26</span></div>
-            <div className="pb-rec-row"><b>Team offsite</b><span>Oct 14</span></div>
+            <div className="pb-rec-row"><b>Dr. Ortiz · checkup</b><span>Thu 2:30 PM</span></div>
+            <div className="pb-rec-row"><b>Team offsite</b><span className="pb-chip">updated</span><span>Oct 14</span></div>
           </section>
           <section className="pb-rec pb-rec-ship">
             <ZoneHead glyph="box" title="Shipments" count={2} />
+            <Pin n={4} />
             <div className="pb-ship">
               <div className="pb-ship-top">
                 <i>UPS</i>
-                <b>Keychron Q1</b>
+                <div><b>Keychron Q1 Max</b><small>Keychron · order KC-48211</small></div>
                 <span className="pb-chip filled" style={{ ["--c" as string]: "var(--warn)" }}>out for delivery</span>
               </div>
             </div>
             <div className="pb-ship">
               <div className="pb-ship-top">
                 <i>a</i>
-                <b>Linen notebooks</b>
-                <span className="pb-chip filled" style={{ ["--c" as string]: "var(--accent)" }}>shipped</span>
+                <div><b>Linen notebooks, set of 3</b><small>Rainforest · 2 items</small></div>
+                <span className="pb-chip" style={{ ["--c" as string]: "var(--accent)" }}>shipped</span>
               </div>
               <span className="pb-chip eta">arrives Sat</span>
             </div>
           </section>
           <section className="pb-rec pb-rec-bill">
             <ZoneHead glyph="bank" title="Billing" count={2} />
+            <div className="pb-rec-row"><b>Con Edison</b><span className="pb-chip">autopay</span><span className="amt">$142.08</span></div>
             <div className="pb-rec-row"><b>Chase ··4417</b><span className="pb-chip">statement</span></div>
-            <div className="pb-rec-row"><b>Con Edison</b><span className="pb-chip">update</span></div>
           </section>
           <section className="pb-rec pb-rec-rcpt">
             <ZoneHead glyph="receipt" title="Receipts" count={3} />
@@ -1359,6 +1498,43 @@ function AppMock() {
             <div className="pb-rec-row"><b>Berghain Klubnacht</b><span>€25.00</span></div>
           </section>
         </aside>
+      </div>
+
+      <div className="pb-tray">
+        <div className="pb-unsub done">
+          <span className="pb-avatar" style={{ background: AVATAR.rust[0], color: AVATAR.rust[1] }}>M</span>
+          <span>Unsubscribed from <b>Marriott Bonvoy</b></span>
+          <Glyph name="done" />
+          <Pin n={6} />
+        </div>
+        <div className="pb-unsub">
+          <span className="pb-avatar" style={{ background: AVATAR.violet[0], color: AVATAR.violet[1] }}>E</span>
+          <span>Unsubscribing from <b>Eventbrite</b></span>
+          <i />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The floating login code, which in the app sits over whatever you are working
+// in. A sibling of the window so it can hang off its edge.
+function CodePanel() {
+  return (
+    <div className="pb-code" aria-hidden="true">
+      <Pin n={5} />
+      <div className="pb-code-top">
+        <span className="pb-avatar" style={{ background: AVATAR.blue[0], color: AVATAR.blue[1] }}>N</span>
+        <div>
+          <b>Northwind Bank</b>
+          <small><Glyph name="key" />Login code</small>
+        </div>
+        <span>24s</span>
+      </div>
+      <div className="pb-code-num">482 913</div>
+      <div className="pb-code-acts">
+        <span><Glyph name="copy" />Copy</span>
+        <em>Dismiss</em>
       </div>
     </div>
   );
@@ -1589,11 +1765,23 @@ export function App() {
           </div>
           <figure className="pb-panel pb-after">
             <figcaption><b>After</b> what Passband shows you</figcaption>
-            <div className="pb-window">
-              <AppMock />
+            <div className="pb-shot">
+              <div className="pb-window">
+                <AppMock />
+              </div>
+              <CodePanel />
             </div>
           </figure>
         </div>
+        <ol className="pb-feats">
+          {FEATURES.map(([title, line], i) => (
+            <li key={title} className="pb-feat" data-n={i + 1}>
+              <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
+              <b>{title}</b>
+              <p>{line}</p>
+            </li>
+          ))}
+        </ol>
       </section>
 
       <section className="pb-section" style={{ paddingTop: 0 }}>

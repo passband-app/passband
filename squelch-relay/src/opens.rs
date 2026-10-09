@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
@@ -19,7 +19,7 @@ pub const MAX_PER_TOKEN: usize = 50;
 
 /// Rows past this age are dropped: a daemon that has been offline for a quarter
 /// is not going to reconcile opens it can no longer place in a thread.
-const RETENTION_SECS: i64 = 90 * 24 * 60 * 60;
+pub(crate) const RETENTION_SECS: i64 = 90 * 24 * 60 * 60;
 
 /// Rows kept across ALL tokens. [`MAX_PER_TOKEN`] cannot bound the table on its
 /// own: this relay holds no tracker list and cannot tell a minted token from a
@@ -37,17 +37,24 @@ const RETENTION_SECS: i64 = 90 * 24 * 60 * 60;
 /// row, so under a gigabyte at the ceiling.
 const MAX_ROWS: i64 = 1_000_000;
 
-/// The purge is a full-table scan and the cutoff moves by seconds, so it runs on
-/// a clock rather than per insert.
-const PURGE_EVERY: Duration = Duration::from_secs(600);
+/// The purge is a full-table scan and the cutoff moves by seconds, so the
+/// maintenance task ([`crate::RelayState::run_maintenance`]) runs it on this
+/// clock rather than per insert.
+pub const PURGE_EVERY: Duration = Duration::from_secs(600);
 
-/// The trim walks the id index, so it is gated the same way. Tighter than
+/// The trim walks the id index, so it runs on a clock too. Tighter than
 /// [`PURGE_EVERY`] because the ceiling is a size bound rather than a policy: the
 /// table overshoots by whatever the pixel route admits between runs.
-const TRIM_EVERY: Duration = Duration::from_secs(60);
+pub const TRIM_EVERY: Duration = Duration::from_secs(60);
 
 /// User agents are attacker-controlled and unbounded on the wire.
 pub const MAX_USER_AGENT: usize = 512;
+
+/// The WAL may grow to this before SQLite truncates it at the next checkpoint.
+/// The trim's bulk DELETE touches a page for every row it evicts (hundreds of
+/// thousands under a flood), and without a limit the `-wal` file keeps that
+/// high-water mark on the volume forever.
+const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 
 /// Rows returned by one drain, so a long-offline daemon reconciles in bounded
 /// pages instead of one unbounded body.
@@ -82,8 +89,6 @@ pub struct OpenStore {
 
 struct Inner {
     conn: Connection,
-    last_purge: Instant,
-    last_trim: Instant,
 }
 
 impl OpenStore {
@@ -91,16 +96,16 @@ impl OpenStore {
     /// restart drops whatever the daemon had not yet drained.
     pub fn open(path: Option<&Path>) -> rusqlite::Result<Self> {
         let conn = match path {
-            Some(p) => Connection::open(p)?,
+            Some(p) => {
+                let conn = Connection::open(p)?;
+                tune_file_backed(&conn);
+                conn
+            }
             None => Connection::open_in_memory()?,
         };
         conn.execute_batch(SCHEMA)?;
         Ok(Self {
-            inner: Mutex::new(Inner {
-                conn,
-                last_purge: Instant::now(),
-                last_trim: Instant::now(),
-            }),
+            inner: Mutex::new(Inner { conn }),
         })
     }
 
@@ -115,7 +120,7 @@ impl OpenStore {
         opened_at: i64,
         user_agent: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let mut g = self.lock();
+        let g = self.lock();
         // One statement, so the count and the insert cannot interleave with a
         // concurrent open of the same token.
         g.conn.execute(
@@ -124,10 +129,34 @@ impl OpenStore {
              WHERE (SELECT count(*) FROM opens WHERE token = ?1) < ?4",
             params![token, opened_at, user_agent, MAX_PER_TOKEN as i64],
         )?;
-        let now = Instant::now();
-        g.purge_if_due(opened_at, now);
-        g.trim_if_due(now);
         Ok(())
+    }
+
+    /// Drop rows past the retention window, and say how many. For the
+    /// maintenance task, every [`PURGE_EVERY`]; never from a record. These
+    /// sweeps used to run inside [`Self::record`] on a clock, so whichever
+    /// pixel fetch landed first after an interval paid for a full-table scan
+    /// under the mutex with its response waiting on it. A failed sweep is a
+    /// warning: the rows it would have dropped are still only rows.
+    pub fn purge(&self, now_unix: i64) -> usize {
+        let g = self.lock();
+        match g.conn.execute(
+            "DELETE FROM opens WHERE opened_at < ?1",
+            params![now_unix - RETENTION_SECS],
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(error = %e, "open buffer purge failed");
+                0
+            }
+        }
+    }
+
+    /// Evict down to [`MAX_ROWS`], largest token first (see `trim_to` for the
+    /// order and why), and say how many. For the maintenance task, every
+    /// [`TRIM_EVERY`]; never from a record.
+    pub fn trim(&self) -> usize {
+        self.lock().trim_to(MAX_ROWS)
     }
 
     /// Delete everything at or below `cursor`, then return up to
@@ -168,29 +197,39 @@ impl OpenStore {
     }
 }
 
+/// WAL for the file-backed buffer, as the daemon's store runs: one WAL append
+/// and one fsync per buffered open, where SQLite's default rollback journal
+/// writes the journal, syncs it, writes the page, syncs again and deletes the
+/// journal. `synchronous` stays at its default, FULL, on purpose: the drain
+/// hands the daemon ids and the README promises an id is never reused, and
+/// under NORMAL a power loss could rewind `sqlite_sequence` past a cursor the
+/// daemon has already acked, so later opens would land under it and be deleted
+/// unread. One fsync per open is the price of that promise.
+///
+/// Best-effort, every line: the journal mode is read back (SQLite keeps the old
+/// mode silently where WAL is unavailable, a read-only file or a filesystem
+/// without shared memory, and would not report it), a refusal is a warning,
+/// and nothing here can fail the open. The relay must boot and serve pushes
+/// whatever state the buffer's volume is in; a pixel that cannot be buffered
+/// already fails per request, never per process.
+fn tune_file_backed(conn: &Connection) {
+    match conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0)) {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
+        Ok(mode) => tracing::warn!(
+            mode,
+            "open buffer: WAL unavailable on this file, keeping the default journal"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "open buffer: WAL unavailable on this file, keeping the default journal"
+        ),
+    }
+    if let Err(e) = conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES) {
+        tracing::warn!(error = %e, "open buffer: journal size limit not set");
+    }
+}
+
 impl Inner {
-    fn purge_if_due(&mut self, now_unix: i64, now: Instant) {
-        if now.saturating_duration_since(self.last_purge) < PURGE_EVERY {
-            return;
-        }
-        self.last_purge = now;
-        // A failed sweep is not a failed open: the row is already buffered.
-        if let Err(e) = self.conn.execute(
-            "DELETE FROM opens WHERE opened_at < ?1",
-            params![now_unix - RETENTION_SECS],
-        ) {
-            tracing::warn!(error = %e, "open buffer purge failed");
-        }
-    }
-
-    fn trim_if_due(&mut self, now: Instant) {
-        if now.saturating_duration_since(self.last_trim) < TRIM_EVERY {
-            return;
-        }
-        self.last_trim = now;
-        self.trim_to(MAX_ROWS);
-    }
-
     /// Evict down to `max_rows`, taking from the tokens holding the MOST rows
     /// first, and return how many rows that deleted. Separate from the clock so
     /// the eviction can be exercised without a million-row fixture.
@@ -345,11 +384,7 @@ mod tests {
         let now = 1_800_000_000;
         s.record("aaaa", now - RETENTION_SECS - 1, None).unwrap();
         s.record("bbbb", now, None).unwrap();
-        {
-            let mut g = s.lock();
-            g.last_purge = Instant::now() - PURGE_EVERY;
-            g.purge_if_due(now, Instant::now());
-        }
+        assert_eq!(s.purge(now), 1);
         let rows = s.drain(0).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].token, "bbbb");
@@ -461,6 +496,24 @@ mod tests {
         assert!(s.drain(0).unwrap().last().unwrap().id > highest);
     }
 
+    /// A record is only the insert: however stale the table, it sweeps
+    /// nothing. The sweeps are the maintenance task's, and under the ceiling
+    /// the trim evicts nothing.
+    #[test]
+    fn a_record_never_sweeps() {
+        let s = store();
+        let now = 1_800_000_000;
+        s.record("stale", now - RETENTION_SECS - 1, None).unwrap();
+        s.record("fresh", now, None).unwrap();
+        assert_eq!(s.drain(0).unwrap().len(), 2);
+        assert_eq!(s.trim(), 0);
+        assert_eq!(s.drain(0).unwrap().len(), 2);
+        assert_eq!(s.purge(now), 1);
+        let left = s.drain(0).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].token, "fresh");
+    }
+
     #[test]
     fn survives_a_reopen_of_the_same_file() {
         let dir = std::env::temp_dir().join(format!("squelch-relay-opens-{}", std::process::id()));
@@ -474,6 +527,39 @@ mod tests {
             .unwrap();
         let s = OpenStore::open(Some(&path)).unwrap();
         assert_eq!(s.drain(0).unwrap().len(), 1);
+        // The file-backed buffer runs WAL with a bounded journal and FULL
+        // synchronous, read back through the pragmas rather than trusted from
+        // the open path.
+        let (journal, synchronous, limit): (String, i64, i64) = {
+            let g = s.lock();
+            let read = |pragma: &str| {
+                g.conn
+                    .query_row(&format!("PRAGMA {pragma}"), [], |r| {
+                        r.get::<_, rusqlite::types::Value>(0)
+                    })
+                    .unwrap()
+            };
+            let journal = match read("journal_mode") {
+                rusqlite::types::Value::Text(t) => t,
+                other => panic!("journal_mode: {other:?}"),
+            };
+            let int = |v: rusqlite::types::Value| match v {
+                rusqlite::types::Value::Integer(i) => i,
+                other => panic!("integer pragma: {other:?}"),
+            };
+            (
+                journal,
+                int(read("synchronous")),
+                int(read("journal_size_limit")),
+            )
+        };
+        assert_eq!(journal, "wal");
+        assert_eq!(
+            synchronous, 2,
+            "FULL: the ack protocol's ids must be durable"
+        );
+        assert_eq!(limit, JOURNAL_SIZE_LIMIT_BYTES);
+        drop(s);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

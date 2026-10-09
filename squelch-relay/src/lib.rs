@@ -8,6 +8,7 @@
 //! timing only.
 
 pub mod auth;
+mod clock;
 pub mod config;
 mod handlers;
 pub mod jwt;
@@ -49,6 +50,18 @@ use axum::{
 /// auth-less relay simply has no drain. The pixel still buffers; nothing can
 /// collect it until a bearer exists.
 pub fn router(state: RelayState) -> Router {
+    // The open buffer's sweeps run for as long as this router serves. Spawned
+    // here rather than by the binary so that no embedder, the tests included,
+    // can serve the pixel into a buffer nothing bounds: the ceiling in
+    // `opens::MAX_ROWS` is a security bound, and before the maintenance task
+    // existed every record enforced it. A router is only ever built inside a
+    // runtime, since there is nothing to serve from without one.
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(state.clone().run_maintenance());
+        }
+        Err(_) => tracing::warn!("no tokio runtime: the open buffer's sweeps are not running"),
+    }
     let authed = state.auth_token().is_some();
 
     let mut push = Router::new().route("/v1/push", post(handlers::push)).layer(

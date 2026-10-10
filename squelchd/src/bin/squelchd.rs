@@ -492,6 +492,38 @@ fn worker_threads_for(parallelism: usize, env_override: Option<&str>) -> usize {
         .max(MIN_WORKER_THREADS)
 }
 
+/// How long after boot the planner-statistics pass runs, then hourly.
+///
+/// A fresh install's first hour (the initial backfill and the first triage
+/// burst) is the heaviest of its life, and with no statistics at all it is
+/// exactly the pathology the pass exists to fix, so the first ticks come
+/// early; an upgraded install gets its first full pass a minute in, with the
+/// door already bound. Hourly after that keeps up with a process that runs
+/// for weeks while its tables grow.
+const STATISTICS_REFRESH_AFTER_SECS: [u64; 3] = [60, 540, 3000];
+
+/// Spawn the planner-statistics pass ([`SqliteStore::refresh_statistics`])
+/// on [`STATISTICS_REFRESH_AFTER_SECS`], then hourly, for both long-lived
+/// modes (`serve` and `run`). Off the open path on purpose: see the store
+/// method. Behind the mutex via `spawn_blocking`; never fatal; not
+/// shutdown-aware for the same reason the shredder is not: the next tick is
+/// minutes or an hour away and the runtime drop ends it.
+fn spawn_statistics_refresh(store: Arc<SqliteStore>) {
+    tokio::spawn(async move {
+        let mut early = STATISTICS_REFRESH_AFTER_SECS.into_iter();
+        loop {
+            let secs = early.next().unwrap_or(3600);
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            let store = store.clone();
+            match tokio::task::spawn_blocking(move || store.refresh_statistics()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("squelchd: planner statistics refresh failed: {e}"),
+                Err(_) => eprintln!("squelchd: planner statistics refresh panicked"),
+            }
+        }
+    });
+}
+
 fn build_runtime() -> Result<tokio::runtime::Runtime, squelch_core::CoreError> {
     let parallelism = available_parallelism();
     let env_override = std::env::var(WORKER_THREADS_ENV).ok();
@@ -1723,6 +1755,8 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
             }
         });
 
+        spawn_statistics_refresh(store.clone());
+
         let mut engine = SyncEngine::new(store, creds, account_id, email, config);
         if let Some(e) = embedder {
             spawn_embedder_reaper(e.clone(), idle_unload_secs, shutdown_rx.clone());
@@ -2630,6 +2664,8 @@ fn cmd_serve(
                 }
             });
         }
+
+        spawn_statistics_refresh(store.clone());
 
         // SCHEDULED SEND fires here for the same reason the shredder runs
         // here: it sends on the WRITE credential (docs/SCHEDULED-SEND.md §4).

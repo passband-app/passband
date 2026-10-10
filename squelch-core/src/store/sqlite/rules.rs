@@ -4,13 +4,15 @@ use super::*;
 
 /// A sender's recent non-sealed inbound mail with what became of it.
 ///
-/// `INDEXED BY` ON PURPOSE. Without `sqlite_stat1` (which a daemon never
-/// writes) the planner reads `ORDER BY received_at DESC LIMIT` as a reason to
-/// walk `idx_messages_received` newest-first across the WHOLE account, under the
-/// store mutex, until it happens on enough of this sender's rows. The seek on
-/// the NOCASE sender index plus a sort of one sender's mail is the cheap plan,
-/// and pinning it means a missing index is a loud prepare error, not a silent
-/// walk. `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
+/// `INDEXED BY` ON PURPOSE. Without `sqlite_stat1` (which the daemon writes
+/// only since `SqliteStore::refresh_statistics`, on a schedule, so a store can
+/// still be minutes or an upgrade away from having one) the planner reads
+/// `ORDER BY received_at DESC LIMIT` as a reason to walk `idx_messages_received`
+/// newest-first across the WHOLE account, under the store mutex, until it
+/// happens on enough of this sender's rows. The seek on the NOCASE sender index
+/// plus a sort of one sender's mail is the cheap plan, and pinning it means a
+/// missing index is a loud prepare error, not a silent walk, statistics or no.
+/// `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
 pub(crate) const SENDER_RULE_DIGEST_SQL: &str =
     "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL, t.category
      FROM messages m INDEXED BY idx_messages_from_nocase

@@ -15,8 +15,9 @@ and confirmed accurate.
 
 `README.md` links `squelch-desktop/README.md` ("the Tauri desktop client").
 The directory is gone — the desktop client was retired 2026-07-30 and the
-commit that removed it is in this branch's history. First link a curious new
-user clicks, 404 on GitHub.
+commit that removed its source is in this branch's history (its build-output
+stump, 42 files of `dist/` and generated schemas, outlived it until #515).
+First link a curious new user clicks, 404 on GitHub.
 
 ## 2. README "Building the macOS client" builds from a directory that doesn't exist — [lie]
 

@@ -1,6 +1,5 @@
 target/
 .git/
-squelch-desktop/
 passband/
 passband-site/
 docs/

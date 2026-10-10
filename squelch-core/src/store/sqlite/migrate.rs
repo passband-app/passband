@@ -348,6 +348,22 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // AND THE FIRED REMINDERS' INDEX, the same shape for the same reason. A
+    // fired reminder (`reminded_at` set, `remind_at` cleared) is a standing-
+    // band arm, and `append_due_reminders` asks for them on EVERY Standing
+    // read, which is the client's 10 s poll; without this the ask was a walk
+    // of every triage row in the account, 233 ms at 50k messages, under the
+    // mutex every request waits on. Partial because almost no row has ever
+    // had a reminder fire. Both columns in the guard, as `idx_messages_spam`
+    // below explains: an index names every column it covers.
+    if has_columns(conn, "triage", &["account_id", "reminded_at"])? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_triage_reminded_at
+             ON triage(account_id, reminded_at) WHERE reminded_at IS NOT NULL",
+            [],
+        )?;
+    }
+
     // THE SPAM PAGE'S INDEX, partial for the same reason and in the same place.
     // Every other listing wants `is_spam = 0`, which is almost every row and so
     // is better served by a scan the planner was going to do anyway; only the

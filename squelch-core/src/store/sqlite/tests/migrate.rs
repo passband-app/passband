@@ -982,18 +982,16 @@ fn migrate_adds_reminder_columns_and_the_due_index_to_preexisting_triage() {
     assert!(cols.iter().any(|c| c == "remind_at"), "remind_at added");
     assert!(cols.iter().any(|c| c == "reminded_at"), "reminded_at added");
 
-    let indexed: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type='index' AND name='idx_triage_remind_at'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        indexed, 1,
-        "the sweep's index is created here, not in schema.sql"
-    );
+    for index in ["idx_triage_remind_at", "idx_triage_reminded_at"] {
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                [index],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "{index} is created here, not in schema.sql");
+    }
 
     // NOT backfilled: `reminded_at` is a standing-band arm, so a stamped
     // historical row would drag the whole mailbox into the band.
@@ -2621,4 +2619,88 @@ fn open_tunes_the_connection_pragmas() {
     }
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- the three indexes the 50k-row bench asked for -----------------------
+
+/// Three listings that walked the whole account on the planner bench, pinned
+/// by PLAN rather than by timing (a timing test is flaky on CI and a plan is
+/// exact), and pinned on the SHIPPED statements (the `const`s the store runs)
+/// so an edit to a query that loses its seek fails here. The second half drops
+/// each index and asserts the plan really degrades, so a rename that silently
+/// detaches one cannot pass either:
+///
+/// - `append_due_reminders` runs on EVERY Standing-band read (the client's
+///   10 s poll) and asked for `reminded_at IS NOT NULL` with no index over it:
+///   a walk of every triage row in the account, 233 ms at 50k messages;
+/// - `message_opens` (and the sent and group listings' per-row open counts)
+///   reached `send_trackers` through `token`, its only key, so each was a SCAN
+///   of the whole tracker table;
+/// - `agent_diagnostics` reads `agent_triage_runs ORDER BY id DESC LIMIT 25`,
+///   and the table had no index at all over a column that grows forever.
+#[test]
+fn reminder_tracker_and_run_lookups_seek_their_indexes() {
+    use super::super::agent_triage::{DUE_REMINDERS_SQL, MESSAGE_RUNS_SQL};
+    use super::super::tracking::MESSAGE_OPENS_SQL;
+
+    let (store, _acct) = store();
+    let conn = store.lock().unwrap();
+
+    /// Whether `table` (the alias, when there is one) is reached through
+    /// `index`.
+    fn seeks(plan: &[String], table: &str, index: &str) -> bool {
+        plan.iter()
+            .any(|line| line.starts_with(&format!("SEARCH {table} USING")) && line.contains(index))
+    }
+    /// Whether `table` is walked whole.
+    fn scans(plan: &[String], table: &str) -> bool {
+        plan.iter()
+            .any(|line| line.starts_with(&format!("SCAN {table}")))
+    }
+
+    let p = plan(&conn, DUE_REMINDERS_SQL);
+    assert!(
+        seeks(&p, "t", "idx_triage_reminded_at"),
+        "due reminders walk the account's triage rows:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_OPENS_SQL);
+    assert!(
+        seeks(&p, "t", "idx_send_trackers_message"),
+        "message opens scan send_trackers:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_RUNS_SQL);
+    assert!(
+        seeks(&p, "agent_triage_runs", "idx_agent_triage_runs_message"),
+        "run diagnostics scan agent_triage_runs:\n{p:#?}"
+    );
+
+    // THE CANARY: with the indexes gone the same statements must degrade to
+    // what they did before, or the assertions above were never testing the
+    // index. Each is asserted on the shape the planner actually falls back
+    // to, not on the absence of a name that cannot appear once dropped: the
+    // reminders are driven from `messages` with `t` reached by primary key
+    // instead of through an index, the opens walk `message_opens` whole and
+    // reach each tracker by token, and the runs become a table scan.
+    conn.execute_batch(
+        "DROP INDEX idx_triage_reminded_at;
+         DROP INDEX idx_send_trackers_message;
+         DROP INDEX idx_agent_triage_runs_message;",
+    )
+    .unwrap();
+    let p = plan(&conn, DUE_REMINDERS_SQL);
+    assert!(
+        !p.iter()
+            .any(|line| line.starts_with("SEARCH t USING INDEX")),
+        "canary: reminders still reach triage through an index:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_OPENS_SQL);
+    assert!(
+        scans(&p, "o") && !seeks(&p, "t", "idx_send_trackers_message"),
+        "canary: opens do not fall back to walking message_opens:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_RUNS_SQL);
+    assert!(
+        scans(&p, "agent_triage_runs"),
+        "canary: runs do not fall back to a table scan:\n{p:#?}"
+    );
 }

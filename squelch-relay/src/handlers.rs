@@ -5,7 +5,7 @@
 //! 4xxs the whole batch; a failed token is data (`status: 0`), never a batch
 //! failure. PRIVACY: no token value, payload, bearer, or APNs JWT is logged.
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use axum::{
     Json,
@@ -18,9 +18,10 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::clock::now_unix;
 use crate::config::Environment;
 use crate::opens::{MAX_USER_AGENT, Open};
-use crate::state::RelayState;
+use crate::state::{OpensError, RelayState};
 
 /// An unbounded token list would let one call hold a connection open forever.
 const MAX_TOKENS: usize = 100;
@@ -160,14 +161,17 @@ pub async fn pixel(
             .get(header::USER_AGENT)
             .and_then(|h| h.to_str().ok())
             .map(truncate_user_agent);
-        if let Err(e) = state
-            .opens()
-            .record(&token, now_unix(), user_agent.as_deref())
+        let now = now_unix();
+        match state
+            .with_opens(move |opens| opens.record(&token, now, user_agent.as_deref()))
+            .await
         {
+            // A shutdown mid-fetch is not a buffer failure.
+            Ok(()) | Err(OpensError::Cancelled) => {}
             // PRIVACY: the token names a message to anyone holding the mapping,
             // so it never reaches a log line — not here, not at any level. A
             // buffer failure is also never visible to the fetching client.
-            tracing::warn!(error = %e, "failed to buffer an open");
+            Err(e) => tracing::warn!(error = %e, "failed to buffer an open"),
         }
     }
 
@@ -196,10 +200,15 @@ pub async fn opens(
     // A negative cursor acks nothing rather than being an error the daemon has
     // to handle mid-drain.
     let cursor = q.cursor.unwrap_or(0).max(0);
-    let opens = state.opens().drain(cursor).map_err(|e| {
-        tracing::error!(error = %e, "open buffer read failed");
-        RelayError::new(StatusCode::INTERNAL_SERVER_ERROR, "open buffer unavailable")
-    })?;
+    let opens = state
+        .with_opens(move |opens| opens.drain(cursor))
+        .await
+        .map_err(|e| {
+            if !matches!(e, OpensError::Cancelled) {
+                tracing::error!(error = %e, "open buffer read failed");
+            }
+            RelayError::new(StatusCode::INTERNAL_SERVER_ERROR, "open buffer unavailable")
+        })?;
     // PRIVACY: a count and a cursor. Tokens are the response body, never the log.
     tracing::info!(acked = cursor, returned = opens.len(), "opens");
     Ok(Json(OpensResponse { opens }))
@@ -224,14 +233,6 @@ fn truncate_user_agent(ua: &str) -> String {
         end -= 1;
     }
     ua[..end].to_string()
-}
-
-/// Seconds since the epoch. A clock before 1970 records as 0 rather than
-/// panicking a route that must always answer.
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// A request that has passed validation.

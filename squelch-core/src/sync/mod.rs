@@ -812,6 +812,25 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// What the archive walk remembers between chunks and tells the other
     /// lanes. See [`ArchiveRun`].
     archive: ArchiveRun,
+    /// SOME MESSAGE MAY BE MISSING ITS VECTOR, so the next refine round should
+    /// run the drain. Raised at construction (rows ingested before this
+    /// process had an embedder, and failures from an earlier run, are what the
+    /// first drain is for), by every arm of [`SyncEngine::embed_and_store`]
+    /// that did not write a vector, and by a drain that stopped on an error;
+    /// lowered by a drain as it starts, so a failure that lands while it runs
+    /// is not lost under its clear. Without this the drain ran EVERY round,
+    /// and in steady state every non-spam row already has a vector, so its
+    /// `NOT EXISTS` never short-circuited: a walk of the whole account with a
+    /// vec0 probe per row, 50k probes every 30 s idle and every second while
+    /// triage was busy, under the store mutex, for nothing.
+    ///
+    /// An `Arc`, because the debt is a property of the STORE and more than
+    /// one engine writes to it: the daemon's sweeps engine runs the blank-body
+    /// heal, which deletes a healed row's vector for this drain to redo, and
+    /// its raise has to land on the flag the sync engine's refine lane reads.
+    /// [`SyncEngine::with_vectors_dirty`] hands one flag to every engine over
+    /// one store.
+    vectors_dirty: Arc<AtomicBool>,
     /// Shared cooldown after provider failure. Rejected configuration must not
     /// trigger one request per queued message or consume message retry attempts.
     agent_retry_after: AtomicI64,
@@ -827,6 +846,25 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`profile::PEOPLE_ME_URL`] in production; only the tests in that module
     /// assign it, for the same reason `api_base` has no public setter.
     profile_url: String,
+}
+
+/// The "a vector may be missing" flag's lifecycle across ONE drain pass:
+/// lowered by the pass as it starts, and raised again on drop unless the pass
+/// set `drained`, which it does only when the queue came back empty or short.
+/// Every other ending, a query error, a failed batch, or the future being
+/// dropped mid-pass when `run_lanes` restarts the lanes, leaves the debt on
+/// the books for the next round. See [`SyncEngine::backfill_missing_vectors`].
+struct DrainGuard<'a> {
+    flag: &'a AtomicBool,
+    drained: bool,
+}
+
+impl Drop for DrainGuard<'_> {
+    fn drop(&mut self) {
+        if !self.drained {
+            self.flag.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C> {
@@ -894,6 +932,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             window_in_flight: AtomicBool::new(false),
             archive_pace: ArchivePace::default(),
             archive: ArchiveRun::default(),
+            vectors_dirty: Arc::new(AtomicBool::new(true)),
             agent_retry_after: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
@@ -973,6 +1012,21 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     pub fn with_embedder(mut self, embedder: Arc<dyn crate::embed::Embedder>) -> Self {
         self.embedder = Some(embedder);
         self
+    }
+
+    /// Share the "a vector may be missing" flag with another engine over the
+    /// same store, so a raise on either lands where the drain reads it. The
+    /// daemon builds its sweeps engine with the sync engine's handle; see the
+    /// field.
+    pub fn with_vectors_dirty(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.vectors_dirty = flag;
+        self
+    }
+
+    /// This engine's "a vector may be missing" flag, to hand to another
+    /// engine through [`SyncEngine::with_vectors_dirty`].
+    pub fn vectors_dirty_handle(&self) -> Arc<AtomicBool> {
+        self.vectors_dirty.clone()
     }
 
     /// The EFFECTIVE embedder for this tick: the override, else whatever is
@@ -2230,7 +2284,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 // land on top of the bodies it is parsing. The walk rests
                 // between batches for twice as long as it works, and the drain
                 // has that.
-                if self.may_drain_vectors() {
+                //
+                // AND ONLY WHEN SOMETHING MAY BE MISSING: the drain's query
+                // walks the whole account when nothing is, which in steady
+                // state is every round. See `vectors_dirty`.
+                if self.may_drain_vectors() && self.vectors_dirty.load(Ordering::Relaxed) {
                     self.backfill_missing_vectors().await;
                 }
             }
@@ -2861,6 +2919,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 };
                 match self.store.ingest_message_fresh(&triaged, scope)? {
                     Some(_) => {
+                        // The heal DELETES the row's vector (it was computed
+                        // from the subject alone) for the drain to redo from
+                        // the real text, so the drain must know there is one
+                        // to redo. This engine is the daemon's SWEEPS engine;
+                        // the flag it raises is the sync engine's, shared.
+                        self.vectors_dirty.store(true, Ordering::Relaxed);
                         if scope == crate::store::HealScope::TextAndTriage {
                             re_read += 1;
                         } else {
@@ -3448,6 +3512,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// backfill pass recovers the vector, so ingest must not block on it.
     async fn embed_and_store(&self, message_id: i64, text: String) {
         let Some(embedder) = self.embedder() else {
+            // No vector written: the drain owes this row one once an embedder
+            // is attached.
+            self.vectors_dirty.store(true, Ordering::Relaxed);
             return;
         };
         let account_id = self.account_id;
@@ -3458,12 +3525,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             store.upsert_message_vector(account_id, message_id, &vec)
         })
         .await;
-        match result {
+        match &result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => eprintln!(
                 "squelch: embed failed for message {message_id} (recoverable via backfill): {e}"
             ),
             Err(e) => eprintln!("squelch: embed task join error for message {message_id}: {e}"),
+        }
+        // Anything but a written vector is a row the drain owes.
+        if !matches!(result, Ok(Ok(()))) {
+            self.vectors_dirty.store(true, Ordering::Relaxed);
         }
     }
 
@@ -3472,9 +3543,28 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// content is structurally absent — `messages_missing_vectors` selects only
     /// `sensitivity='normal'` (see docs/SECURITY.md). A failed batch logs a
     /// redacted one-liner and is retried on a later pass. No-op with no embedder.
+    ///
+    /// Runs only while [`SyncEngine::vectors_dirty`] says a vector may be
+    /// missing; the flag's lifecycle across one pass is [`DrainGuard`]'s.
     async fn backfill_missing_vectors(&self) {
         let Some(embedder) = self.embedder() else {
+            // Leave `vectors_dirty` standing: the rows are still owed, and the
+            // round after an embedder is attached is the one to pay them.
             return;
+        };
+        // Lowered BEFORE the first query, not after the last: a failure that
+        // lands on the poll lane while this drain is between awaits raises it
+        // again, and a clear at the end would erase that. The guard raises it
+        // back for every way this pass can end short of draining the queue:
+        // a query error, a failed batch, and CANCELLATION, which is not an
+        // arm anywhere: when the poll lane errors, `run_lanes` drops this
+        // future wherever it is parked, and a flag left lowered then would
+        // leave every row past the dropped batch without a vector until the
+        // next restart.
+        self.vectors_dirty.store(false, Ordering::Relaxed);
+        let mut pass = DrainGuard {
+            flag: &self.vectors_dirty,
+            drained: false,
         };
         let batch = self.config.embed.backfill_batch.max(1);
         let max_chars = self.config.embed.max_chars;
@@ -3490,6 +3580,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 }
             };
             if missing.is_empty() {
+                pass.drained = true;
                 break;
             }
             let n = missing.len();
@@ -3524,6 +3615,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
             // A short batch means we drained the queue; stop before re-querying.
             if n < batch {
+                pass.drained = true;
                 break;
             }
             // Throttle between batches so a large backfill doesn't peg the CPU
@@ -6433,7 +6525,11 @@ mod tests {
         assert!(!job.foreground, "behind live arrivals, not ahead of them");
         assert!(!job.arrival_eligible);
         assert!(queued_job(&store, acct, "notification").is_none());
-        // Not embedded inline: the vector backfill picks it up, batched.
+        // Not embedded inline: the vector backfill picks it up, batched. The
+        // whole contract, not only the query: the heal raised the drain's
+        // flag (on the SWEEPS engine, which the daemon builds over the sync
+        // engine's handle), a drain that fails leaves it raised, and a drain
+        // that succeeds writes the vector and lowers it.
         assert!(
             store
                 .messages_missing_vectors(acct, 10)
@@ -6441,6 +6537,38 @@ mod tests {
                 .iter()
                 .any(|m| m.message_id == id)
         );
+        assert!(
+            eng.vectors_dirty.load(Ordering::Relaxed),
+            "the heal raises the drain's flag"
+        );
+        {
+            use crate::embed::StubEmbedder;
+            use crate::store::sqlite::VEC_DIMS;
+            let failing = engine(store.clone(), acct, &base)
+                .with_vectors_dirty(eng.vectors_dirty_handle())
+                .with_embedder(Arc::new(StubEmbedder::new(0)));
+            failing.backfill_missing_vectors().await;
+            assert!(
+                eng.vectors_dirty.load(Ordering::Relaxed),
+                "a drain that fails its batch leaves the debt standing"
+            );
+            let drainer = engine(store.clone(), acct, &base)
+                .with_vectors_dirty(eng.vectors_dirty_handle())
+                .with_embedder(Arc::new(StubEmbedder::new(VEC_DIMS)));
+            drainer.backfill_missing_vectors().await;
+            assert!(
+                !store
+                    .messages_missing_vectors(acct, 10)
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.message_id == id),
+                "the drain re-embeds the healed row"
+            );
+            assert!(
+                !eng.vectors_dirty.load(Ordering::Relaxed),
+                "a drain that finishes lowers the shared flag"
+            );
+        }
 
         // Once per install: the walk finished, so the cursor says done and a
         // second start makes not one more Gmail call.
@@ -10333,5 +10461,77 @@ mod tests {
         let diagnostics = store.agent_diagnostics(account, id).unwrap().to_string();
         assert!(!diagnostics.contains("\"state\":\"failed\""));
         server.abort();
+    }
+
+    /// The vector drain runs only while something may be missing. A fresh
+    /// engine owes one (rows from before this process had an embedder, and
+    /// an earlier run's failures); a clean drain lowers the flag; every arm of
+    /// `embed_and_store` that wrote no vector raises it, including "no
+    /// embedder at all", which a drain must then leave standing rather than
+    /// clear, so the round after an embedder is attached pays the debt.
+    #[tokio::test]
+    async fn vector_drain_runs_only_while_something_may_be_missing() {
+        use crate::embed::StubEmbedder;
+        use crate::store::sqlite::VEC_DIMS;
+
+        let (store, acct) = store_at_cursor(None);
+        let base = "http://127.0.0.1:9";
+
+        let eng =
+            engine(store.clone(), acct, base).with_embedder(Arc::new(StubEmbedder::new(VEC_DIMS)));
+        assert!(
+            eng.vectors_dirty.load(Ordering::Relaxed),
+            "a fresh engine owes the first drain"
+        );
+        eng.backfill_missing_vectors().await;
+        assert!(
+            !eng.vectors_dirty.load(Ordering::Relaxed),
+            "a clean drain lowers the flag"
+        );
+        eng.embed_and_store(1, "hello there".to_string()).await;
+        assert!(
+            !eng.vectors_dirty.load(Ordering::Relaxed),
+            "a successful ingest-time embed leaves it down"
+        );
+
+        // dims=0 is the stub's failure mode: `embed` returns Err.
+        let failing =
+            engine(store.clone(), acct, base).with_embedder(Arc::new(StubEmbedder::new(0)));
+        failing.vectors_dirty.store(false, Ordering::Relaxed);
+        failing.embed_and_store(2, "hello there".to_string()).await;
+        assert!(
+            failing.vectors_dirty.load(Ordering::Relaxed),
+            "a failed embed raises it"
+        );
+
+        // No embedder anywhere: the store has none and the engine overrides none.
+        let bare = engine(store, acct, base);
+        bare.vectors_dirty.store(false, Ordering::Relaxed);
+        bare.embed_and_store(3, "hello there".to_string()).await;
+        assert!(
+            bare.vectors_dirty.load(Ordering::Relaxed),
+            "an embed skipped for want of an embedder raises it"
+        );
+        bare.backfill_missing_vectors().await;
+        assert!(
+            bare.vectors_dirty.load(Ordering::Relaxed),
+            "a drain with no embedder leaves the debt standing"
+        );
+
+        // The flag is the store's, not one engine's: a second engine built
+        // over the first one's handle (the daemon's sweeps engine) raises the
+        // flag the first one's refine lane reads.
+        let first = engine(store_at_cursor(None).0, acct, base)
+            .with_embedder(Arc::new(StubEmbedder::new(VEC_DIMS)));
+        first.backfill_missing_vectors().await;
+        assert!(!first.vectors_dirty.load(Ordering::Relaxed));
+        let second = engine(store_at_cursor(None).0, acct, base)
+            .with_vectors_dirty(first.vectors_dirty_handle())
+            .with_embedder(Arc::new(StubEmbedder::new(0)));
+        second.embed_and_store(4, "hello there".to_string()).await;
+        assert!(
+            first.vectors_dirty.load(Ordering::Relaxed),
+            "a raise on the sweeps engine lands on the sync engine's flag"
+        );
     }
 }

@@ -2482,6 +2482,12 @@ fn cmd_serve(
         // model is still downloading, and the vector pass then has to embed all
         // of it in batches, which is the memory that OOM-killed tenant daemons.
         // Only the first backfill waits; polling and catch-up never do.
+        // ONE "a vector may be missing" flag for both engines over this store:
+        // the sync engine's refine lane reads it, and the sweeps engine's
+        // blank-body heal raises it when it deletes a healed row's vector for
+        // the drain to redo. Two flags would be two engines each believing
+        // the other's debt is paid.
+        let vectors_dirty = Arc::new(AtomicBool::new(true));
         let sync_handle = {
             let store = store.clone();
             let email = email.clone();
@@ -2490,6 +2496,7 @@ fn cmd_serve(
             let creds = sync_creds.clone();
             let sync_metrics = sync_metrics.clone();
             let sync_budget = gmail_budget.clone();
+            let vectors_dirty = vectors_dirty.clone();
             // Taken before the spawn and dropped by the task, so readiness
             // tracks the engine and not the intention to start one.
             let sync_running = readiness.sync_started();
@@ -2502,6 +2509,7 @@ fn cmd_serve(
                     .with_refine_poke(refine_poke)
                     .with_metrics(sync_metrics)
                     .with_embedder_gate(embedder_gate)
+                    .with_vectors_dirty(vectors_dirty)
                     .run(shutdown_rx)
                     .await
             })
@@ -2534,15 +2542,18 @@ fn cmd_serve(
             let creds = sync_creds.clone();
             let sweep_metrics = sync_metrics.clone();
             let sweep_budget = gmail_budget.clone();
+            let vectors_dirty = vectors_dirty.clone();
             let mut embedder_gate = readiness.embedder_gate();
             tokio::spawn(async move {
                 wait_for_embedder_gate(&mut embedder_gate).await;
                 tokio::time::sleep(std::time::Duration::from_secs(180)).await;
                 // The same metrics the sync loop reports into, so a Gmail
-                // refusal during a sweep lands on the same panel and alert.
+                // refusal during a sweep lands on the same panel and alert;
+                // the same vector flag, so the heal's deletions are drained.
                 let engine =
                     mailbox_engine(store, creds, account_id, email, config, &sweep_budget)
-                        .with_metrics(sweep_metrics);
+                        .with_metrics(sweep_metrics)
+                        .with_vectors_dirty(vectors_dirty);
                 if let Err(e) = engine.harvest_sent_contacts().await {
                     eprintln!(
                         "squelchd: sent-contacts harvest incomplete (retries next start): {e}"

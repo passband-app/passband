@@ -101,6 +101,33 @@ enum PhoneReleaseNotes {
     /// THE TABLE. Newest first, and the only place a phone note is written.
     static let all: [PhoneReleaseNote] = [
         PhoneReleaseNote(
+            version: "0.0.9",
+            date: "2026-10-10",
+            headline: "Faster to Find",
+            features: [
+                PhoneFeature(
+                    "Find mail by who sent it",
+                    detail: "Type a name or an address in Search and tap the sender to see their mail, newest first.",
+                    symbol: "person.crop.circle"),
+                PhoneFeature(
+                    "Long threads keep up",
+                    detail: "The next messages are drawn before you scroll to them, and a thread you reopen lands on its newest message.",
+                    symbol: "text.line.last.and.arrowtriangle.forward"),
+                PhoneFeature(
+                    "Notifications on a locked phone",
+                    detail: "A banner now says who wrote and what about while the phone is locked, and tapping one opens the app.",
+                    symbol: "bell.badge"),
+            ],
+            also: [
+                PhoneAside("Tap Search and the keyboard is already up", symbol: "magnifyingglass"),
+                PhoneAside("The assistant looks harder before it says it found nothing", symbol: "sparkles"),
+                PhoneAside("Images that some senders label wrongly now load", symbol: "photo"),
+                PhoneAside(
+                    "A way back to sign in when your mailbox is not answering",
+                    symbol: "arrow.uturn.backward"),
+                PhoneAside("Bug fixes"),
+            ]),
+        PhoneReleaseNote(
             version: "0.0.8",
             date: "2026-10-05",
             headline: "Catching Up",

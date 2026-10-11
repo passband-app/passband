@@ -3,17 +3,44 @@
 # purpose: shipping a phone build must never rebuild three Docker images, and
 # vice versa.
 #
-# The runner holds NO signing material: passband/release-ios.sh hands the App
-# Store Connect API key to xcodebuild, and cloud signing mints a managed
-# distribution certificate per run. The three secrets are the whole setup:
+# Two kinds of signing happen here, and only one of them needs material:
 #
-#   ASC_KEY_ID         App Store Connect API key id
-#   ASC_KEY_ISSUER_ID  issuer id (App Store Connect > Users and Access > Keys)
-#   ASC_KEY_P8         the AuthKey_<id>.p8 file's contents, verbatim
+#   - The ARCHIVE is signed "Apple Development" (project.yml). That is a real
+#     certificate with a private key, so the runner is handed one: a .p12 kept
+#     in two secrets and imported into a throwaway keychain. Without it Xcode
+#     quietly MINTS a new development certificate on every run, the runner is
+#     thrown away with the only copy of its key, and the account fills up
+#     until Apple refuses the next one ("Your account has reached the maximum
+#     number of certificates", passband-ios-0.0.9).
+#   - The EXPORT is re-signed for the App Store by cloud signing, which holds
+#     a managed distribution certificate on Apple's side. Nothing to store.
+#
+# Secrets:
+#
+#   ASC_KEY_ID              App Store Connect API key id
+#   ASC_KEY_ISSUER_ID       issuer id (App Store Connect > Users and Access > Keys)
+#   ASC_KEY_P8              the AuthKey_<id>.p8 file's contents, verbatim
+#   IOS_DEV_CERT_P12        base64 .p12 of an Apple Development certificate
+#   IOS_DEV_CERT_PASSWORD   the .p12's passphrase
 #
 # The key needs the ADMIN role. Apple's docs say App Manager suffices for
 # cloud signing; xcodebuild disagrees and fails with "Cloud signing permission
 # error" on anything below Admin (developer.apple.com/forums/thread/698117).
+#
+# THE CERTIFICATE EXPIRES A YEAR AFTER IT IS MADE, and the import step warns
+# on the run page for its last 30 days. To replace it:
+#
+#   openssl genrsa -out ci.key 2048
+#   openssl req -new -key ci.key -out ci.csr -subj "/CN=Passband iOS CI"
+#   # developer.apple.com > Certificates > + > Apple Development, upload
+#   # ci.csr, download the .cer
+#   openssl x509 -inform DER -in development.cer -out ci.pem
+#   # -legacy: macOS's `security import` cannot read OpenSSL 3's default .p12
+#   openssl pkcs12 -export -legacy -inkey ci.key -in ci.pem -out ci.p12
+#   base64 -i ci.p12 | gh secret set IOS_DEV_CERT_P12
+#   gh secret set IOS_DEV_CERT_PASSWORD
+#
+# and revoke the old one on the same page.
 name: release-passband-ios
 
 on:
@@ -53,6 +80,39 @@ jobs:
       # to exist. The script pins version + sha256 and fails loudly on drift.
       - name: vendor Sparkle
         run: ./passband/vendor/fetch-sparkle.sh
+
+      # Fails rather than falls back: with no identity in the keychain the
+      # archive would still succeed, by minting the certificate this step
+      # exists to stop it minting.
+      - name: Import signing certificate
+        env:
+          CERT_P12: ${{ secrets.IOS_DEV_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.IOS_DEV_CERT_PASSWORD }}
+        run: |
+          [ -n "$CERT_P12" ] || { echo "::error::IOS_DEV_CERT_P12 is not set; see this workflow's header"; exit 1; }
+          KEYCHAIN_PW=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PW" build.keychain
+          # In the search list, or find-identity (and codesign) can't see it.
+          security list-keychains -d user -s build.keychain login.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PW" build.keychain
+          # No auto-lock mid-archive.
+          security set-keychain-settings build.keychain
+          echo "$CERT_P12" | base64 --decode > cert.p12
+          security import cert.p12 -k build.keychain -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm cert.p12
+          # Allow codesign to use the key without a UI prompt.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PW" build.keychain > /dev/null
+
+          # An expired or revoked certificate imports without complaint and is
+          # simply not an identity, which sends Xcode back to minting one.
+          security find-identity -v -p codesigning build.keychain | grep -q "Apple Development" || {
+            echo "::error::the imported certificate is not a valid Apple Development identity (expired or revoked?)"; exit 1; }
+          security find-certificate -c "Apple Development" -p build.keychain \
+            | openssl x509 -noout -checkend $((30 * 86400)) > /dev/null || \
+            echo "::warning::the iOS signing certificate expires within 30 days; replace it (see this workflow's header)"
 
       - name: write ASC key
         env:

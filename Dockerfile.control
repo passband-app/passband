@@ -20,6 +20,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# The compiler is rust-toolchain.toml's, not the image's; see that file's
+# header for why, and for what a bump of it reaches.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update
+
 COPY Cargo.toml Cargo.lock ./
 COPY squelch-core ./squelch-core
 COPY squelch-httpauth ./squelch-httpauth

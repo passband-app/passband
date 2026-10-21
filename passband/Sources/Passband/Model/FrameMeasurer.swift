@@ -99,6 +99,13 @@ final class FrameMeasurer {
 
     // MARK: - the pass
 
+    /// One document to measure: a message as one version of it draws, and the
+    /// key that version's height is filed under.
+    private struct Job {
+        let shown: ClientMessage
+        let key: String
+    }
+
     /// Measure every message in this thread that has no height on file, and
     /// call back ONCE when the whole thread is measured. That includes calling
     /// back immediately with nothing to do, which is what a second open looks
@@ -123,12 +130,24 @@ final class FrameMeasurer {
 
         // NEWEST FIRST: the thread opens on the newest message with the history
         // above it, so the next size anybody needs is the one just behind them.
-        let jobs = messages.reversed().filter { message in
-            guard let html = message.presented().html, !html.isEmpty else { return false }
+        //
+        // BOTH VERSIONS of a translated message: the English first, since that
+        // is what opens, and then, behind every message's English, the
+        // original, so "show original" opens at its real height rather than a
+        // guess that snaps. Each is the document the card draws for that
+        // version, under that version's key.
+        let newestFirst = Array(messages.reversed())
+        let versions: [Job] =
+            newestFirst.map { Job(shown: $0.presented(), key: style.frameKey(for: $0)) }
+            + newestFirst.filter { $0.readyTranslation != nil }.map {
+                Job(shown: $0.presented(original: true), key: style.frameKey(for: $0, original: true))
+            }
+        let jobs = versions.filter { job in
+            guard let html = job.shown.html, !html.isEmpty else { return false }
             // AUTHORITATIVE, not merely present: a height a live frame put
             // there is a stopgap taken inside a box it had sized itself, and
             // replacing exactly those is what this pass is for.
-            return FrameHeights.shared.authoritative(style.frameKey(for: message)) == nil
+            return FrameHeights.shared.authoritative(job.key) == nil
         }
         guard !jobs.isEmpty else {
             onFinished()
@@ -141,10 +160,10 @@ final class FrameMeasurer {
             // that is to stop rather than to spend a second and a bit per
             // message learning it twenty times.
             var misses = 0
-            for message in jobs {
+            for job in jobs {
                 if Task.isCancelled { return }
                 guard let self else { return }
-                let height = await self.measure(message, allowRemote: allowRemote)
+                let height = await self.measure(job.shown, allowRemote: allowRemote)
                 if Task.isCancelled { return }
                 // The setting moved while this document was being measured:
                 // the number is true of a drawing nobody will see, and filed as
@@ -152,8 +171,7 @@ final class FrameMeasurer {
                 // real one. The reader starts a pass of its own for the flip.
                 guard ReaderMetrics.current == metrics else { return }
                 if height > 0 {
-                    FrameHeights.shared.set(
-                        style.frameKey(for: message), height, authoritative: true)
+                    FrameHeights.shared.set(job.key, height, authoritative: true)
                     misses = 0
                 } else {
                     misses += 1
@@ -278,9 +296,10 @@ final class FrameMeasurer {
         }
     }
 
+    /// `message` is already the version being measured (ClientMessage.presented),
+    /// so its html is the document the card draws for it.
     private static func prepare(_ message: ClientMessage) async -> EmailWebView.Prepared {
-        // The document the card will draw: the translation, when there is one.
-        let html = message.presented().html ?? ""
+        let html = message.html ?? ""
         let allow = message.allowsTrackers
         let parts = message.attachmentList
         let key = EmailWebView.Prepared.cacheKey(html, allow, parts)

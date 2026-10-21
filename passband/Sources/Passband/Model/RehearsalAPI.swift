@@ -66,9 +66,6 @@ actor RehearsalAPI {
             groupHistory = history
         }
 
-        /// Sent mail and an outbox, for the same reason and the same caller:
-        /// the lesson sends nothing and schedules nothing, so its Sent page is
-        /// the empty one. Only a screenshot ever fills these.
         /// THREADS IN ANOTHER LANGUAGE, which the lesson does not have: each
         /// is a run of versions served one per fetch, the last one sticking, so
         /// a pending translation can be seen to land the way a daemon's does.
@@ -101,6 +98,9 @@ actor RehearsalAPI {
             return next.messages.filter { $0.translation?.status == .deferred }.count
         }
 
+        /// Sent mail and an outbox, for the same reason and the same caller:
+        /// the lesson sends nothing and schedules nothing, so its Sent page is
+        /// the empty one. Only a screenshot ever fills these.
         private var stagedSent: [SentItem] = []
         private var stagedScheduled: [ScheduledSendView] = []
         func stage(sent: [SentItem], scheduled: [ScheduledSendView]) {

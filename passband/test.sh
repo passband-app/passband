@@ -502,6 +502,7 @@ run_suite need-today \
 # message the reader shows, under which frame key.
 run_suite translation-wire \
   Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/TranslationRefresh.swift \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Lib/ThreadStyle.swift \
   Sources/Passband/Lib/Quotes.swift \

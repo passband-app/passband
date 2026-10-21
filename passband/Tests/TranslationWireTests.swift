@@ -27,6 +27,12 @@ struct TranslationWireTests {
         aTextOnlyTranslationDropsTheOriginalHTML()
         anEmptyFinishedTranslationIsNoTranslation()
         theTwoVersionsAreTwoFrameKeys()
+        aTranslationOfTheWrongShapeIsNoTranslation()
+        noTranslationIsLeftOffTheWire()
+        thePollIsFastThenSlowThenStops()
+        aStaleRefetchIsDropped()
+        thePollMergesOnlyTranslations()
+        theStripCopyHasNoDashes()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -181,5 +187,121 @@ struct TranslationWireTests {
                 style.frameKey(7, translated: false) == style.frameKey(7),
                 "\(style): the original keeps the key it always had")
         }
+    }
+
+    /// THE NOTIFICATION EXTENSION DECODES THIS TYPE TOO: a `translation` that
+    /// is not an object at all (a daemon bug) must cost the translation, never
+    /// the message, or the push is lost with it.
+    static func aTranslationOfTheWrongShapeIsNoTranslation() {
+        for odd in [#""done""#, "[]", "[1,2]", "5", "true", #"{"status":[]}"#] {
+            let m = message(#","translation":"# + odd)
+            expect(m != nil, "a translation of \(odd) does not fail the message")
+            expect(m?.content == "Bonjour", "and the message is whole (\(odd))")
+        }
+        expect(message(#","translation":"done""#)?.translation == nil, "a bare string is none")
+        expect(message(#","translation":[]"#)?.translation == nil, "an array is none")
+        // The thread around it decodes too: one bad message is not a bad page.
+        let thread =
+            #"{"thread_id":"t","subject":"Salut","messages":[{"# + base + #","translation":"x"}]}"#
+        let view = try? JSONDecoder().decode(ClientThreadView.self, from: Data(thread.utf8))
+        expect(view?.messages.count == 1, "the thread decodes with it")
+    }
+
+    /// The cache round-trips messages through JSON: no translation must come
+    /// back as no translation, not as a key the next decode has to forgive.
+    static func noTranslationIsLeftOffTheWire() {
+        guard let m = message(), let data = try? JSONEncoder().encode(m),
+            let text = String(data: data, encoding: .utf8)
+        else { return expect(false, "encodes") }
+        expect(!text.contains("translation"), "nil is an absent key")
+        guard
+            let t = message(
+                #","translation":{"source_lang":"fr","source_language":"French","status":"done","subject":"Hi","content":"Hello"}"#
+            ), let again = try? JSONEncoder().encode(t),
+            let back = try? JSONDecoder().decode(ClientMessage.self, from: again)
+        else { return expect(false, "round trips") }
+        expect(back.translation == t.translation, "a translation survives the round trip")
+        expect(back == t, "and so does the message")
+    }
+
+    static func thePollIsFastThenSlowThenStops() {
+        let fast = (0..<4).map { TranslationPollPlan.delay(attempt: $0) }
+        expect(fast == [3, 6, 12, 24], "the first four waits are the fast backoff")
+        expect(TranslationPollPlan.delay(attempt: 4) == 30, "then a slow tail")
+        var total = 0
+        var attempt = 0
+        while let wait = TranslationPollPlan.delay(attempt: attempt) {
+            total += wait
+            attempt += 1
+            if attempt > 1000 { break }
+        }
+        expect(attempt < 1000, "it stops")
+        expect(total <= 600, "within about ten minutes (\(total)s)")
+        expect(total >= 540, "and not long before (\(total)s)")
+        expect(TranslationPollPlan.delay(attempt: attempt + 1) == nil, "and stays stopped")
+        expect(TranslationPollPlan.delay(attempt: -1) == nil, "a nonsense attempt waits for nothing")
+    }
+
+    /// The GET that set off before the reader's POST, landing after the one
+    /// that followed it, must not put `deferred` back.
+    static func aStaleRefetchIsDropped() {
+        let seq = RefreshSequence()
+        let beforePost = seq.issue()
+        let afterPost = seq.issue()
+        expect(seq.accept(afterPost), "the newer answer is adopted")
+        expect(!seq.accept(beforePost), "the older one, landing late, is dropped")
+        expect(!seq.accept(afterPost), "and an answer is adopted once")
+        let next = seq.issue()
+        expect(seq.accept(next), "a later refetch is adopted again")
+    }
+
+    static func thePollMergesOnlyTranslations() {
+        func view(_ messages: [String]) -> ClientThreadView? {
+            let json = #"{"thread_id":"t","subject":"Salut","messages":["#
+                + messages.joined(separator: ",") + "]}"
+            return try? JSONDecoder().decode(ClientThreadView.self, from: Data(json.utf8))
+        }
+        let pending =
+            #","translation":{"source_lang":"fr","source_language":"French","status":"pending","subject":"","content":""}"#
+        let done =
+            #","translation":{"source_lang":"fr","source_language":"French","status":"done","subject":"Hi","content":"Hello"}"#
+        let other = #"{"id":8,"from_addr":"b@example.fr","received_at":"2026-10-21T11:00:00Z","content":"Merci""#
+        guard
+            let current = view(["{" + base + pending + "}", other + "}"]),
+            let fresh = view([
+                "{" + base.replacingOccurrences(of: "Bonjour", with: "Bonsoir") + done + "}",
+                other + #","tier":"fyi"}"#,
+            ]),
+            let same = view(["{" + base + pending + "}", other + "}"]),
+            let gone = view(["{" + base + "}", other + "}"]),
+            let arrival = view(["{" + base + pending + "}", other + "}", #"{"id":9,"from_addr":"c@x","received_at":"x","content":"x"}"#])
+        else { return expect(false, "fixtures decode") }
+        guard let merged = current.mergingTranslations(from: fresh) else {
+            return expect(false, "a landed translation is a change")
+        }
+        expect(merged.messages[0].translation?.status == .done, "the translation is taken")
+        expect(merged.messages[0].content == "Bonjour", "nothing else on the message is")
+        expect(merged.messages[1].tier == nil, "nor on the others")
+        expect(merged.messages.map(\.id) == [7, 8], "same messages, same order")
+        expect(current.mergingTranslations(from: same) == nil, "no change is nil")
+        expect(
+            current.mergingTranslations(from: gone)?.messages[0].translation == nil,
+            "a translation the daemon dropped (it failed) goes")
+        expect(current.sameMessages(as: fresh), "fresh carries the same messages")
+        expect(!current.sameMessages(as: arrival), "an arrival is not the same messages")
+        expect(current.readyTranslations == 0 && merged.readyTranslations == 1, "ready count")
+    }
+
+    /// The strip's strings are views (not compiled here), so the house rule
+    /// is checked against its source: no em or en dashes in any copy.
+    static func theStripCopyHasNoDashes() {
+        guard let strip = try? String(
+            contentsOfFile: "Sources/Passband/Views/TranslationStrip.swift", encoding: .utf8)
+        else { return expect(false, "read the strip (run from passband/)") }
+        expect(!strip.contains("\u{2014}") && !strip.contains("\u{2013}"), "no em or en dash")
+        expect(strip.contains("translation not ready yet · showing the original"), "the stalled line")
+        expect(
+            strip.contains("may be incomplete\""),
+            "the incomplete line, one lowercase clause")
     }
 }

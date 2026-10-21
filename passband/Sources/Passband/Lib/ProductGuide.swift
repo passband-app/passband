@@ -369,8 +369,8 @@ enum ProductGuide {
 
         Mail in other languages:
         - An email written in another language opens in English. A line above the message says "translated from French" (or whichever language it was), and "show original" beside it switches that one message to what the sender wrote. "show translation" switches it back. The subject at the top follows the message it came from.
-        - While the translation is still being written, the original shows with "translating from French…" above it, and the English takes its place when it is ready.
-        - If Passband could not confirm that every detail carried over, the line also says the translation may have missed something. Check the original for numbers, codes and links before acting on it.
+        - While the translation is still being written, the original shows with "translating from French…" above it, and the English takes its place when it is ready. If it has not arrived after about ten minutes, the line says "translation not ready yet · showing the original", and opening the thread again checks again.
+        - If Passband could not confirm that every detail carried over, the line also says the translation may be incomplete. Check the original for numbers, codes and links before acting on it.
         - Search finds the email by the words of either version. A reply or a forward uses the original.
 
         Attachments and images:

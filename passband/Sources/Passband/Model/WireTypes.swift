@@ -27,6 +27,43 @@ extension LenientRawEnum {
     }
 }
 
+// MARK: - lenient optional field
+
+/// An OPTIONAL FIELD THAT CAN NEVER FAIL ITS PARENT: absent, null, or a value
+/// of the wrong shape all decode as nil. For a field the rest of the message
+/// does not need, on a type something else must not lose over it (the
+/// notification extension decodes `ClientMessage` too, and a message that
+/// fails to decode is a push that never shows). Encodes as an absent key when
+/// nil, so the round trip through a cache is the wire's own shape.
+@propertyWrapper
+struct LenientOptional<T: Codable & Sendable & Hashable>: Codable, Sendable, Hashable {
+    var wrappedValue: T?
+    init(wrappedValue: T?) { self.wrappedValue = wrappedValue }
+    init(from decoder: Decoder) throws {
+        wrappedValue = try? decoder.singleValueContainer().decode(T.self)
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        if let wrappedValue { try c.encode(wrappedValue) } else { try c.encodeNil() }
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// The synthesized decode asks for the wrapper with `decode`, which throws
+    /// on a missing key; this overload is what makes an absent key nil.
+    func decode<T>(_ type: LenientOptional<T>.Type, forKey key: Key) throws -> LenientOptional<T> {
+        (try? decodeIfPresent(LenientOptional<T>.self, forKey: key)) ?? LenientOptional(wrappedValue: nil)
+    }
+}
+
+extension KeyedEncodingContainer {
+    /// And nil is left OFF the wire rather than written as null.
+    mutating func encode<T>(_ value: LenientOptional<T>, forKey key: Key) throws {
+        guard let wrapped = value.wrappedValue else { return }
+        try encode(wrapped, forKey: key)
+    }
+}
+
 // MARK: - sender pair
 
 /// A wire type carrying the `from_name` / `from_addr` pair, so the one true
@@ -347,9 +384,11 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// docs/TRANSLATION.md). ABSENT on a daemon too old to translate, on mail
     /// that is already English, and on a translation that failed, and all
     /// three read the same way: the original, with nothing said about it.
-    /// Optional so the notification extension, which decodes this type too,
-    /// never fails a push over a field it does not draw.
-    var translation: ClientTranslation?
+    /// LENIENT so the notification extension, which decodes this type too,
+    /// never fails a push over a field it does not draw: a value of the wrong
+    /// shape (a bare string, an array) reads as no translation at all, rather
+    /// than failing the whole message.
+    @LenientOptional var translation: ClientTranslation? = nil
 
     var attachmentList: [Attachment] { attachments ?? [] }
 
@@ -494,6 +533,40 @@ struct ClientThreadView: Codable, Sendable, Hashable {
     var thread_id: String
     var subject: String
     var messages: [ClientMessage]
+}
+
+extension ClientThreadView {
+    /// THIS THREAD WITH `fresh`'S TRANSLATIONS LAID OVER IT, and nothing else
+    /// changed: what the reader's translation poll adopts, so a refetch made
+    /// only to see whether the English has landed cannot move, re-order or
+    /// re-render anything else under somebody reading. A message `fresh` does
+    /// not carry keeps what it had; one `fresh` carries with NO translation
+    /// (it failed, and the daemon leaves failures off the wire) loses it.
+    /// nil when not one translation changed, so the caller can skip the write.
+    func mergingTranslations(from fresh: ClientThreadView) -> ClientThreadView? {
+        var incoming: [Int: ClientTranslation?] = [:]
+        for m in fresh.messages where incoming[m.id] == nil { incoming[m.id] = .some(m.translation) }
+        var merged = self
+        var changed = false
+        for i in merged.messages.indices {
+            guard let t = incoming[merged.messages[i].id], t != merged.messages[i].translation
+            else { continue }
+            merged.messages[i].translation = t
+            changed = true
+        }
+        return changed ? merged : nil
+    }
+
+    /// Same messages, same order: the only case the poll may merge into. Any
+    /// other difference is an arrival, which the in-place refresh owns.
+    func sameMessages(as other: ClientThreadView) -> Bool {
+        messages.map(\.id) == other.messages.map(\.id)
+    }
+
+    /// How many messages have a translation READY to show. Part of the
+    /// reader's measuring-pass identity: a translation landing is a new
+    /// document to size under a new key.
+    var readyTranslations: Int { messages.reduce(0) { $0 + ($1.readyTranslation == nil ? 0 : 1) } }
 }
 
 // MARK: - shipments

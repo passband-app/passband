@@ -344,6 +344,18 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// Overwrite the account's creation stamp with `raw`, for a test that
+    /// wants the store to stop answering [`Store::account_created_at`].
+    #[cfg(test)]
+    pub(crate) fn test_set_account_created_at(&self, account_id: AccountId, raw: &str) {
+        let conn = self.lock().unwrap();
+        conn.execute(
+            "UPDATE accounts SET created_at = ?2 WHERE id = ?1",
+            params![account_id, raw],
+        )
+        .unwrap();
+    }
+
     /// Open (or create) a store at `path`, applying the schema.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         register_vec_extension();

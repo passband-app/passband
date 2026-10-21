@@ -16,7 +16,12 @@ pub struct AgentJob {
     pub lease_token: String,
     pub attempts: i64,
     pub arrival_eligible: bool,
-    /// First classification of a newly ingested ordinary message; independent of push eligibility.
+    /// The store's foreground lane: the first classification of a newly
+    /// ingested ordinary message, a heal of such an arrival while it is
+    /// still unclassified, or a person's one-message request. Independent of
+    /// push eligibility. The claim serves it first, the daily budget
+    /// reserves for it, and the onboarding effort follows it
+    /// (`Stage2Config::effort_for_job`).
     pub foreground: bool,
 }
 

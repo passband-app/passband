@@ -593,6 +593,10 @@ crate::types::str_enum! {
 pub struct ClientTag {
     pub platform: ClientPlatform,
     version: String,
+    /// The device's zone, from [`crate::owner_clock::ZONE_HEADER`]. Not part of
+    /// the tag's identity as a metric label; it rides along so the same write
+    /// that stamps the client stamps where it is.
+    zone: Option<chrono_tz::Tz>,
 }
 
 impl ClientTag {
@@ -615,11 +619,24 @@ impl ClientTag {
         Some(Self {
             platform,
             version: version.to_string(),
+            zone: None,
         })
     }
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// Attach the device zone the request reported, if it is a real IANA zone
+    /// ([`crate::owner_clock::device_zone`]). Anything else is dropped, which
+    /// leaves the stored zone as it was.
+    pub fn with_zone(mut self, raw: Option<&str>) -> Self {
+        self.zone = raw.and_then(crate::owner_clock::device_zone);
+        self
+    }
+
+    pub fn zone(&self) -> Option<chrono_tz::Tz> {
+        self.zone
     }
 }
 
@@ -2218,6 +2235,11 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// unknown id or an unparseable stamp. The triage agent's onboarding
     /// window counts from it.
     fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
+    /// The account owner's zone: the most recently used app's device zone,
+    /// else the primary calendar's, else UTC. Every agent reads "now" in it.
+    /// See [`SqliteStore::owner_zone`](sqlite::SqliteStore::owner_zone).
+    fn owner_zone(&self, account_id: AccountId) -> Result<crate::owner_clock::OwnerZone>;
 
     /// Overwrite this account's Gmail INBOX unread counts, stamping `fetched_at`
     /// now. Only ever called with numbers that came back from Gmail, so a failed

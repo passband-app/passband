@@ -198,7 +198,15 @@ impl<S: Store> StoreEvidence<'_, S> {
     }
 }
 
-fn snapshot(context: &AgentContext, job: &AgentJob, limit: usize) -> ContextSnapshot {
+/// The agent's starting context. `clock` is this run's "now" in the owner's
+/// zone (#526): fixed once per run, so a zone that changes mid-run cannot
+/// change an answer already given.
+fn snapshot(
+    context: &AgentContext,
+    job: &AgentJob,
+    limit: usize,
+    clock: &crate::owner_clock::OwnerClock,
+) -> ContextSnapshot {
     let siblings = context
         .thread
         .iter()
@@ -223,7 +231,14 @@ fn snapshot(context: &AgentContext, job: &AgentJob, limit: usize) -> ContextSnap
             "user_corrections": context.corrections,
             "trigger": job.trigger,
             "access_only": context.message.is_sent || context.message.is_spam,
-            "now": Utc::now(),
+            // LOCAL, with the zone and weekday: "today", "tonight" and "due
+            // tomorrow" are the owner's, and for an American evening UTC is
+            // already tomorrow. Stored timestamps stay UTC instants.
+            "now": clock.prompt_line(),
+            "timezone": clock.zone.name(),
+            "message_received_local": chrono::DateTime::parse_from_rfc3339(&context.message.received_at)
+                .ok()
+                .map(|at| clock.local(at.with_timezone(&Utc))),
         }),
         source_message_ids: sources,
         thread_revisions: [(
@@ -415,7 +430,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 );
             }
         }
-        let input = snapshot(&context, &job, config.context.initial_thread_messages);
+        // Read once per run. A store that cannot answer is UTC, which is what
+        // every run got before the zone existed, not a failed job.
+        let clock = crate::owner_clock::OwnerClock::new(
+            Utc::now(),
+            self.store.owner_zone(self.account_id).unwrap_or_default(),
+        );
+        let input = snapshot(
+            &context,
+            &job,
+            config.context.initial_thread_messages,
+            &clock,
+        );
         // A new account triages at the onboarding effort for its first days;
         // a store error reads as "not new" and takes the cheaper setting.
         let created_at = self
@@ -811,6 +837,55 @@ mod budget_tests {
         (store, account, ids)
     }
 
+    fn utc_clock() -> crate::owner_clock::OwnerClock {
+        crate::owner_clock::OwnerClock::new(Utc::now(), crate::owner_clock::OwnerZone::UTC)
+    }
+
+    /// #526's acceptance case. A bill saying "due tomorrow" lands at 8pm
+    /// Pacific, which is 03:00 UTC the NEXT day. Read in UTC, "tomorrow" is two
+    /// Pacific days out. The agent must be handed the owner's day instead: the
+    /// mail arrived on Monday the 19th, so tomorrow is Tuesday the 20th.
+    #[test]
+    fn the_agent_reads_now_and_the_arrival_in_the_owners_zone() {
+        use crate::owner_clock::{OwnerClock, OwnerZone, OwnerZoneSource};
+        use chrono::TimeZone;
+
+        let message = serde_json::json!({
+            "id":1,"thread_id":"thread","from_addr":"billing@test","subject":"Your bill",
+            "body":"Payment is due tomorrow.","received_at":"2026-10-20T03:00:00+00:00","is_sent":false,
+            "is_spam":false,"status":"new","notify_eligible_at":null,"opened_at":null,"remind_at":null,
+            "source":{"message_id":1,"content":"revision","user_state":"state","attention_revision":1}
+        });
+        let context: AgentContext = serde_json::from_value(serde_json::json!({
+            "message":message,"thread":[],"previous_decision":null,"attention":null,"rules":[],
+            "matched_rules":[],"sender_is_contact":false,"corrections":[],
+            "revision":{"content":"revision","preferences":"preferences","user_state":"state","attention_revision":1},
+            "memory":[],"run_metadata":{}
+        }))
+        .unwrap();
+        let pacific = OwnerZone {
+            zone: chrono_tz::Tz::America__Los_Angeles,
+            source: OwnerZoneSource::Client,
+        };
+        let now = Utc.with_ymd_and_hms(2026, 10, 20, 3, 5, 0).unwrap();
+        let snapshot = snapshot(&context, &read_job(1, 1), 8, &OwnerClock::new(now, pacific));
+
+        assert_eq!(
+            snapshot.initial["now"],
+            "2026-10-19T20:05:00-07:00 (America/Los_Angeles, Monday)"
+        );
+        assert_eq!(snapshot.initial["timezone"], "America/Los_Angeles");
+        assert_eq!(
+            snapshot.initial["message_received_local"],
+            "2026-10-19T20:00:00-07:00"
+        );
+        // The instant itself is untouched: only what the agent reads is local.
+        assert_eq!(
+            snapshot.initial["message"]["received_at"],
+            "2026-10-20T03:00:00+00:00"
+        );
+    }
+
     #[test]
     fn snapshot_exposes_subject_once_and_tracks_exact_siblings_and_preferences() {
         let message = |id| {
@@ -828,7 +903,7 @@ mod budget_tests {
             "revision":{"content":"revision","preferences":"preferences","user_state":"state","attention_revision":1},
             "memory":[],"run_metadata":{}
         })).unwrap();
-        let snapshot = snapshot(&context, &read_job(1, 1), 2);
+        let snapshot = snapshot(&context, &read_job(1, 1), 2, &utc_clock());
         assert_eq!(snapshot.source_message_ids, vec![1, 2, 3]);
         assert_eq!(
             snapshot.initial["thread"]
@@ -856,7 +931,7 @@ mod budget_tests {
         context.sender_is_contact = true;
         context.rules = vec![serde_json::json!({"id":99,"want_text":"unrelated"})];
         context.matched_rules = vec![serde_json::json!({"id":7,"want_text":"relevant"})];
-        let snapshot = snapshot(&context, &job, 8);
+        let snapshot = snapshot(&context, &job, 8, &utc_clock());
         assert!(
             snapshot.initial["message"]["body"]
                 .as_str()

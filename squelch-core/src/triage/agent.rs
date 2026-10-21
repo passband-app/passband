@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v8";
+pub const PROMPT_VERSION: &str = "agent-triage-v9";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
 
 /// The one sentence of the prompt that offers the review step, and what it

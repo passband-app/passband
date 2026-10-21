@@ -31,6 +31,8 @@ use super::*;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Duration;
+
+use crate::owner_clock::{OwnerZone, OwnerZoneSource};
 use sha2::{Digest, Sha256};
 
 /// Prefix on every issued device token. It is INSIDE the hashed material, so it
@@ -398,10 +400,14 @@ impl SqliteStore {
         // standing invariant holds even where the id came from a row this
         // method just read.
         if let Some(client) = named {
+            // The zone moves with the stamp, under the same throttle, so a
+            // changed zone lands within a minute of the app's next request.
+            // No zone on this request (an older app, or a name that did not
+            // validate) keeps the one already stored.
             conn.execute(
                 "UPDATE device_tokens
                  SET last_used_at = ?3, client_platform = ?4, client_version = ?5,
-                     client_seen_at = ?3
+                     client_seen_at = ?3, client_timezone = COALESCE(?6, client_timezone)
                  WHERE id = ?1 AND account_id = ?2",
                 params![
                     token.id,
@@ -409,6 +415,7 @@ impl SqliteStore {
                     now.to_rfc3339(),
                     client.platform.as_str(),
                     client.version(),
+                    client.zone().map(|z| z.name()),
                 ],
             )?;
             token.last_used_at = Some(now);
@@ -610,6 +617,66 @@ impl SqliteStore {
         seen.sort_by_key(|c| std::cmp::Reverse(c.seen_at));
         seen.truncate(CLIENT_VERSIONS_CAP);
         Ok(seen)
+    }
+
+    /// The account owner's zone, which every agent reads "now" in (#526).
+    ///
+    /// The zone of the most recently USED app: each live token's activity time
+    /// is its last action (`client_action_at`), or its last connection
+    /// (`client_seen_at`) when it has never acted, and the newest wins. Action
+    /// first because an open Mac polls: left running at home, its connection
+    /// stamp keeps moving while the phone that is actually in use abroad is
+    /// the one whose zone is right. A token that has never acted still counts
+    /// by its connection, so a fresh install is not ignored.
+    ///
+    /// Revoked tokens do not count: a device that was signed out is not where
+    /// the owner is. Failing every app, the primary Google Calendar's zone;
+    /// failing that, UTC.
+    pub fn owner_zone(&self, account_id: AccountId) -> Result<OwnerZone> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT client_timezone, client_action_at, client_seen_at FROM device_tokens
+             WHERE account_id = ?1 AND revoked_at IS NULL
+               AND client_timezone IS NOT NULL AND client_seen_at IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id], |r| {
+                Ok((r.get::<_, String>(0)?, dt_opt(r, 1)?, dt(r, 2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Compared parsed, not as text, as in `client_versions_seen`.
+        let newest = rows
+            .into_iter()
+            .filter_map(|(zone, acted, seen)| {
+                Some((
+                    acted.unwrap_or(seen),
+                    crate::owner_clock::device_zone(&zone)?,
+                ))
+            })
+            .max_by_key(|(at, _)| *at);
+        if let Some((_, zone)) = newest {
+            return Ok(OwnerZone {
+                zone,
+                source: OwnerZoneSource::Client,
+            });
+        }
+        let calendar = conn
+            .query_row(
+                "SELECT time_zone FROM calendar_calendars
+                 WHERE account_id = ?1 AND is_primary = 1 AND time_zone IS NOT NULL
+                 LIMIT 1",
+                params![account_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(calendar
+            .as_deref()
+            .and_then(crate::owner_clock::device_zone)
+            .map(|zone| OwnerZone {
+                zone,
+                source: OwnerZoneSource::Calendar,
+            })
+            .unwrap_or_default())
     }
 
     /// Record that the app holding `presented` just DID something: stamps

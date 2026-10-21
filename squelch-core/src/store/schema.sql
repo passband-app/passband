@@ -1361,6 +1361,12 @@ CREATE INDEX IF NOT EXISTS idx_message_opens_token ON message_opens(token);
 -- a successful write on the client door (see `note_client_action`). Narrower
 -- than `client_seen_at`, which an open app moves by polling. NULL until the
 -- first one, and it is read with `client_platform`, so it says which app acted.
+--
+-- `client_timezone` is the IANA zone that app's device was in
+-- (`X-Passband-Timezone`), written with `client_seen_at` and validated first.
+-- The owner's zone is the one the most recently used app reported
+-- (`owner_zone`), which is what every agent reads "now" in. NULL until an app
+-- that sends it connects; a request without the header leaves it as it was.
 CREATE TABLE IF NOT EXISTS device_tokens (
     id           INTEGER PRIMARY KEY,
     account_id   INTEGER NOT NULL,   -- -> accounts.id
@@ -1374,7 +1380,8 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     client_platform TEXT,
     client_version  TEXT,
     client_seen_at  TEXT,
-    client_action_at TEXT
+    client_action_at TEXT,
+    client_timezone TEXT
 );
 
 -- `token list` reads exactly "every token for my account".

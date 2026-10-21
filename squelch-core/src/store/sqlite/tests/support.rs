@@ -641,3 +641,18 @@ pub(super) fn stale_after(days: u32) -> crate::config::ShipmentListPolicy {
         ..KEEP_ALL_SHIPMENTS
     }
 }
+
+// ---- query plans ---------------------------------------------------------
+
+/// `EXPLAIN QUERY PLAN` for `sql`, one line per step, with every placeholder
+/// bound to NULL: a plan does not depend on the values, but rusqlite still
+/// insists each parameter is bound. For the tests that pin a statement to its
+/// index rather than to a timing.
+pub(super) fn plan(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let nulls = vec![rusqlite::types::Value::Null; stmt.parameter_count()];
+    stmt.query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(|line| line.unwrap())
+        .collect()
+}

@@ -262,6 +262,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "device_tokens", "client_platform", "TEXT")?;
     add_column_if_missing(conn, "device_tokens", "client_version", "TEXT")?;
     add_column_if_missing(conn, "device_tokens", "client_seen_at", "TEXT")?;
+    // When that app last wrote something. NULL on every pre-existing row and
+    // NOT backfilled: nothing recorded which app made a past write.
+    add_column_if_missing(conn, "device_tokens", "client_action_at", "TEXT")?;
     // Per-property triage reasons (JSON object). NULL on pre-existing rows.
     add_column_if_missing(conn, "triage", "field_reasons", "TEXT")?;
 
@@ -344,6 +347,22 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_triage_remind_at
              ON triage(account_id, remind_at) WHERE remind_at IS NOT NULL",
+            [],
+        )?;
+    }
+
+    // AND THE FIRED REMINDERS' INDEX, the same shape for the same reason. A
+    // fired reminder (`reminded_at` set, `remind_at` cleared) is a standing-
+    // band arm, and `append_due_reminders` asks for them on EVERY Standing
+    // read, which is the client's 10 s poll; without this the ask was a walk
+    // of every triage row in the account, 233 ms at 50k messages, under the
+    // mutex every request waits on. Partial because almost no row has ever
+    // had a reminder fire. Both columns in the guard, as `idx_messages_spam`
+    // below explains: an index names every column it covers.
+    if has_columns(conn, "triage", &["account_id", "reminded_at"])? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_triage_reminded_at
+             ON triage(account_id, reminded_at) WHERE reminded_at IS NOT NULL",
             [],
         )?;
     }

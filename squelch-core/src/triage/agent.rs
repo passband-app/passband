@@ -11,8 +11,32 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v7";
+pub const PROMPT_VERSION: &str = "agent-triage-v8";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
+
+/// The one sentence of the prompt that offers the review step, and what it
+/// says when there is no reviewer to offer. `system_prompt` swaps them, and a
+/// test pins the first to the prompt file so an edit there cannot turn the
+/// swap into a silent no-op.
+const REVIEW_OFFER: &str = "Read evidence when needed, request configured stronger review \
+                            for a specific question, or finish with a complete decision.";
+const NO_REVIEW_OFFER: &str = "Read evidence when needed, or finish with a complete decision.";
+
+/// The system prompt for a deployment with (`with_review`) or without a
+/// configured, usable `review_model`: the same text, minus the offer of a
+/// step the schema does not carry. See [`step_schema`] for why the step is
+/// left out rather than refused. Composed once per process, like every other
+/// prompt that feeds a cached prefix in this crate, so the bytes are
+/// identical across calls.
+fn system_prompt(with_review: bool) -> &'static str {
+    static WITHOUT_REVIEW: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| SYSTEM.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1));
+    if with_review {
+        SYSTEM
+    } else {
+        WITHOUT_REVIEW.as_str()
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
 pub enum AgentStep {
@@ -112,6 +136,13 @@ async fn run_bounded(
     let mut tool_calls = 0;
     let mut reviews = 0;
     let mut model = config.agent.model.as_deref().unwrap_or(connection.model);
+    // Offer the review step, in prompt and schema, only where a reviewer
+    // exists to take it AND the budget lets it be taken: a `review_model`
+    // with `max_review_calls = 0` is an offer whose acceptance fails the run.
+    // Both are per-run constants, so the prompt and the schema are built once.
+    let with_review = config.agent.review_model.is_some() && config.agent.max_review_calls > 0;
+    let system = system_prompt(with_review);
+    let schema = step_schema(with_review);
     for turn in 0..config.agent.max_model_turns {
         let final_turn = turn + 1 == config.agent.max_model_turns;
         let user = serde_json::to_string(
@@ -123,9 +154,9 @@ async fn run_bounded(
         }
         let request = LlmRequest {
             model,
-            system: SYSTEM,
+            system,
             user: &user,
-            schema: step_schema(),
+            schema: schema.clone(),
             effort: connection.effort,
             max_tries: 1,
         };
@@ -926,7 +957,22 @@ fn decision_schema_body() -> Value {
         ),
     ])
 }
-fn step_schema() -> Value {
+/// The step schema the model answers with. `with_review` adds the
+/// `request_review` step; without a configured, usable `review_model` the
+/// step is LEFT OUT rather than refused at runtime, because an offer the
+/// model can take up and have refused is a whole billed turn (cached prefix
+/// read, the full context again, the thinking) spent learning that a tool is
+/// absent, and one of its four turns gone.
+///
+/// How much the schema alone guarantees depends on the transport. On the
+/// OpenAI wire it is a strict `json_schema` response format, so a step the
+/// schema does not name cannot be produced. On the Anthropic wire (the hosted
+/// gateway's) it is a non-strict tool `input_schema` with `tool_choice: auto`,
+/// so a stray `request_review` can still arrive, and the `RequestReview` arm
+/// in `run_bounded` that answers it with `review_model_unavailable` and
+/// carries on is LOAD-BEARING there, not a backstop. The shape is a
+/// per-deployment constant, so the cached prefix is unaffected.
+fn step_schema(with_review: bool) -> Value {
     let requests = vec![
         object(vec![
             ("tool", enumeration(&["read_thread"])),
@@ -955,20 +1001,20 @@ fn step_schema() -> Value {
             ("attachment_id", text()),
         ]),
     ];
-    let steps = vec![
-        object(vec![
-            ("step", enumeration(&["read_evidence"])),
-            ("requests", array(json!({"anyOf": requests}))),
-        ]),
-        object(vec![
+    let mut steps = vec![object(vec![
+        ("step", enumeration(&["read_evidence"])),
+        ("requests", array(json!({"anyOf": requests}))),
+    ])];
+    if with_review {
+        steps.push(object(vec![
             ("step", enumeration(&["request_review"])),
             ("question", text()),
-        ]),
-        object(vec![
-            ("step", enumeration(&["finish"])),
-            ("decision", decision_schema_body()),
-        ]),
-    ];
+        ]));
+    }
+    steps.push(object(vec![
+        ("step", enumeration(&["finish"])),
+        ("decision", decision_schema_body()),
+    ]));
     // Provider structured outputs require an object at the root; a nested
     // union is supported by both transports. WireStep unwraps that envelope.
     let mut schema = object(vec![("result", json!({"anyOf": steps}))]);
@@ -992,7 +1038,8 @@ mod tests {
     /// the shared definitions should not.
     #[test]
     fn step_schema_stays_compact_and_its_refs_resolve() {
-        let schema = step_schema();
+        // The larger shape is the one the size bound is about.
+        let schema = step_schema(true);
         let encoded = serde_json::to_string(&schema).unwrap();
         eprintln!("step schema: {} bytes", encoded.len());
         assert!(
@@ -1321,8 +1368,104 @@ mod tests {
                 _ => {}
             }
         }
-        check(&step_schema());
+        check(&step_schema(true));
+        check(&step_schema(false));
     }
+    /// The review step and its sentence of prompt are offered only when a
+    /// usable `review_model` exists to answer them. Pins the prompt file's wording
+    /// too: if the sentence is reworded there, the swap would silently stop
+    /// matching, and this is what notices.
+    #[test]
+    fn review_step_is_offered_only_with_a_review_model() {
+        fn step_names(schema: &Value) -> Vec<String> {
+            schema["properties"]["result"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| {
+                    s["properties"]["step"]["enum"][0]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+                .collect()
+        }
+        assert_eq!(
+            step_names(&step_schema(true)),
+            ["read_evidence", "request_review", "finish"]
+        );
+        assert_eq!(step_names(&step_schema(false)), ["read_evidence", "finish"]);
+
+        assert!(
+            SYSTEM.contains(REVIEW_OFFER),
+            "the prompt file no longer carries the review offer verbatim"
+        );
+        let with = system_prompt(true);
+        let without = system_prompt(false);
+        assert_eq!(with, SYSTEM);
+        assert!(without.contains(NO_REVIEW_OFFER));
+        assert!(
+            !without.contains(REVIEW_OFFER) && !without.contains("stronger review"),
+            "a prompt with no reviewer still offers one"
+        );
+        assert_eq!(
+            with.len() - without.len(),
+            REVIEW_OFFER.len() - NO_REVIEW_OFFER.len(),
+            "only the one sentence should differ"
+        );
+    }
+
+    /// On the Anthropic transport the schema is a non-strict tool, so a
+    /// reviewer-less deployment can still receive a stray `request_review`;
+    /// the runtime arm is what answers it there (see `step_schema`). A run
+    /// that asks and is told no reviewer exists carries on and finishes on
+    /// the next turn, instead of failing.
+    #[tokio::test]
+    async fn a_stray_review_request_without_a_reviewer_is_answered_not_fatal() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let responses = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            json!({"result": {"step": "request_review", "question": "is this a bill?"}}),
+            json!({"result": {"step": "finish", "decision": valid()}}),
+        ])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/", post(mock_provider))
+            .with_state(responses);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = reqwest::Client::new();
+        let connection = AgentConnection {
+            http: &http,
+            url: &url,
+            api_key: "test",
+            provider: Stage2Provider::OpenAI,
+            model: "test",
+            effort: None,
+        };
+        let context = ContextSnapshot {
+            thread_id: "thread".into(),
+            initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+            source_message_ids: vec![7],
+            ..Default::default()
+        };
+        let config = AgentTriageConfig::default();
+        assert!(
+            config.agent.review_model.is_none(),
+            "the default has no reviewer"
+        );
+        let run = run_agent(connection, &config, context, &NoEvidence)
+            .await
+            .expect("a stray review request is answered, not fatal");
+        assert_eq!(
+            run.model_turns, 2,
+            "the refusal costs one turn, then it finishes"
+        );
+        server.abort();
+    }
+
     struct NoEvidence;
     impl EvidenceReader for NoEvidence {
         fn read(&self, _: &EvidenceRequest) -> Result<EvidenceResult, String> {

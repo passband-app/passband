@@ -15207,3 +15207,143 @@ async fn a_live_forward_whose_original_read_is_paced_is_503_and_audited_paced() 
         "not `failed:fetch_original`"
     );
 }
+
+/// Responses gzip when the caller asks and stay plain when it does not (the
+/// Swift client's `URLSession` asks on every request), the gzipped body IS
+/// the plain one, the console's HTML gzips too (one layer over the whole
+/// door), and two kinds of response are never compressed whatever the caller
+/// asks: the events stream, because an SSE frame has to leave the process
+/// the moment it is written and a gzip encoder would hold it, and an
+/// attachment, already-compressed bytes served as `application/pdf` or
+/// `application/octet-stream` that would cost a worker thread for nothing.
+#[tokio::test]
+async fn json_gzips_when_asked_and_the_event_stream_never_does() {
+    use std::io::Read;
+
+    let id = std::sync::Arc::new(std::sync::Mutex::new(0i64));
+    let id_seed = id.clone();
+    let Harness { app, .. } = harness(move |store, acct| {
+        let m = store
+            .upsert_message(&msg(acct, "g1", "t1", "s", "b"))
+            .unwrap();
+        store
+            .set_triage(
+                m,
+                acct,
+                60,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+        // Well over the 32-byte floor, so only the content type can be what
+        // keeps it plain.
+        let pdf = vec![b'%'; 4096];
+        *id_seed.lock().unwrap() = store
+            .insert_attachment(
+                acct,
+                m,
+                "a.pdf",
+                "application/pdf",
+                pdf.len() as i64,
+                Some(&pdf),
+            )
+            .unwrap();
+    });
+    let attachment_id = *id.lock().unwrap();
+    let gzip_get = |uri: &str| {
+        let mut req = authed("GET", uri);
+        req.headers_mut()
+            .insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        req
+    };
+    let encoding = |resp: &axum::response::Response| {
+        resp.headers()
+            .get(header::CONTENT_ENCODING)
+            .map(|v| v.to_str().unwrap().to_string())
+    };
+
+    let plain = app
+        .clone()
+        .oneshot(authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::OK);
+    assert_eq!(encoding(&plain), None, "no Accept-Encoding, no encoding");
+    let plain: Value = body_json(plain).await;
+
+    let resp = app
+        .clone()
+        .oneshot(gzip_get("/client/stats"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        encoding(&resp).as_deref(),
+        Some("gzip"),
+        "a JSON body is gzipped for a caller that asks"
+    );
+    let compressed = body_bytes(resp).await;
+    let mut inflated = Vec::new();
+    flate2::read::GzDecoder::new(compressed.as_slice())
+        .read_to_end(&mut inflated)
+        .expect("the body is a gzip stream");
+    let inflated: Value = serde_json::from_slice(&inflated).unwrap();
+    assert_eq!(inflated, plain, "the gzipped body is the plain one");
+
+    // The console's server-rendered HTML sits under the same layer; its
+    // login page needs no session.
+    let resp = app.clone().oneshot(gzip_get("/console")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap())
+            .is_some_and(|ct| ct.starts_with("text/html")),
+        "the console serves HTML"
+    );
+    assert_eq!(
+        encoding(&resp).as_deref(),
+        Some("gzip"),
+        "console HTML gzips"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(gzip_get("/client/events"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap()),
+        Some("text/event-stream")
+    );
+    assert_eq!(
+        encoding(&resp),
+        None,
+        "the event stream must never be compressed"
+    );
+
+    let resp = app
+        .oneshot(gzip_get(&format!("/client/attachments/{attachment_id}")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap()),
+        Some("application/pdf")
+    );
+    assert_eq!(encoding(&resp), None, "an attachment is never compressed");
+    assert_eq!(
+        body_bytes(resp).await.len(),
+        4096,
+        "and arrives byte for byte"
+    );
+}

@@ -449,11 +449,101 @@ fn other_err(msg: String) -> squelch_core::CoreError {
 /// How long shutdown waits for the calendar sync loop before aborting it.
 const CALENDAR_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The floor on tokio worker threads, whatever the box reports.
+///
+/// Left to its default the runtime sizes itself by
+/// `available_parallelism()`, which honours the cgroup CPU quota, and the
+/// hosted tenant pod's limit is one CPU: ONE worker thread, on which both
+/// HTTP doors, every SSE pump, every timer, and the sync engine's and triage
+/// worker's direct store calls all run. The store is a `Mutex<Connection>`,
+/// so whenever a `spawn_blocking` handler, an embed or a triage commit holds
+/// it, that lone worker parks in `lock()` and nothing else progresses: no
+/// accept, no auth, no keep-alive, no tick.
+///
+/// Four, because three always-on tasks make direct store calls and can all
+/// be parked in `lock()` at the same moment (the sync engine, the triage
+/// worker, an MCP tool call), and the door should still answer then. Workers
+/// park when idle, so on a one-core box the extra three cost a stack each
+/// and nothing more. A floor and not a cap: a self-host box with eight cores
+/// keeps eight, as it always has.
+const MIN_WORKER_THREADS: usize = 4;
+
+/// tokio's own override. Read here, because calling `worker_threads` on the
+/// builder is exactly what makes tokio stop reading it, and an operator's
+/// no-rebuild knob for a stalled daemon should not vanish silently.
+const WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
+
+/// The box's parallelism as the runtime sees it: cgroup-quota-aware, so on a
+/// hosted pod it reads 1 whatever the node has.
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Worker threads for a runtime: the operator's override when it is set and a
+/// positive integer, else the box's `parallelism`; either floored at
+/// [`MIN_WORKER_THREADS`].
+fn worker_threads_for(parallelism: usize, env_override: Option<&str>) -> usize {
+    env_override
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(parallelism)
+        .max(MIN_WORKER_THREADS)
+}
+
+/// How long after boot the planner-statistics pass runs, then hourly.
+///
+/// A fresh install's first hour (the initial backfill and the first triage
+/// burst) is the heaviest of its life, and with no statistics at all it is
+/// exactly the pathology the pass exists to fix, so the first ticks come
+/// early; an upgraded install gets its first full pass a minute in, with the
+/// door already bound. Hourly after that keeps up with a process that runs
+/// for weeks while its tables grow.
+const STATISTICS_REFRESH_AFTER_SECS: [u64; 3] = [60, 540, 3000];
+
+/// Spawn the planner-statistics pass ([`SqliteStore::refresh_statistics`])
+/// on [`STATISTICS_REFRESH_AFTER_SECS`], then hourly, for both long-lived
+/// modes (`serve` and `run`). Off the open path on purpose: see the store
+/// method. Behind the mutex via `spawn_blocking`; never fatal; not
+/// shutdown-aware for the same reason the shredder is not: the next tick is
+/// minutes or an hour away and the runtime drop ends it.
+fn spawn_statistics_refresh(store: Arc<SqliteStore>) {
+    tokio::spawn(async move {
+        let mut early = STATISTICS_REFRESH_AFTER_SECS.into_iter();
+        loop {
+            let secs = early.next().unwrap_or(3600);
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            let store = store.clone();
+            match tokio::task::spawn_blocking(move || store.refresh_statistics()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("squelchd: planner statistics refresh failed: {e}"),
+                Err(_) => eprintln!("squelchd: planner statistics refresh panicked"),
+            }
+        }
+    });
+}
+
 fn build_runtime() -> Result<tokio::runtime::Runtime, squelch_core::CoreError> {
-    tokio::runtime::Builder::new_multi_thread()
+    let parallelism = available_parallelism();
+    let env_override = std::env::var(WORKER_THREADS_ENV).ok();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads_for(parallelism, env_override.as_deref()))
         .enable_all()
         .build()
-        .map_err(|e| other_err(format!("tokio runtime: {e}")))
+        .map_err(|e| other_err(format!("tokio runtime: {e}")))?;
+    // Said once at boot, by both long-lived modes, so a stall is diagnosed
+    // against the number that applies rather than the cores the node claims.
+    eprintln!(
+        "squelchd: tokio runtime: {} worker thread(s), quota-aware parallelism {}{}",
+        runtime.metrics().num_workers(),
+        parallelism,
+        env_override
+            .as_deref()
+            .map(|v| format!(", {WORKER_THREADS_ENV}={v}"))
+            .unwrap_or_default()
+    );
+    Ok(runtime)
 }
 
 /// Load config plus the Stage-2 cap sources, which `serve` reports as "default"
@@ -1665,6 +1755,8 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
             }
         });
 
+        spawn_statistics_refresh(store.clone());
+
         let mut engine = SyncEngine::new(store, creds, account_id, email, config);
         if let Some(e) = embedder {
             spawn_embedder_reaper(e.clone(), idle_unload_secs, shutdown_rx.clone());
@@ -1950,6 +2042,7 @@ async fn gather_store_metrics(
         // Platform and version only, already folded: two phones on one build
         // are one entry, and nothing that names a device comes back.
         let clients = store.client_versions_seen(account_id)?;
+        let client_actions = store.client_actions_seen(account_id)?;
         Ok::<_, squelch_core::CoreError>(squelch_core::metrics::StoreSnapshot {
             llm_cost_usd: squelch_core::metrics::estimate_cost_usd(&llm, &config),
             stats,
@@ -1958,6 +2051,7 @@ async fn gather_store_metrics(
             wal_bytes,
             devices_paired,
             clients,
+            client_actions,
             triage_jobs: store.triage_job_counts(account_id)?,
             triage_budget: store.daily_budget_status(
                 account_id,
@@ -2424,6 +2518,12 @@ fn cmd_serve(
         // model is still downloading, and the vector pass then has to embed all
         // of it in batches, which is the memory that OOM-killed tenant daemons.
         // Only the first backfill waits; polling and catch-up never do.
+        // ONE "a vector may be missing" flag for both engines over this store:
+        // the sync engine's refine lane reads it, and the sweeps engine's
+        // blank-body heal raises it when it deletes a healed row's vector for
+        // the drain to redo. Two flags would be two engines each believing
+        // the other's debt is paid.
+        let vectors_dirty = Arc::new(AtomicBool::new(true));
         let sync_handle = {
             let store = store.clone();
             let email = email.clone();
@@ -2432,6 +2532,7 @@ fn cmd_serve(
             let creds = sync_creds.clone();
             let sync_metrics = sync_metrics.clone();
             let sync_budget = gmail_budget.clone();
+            let vectors_dirty = vectors_dirty.clone();
             // Taken before the spawn and dropped by the task, so readiness
             // tracks the engine and not the intention to start one.
             let sync_running = readiness.sync_started();
@@ -2444,6 +2545,7 @@ fn cmd_serve(
                     .with_refine_poke(refine_poke)
                     .with_metrics(sync_metrics)
                     .with_embedder_gate(embedder_gate)
+                    .with_vectors_dirty(vectors_dirty)
                     .run(shutdown_rx)
                     .await
             })
@@ -2476,15 +2578,18 @@ fn cmd_serve(
             let creds = sync_creds.clone();
             let sweep_metrics = sync_metrics.clone();
             let sweep_budget = gmail_budget.clone();
+            let vectors_dirty = vectors_dirty.clone();
             let mut embedder_gate = readiness.embedder_gate();
             tokio::spawn(async move {
                 wait_for_embedder_gate(&mut embedder_gate).await;
                 tokio::time::sleep(std::time::Duration::from_secs(180)).await;
                 // The same metrics the sync loop reports into, so a Gmail
-                // refusal during a sweep lands on the same panel and alert.
+                // refusal during a sweep lands on the same panel and alert;
+                // the same vector flag, so the heal's deletions are drained.
                 let engine =
                     mailbox_engine(store, creds, account_id, email, config, &sweep_budget)
-                        .with_metrics(sweep_metrics);
+                        .with_metrics(sweep_metrics)
+                        .with_vectors_dirty(vectors_dirty);
                 if let Err(e) = engine.harvest_sent_contacts().await {
                     eprintln!(
                         "squelchd: sent-contacts harvest incomplete (retries next start): {e}"
@@ -2561,6 +2666,8 @@ fn cmd_serve(
                 }
             });
         }
+
+        spawn_statistics_refresh(store.clone());
 
         // SCHEDULED SEND fires here for the same reason the shredder runs
         // here: it sends on the WRITE credential (docs/SCHEDULED-SEND.md §4).
@@ -2821,6 +2928,28 @@ mod tests {
     use squelch_core::credentials::{CredentialKind, StoredToken};
 
     const BROKER: &str = "https://auth.passband.email";
+
+    /// A one-CPU quota (the hosted tenant pod) gets the floor, not one; a
+    /// wider box keeps its count; the operator's override is honoured and
+    /// floored like everything else; and the real runtime is sized by exactly
+    /// this rule, so dropping the builder call cannot pass on a wide CI box.
+    #[test]
+    fn the_runtime_never_runs_on_a_single_worker() {
+        assert_eq!(worker_threads_for(1, None), MIN_WORKER_THREADS);
+        assert_eq!(worker_threads_for(8, None), 8);
+        assert_eq!(worker_threads_for(8, Some("6")), 6);
+        assert_eq!(worker_threads_for(8, Some("1")), MIN_WORKER_THREADS);
+        assert_eq!(worker_threads_for(8, Some("nonsense")), 8);
+        assert_eq!(worker_threads_for(8, Some("")), 8);
+        let runtime = build_runtime().expect("a runtime");
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            worker_threads_for(
+                available_parallelism(),
+                std::env::var(WORKER_THREADS_ENV).ok().as_deref()
+            )
+        );
+    }
 
     /// PID 1 in the image stops on SIGTERM or not at all: the stop future must
     /// resolve on it, not only on Ctrl-C.

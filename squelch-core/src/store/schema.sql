@@ -354,10 +354,12 @@ CREATE TABLE IF NOT EXISTS triage (
 CREATE INDEX IF NOT EXISTS idx_triage_sensitivity ON triage(account_id, sensitivity);
 CREATE INDEX IF NOT EXISTS idx_triage_status ON triage(account_id, status);
 -- `idx_triage_remind_at ON triage(account_id, remind_at) WHERE remind_at IS NOT
--- NULL` is created in migrate.rs, NOT here, for the same reason as
--- `idx_shipments_order_ref` below: this file runs in full on every open, BEFORE
--- the column migrations, so an index over a migrated column would fail ("no such
--- column: remind_at") on every pre-existing DB and make the store unopenable.
+-- NULL` and its twin `idx_triage_reminded_at` (same shape over `reminded_at`,
+-- for the fired reminders every Standing read lists) are created in migrate.rs,
+-- NOT here, for the same reason as `idx_shipments_order_ref` below: this file
+-- runs in full on every open, BEFORE the column migrations, so an index over a
+-- migrated column would fail ("no such column: remind_at") on every pre-existing
+-- DB and make the store unopenable.
 
 CREATE TABLE IF NOT EXISTS deadlines (
     id         INTEGER PRIMARY KEY,
@@ -1294,6 +1296,14 @@ CREATE TABLE IF NOT EXISTS send_trackers (
     message_id INTEGER,
     created_at INTEGER NOT NULL
 );
+-- The reads that start from a MESSAGE rather than a token (`message_opens`, the
+-- sent listing's and the group listing's per-row open counts) need this, or
+-- each is a scan of every tracker the account ever minted. Partial, in the
+-- file's usual shape: every one of them constrains `message_id = ...`, which
+-- implies NOT NULL, and a tracker with no message is one nothing reads by
+-- message.
+CREATE INDEX IF NOT EXISTS idx_send_trackers_message
+    ON send_trackers(account_id, message_id) WHERE message_id IS NOT NULL;
 
 -- ONE ROW PER OBSERVED OPEN, append-only. Rows arrive two ways: the daemon's own
 -- unauthenticated GET /t/:token, and the opens poller draining the relay. Both
@@ -1346,6 +1356,11 @@ CREATE INDEX IF NOT EXISTS idx_message_opens_token ON message_opens(token);
 -- A CHANGED platform or version only replaces the stored one after it has been
 -- quiet for an hour (`CLIENT_CHANGE_THROTTLE_SECS`), which is what stops a
 -- token holder minting a metric series per request.
+--
+-- `client_action_at` is the last time that app DID something with this token:
+-- a successful write on the client door (see `note_client_action`). Narrower
+-- than `client_seen_at`, which an open app moves by polling. NULL until the
+-- first one, and it is read with `client_platform`, so it says which app acted.
 CREATE TABLE IF NOT EXISTS device_tokens (
     id           INTEGER PRIMARY KEY,
     account_id   INTEGER NOT NULL,   -- -> accounts.id
@@ -1358,7 +1373,8 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     revoked_at   TEXT,
     client_platform TEXT,
     client_version  TEXT,
-    client_seen_at  TEXT
+    client_seen_at  TEXT,
+    client_action_at TEXT
 );
 
 -- `token list` reads exactly "every token for my account".
@@ -1621,6 +1637,12 @@ CREATE TABLE IF NOT EXISTS agent_triage_runs (
     metadata_json TEXT NOT NULL DEFAULT '{}',
     completed_at TEXT NOT NULL
 );
+-- One row per run, never deleted, so without this the diagnostics read
+-- (`agent_diagnostics`: the newest 25 runs for one message) is a scan of a
+-- table that only grows. The first open after this ships builds it over the
+-- whole table, synchronously, before the daemon serves: a one-time cost in
+-- proportion to the run history, paid once.
+CREATE INDEX IF NOT EXISTS idx_agent_triage_runs_message ON agent_triage_runs(account_id, message_id);
 CREATE TABLE IF NOT EXISTS agent_triage_cutover (
     account_id INTEGER PRIMARY KEY,
     completed_at TEXT NOT NULL

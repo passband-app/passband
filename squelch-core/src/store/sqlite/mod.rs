@@ -230,16 +230,16 @@ use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::SmartBlockMemo;
 use crate::store::{
     AccountIdentity, AccountPhoto, AgentDraftOutcome, AttachmentBytes, BankingApplied,
-    BlankBodyScan, ClientPlatform, ClientSeen, ClientTag, ContactEntry, Device, DeviceToken, Draft,
-    DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken,
-    LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer, MessageMissingRecipients,
-    MessageOpen, MessageUnsub, MintedPairingCode, MissingVector, NewAuditEntry, NewEvent,
-    NewNotifyDecision, NotifyDecisionRow, PersonNamed, RevisitQueued, SPAM_SYNCED_AT_KEY,
-    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict,
-    SenderDigestRow, SenderDomainEntry, SenderEntry, SenderHistory, SentMessage, SitrepBand,
-    SpamScope, Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued,
-    Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage,
-    TriageDebug, TriagedMessage, UsageTokens,
+    BlankBodyScan, ClientActed, ClientPlatform, ClientSeen, ClientTag, ContactEntry, Device,
+    DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread,
+    IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer,
+    MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode, MissingVector,
+    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, RevisitQueued,
+    SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
+    SeedVerdict, SenderDigestRow, SenderDomainEntry, SenderEntry, SenderHistory, SentMessage,
+    SitrepBand, SpamScope, Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides,
+    Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling,
+    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
@@ -269,6 +269,37 @@ pub const VEC_DIMS: usize = 384;
 /// runs, and short enough that a genuinely wedged writer still surfaces as an
 /// error instead of a hang.
 const BUSY_TIMEOUT_MS: u64 = 5_000;
+
+/// Page cache per connection, in SQLite's negative-is-KiB spelling: 32 MB. See
+/// [`SqliteStore::set_pragmas`].
+const CACHE_SIZE_KIB_NEGATED: i64 = -32_000;
+
+/// The WAL is truncated to this after a checkpoint: 64 MB. See
+/// [`SqliteStore::set_pragmas`].
+const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
+/// Rows `ANALYZE` samples per index (`PRAGMA analysis_limit`). LARGE, so a
+/// table under it is scanned in full and the statistics say what the data
+/// says: at the 400 SQLite's docs suggest for a cheap pass, the sampler
+/// visits ~400 rows and scales, and on a single-account store that records
+/// `account_id = ?` as matching ~400 rows of 50,000, which is "selective",
+/// the exact belief this pass exists to correct. A table past the limit is
+/// still bounded.
+///
+/// NEVER ZERO. Zero is also the switch that makes STAT4 (compiled in) persist
+/// real index-key samples, sender addresses and subjects among them, into the
+/// file, where they would outlive the rows the shredder removes. See
+/// [`SqliteStore::refresh_statistics`].
+const ANALYSIS_LIMIT_ROWS: i64 = 1_000_000;
+
+/// The `PRAGMA optimize` mask the statistics pass runs with: SQLite's default
+/// (`0xfffe`) minus bit `0x10`, which would cap every ANALYZE the pragma
+/// issues at the lesser of the connection's `analysis_limit` and 2,000 rows.
+/// Under that cap a table that grew 10x would be re-analyzed as a 2,000-row
+/// sample, which is the very "`account_id = ?` matches 2,000 of N" belief
+/// [`ANALYSIS_LIMIT_ROWS`] exists to keep out of the file. Without the bit
+/// the pragma's ANALYZE runs under the connection's limit, like step 1.
+const OPTIMIZE_MASK: u32 = 0xfffe & !0x10;
 
 static VEC_EXT_INIT: Once = Once::new();
 
@@ -348,9 +379,45 @@ impl SqliteStore {
     /// file to itself, so it can lose to a process still holding the old mode
     /// open, and a store that quietly stayed on the rollback journal would
     /// reproduce the locking it is here to prevent with nothing to point at.
+    ///
+    /// Two more are per-connection tuning, so they too run on every open:
+    ///
+    /// - `cache_size=-32000` is 32 MB of page cache instead of the 2 MB default,
+    ///   against a file that runs 200 MB to 1 GB on a real mailbox. It is a
+    ///   ceiling, not a reservation: pages are cached as they are read, and an
+    ///   idle connection holds only what it has touched.
+    /// - `journal_size_limit` truncates the WAL back to 64 MB after a
+    ///   checkpoint. Without it the file keeps the high-water mark of the
+    ///   largest transaction ever run (the whole-mailbox FTS rebuild) for the
+    ///   life of the database.
+    ///
+    /// Two that look like they belong here are left at SQLite's defaults ON
+    /// PURPOSE:
+    ///
+    /// - `synchronous` stays FULL. NORMAL is the usual WAL pairing and would
+    ///   save an fsync per commit, but this daemon makes irreversible moves on
+    ///   the strength of its own commits: the scheduled-send claim must be on
+    ///   disk before the Gmail POST (`scheduled_send.rs` re-fires a row that
+    ///   reads `scheduled` after a crash, and only searches for the sent copy
+    ///   when `maybe_sent` says it may exist), and the notify ledger is the
+    ///   dedupe for a push already delivered and a model call already billed.
+    ///   Under NORMAL a power loss inside the OS writeback window could roll
+    ///   either back after the side effect: a mail sent twice. The right shape
+    ///   is NORMAL with those claims synced explicitly, which is a design
+    ///   change, not a pragma.
+    /// - `temp_store` stays FILE. MEMORY would keep the planner's temp b-trees
+    ///   off disk, but in this SQLite it also disables the sorter's spill, so a
+    ///   `CREATE INDEX` over a large table inside `migrate` (the one place a
+    ///   big sort is certain) would hold every key in heap: on a memory-capped
+    ///   tenant pod that is an OOM kill during open, on every restart.
+    ///
+    /// `foreign_keys=ON`, the one other per-connection setting, is applied by
+    /// `schema.sql`'s first line through `execute_batch(SCHEMA)` in `init`.
     fn set_pragmas(conn: &Connection) -> Result<()> {
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+        conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB_NEGATED)?;
+        conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
         Ok(())
     }
 
@@ -367,6 +434,87 @@ impl SqliteStore {
             embedder: RwLock::new(None),
             event_tx: RwLock::new(None),
         })
+    }
+
+    /// Give the query planner statistics to plan with.
+    ///
+    /// Until this existed NOTHING in the daemon ever ran `ANALYZE`, so the
+    /// planner had never seen a row count for the file. Its default guess is
+    /// that an equality on any indexed column is selective, which on a store
+    /// where every row carries the same `account_id` sends it down the
+    /// `account_id` prefix of whatever index it finds and walks the whole
+    /// account: the recursive external-access check measured 457 ms at 50k
+    /// messages with no statistics and 0.2 ms with them, `agent_sender_history`
+    /// 64 ms to 0.0, and several statements carry `INDEXED BY` pins only
+    /// because the planner could not be trusted to find the index on its own.
+    ///
+    /// Two steps, every call:
+    ///
+    /// 1. `ANALYZE` each REAL table that has no statistics yet. "Real" leaves
+    ///    out the FTS5 and vec0 shadow tables (`messages_fts_data`,
+    ///    `message_vecs_chunks`, ...): they hold the bodies and the vectors,
+    ///    the largest b-trees in the file, nothing plans against them, and an
+    ///    unqualified `ANALYZE` would walk every one of them end to end,
+    ///    because the per-index row count is exact whatever the sampling
+    ///    limit says.
+    /// 2. `PRAGMA optimize` under [`OPTIMIZE_MASK`], which in this SQLite
+    ///    (3.46) re-analyzes a table the connection has planned against
+    ///    whose size has moved 10x since its statistics were taken, or that
+    ///    has an index with none, and is a no-op otherwise. That second rule
+    ///    does reach the small keyed shadow tables FTS5 and vec0 look rows
+    ///    up in (`messages_fts_idx`, `messages_fts_config`,
+    ///    `message_vecs_info`): a few rows each, taken once, SQLite's own
+    ///    call. The blob tables have no index for it to want statistics on,
+    ///    and their growth is only checked against the connection's own
+    ///    queries, which never touch them, so it never walks them.
+    ///
+    /// NOT on the open path, on purpose. Step 1 on a cold multi-hundred-MB
+    /// file is seconds of b-tree walking, which belongs after the daemon's
+    /// door is bound rather than before, and never on the short CLI opens
+    /// (`squelchd token`, `squelchd pair`) that share the file with a serving
+    /// daemon: both steps take the write lock, and an open that waited out
+    /// `busy_timeout` behind the sync engine would have logged a failure for
+    /// nothing. The daemon calls this on a schedule instead
+    /// (`spawn_statistics_refresh` in squelchd).
+    ///
+    /// Under [`ANALYSIS_LIMIT_ROWS`] throughout; see that constant for why
+    /// the limit is large and why it must never be zero.
+    pub fn refresh_statistics(&self) -> Result<()> {
+        let conn = self.lock()?;
+        conn.pragma_update(None, "analysis_limit", ANALYSIS_LIMIT_ROWS)?;
+        let real_tables: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+                   AND name NOT LIKE 'messages\\_fts%' ESCAPE '\\'
+                   AND name NOT LIKE 'message\\_vecs%' ESCAPE '\\'",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        // `sqlite_stat1` does not exist until the first ANALYZE, and a SELECT
+        // naming it does not compile on such a file, so ask `sqlite_master`
+        // before asking it.
+        let stat_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat1')",
+            [],
+            |r| r.get(0),
+        )?;
+        let analyzed: std::collections::HashSet<String> = if stat_table {
+            let mut stmt = conn.prepare("SELECT DISTINCT tbl FROM sqlite_stat1")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        } else {
+            std::collections::HashSet::new()
+        };
+        for table in real_tables.iter().filter(|t| !analyzed.contains(*t)) {
+            // Quoted: these are our own names from schema.sql, but a name is
+            // a name.
+            conn.execute_batch(&format!("ANALYZE \"{}\"", table.replace('"', "\"\"")))?;
+        }
+        conn.execute_batch(&format!("PRAGMA optimize({OPTIMIZE_MASK:#x})"))?;
+        Ok(())
     }
 
     /// Attach an [`Embedder`](crate::embed::Embedder) so the semantic-recall

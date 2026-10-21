@@ -982,18 +982,16 @@ fn migrate_adds_reminder_columns_and_the_due_index_to_preexisting_triage() {
     assert!(cols.iter().any(|c| c == "remind_at"), "remind_at added");
     assert!(cols.iter().any(|c| c == "reminded_at"), "reminded_at added");
 
-    let indexed: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type='index' AND name='idx_triage_remind_at'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        indexed, 1,
-        "the sweep's index is created here, not in schema.sql"
-    );
+    for index in ["idx_triage_remind_at", "idx_triage_reminded_at"] {
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                [index],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "{index} is created here, not in schema.sql");
+    }
 
     // NOT backfilled: `reminded_at` is a standing-band arm, so a stamped
     // historical row would drag the whole mailbox into the band.
@@ -2591,4 +2589,233 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         })
         .unwrap();
     assert_eq!(left, 0);
+}
+
+/// The per-connection tuning `set_pragmas` applies on every open, asserted on a
+/// FILE-backed store because the journal limit means nothing to `:memory:`.
+/// Each value is read back through the same pragma, so a typo in a name (which
+/// SQLite ignores silently) fails here instead of in production; and the two
+/// settings deliberately left at their defaults are pinned at those defaults,
+/// so adding one back has to argue with the doc on `set_pragmas` first.
+#[test]
+fn open_tunes_the_connection_pragmas() {
+    let dir = std::env::temp_dir().join(format!("squelch-pragmas-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pragmas.db");
+
+    {
+        let store = SqliteStore::open(&path).unwrap();
+        let conn = store.lock().unwrap();
+        let read = |name: &str| -> i64 {
+            conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(read("cache_size"), CACHE_SIZE_KIB_NEGATED);
+        assert_eq!(read("journal_size_limit"), JOURNAL_SIZE_LIMIT_BYTES);
+        // Left alone on purpose: FULL (2) and FILE (0 or 1); see `set_pragmas`.
+        assert_eq!(read("synchronous"), 2, "synchronous must stay FULL");
+        assert_ne!(read("temp_store"), 2, "temp_store must not be MEMORY");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- the three indexes the 50k-row bench asked for -----------------------
+
+/// Three listings that walked the whole account on the planner bench, pinned
+/// by PLAN rather than by timing (a timing test is flaky on CI and a plan is
+/// exact), and pinned on the SHIPPED statements (the `const`s the store runs)
+/// so an edit to a query that loses its seek fails here. The second half drops
+/// each index and asserts the plan really degrades, so a rename that silently
+/// detaches one cannot pass either:
+///
+/// - `append_due_reminders` runs on EVERY Standing-band read (the client's
+///   10 s poll) and asked for `reminded_at IS NOT NULL` with no index over it:
+///   a walk of every triage row in the account, 233 ms at 50k messages;
+/// - `message_opens` (and the sent and group listings' per-row open counts)
+///   reached `send_trackers` through `token`, its only key, so each was a SCAN
+///   of the whole tracker table;
+/// - `agent_diagnostics` reads `agent_triage_runs ORDER BY id DESC LIMIT 25`,
+///   and the table had no index at all over a column that grows forever.
+#[test]
+fn reminder_tracker_and_run_lookups_seek_their_indexes() {
+    use super::super::agent_triage::{DUE_REMINDERS_SQL, MESSAGE_RUNS_SQL};
+    use super::super::tracking::MESSAGE_OPENS_SQL;
+
+    let (store, _acct) = store();
+    let conn = store.lock().unwrap();
+
+    /// Whether `table` (the alias, when there is one) is reached through
+    /// `index`.
+    fn seeks(plan: &[String], table: &str, index: &str) -> bool {
+        plan.iter()
+            .any(|line| line.starts_with(&format!("SEARCH {table} USING")) && line.contains(index))
+    }
+    /// Whether `table` is walked whole.
+    fn scans(plan: &[String], table: &str) -> bool {
+        plan.iter()
+            .any(|line| line.starts_with(&format!("SCAN {table}")))
+    }
+
+    let p = plan(&conn, DUE_REMINDERS_SQL);
+    assert!(
+        seeks(&p, "t", "idx_triage_reminded_at"),
+        "due reminders walk the account's triage rows:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_OPENS_SQL);
+    assert!(
+        seeks(&p, "t", "idx_send_trackers_message"),
+        "message opens scan send_trackers:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_RUNS_SQL);
+    assert!(
+        seeks(&p, "agent_triage_runs", "idx_agent_triage_runs_message"),
+        "run diagnostics scan agent_triage_runs:\n{p:#?}"
+    );
+
+    // THE CANARY: with the indexes gone the same statements must degrade to
+    // what they did before, or the assertions above were never testing the
+    // index. Each is asserted on the shape the planner actually falls back
+    // to, not on the absence of a name that cannot appear once dropped: the
+    // reminders are driven from `messages` with `t` reached by primary key
+    // instead of through an index, the opens walk `message_opens` whole and
+    // reach each tracker by token, and the runs become a table scan.
+    conn.execute_batch(
+        "DROP INDEX idx_triage_reminded_at;
+         DROP INDEX idx_send_trackers_message;
+         DROP INDEX idx_agent_triage_runs_message;",
+    )
+    .unwrap();
+    let p = plan(&conn, DUE_REMINDERS_SQL);
+    assert!(
+        !p.iter()
+            .any(|line| line.starts_with("SEARCH t USING INDEX")),
+        "canary: reminders still reach triage through an index:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_OPENS_SQL);
+    assert!(
+        scans(&p, "o") && !seeks(&p, "t", "idx_send_trackers_message"),
+        "canary: opens do not fall back to walking message_opens:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_RUNS_SQL);
+    assert!(
+        scans(&p, "agent_triage_runs"),
+        "canary: runs do not fall back to a table scan:\n{p:#?}"
+    );
+}
+
+/// The planner has statistics to plan with, from the pass the daemon runs on a
+/// schedule: the real tables are analyzed, the bulky FTS and vector shadow
+/// tables (the largest b-trees in the file, which nothing plans against) are
+/// not, and a later pass notices a table that grew.
+#[test]
+fn refresh_statistics_analyzes_the_real_tables_and_optimize_keeps_up() {
+    let (store, acct) = store();
+    for i in 0..5 {
+        let _ = triaged(acct, &format!("g{i}"), &format!("t{i}")).upsert(&store);
+    }
+    // Opening analyzed nothing: that work is the scheduled pass's, not the
+    // open path's (a CLI open must not take the write lock for it).
+    let stat_table_exists = |store: &SqliteStore| -> bool {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert!(!stat_table_exists(&store), "open must not analyze");
+
+    store.refresh_statistics().unwrap();
+    let stat_for = |store: &SqliteStore, tbl: &str| -> Vec<(String, String)> {
+        store
+            .lock()
+            .unwrap()
+            .prepare("SELECT idx, stat FROM sqlite_stat1 WHERE tbl = ?1 ORDER BY idx")
+            .unwrap()
+            .query_map([tbl], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    let first = stat_for(&store, "messages");
+    assert!(!first.is_empty(), "messages has statistics after the pass");
+    // The pass's own ANALYZE loop never names a shadow table. `PRAGMA
+    // optimize` then takes statistics for the few small keyed ones whose
+    // index the connection consulted (the FTS term index and the two config
+    // tables), which is SQLite's call and a few rows each; the bulky ones,
+    // the body blobs, docsizes and vector chunks, have no index to plan with
+    // and are never walked.
+    let shadow_rows: Vec<String> = store
+        .lock()
+        .unwrap()
+        .prepare(
+            "SELECT DISTINCT tbl FROM sqlite_stat1
+             WHERE tbl LIKE 'messages\\_fts%' ESCAPE '\\'
+                OR tbl LIKE 'message\\_vecs%' ESCAPE '\\'
+             ORDER BY tbl",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    let keyed_and_small = [
+        "message_vecs_info",
+        "messages_fts_config",
+        "messages_fts_idx",
+    ];
+    assert!(
+        shadow_rows
+            .iter()
+            .all(|t| keyed_and_small.contains(&t.as_str())),
+        "only the small keyed shadow tables may carry statistics: {shadow_rows:?}"
+    );
+    for bulky in [
+        "messages_fts_data",
+        "messages_fts_docsize",
+        "messages_fts_content",
+        "message_vecs_chunks",
+        "message_vecs_rowids",
+        "message_vecs_vector_chunks00",
+    ] {
+        assert!(
+            !shadow_rows.iter().any(|t| t == bulky),
+            "{bulky} holds the bodies or the vectors and is never walked"
+        );
+    }
+
+    // Fifty times the rows (optimize's growth gate is a b-tree page estimate,
+    // too coarse to trust at ten), read through an index so the connection
+    // has planned against the table, and the incremental pass re-analyzes
+    // it, at the full limit: the second line of statistics is the honest
+    // one, not SQLite's 2000-row sample.
+    for i in 5..255 {
+        let _ = triaged(acct, &format!("g{i}"), &format!("t{i}")).upsert(&store);
+    }
+    let _: i64 = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND received_at > ''",
+            [acct],
+            |r| r.get(0),
+        )
+        .unwrap();
+    store.refresh_statistics().unwrap();
+    let second = stat_for(&store, "messages");
+    assert_ne!(first, second, "a table that grew 50x is re-analyzed");
+    let received = second
+        .iter()
+        .find(|(idx, _)| idx == "idx_messages_received")
+        .map(|(_, stat)| stat.as_str())
+        .expect("the (account_id, received_at) index has statistics");
+    assert_eq!(
+        received, "255 255 1",
+        "every row was counted, so `account_id = ?` is known to match them all"
+    );
 }

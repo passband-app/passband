@@ -1080,3 +1080,66 @@ fn a_store_from_before_the_client_columns_still_authenticates() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn client_actions_fold_to_the_newest_stamp_per_platform() {
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    assert!(store.client_actions_seen(acct).unwrap().is_empty());
+
+    let mac = store.issue_device_token(acct, "laptop").unwrap();
+    let phone = store.issue_device_token(acct, "phone").unwrap();
+    let ipad = store.issue_device_token(acct, "ipad").unwrap();
+    for (token, client) in [
+        (&mac.token, "macos/0.0.13"),
+        (&phone.token, "ios/0.0.8"),
+        (&ipad.token, "ios/0.0.7"),
+    ] {
+        store
+            .verify_device_token_from(token, Some(&tag(client)))
+            .unwrap()
+            .unwrap();
+    }
+    // Connected is not acted.
+    assert!(store.client_actions_seen(acct).unwrap().is_empty());
+
+    // A stamp only lands on a row that says it is that platform, and nothing
+    // that is not a live device token is an error.
+    store
+        .note_client_action(&mac.token, ClientPlatform::Ios)
+        .unwrap();
+    store
+        .note_client_action("master-token", ClientPlatform::Ios)
+        .unwrap();
+    store
+        .note_client_action("sqd_never-issued", ClientPlatform::Ios)
+        .unwrap();
+    assert!(store.client_actions_seen(acct).unwrap().is_empty());
+
+    store
+        .note_client_action(&ipad.token, ClientPlatform::Ios)
+        .unwrap();
+    let first = store.client_actions_seen(acct).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].platform, ClientPlatform::Ios);
+
+    // Two iOS devices are one entry, carrying the later stamp; revoking the
+    // phone afterwards does not un-happen what it did.
+    store
+        .note_client_action(&phone.token, ClientPlatform::Ios)
+        .unwrap();
+    assert!(store.revoke_device_token(acct, phone.id).unwrap());
+    store
+        .note_client_action(&phone.token, ClientPlatform::Ios)
+        .unwrap();
+    store
+        .note_client_action(&mac.token, ClientPlatform::Macos)
+        .unwrap();
+    let acted = store.client_actions_seen(acct).unwrap();
+    assert_eq!(
+        acted.iter().map(|a| a.platform).collect::<Vec<_>>(),
+        [ClientPlatform::Macos, ClientPlatform::Ios]
+    );
+    assert!(acted[1].acted_at >= first[0].acted_at);
+    assert!(store.client_actions_seen(other).unwrap().is_empty());
+}

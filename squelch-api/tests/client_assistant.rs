@@ -180,6 +180,39 @@ async fn relay_streams_upstream_bytes_verbatim_and_audits() {
     assert_eq!(audit[0].detail.as_deref(), Some("status:200"));
 }
 
+/// The door's gzip layer never touches the relayed stream, whatever the
+/// client's `Accept-Encoding` says: the app's SSE parser needs each frame the
+/// moment the upstream writes it, and a gzip encoder would hold frames back
+/// to fill a block. The upstream's `text/event-stream` is what keeps the
+/// layer off, so a relay that stopped mirroring the content-type would fail
+/// here as well as in the verbatim test above.
+#[tokio::test]
+async fn relay_stream_is_never_compressed_whatever_the_client_accepts() {
+    const FRAMES: &[&str] = &[
+        "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+        "event: content_block_delta\ndata: {\"delta\":{\"text\":\"hi\"}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ];
+    let (url, _seen) = spawn_upstream(StatusCode::OK, "text/event-stream", &[], FRAMES).await;
+    let (app, _store, _acct) = relay_app(url);
+
+    let mut req = relay_request(true);
+    req.headers_mut()
+        .insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/event-stream"
+    );
+    assert!(
+        resp.headers().get(header::CONTENT_ENCODING).is_none(),
+        "the relayed stream is never gzipped"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body, FRAMES.concat().as_bytes());
+}
+
 #[tokio::test]
 async fn relay_names_the_provider_on_a_bare_model_and_changes_nothing_else() {
     // The bug this pins: the app sends a bare `claude-sonnet-5`, the gateway

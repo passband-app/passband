@@ -209,6 +209,13 @@ pub struct ApiState {
     /// ([`crate::calendar_write::WRITE_DEADLINE`]). Past it the write is
     /// answered 504, "may have happened". Shorter only in tests.
     pub(crate) calendar_write_deadline: std::time::Duration,
+    /// The ceilings a `/client/*` request runs under, by route class
+    /// ([`crate::limits`]). The constants, except in tests.
+    pub(crate) request_timeouts: crate::limits::RequestTimeouts,
+    /// The door's store-call slots ([`crate::limits::STORE_CALL_SLOTS`]):
+    /// how many of its store calls may be on blocking threads at once.
+    /// Shared by every clone of the state.
+    pub(crate) store_call_slots: Arc<tokio::sync::Semaphore>,
     /// The creates naming their own event id that are in flight, as
     /// (account, calendar, id), shared by every clone: a second create with
     /// the same key while the first is still running is refused at once
@@ -583,6 +590,10 @@ impl ApiState {
             calendar_refresh: CalendarRefresh::default(),
             calendar_api_base: None,
             calendar_write_deadline: crate::calendar_write::WRITE_DEADLINE,
+            request_timeouts: crate::limits::RequestTimeouts::default(),
+            store_call_slots: Arc::new(tokio::sync::Semaphore::new(
+                crate::limits::STORE_CALL_SLOTS,
+            )),
             calendar_creates_in_flight: Default::default(),
             calendar_consent: Default::default(),
             calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
@@ -900,6 +911,26 @@ impl ApiState {
         self
     }
 
+    /// The ceilings a `/client/*` request runs under, for a test that wants
+    /// to see one fire. The daemon runs [`crate::limits::RequestTimeouts::default`].
+    pub fn with_request_timeouts(mut self, timeouts: crate::limits::RequestTimeouts) -> Self {
+        self.request_timeouts = timeouts;
+        self
+    }
+
+    /// How many of the door's store calls may be on blocking threads at
+    /// once, for a test that wants to see the cap bite. The daemon runs
+    /// [`crate::limits::STORE_CALL_SLOTS`].
+    pub fn with_store_call_slots(mut self, max: usize) -> Self {
+        self.store_call_slots = Arc::new(tokio::sync::Semaphore::new(max));
+        self
+    }
+
+    /// Store-call slots not in use right now.
+    pub fn store_call_slots_free(&self) -> usize {
+        self.store_call_slots.available_permits()
+    }
+
     /// The loopback port the self-host calendar consent's listener binds.
     /// `0` binds an ephemeral port (tests), and the consent URL then carries
     /// the port that was bound.
@@ -938,17 +969,6 @@ impl ApiState {
     /// [`crate::tracking::PIXEL_CONCURRENCY`].
     pub(crate) fn pixel_slots(&self) -> &tokio::sync::Semaphore {
         &self.pixel_slots
-    }
-
-    /// Slots for concurrent pairing claims; see [`crate::pair::PAIR_CONCURRENCY`].
-    pub(crate) fn pair_slots(&self) -> &tokio::sync::Semaphore {
-        &self.pair_slots
-    }
-
-    /// Slots for concurrent device-token verifications; see
-    /// [`crate::auth::DEVICE_AUTH_CONCURRENCY`].
-    pub(crate) fn device_auth_slots(&self) -> &tokio::sync::Semaphore {
-        &self.device_auth_slots
     }
 
     /// Attach the cheap-model handle that infers a rule's disposition from the

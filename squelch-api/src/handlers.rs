@@ -99,16 +99,47 @@ struct Page<T> {
     next_cursor: Option<String>,
 }
 
-/// Run a synchronous store closure off the async runtime. A panic inside it
-/// surfaces as an opaque 500.
-pub(crate) async fn blocking<T, F>(f: F) -> Result<T, ApiError>
+/// Why [`blocking_on`] could not run its closure: the permit never came (a
+/// closed semaphore, which nothing here closes) or the closure panicked.
+/// Opaque to every caller, which answers its own uniform failure.
+pub(crate) struct Blocked;
+
+/// Run `f` on a blocking thread holding one permit of `slots` for as long
+/// as the thread runs. The permit is taken HERE, on the async side, where a
+/// caller cut at its ceiling (`limits`), or whose client hung up, gives up
+/// its place without a thread having been taken; and it is MOVED INTO the
+/// closure, so a call already on a thread keeps its permit until the store
+/// answers, whatever became of the caller. Every semaphore in `ApiState`
+/// that bounds store work is taken this way, through here: the store-call
+/// slots, the device-token lookups' permits, the pairing claims'.
+pub(crate) async fn blocking_on<T, F>(
+    slots: &std::sync::Arc<tokio::sync::Semaphore>,
+    f: F,
+) -> Result<T, Blocked>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = slots.clone().acquire_owned().await.map_err(|_| Blocked)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
+    .map_err(|_| Blocked)
+}
+
+/// Run a synchronous store closure off the async runtime, on one of the
+/// door's [`crate::limits::STORE_CALL_SLOTS`] ([`blocking_on`] for how the
+/// slot rides the thread). A panic inside it surfaces as an opaque 500.
+pub(crate) async fn blocking<T, F>(state: &ApiState, f: F) -> Result<T, ApiError>
 where
     F: FnOnce() -> Result<T, squelch_core::CoreError> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
+    blocking_on(&state.store_call_slots, f)
         .await
-        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?
+        .map_err(|Blocked| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?
         .map_err(ApiError::from)
 }
 
@@ -123,7 +154,7 @@ where
 {
     let store = state.store.clone();
     let account_id = state.account_id;
-    blocking(move || f(&store, account_id)).await
+    blocking(state, move || f(&store, account_id)).await
 }
 
 /// [`store_call`] for the common read shape: whatever the store returns IS the

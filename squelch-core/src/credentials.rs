@@ -66,6 +66,15 @@ pub struct OAuthToken {
 pub trait CredentialStore: Send + Sync {
     /// Return a *currently valid* access token, refreshing if necessary.
     async fn token(&self, account: AccountId) -> Result<OAuthToken>;
+
+    /// [`Self::token`] with any copy held in memory discarded first: the
+    /// retry after a 401, when the token just served was refused and the
+    /// backend may hold a newer one (a `squelchd auth` in another process, a
+    /// refresh by another daemon on the same file). A store that holds
+    /// nothing in memory answers as [`Self::token`] does.
+    async fn fresh_token(&self, account: AccountId) -> Result<OAuthToken> {
+        self.token(account).await
+    }
 }
 
 /// JSON-serialized token as persisted. Expiry is an absolute UTC instant so
@@ -298,14 +307,18 @@ fn refresh_error_message(err: &str) -> String {
     }
 }
 
-/// Return a currently-valid [`OAuthToken`] from `stored`, refreshing when inside the
-/// skew window. `persist` re-saves the refreshed blob into the caller's backend.
-fn validate_or_refresh(
+/// Return a currently-valid [`StoredToken`] from `stored`, refreshing when
+/// inside the skew window. `persist` re-saves the refreshed blob into the
+/// caller's backend; whatever it returns comes back as `Some` beside the
+/// token, so the caller knows a refresh happened and what the write found
+/// (the file backend's stamp, see [`TokenCache`]). `None` beside the token
+/// is the token as it was stored, nothing written.
+fn validate_or_refresh_stored<P>(
     stored: StoredToken,
     client: &OAuthClientConfig,
-    persist: impl FnOnce(&StoredToken) -> Result<()>,
-) -> Result<OAuthToken> {
-    validate_or_refresh_at(
+    persist: impl FnOnce(&StoredToken) -> Result<P>,
+) -> Result<(StoredToken, Option<P>)> {
+    validate_or_refresh_stored_at(
         stored,
         client,
         crate::auth::GOOGLE_TOKEN_URL,
@@ -314,15 +327,16 @@ fn validate_or_refresh(
     )
 }
 
-/// [`validate_or_refresh`] against an explicit token endpoint, so a test can
-/// drive the whole refresh-and-persist path against a scripted socket.
-fn validate_or_refresh_at(
+/// [`validate_or_refresh_stored`] against an explicit token endpoint, so a
+/// test can drive the whole refresh-and-persist path against a scripted
+/// socket.
+fn validate_or_refresh_stored_at<P>(
     stored: StoredToken,
     client: &OAuthClientConfig,
     token_url: &str,
     timeout: Duration,
-    persist: impl FnOnce(&StoredToken) -> Result<()>,
-) -> Result<OAuthToken> {
+    persist: impl FnOnce(&StoredToken) -> Result<P>,
+) -> Result<(StoredToken, Option<P>)> {
     if stored.is_expired(ChronoDuration::seconds(REFRESH_SKEW_SECS)) {
         let refresh = stored.refresh_token.clone().ok_or_else(|| {
             CoreError::Credential(
@@ -332,10 +346,127 @@ fn validate_or_refresh_at(
         })?;
         let refreshed = refresh_stored_token_detailed_at(client, &refresh, token_url, timeout)?;
         let fresh = carry_scopes_forward(&stored, refreshed);
-        persist(&fresh)?;
-        return Ok(fresh.into_oauth());
+        let persisted = persist(&fresh)?;
+        return Ok((fresh, Some(persisted)));
     }
-    Ok(stored.into_oauth())
+    Ok((stored, None))
+}
+
+/// [`validate_or_refresh_stored_at`] as the wire token, for the tests that
+/// drive the refresh against a scripted socket.
+#[cfg(test)]
+fn validate_or_refresh_at(
+    stored: StoredToken,
+    client: &OAuthClientConfig,
+    token_url: &str,
+    timeout: Duration,
+    persist: impl FnOnce(&StoredToken) -> Result<()>,
+) -> Result<OAuthToken> {
+    validate_or_refresh_stored_at(stored, client, token_url, timeout, persist)
+        .map(|(token, _)| token.into_oauth())
+}
+
+/// THE TOKEN IN MEMORY. Every Gmail call asked its credential store for a
+/// token, and the store read the backend each time: the credentials file
+/// (two file reads, an age decrypt and a JSON parse on a hosted box) or a
+/// keyring round trip, on a blocking thread, some fifty thousand times a day
+/// per idle daemon for a token that changes once an hour. The stores keep
+/// the decoded [`StoredToken`] here between calls and serve it while two
+/// things hold: it is not inside the refresh skew ([`REFRESH_SKEW_SECS`]
+/// before `expires_at`, the window the refresh path acts on, so a token due
+/// a refresh goes through that path exactly as before), and, for the file
+/// backend, the file is the one it was read from (its modification time, one
+/// `stat` per call), so a token installed by `squelchd auth` or refreshed by
+/// another process is picked up on the next call rather than at expiry. The
+/// 401 retry bypasses the cache outright ([`CredentialStore::fresh_token`]).
+///
+/// A backend with no stamp to check (the keyring) is trusted for
+/// [`KEYRING_CACHE_TTL`] at most, so a token rotated or revoked behind the
+/// daemon's back is seen within a minute by every consumer, the ones with no
+/// 401 retry of their own included, where it used to be seen on the next
+/// call. One keyring read a minute in place of one per Gmail call.
+///
+/// Shared by every clone of a store (the stores clone themselves onto the
+/// blocking thread), hence the `Arc`.
+#[derive(Clone, Default)]
+struct TokenCache(std::sync::Arc<std::sync::Mutex<Option<CachedToken>>>);
+
+struct CachedToken {
+    kind: CredentialKind,
+    stored: StoredToken,
+    /// The backend as it was when this was read: the file's stamp, or `None`
+    /// for a backend with none.
+    stamp: Option<FileStamp>,
+    read_at: std::time::Instant,
+}
+
+/// How long a token read from a backend WITHOUT a stamp (the keyring) is
+/// served from memory before the backend is read again.
+const KEYRING_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// What `stat` says about the credentials file: its modification time. Every
+/// write replaces the file by a rename, so a new write is a new time; the
+/// same stamp the calendar resolver's `granted` cache keys on.
+type FileStamp = std::time::SystemTime;
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+impl TokenCache {
+    /// THE ONE PATH: the cached slot and token if the backend still bears
+    /// `stamp` (or, with none, the cache is younger than
+    /// [`KEYRING_CACHE_TTL`]) and the token is not due a refresh; otherwise
+    /// `load` reads the backend (`None`: no slot answers), the token is
+    /// refreshed when due and written back through `persist`, which returns
+    /// the backend's stamp as the write left it (taken under the file lock,
+    /// so no other writer's file can be mistaken for this one's), and the
+    /// result is kept for next time.
+    fn serve(
+        &self,
+        stamp: Option<FileStamp>,
+        client: &OAuthClientConfig,
+        load: impl FnOnce() -> Result<Option<(CredentialKind, StoredToken)>>,
+        persist: impl FnOnce(CredentialKind, &StoredToken) -> Result<Option<FileStamp>>,
+    ) -> Result<Option<(CredentialKind, StoredToken)>> {
+        if let Some(found) = self.get(stamp) {
+            return Ok(Some(found));
+        }
+        let Some((kind, stored)) = load()? else {
+            return Ok(None);
+        };
+        let (fresh, persisted) =
+            validate_or_refresh_stored(stored, client, |fresh| persist(kind, fresh))?;
+        let stamp = persisted.unwrap_or(stamp);
+        if let Ok(mut guard) = self.0.lock() {
+            *guard = Some(CachedToken {
+                kind,
+                stored: fresh.clone(),
+                stamp,
+                read_at: std::time::Instant::now(),
+            });
+        }
+        Ok(Some((kind, fresh)))
+    }
+
+    fn get(&self, stamp: Option<FileStamp>) -> Option<(CredentialKind, StoredToken)> {
+        let guard = self.0.lock().ok()?;
+        let cached = guard.as_ref()?;
+        let same_backend = match stamp {
+            Some(stamp) => cached.stamp == Some(stamp),
+            None => cached.stamp.is_none() && cached.read_at.elapsed() < KEYRING_CACHE_TTL,
+        };
+        let due = cached
+            .stored
+            .is_expired(ChronoDuration::seconds(REFRESH_SKEW_SECS));
+        (same_backend && !due).then(|| (cached.kind, cached.stored.clone()))
+    }
+
+    fn clear(&self) {
+        if let Ok(mut guard) = self.0.lock() {
+            *guard = None;
+        }
+    }
 }
 
 /// Persist a token into the OS keyring at `(service = "squelch", slot)` where
@@ -389,6 +520,7 @@ pub struct KeyringCredentialStore {
     account_email: String,
     kind: CredentialKind,
     client: OAuthClientConfig,
+    cache: TokenCache,
 }
 
 impl KeyringCredentialStore {
@@ -409,6 +541,7 @@ impl KeyringCredentialStore {
             account_email,
             kind,
             client,
+            cache: TokenCache::default(),
         }
     }
 
@@ -422,14 +555,20 @@ impl KeyringCredentialStore {
         self.kind
     }
 
-    /// Synchronous core: load this kind's slot, refresh if needed, re-persist.
+    /// Synchronous core: the token held in memory while it is good (see
+    /// [`TokenCache`]), else load this kind's slot, refresh if needed,
+    /// re-persist, and keep what came of it.
     fn valid_token_blocking(&self) -> Result<OAuthToken> {
-        let stored = load_token(&self.account_email, self.kind)?;
-        let email = self.account_email.clone();
-        let kind = self.kind;
-        validate_or_refresh(stored, &self.client, |fresh| {
-            store_token(&email, kind, fresh)
-        })
+        let (email, kind) = (self.account_email.clone(), self.kind);
+        self.cache
+            .serve(
+                None,
+                &self.client,
+                || load_token(&email, kind).map(|stored| Some((kind, stored))),
+                |kind, fresh| store_token(&email, kind, fresh).map(|()| None),
+            )?
+            .map(|(_, stored)| stored.into_oauth())
+            .ok_or_else(|| CoreError::Credential("no stored credentials".to_string()))
     }
 
     fn clone_for_blocking(&self) -> KeyringCredentialStore {
@@ -438,6 +577,7 @@ impl KeyringCredentialStore {
             account_email: self.account_email.clone(),
             kind: self.kind,
             client: self.client.clone(),
+            cache: self.cache.clone(),
         }
     }
 }
@@ -455,6 +595,11 @@ impl CredentialStore for KeyringCredentialStore {
         tokio::task::spawn_blocking(move || store.valid_token_blocking())
             .await
             .map_err(|e| CoreError::Credential(format!("join error: {e}")))?
+    }
+
+    async fn fresh_token(&self, account: AccountId) -> Result<OAuthToken> {
+        self.cache.clear();
+        self.token(account).await
     }
 }
 
@@ -735,7 +880,7 @@ fn update_credentials_file(
     path: &Path,
     identity: Option<&AgeIdentity>,
     change: impl FnOnce(&mut CredentialsFile),
-) -> Result<()> {
+) -> Result<Option<FileStamp>> {
     static FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // A writer that panicked mid-update left at worst a stray temp file: the
     // real file is only ever replaced by a rename. So poison is not a reason
@@ -744,22 +889,24 @@ fn update_credentials_file(
     update_credentials_file_locked(path, identity, change, CREDENTIALS_LOCK_WAIT)
 }
 
-/// The read-modify-write under the cross-process lock alone. Separate from
-/// [`update_credentials_file`] so a test can stand two threads in for two
-/// processes, with no shared mutex between them.
+/// The read-modify-write under the cross-process lock alone, returning the
+/// file's stamp as the write left it, taken BEFORE the lock is released.
+/// Separate from [`update_credentials_file`] so a test can stand two threads
+/// in for two processes, with no shared mutex between them.
 fn update_credentials_file_locked(
     path: &Path,
     identity: Option<&AgeIdentity>,
     change: impl FnOnce(&mut CredentialsFile),
     wait: Duration,
-) -> Result<()> {
+) -> Result<Option<FileStamp>> {
     let _locked = CredentialsFileLock::acquire(path, wait)?;
     remove_stale_temp_files(path);
     let mut file = CredentialsFile::read(path, identity)?;
     #[cfg(test)]
     test_pause(path);
     change(&mut file);
-    file.write(path, identity)
+    file.write(path, identity)?;
+    Ok(file_stamp(path))
 }
 
 /// How long a write waits for another process's hold on the credentials file
@@ -960,6 +1107,35 @@ fn store_token_file_with(
     token: &StoredToken,
     identity: Option<&AgeIdentity>,
 ) -> Result<()> {
+    store_token_file_stamped_with(path, account_email, kind, token, identity).map(|_| ())
+}
+
+/// [`store_token_file`] that also returns the file's stamp as the write left
+/// it, taken while the write still holds the file lock, so a [`TokenCache`]
+/// can remember the file this token went into and no other writer's file
+/// (`squelchd auth` landing a moment later) can be mistaken for it.
+fn store_token_file_stamped(
+    path: &Path,
+    account_email: &str,
+    kind: CredentialKind,
+    token: &StoredToken,
+) -> Result<Option<FileStamp>> {
+    store_token_file_stamped_with(
+        path,
+        account_email,
+        kind,
+        token,
+        age_identity_from_env()?.as_ref(),
+    )
+}
+
+fn store_token_file_stamped_with(
+    path: &Path,
+    account_email: &str,
+    kind: CredentialKind,
+    token: &StoredToken,
+    identity: Option<&AgeIdentity>,
+) -> Result<Option<FileStamp>> {
     update_credentials_file(path, identity, |file| {
         file.slots
             .insert(kind.slot_key(account_email), token.clone());
@@ -1044,6 +1220,7 @@ pub struct FileCredentialStore {
     kind: CredentialKind,
     path: PathBuf,
     client: OAuthClientConfig,
+    cache: TokenCache,
 }
 
 impl FileCredentialStore {
@@ -1077,6 +1254,7 @@ impl FileCredentialStore {
             kind,
             path,
             client,
+            cache: TokenCache::default(),
         }
     }
 
@@ -1090,14 +1268,23 @@ impl FileCredentialStore {
         self.kind
     }
 
+    /// The token held in memory while it is good and the file is the one it
+    /// came from (see [`TokenCache`]), else the file's: read, refreshed if
+    /// due, re-persisted, and kept.
     fn valid_token_blocking(&self) -> Result<OAuthToken> {
-        let stored = load_token_file(&self.path, &self.account_email, self.kind)?;
-        let path = self.path.clone();
-        let email = self.account_email.clone();
-        let kind = self.kind;
-        validate_or_refresh(stored, &self.client, |fresh| {
-            store_token_file(&path, &email, kind, fresh)
-        })
+        // Stat BEFORE reading, so a write that lands between the two leaves a
+        // stale stamp in the cache and is read again next time.
+        let stamp = file_stamp(&self.path);
+        let (path, email, kind) = (self.path.clone(), self.account_email.clone(), self.kind);
+        self.cache
+            .serve(
+                stamp,
+                &self.client,
+                || load_token_file(&path, &email, kind).map(|stored| Some((kind, stored))),
+                |kind, fresh| store_token_file_stamped(&path, &email, kind, fresh),
+            )?
+            .map(|(_, stored)| stored.into_oauth())
+            .ok_or_else(|| CoreError::Credential("no stored credentials".to_string()))
     }
 
     fn clone_for_blocking(&self) -> FileCredentialStore {
@@ -1107,6 +1294,7 @@ impl FileCredentialStore {
             kind: self.kind,
             path: self.path.clone(),
             client: self.client.clone(),
+            cache: self.cache.clone(),
         }
     }
 }
@@ -1124,6 +1312,11 @@ impl CredentialStore for FileCredentialStore {
         tokio::task::spawn_blocking(move || store.valid_token_blocking())
             .await
             .map_err(|e| CoreError::Credential(format!("join error: {e}")))?
+    }
+
+    async fn fresh_token(&self, account: AccountId) -> Result<OAuthToken> {
+        self.cache.clear();
+        self.token(account).await
     }
 }
 
@@ -1169,6 +1362,7 @@ pub fn store_tokens_backend(
                         .insert(kind.slot_key(account_email), token.clone());
                 }
             })
+            .map(|_| ())
         }
         CredentialBackend::Keyring => {
             // What each slot held BEFORE this run, in the order they were
@@ -1288,11 +1482,15 @@ pub fn pick_calendar_slot(
 /// THE CALENDAR TOKEN RESOLVER: the one answer to "which token may call the
 /// Calendar API", bound to one account and one configured backend.
 ///
-/// Resolved on EVERY call rather than once at startup, because the answer
+/// Resolved from the backend rather than once at startup, because the answer
 /// changes under a running daemon: a self-host runs `squelchd auth --calendar`
-/// beside it, and a refresh can report the grant gone. The token it hands back
-/// refreshes exactly as the other slots do, and is persisted into the slot it
-/// came from, never into another.
+/// beside it, and a refresh can report the grant gone. Between calls the
+/// resolved slot and its token are held in memory (see [`TokenCache`]): on
+/// the file backend for as long as the file is the one they were read from,
+/// on the keyring for a minute at most, and the daemon's own Connect flow
+/// drops them the moment it stores a token. The token it hands back refreshes
+/// exactly as the other slots do, and is persisted into the slot it came
+/// from, never into another.
 ///
 /// A slot that cannot be read (absent, or a backend error) counts as holding
 /// nothing, so a broken calendar answer is "not granted" and never an error on
@@ -1309,6 +1507,9 @@ pub struct CalendarCredentials {
     /// backend at most once per [`GRANTED_TTL`]: on hosted that read is a file
     /// read plus an age decrypt, on a macOS self-host two Keychain reads.
     granted_cache: std::sync::Arc<std::sync::Mutex<Option<GrantedAnswer>>>,
+    /// The resolved slot's token between calls (see [`TokenCache`]): the
+    /// calendar sync asked for it every pass, two backend reads each.
+    token_cache: TokenCache,
 }
 
 /// One cached answer: when it was read, and for the file backend the file's
@@ -1324,8 +1525,9 @@ struct GrantedAnswer {
 
 /// How long [`CalendarCredentials::granted`] trusts its last answer. For the
 /// file backend a changed file ends it early; for the keyring, a fresh grant
-/// shows up within one or two polls. The sync loop does not use the cache (it
-/// resolves the token on every pass) and refreshes it with what it found.
+/// shows up within one or two polls. The sync loop does not use this cache;
+/// it resolves through the token cache ([`TokenCache`], a minute on the
+/// keyring) and refreshes this one with what it found.
 pub const GRANTED_TTL: Duration = Duration::from_secs(15);
 
 /// A token that may call the Calendar API, and whether it may also read the
@@ -1351,6 +1553,7 @@ impl CalendarCredentials {
             credentials_path,
             client,
             granted_cache: Default::default(),
+            token_cache: TokenCache::default(),
         }
     }
 
@@ -1388,8 +1591,11 @@ impl CalendarCredentials {
         })
         .map(|_| ());
         // Forgotten either way: after a failed write the slot may still have
-        // changed, and a fresh read costs one backend read.
+        // changed, and a fresh read costs one backend read. The token held in
+        // memory goes with it, or the sync pass this flow kicks off would run
+        // on the slot it resolved before the consent.
         self.forget_granted();
+        self.token_cache.clear();
         stored
     }
 
@@ -1463,7 +1669,8 @@ impl CalendarCredentials {
     }
 
     /// [`Self::calendar_token`] with whether the list scope is granted too,
-    /// for the sync loop. Never cached; refreshes the `granted` cache.
+    /// for the sync loop. Served through the token cache (see
+    /// [`TokenCache`]); refreshes the `granted` cache with what it found.
     pub async fn calendar_access(&self, account: AccountId) -> Result<Option<CalendarAccess>> {
         if account != self.account_id {
             return Err(CoreError::Credential(format!(
@@ -1473,8 +1680,9 @@ impl CalendarCredentials {
         }
         let this = self.clone();
         tokio::task::spawn_blocking(move || {
+            // One stat, keyed into both caches.
             let modified = this.file_modified();
-            let access = this.calendar_access_blocking();
+            let access = this.calendar_access_blocking(modified);
             if let Ok(found) = &access {
                 this.remember_granted(found.is_some(), modified);
             }
@@ -1484,17 +1692,15 @@ impl CalendarCredentials {
         .map_err(|e| CoreError::Credential(format!("join error: {e}")))?
     }
 
-    fn calendar_access_blocking(&self) -> Result<Option<CalendarAccess>> {
-        let Some((kind, stored)) = self.resolve_blocking() else {
+    fn calendar_access_blocking(&self, stamp: Option<FileStamp>) -> Result<Option<CalendarAccess>> {
+        let Some((_, stored)) = self.current_blocking_at(stamp)? else {
             return Ok(None);
         };
         let list_granted = stored.has_scope(crate::config::CALENDAR_LIST_SCOPE);
-        self.refresh_blocking(kind, stored).map(|token| {
-            Some(CalendarAccess {
-                token,
-                list_granted,
-            })
-        })
+        Ok(Some(CalendarAccess {
+            token: stored.into_oauth(),
+            list_granted,
+        }))
     }
 
     /// A currently valid access token for the Calendar API, or `Ok(None)` when
@@ -1514,24 +1720,38 @@ impl CalendarCredentials {
     }
 
     fn calendar_token_blocking(&self) -> Result<Option<OAuthToken>> {
-        let Some((kind, stored)) = self.resolve_blocking() else {
-            return Ok(None);
-        };
-        self.refresh_blocking(kind, stored).map(Some)
+        // Stat BEFORE reading, as `granted` does, so a write that lands
+        // between the two is read again next time.
+        let stamp = self.file_modified();
+        Ok(self
+            .current_blocking_at(stamp)?
+            .map(|(_, stored)| stored.into_oauth()))
     }
 
-    /// The slot's token, refreshed when due and persisted into that same slot
-    /// through the same path the Gmail stores use, under the file backend's
-    /// write lock.
-    fn refresh_blocking(&self, kind: CredentialKind, stored: StoredToken) -> Result<OAuthToken> {
+    /// The slot that answers right now and its currently valid token: from
+    /// memory while the last answer is good and the backend still bears
+    /// `stamp` (see [`TokenCache`]), else resolved from the backend,
+    /// refreshed when due and persisted into that same slot through the same
+    /// path the Gmail stores use, under the file backend's write lock, and
+    /// kept.
+    fn current_blocking_at(
+        &self,
+        stamp: Option<FileStamp>,
+    ) -> Result<Option<(CredentialKind, StoredToken)>> {
         let (backend, path, email) = (
             self.backend,
             self.credentials_path.clone(),
             self.account_email.clone(),
         );
-        validate_or_refresh(stored, &self.client, |fresh| {
-            store_token_backend(backend, &path, &email, kind, fresh)
-        })
+        self.token_cache.serve(
+            stamp,
+            &self.client,
+            || Ok(self.resolve_blocking()),
+            |kind, fresh| match backend {
+                CredentialBackend::File => store_token_file_stamped(&path, &email, kind, fresh),
+                CredentialBackend::Keyring => store_token(&email, kind, fresh).map(|()| None),
+            },
+        )
     }
 }
 
@@ -1545,6 +1765,11 @@ impl CredentialStore for CalendarCredentials {
         self.calendar_token(account).await?.ok_or_else(|| {
             CoreError::Credential("Google Calendar is not granted for this mailbox".to_string())
         })
+    }
+
+    async fn fresh_token(&self, account: AccountId) -> Result<OAuthToken> {
+        self.token_cache.clear();
+        self.token(account).await
     }
 }
 
@@ -1675,6 +1900,263 @@ mod tests {
             CredentialKind::Read.slot_key("you@x.com"),
             CredentialKind::Write.slot_key("you@x.com")
         );
+    }
+
+    /// PER-CALL COST OF `CredentialStore::token`, ignored by default: two
+    /// thousand calls against a FILE-backed store, sealed with an age
+    /// identity the way a hosted tenant's is, printing the wall time and
+    /// process CPU per call. Run the test binary under
+    /// `strace -f -c -e trace=openat,read,statx,newfstatat` to count what each
+    /// call asked the kernel for; `SQUELCH_BENCH_SKIP=1` runs the setup alone
+    /// so the two counts can be subtracted.
+    ///
+    /// ```text
+    /// cargo test -p squelch-core --lib credentials::tests::token_call_cost -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn token_call_cost() {
+        // A hand-rolled runtime holding `ENV_LOCK`, like the env-wiring test:
+        // this probe sets `SQUELCH_CRED_AGE_IDENTITY` for the sealed shape.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let (identity_path, _identity) = identity_file("token-call-cost");
+        // SAFETY: guarded by ENV_LOCK, and unset again below on every exit.
+        unsafe { std::env::set_var(CRED_AGE_IDENTITY_ENV, &identity_path) };
+        rt.block_on(token_call_cost_scenario());
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::remove_var(CRED_AGE_IDENTITY_ENV) };
+        let _ = std::fs::remove_file(&identity_path);
+    }
+
+    async fn token_call_cost_scenario() {
+        let path = tmp_path("token-call-cost");
+        let tok = StoredToken {
+            access_token: "access".into(),
+            refresh_token: Some("refresh".into()),
+            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: None,
+        };
+        store_token_file(&path, "you@x.com", CredentialKind::Read, &tok).unwrap();
+        let store = FileCredentialStore::new(1_i64, "you@x.com".into(), path.clone(), client());
+        if std::env::var_os("SQUELCH_BENCH_SKIP").is_some() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        let process_cpu = || {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            // SAFETY: `usage` is a valid, writable rusage for the call's duration.
+            let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+            assert_eq!(rc, 0, "getrusage(RUSAGE_SELF)");
+            let secs = |tv: libc::timeval| {
+                Duration::from_secs(tv.tv_sec as u64) + Duration::from_micros(tv.tv_usec as u64)
+            };
+            secs(usage.ru_utime) + secs(usage.ru_stime)
+        };
+        const CALLS: u32 = 2000;
+        let cpu_start = process_cpu();
+        let start = std::time::Instant::now();
+        for _ in 0..CALLS {
+            let token = store.token(1).await.unwrap();
+            assert_eq!(token.access_token, "access");
+        }
+        let elapsed = start.elapsed();
+        let cpu = process_cpu() - cpu_start;
+        eprintln!(
+            "BENCH token_call: {CALLS} calls in {elapsed:?} ({:?} per call), {cpu:?} process cpu ({:?} per call)",
+            elapsed / CALLS,
+            cpu / CALLS
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// THE CACHE SERVES THE FILE'S TOKEN WITHOUT RE-READING IT, for as long as
+    /// the file's stamp stands: the file's contents are swapped with the
+    /// modification time put back and the store still answers from memory;
+    /// `fresh_token` discards that copy and reads the swap; a write that
+    /// moves the stamp is read on the next call.
+    #[test]
+    fn file_store_serves_the_cached_token_until_the_file_changes() {
+        // A hand-rolled runtime holding `ENV_LOCK`, like the env-wiring test:
+        // this test writes the file and reads it back across seconds, and a
+        // neighbour flipping `SQUELCH_CRED_AGE_IDENTITY` in between would seal
+        // the write and then take the key away from the read.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        rt.block_on(file_store_serves_the_cached_token_scenario());
+    }
+
+    async fn file_store_serves_the_cached_token_scenario() {
+        let path = tmp_path("cache-serve");
+        let tok = |access: &str| StoredToken {
+            access_token: access.into(),
+            refresh_token: Some("r".into()),
+            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: None,
+        };
+        store_token_file(&path, "you@x.com", CredentialKind::Read, &tok("first!")).unwrap();
+        let store = FileCredentialStore::new(1_i64, "you@x.com".into(), path.clone(), client());
+        assert_eq!(store.token(1).await.unwrap().access_token, "first!");
+
+        // Modification time put back: the stamp the cache holds.
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        store_token_file(&path, "you@x.com", CredentialKind::Read, &tok("second")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_eq!(
+            store.token(1).await.unwrap().access_token,
+            "first!",
+            "served from memory: the file was not read"
+        );
+        assert_eq!(
+            store.fresh_token(1).await.unwrap().access_token,
+            "second",
+            "the retry after a 401 reads the file"
+        );
+
+        // A write that moves the stamp is seen at once.
+        store_token_file(&path, "you@x.com", CredentialKind::Read, &tok("third!")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified + Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(store.token(1).await.unwrap().access_token, "third!");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// INSIDE THE REFRESH SKEW THE CACHE STEPS ASIDE: a token it served a
+    /// moment ago is not served once it is due a refresh, and the refresh
+    /// path runs exactly as it would have with no cache (here, to the error
+    /// a token without a refresh token earns).
+    #[test]
+    fn file_store_does_not_serve_a_cached_token_once_it_is_due_a_refresh() {
+        // `ENV_LOCK`, for the reason above: a write and a read a second apart.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        rt.block_on(file_store_refresh_skew_scenario());
+    }
+
+    async fn file_store_refresh_skew_scenario() {
+        let path = tmp_path("cache-skew");
+        let tok = StoredToken {
+            access_token: "soon".into(),
+            refresh_token: None,
+            expires_at: Some(Utc::now() + ChronoDuration::seconds(REFRESH_SKEW_SECS + 1)),
+            scopes: None,
+        };
+        store_token_file(&path, "you@x.com", CredentialKind::Read, &tok).unwrap();
+        let store = FileCredentialStore::new(1_i64, "you@x.com".into(), path.clone(), client());
+        assert_eq!(store.token(1).await.unwrap().access_token, "soon");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let err = store.token(1).await.unwrap_err().to_string();
+        assert!(
+            err.contains("no refresh token"),
+            "the refresh path ran, not the cache: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// THE CALENDAR RESOLVER KEEPS ITS ANSWER THE SAME WAY: the slot and the
+    /// token it resolved are served from memory while the file stands, and
+    /// an install that rewrites the file is resolved afresh.
+    #[test]
+    fn calendar_resolver_serves_the_cached_slot_until_the_file_changes() {
+        // `ENV_LOCK`, for the reason above.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        rt.block_on(calendar_resolver_cache_scenario());
+    }
+
+    async fn calendar_resolver_cache_scenario() {
+        let path = tmp_path("calendar-cache");
+        let resolver = CalendarCredentials::new(
+            3_i64,
+            "you@x.com".into(),
+            CredentialBackend::File,
+            path.clone(),
+            client(),
+        );
+        let scoped = |access: &str| StoredToken {
+            access_token: access.into(),
+            refresh_token: Some("r".into()),
+            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: Some(vec![crate::config::CALENDAR_EVENTS_SCOPE.to_string()]),
+        };
+        store_token_file(
+            &path,
+            "you@x.com",
+            CredentialKind::Calendar,
+            &scoped("cal-1"),
+        )
+        .unwrap();
+        assert_eq!(
+            resolver
+                .calendar_token(3_i64)
+                .await
+                .unwrap()
+                .unwrap()
+                .access_token,
+            "cal-1"
+        );
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        store_token_file(
+            &path,
+            "you@x.com",
+            CredentialKind::Calendar,
+            &scoped("cal-2"),
+        )
+        .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_eq!(
+            resolver
+                .calendar_token(3_i64)
+                .await
+                .unwrap()
+                .unwrap()
+                .access_token,
+            "cal-1",
+            "served from memory under the same stamp"
+        );
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified + Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(
+            resolver
+                .calendar_token(3_i64)
+                .await
+                .unwrap()
+                .unwrap()
+                .access_token,
+            "cal-2",
+            "a moved stamp is resolved afresh"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     fn tmp_path(name: &str) -> PathBuf {

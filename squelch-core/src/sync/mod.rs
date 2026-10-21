@@ -1303,25 +1303,32 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
     /// Send a GET with a Bearer token, retrying once on 401 with a fresh token.
     async fn send_get(&self, url: &str, quiet: bool) -> Result<reqwest::Response> {
-        let token = self.token_for_request().await?;
+        let token = self.token_for_request(false).await?;
         let resp = self.bearer_get(url, &token.access_token, quiet).await?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             // Redacted: the fact of a retry, never token/header content.
             eprintln!("squelch: gmail 401; refreshing token and retrying once");
-            let token = self.token_for_request().await?;
+            // FRESH: past the store's in-memory copy, which is the token Gmail
+            // just refused; the backend may hold a newer one.
+            let token = self.token_for_request(true).await?;
             return self.bearer_get(url, &token.access_token, quiet).await;
         }
         Ok(resp)
     }
 
-    /// The access token for one Gmail call. A credential failure never reaches
-    /// a status code — the refresh exchange is what failed, `invalid_grant`
-    /// included — so it is counted as `auth` on the typed variant here rather
-    /// than string-matched out of an error chain later.
-    async fn token_for_request(&self) -> Result<crate::credentials::OAuthToken> {
-        self.creds
-            .token(self.account_id)
-            .await
+    /// The access token for one Gmail call (`fresh`: past the credential
+    /// store's in-memory copy, for the retry after a 401). A credential
+    /// failure never reaches a status code — the refresh exchange is what
+    /// failed, `invalid_grant` included — so it is counted as `auth` on the
+    /// typed variant here rather than string-matched out of an error chain
+    /// later.
+    async fn token_for_request(&self, fresh: bool) -> Result<crate::credentials::OAuthToken> {
+        let token = if fresh {
+            self.creds.fresh_token(self.account_id).await
+        } else {
+            self.creds.token(self.account_id).await
+        };
+        token
             // The SUCCESS half, and it is not decoration: the failure below sets
             // a state a client renders as "your mailbox is disconnected", so
             // something has to clear it when the credential works again. Without
@@ -5647,6 +5654,65 @@ mod tests {
             assert!(metrics.contains("squelchd_gmail_quota_retries_total 1\n"));
             assert!(metrics.contains("squelchd_gmail_api_errors_total{kind=\"quota\"} 0\n"));
         }
+    }
+
+    /// A credential store that counts how often the engine asked past its
+    /// in-memory copy ([`CredentialStore::fresh_token`]).
+    #[derive(Clone, Default)]
+    struct CountingToken {
+        fresh: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl CredentialStore for CountingToken {
+        async fn token(&self, _account: AccountId) -> Result<crate::credentials::OAuthToken> {
+            Ok(crate::credentials::OAuthToken {
+                access_token: "cached-token".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            })
+        }
+        async fn fresh_token(&self, account: AccountId) -> Result<crate::credentials::OAuthToken> {
+            self.fresh.fetch_add(1, Ordering::SeqCst);
+            self.token(account).await
+        }
+    }
+
+    /// THE 401 RETRY ASKS PAST THE CACHE: the first attempt takes the token
+    /// the store has in memory, and the retry after Gmail refuses it asks
+    /// for a fresh one, so a token rotated behind the daemon's back is picked
+    /// up on the retry rather than at expiry.
+    #[tokio::test]
+    async fn a_401_retries_once_with_a_token_read_past_the_cache() {
+        let g = MockGmail::default();
+        g.0.lock()
+            .unwrap()
+            .errors
+            .insert("label:INBOX".into(), [(401, "authError".into())].into());
+        g.label(LABEL_INBOX, Some((2, 1)));
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        let creds = CountingToken::default();
+        let e = SyncEngine::new(
+            store.clone(),
+            Arc::new(creds.clone()),
+            acct,
+            "me@example.com".to_string(),
+            Config::default(),
+        )
+        .with_api_base(base);
+        e.refresh_inbox_unread().await;
+        assert_eq!(g.calls("label:INBOX"), 2, "refused once, retried once");
+        assert_eq!(
+            creds.fresh.load(Ordering::SeqCst),
+            1,
+            "the retry, and only the retry, asked past the cache"
+        );
+        assert_eq!(
+            store.inbox_unread(acct).unwrap().unwrap().messages,
+            2,
+            "and the retry succeeded"
+        );
     }
 
     #[tokio::test]

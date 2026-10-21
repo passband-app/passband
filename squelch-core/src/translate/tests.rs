@@ -514,7 +514,7 @@ async fn an_injected_phone_number_is_retried_then_rejected() {
     let sent = backend.sent();
     assert!(!sent[0].0.contains("Do not add"));
     assert!(sent[1].0.contains("Do not add them"), "{}", sent[1].0);
-    assert!(sent[1].0.contains("[\"1555\", \"0100\"]"), "{}", sent[1].0);
+    assert!(sent[1].0.contains("[\"+1 555 0100\"]"), "{}", sent[1].0);
 }
 
 #[tokio::test]
@@ -548,7 +548,7 @@ async fn an_answer_that_only_misses_beats_one_that_adds() {
         answer(segments.iter().map(|s| s.replace("ZX81Q9", "")).collect())
     }
     fn adds(segments: &[String]) -> LlmOutcome<String> {
-        answer(segments.iter().map(|s| format!("{s} 98765")).collect())
+        answer(segments.iter().map(|s| format!("{s} 98765432")).collect())
     }
     let backend = Scripted::new(vec![ok(drops), ok(adds)]);
     let run = translate_message(&backend, plain("Bonjour, code ZX81Q9")).await;
@@ -557,7 +557,68 @@ async fn an_answer_that_only_misses_beats_one_that_adds() {
     };
     // The first answer, incomplete, is served; the second never is.
     assert_eq!(t.missing_facts, vec!["ZX81Q9".to_string()]);
-    assert!(!t.body.contains("98765"));
+    assert!(!t.body.contains("98765432"));
+}
+
+#[tokio::test]
+async fn a_number_word_written_in_digits_is_served_with_a_note_and_no_retry() {
+    fn digits(segments: &[String]) -> LlmOutcome<String> {
+        answer(
+            segments
+                .iter()
+                .map(|s| {
+                    s.replace("deux mille euros", "2,000 euros")
+                        .replace("Bonjour", "Hello")
+                })
+                .collect(),
+        )
+    }
+    let backend = Scripted::new(vec![ok(digits)]);
+    let run = translate_message(&backend, plain("Bonjour, la somme de deux mille euros")).await;
+    let TranslateOutcome::Translated(t) = run.outcome else {
+        panic!("{:?}", run.outcome)
+    };
+    assert_eq!(run.model_calls, 1, "an added number buys no retry");
+    assert_eq!(
+        t.missing_facts,
+        vec![format!("{ADDED_NUMBERS_NOTE}: 2,000")]
+    );
+}
+
+#[tokio::test]
+async fn a_count_failure_after_an_addition_is_a_failure_not_a_rejection() {
+    fn adds(segments: &[String]) -> LlmOutcome<String> {
+        answer(
+            segments
+                .iter()
+                .map(|s| format!("{s} https://evil.example/x"))
+                .collect(),
+        )
+    }
+    fn short(_: &[String]) -> LlmOutcome<String> {
+        answer(Vec::new())
+    }
+    let backend = Scripted::new(vec![ok(adds), ok(short)]);
+    let run = translate_message(&backend, plain("Bonjour tout le monde")).await;
+    assert_eq!(
+        run.outcome,
+        TranslateOutcome::Failed("translate_count_mismatch".into())
+    );
+}
+
+#[test]
+fn a_cjk_batch_is_sized_by_its_answer() {
+    // 2,700 chars: 2,400 kana and kanji at the dense weight, 300 `。`.
+    let cjk = "これはテストです。".repeat(300);
+    assert_eq!(weight(&cjk), 2_400 * DENSE_SCRIPT_WEIGHT + 300);
+    let segs = vec![cjk.clone(), cjk.clone()];
+    assert_eq!(batches(&segs), vec![0..1, 1..2]);
+    // One long CJK paragraph splits into pieces of about 2,000 characters.
+    let long = "これはテストです。".repeat(1_000);
+    for (piece, _) in split_long(&long) {
+        assert!(weight(&piece) <= BATCH_SOURCE_CHARS);
+        assert!(piece.chars().count() <= 2_300, "{}", piece.chars().count());
+    }
 }
 
 #[tokio::test]

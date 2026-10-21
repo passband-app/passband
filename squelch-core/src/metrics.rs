@@ -409,6 +409,7 @@ pub struct SyncMetrics {
     /// The 2026-08-19 outage was ~900 of these a day reading as generic
     /// retryables; this is the series a dashboard alerts on.
     llm_config_failures: AtomicU64,
+    translate_config_failures: AtomicU64,
     /// Unix seconds of the last LLM call ANY pass got a real verdict from.
     /// 0 = never, so `time() - metric` fires on a daemon whose LLM path has
     /// never worked rather than evaluating to nothing. Stamped from the Ok
@@ -849,6 +850,15 @@ impl SyncMetrics {
     /// this tenant's LLM path broken" no matter which pass noticed first.
     pub fn record_llm_config_failure(&self) {
         self.llm_config_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One config-level failure of the TRANSLATE pass, counted apart from
+    /// [`Self::record_llm_config_failure`]: translation runs its own model and
+    /// its own cooldown, so a translate model missing from an allow-list must
+    /// not read as "triage is stalled". Once per row per run of releases.
+    pub fn record_translate_config_failure(&self) {
+        self.translate_config_failures
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A first backfill stopped waiting for the embedder at the ceiling and went
@@ -1787,8 +1797,17 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         "squelchd_llm_config_failures_total",
         MetricKind::Counter,
         "Config-level LLM failures (4xx shared by every row: bad key, disallowed model, \
-         spent gateway budget) across all passes. Rows stay queued; alert on any rate.",
+         spent gateway budget) in triage and notify. Rows stay queued; alert on any rate. \
+         The translate pass counts its own in squelchd_translate_config_failures_total.",
         metrics.get(&metrics.llm_config_failures),
+    );
+    e.scalar(
+        "squelchd_translate_config_failures_total",
+        MetricKind::Counter,
+        "Config-level failures of the translate pass (its model rejected, its key or budget \
+         refused), counted once per row per run of releases. Translations stay queued; \
+         triage is not affected.",
+        metrics.get(&metrics.translate_config_failures),
     );
 
     // 0 until an LLM call has ever answered, for the same reason the sync

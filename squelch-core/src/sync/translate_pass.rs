@@ -17,19 +17,37 @@
 //! equally a provider outage (5xx, 429, 529, a timeout): every other row
 //! would fail the same way, and a row marked failed for it would spend one of
 //! its bounded attempts on a fact about the deployment rather than about the
-//! mail. Those rows are RELEASED (their attempt and their daily-cap charge
-//! handed back, their backoff kept) and the pass cools down: for
-//! `triage.agent.outage_retry_secs` on a configuration failure, for
-//! [`OUTAGE_COOLDOWN_SECS`] on an outage. The cooldown is this pass's own: a
-//! translate model missing from an allow-list says nothing about the triage
-//! model, and must not stop triage.
+//! mail. Those rows are RELEASED (their attempt handed back, their backoff
+//! kept) and the pass cools down: for `triage.agent.outage_retry_secs` on a
+//! configuration failure, for [`OUTAGE_COOLDOWN_SECS`] on an outage. The
+//! cooldown is this pass's own: a translate model missing from an allow-list
+//! says nothing about the triage model, and must not stop triage.
 //!
-//! THE DAILY CAP (`[translate].daily_cap`) counts messages sent to the
-//! translator. Over it, queued rows wait for the next UTC day.
+//! UNLESS THE FAILURE IS THE MESSAGE'S OWN. When another row of the same
+//! round got an answer, the gateway is fine and this row's failure (a batch
+//! that times out every time, a 4xx its content draws) is charged to it as
+//! an ordinary failure. And a row released `MAX_CONSECUTIVE_RELEASES` times
+//! in a row is charged on the next one by the store. Either way it runs out
+//! of attempts instead of being claimed and released forever, and the config
+//! failure counter (`squelchd_translate_config_failures_total`, its own,
+//! never triage's) counts a row's first release only.
+//!
+//! THE DAILY BUDGET (`[translate].daily_budget_usd`) is dollars, priced at
+//! the translate prices from today's `translate` usage line. Each message's
+//! cost is estimated before its call ([`translate::estimate_tokens`]) and
+//! goes only if it fits what is left; the spend itself is settled from the
+//! usage the provider reported. Over it, queued rows wait for the next UTC
+//! day.
 
 use super::*;
 use crate::store::{TranslationJob, TranslationWrite};
 use crate::translate::{self, TranslateInput, TranslateOutcome, TranslateRun};
+
+/// A failure that is not about the message: a configuration failure or a
+/// provider outage, which every other row would draw too.
+fn failure_is_global(kind: &str) -> bool {
+    crate::triage::llm::is_config_failure(kind) || super::triage_worker::is_provider_outage(kind)
+}
 
 /// Rows one round claims. Small on purpose: a round's results land together,
 /// and four concurrent calls bound one account's share of the gateway.
@@ -81,60 +99,56 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             return false;
         }
         let day = now.format("%Y-%m-%d").to_string();
-        let cap = self.config.translate.daily_cap;
-        let room = match self
-            .store
-            .stage2_budget_used(self.account_id, TRANSLATE_BUDGET_KEY, &day)
-        {
-            Ok(used) if used >= cap => {
-                if self.translate_budget().warn_once(CapKind::Translate, &day) {
-                    eprintln!(
-                        "squelch: translate daily budget exhausted ({used}/{cap}); \
-                         queued translations wait for tomorrow"
-                    );
-                }
-                return false;
-            }
-            Ok(used) => (cap - used) as usize,
+        let budget = self.config.translate.daily_budget_usd;
+        let spent = match self.translate_spent_usd(&day) {
+            Ok(spent) => spent,
             Err(e) => {
                 eprintln!("squelch: translate budget read failed ({e}); skipping round");
                 return false;
             }
         };
-        let jobs =
-            match self
-                .store
-                .claim_translations(self.account_id, now, TRANSLATE_BATCH.min(room))
-            {
-                Ok(jobs) => jobs,
-                Err(e) => {
-                    eprintln!("squelch: translate claim failed ({e})");
-                    return false;
-                }
-            };
+        if spent >= budget {
+            self.translate_budget_exhausted(&day, spent);
+            return false;
+        }
+        let jobs = match self
+            .store
+            .claim_translations(self.account_id, now, TRANSLATE_BATCH)
+        {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                eprintln!("squelch: translate claim failed ({e})");
+                return false;
+            }
+        };
         if jobs.is_empty() {
             return false;
         }
-        // CHARGED BEFORE THE CALL, the cap's usual rule, so a retry storm
-        // cannot run past it. A row the store cannot charge is released.
+        // ESTIMATED BEFORE THE CALL: a message goes only if its estimate
+        // fits what today has left beside the others of this round. One that
+        // does not is handed back untouched, for a later round or tomorrow.
+        let mut reserved = 0.0;
         let mut charged = Vec::with_capacity(jobs.len());
         for job in jobs {
-            match self
-                .store
-                .stage2_increment_budget(self.account_id, TRANSLATE_BUDGET_KEY, &day)
+            let (tin, tout) = translate::estimate_tokens(TranslateInput {
+                subject: &job.subject,
+                body: &job.body,
+                body_html: job.body_html.as_deref(),
+            });
+            let estimate = self.translate_price_usd(tin, tout, 0, 0);
+            if spent + reserved + estimate <= budget {
+                reserved += estimate;
+                charged.push(job);
+            } else if let Err(e) =
+                self.store
+                    .record_translation(&job, &TranslationWrite::Returned, now)
             {
-                Ok(_) => charged.push(job),
-                Err(e) => {
-                    eprintln!("squelch: translate budget increment failed ({e}); releasing row");
-                    let _ = self
-                        .store
-                        .record_translation(&job, &TranslationWrite::Released, now);
-                }
+                eprintln!("squelch: translate row not handed back ({e})");
             }
         }
         if charged.is_empty() {
-            // Nothing went out: not "work done", or a store that cannot
-            // write would spin the lane.
+            // Nothing fits today: as good as spent.
+            self.translate_budget_exhausted(&day, spent);
             return false;
         }
         let runs = futures::future::join_all(charged.iter().map(|job| {
@@ -153,10 +167,75 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }))
         .await;
         let model = backend.model().to_string();
+        // A row whose call failed on configuration or an outage while
+        // another row of this round got an answer: the gateway works, the
+        // failure is this message's.
+        let any_answer = runs.iter().any(|r| match &r.outcome {
+            TranslateOutcome::Failed(kind) => !failure_is_global(kind),
+            _ => true,
+        });
         for (job, run) in charged.iter().zip(runs) {
-            self.finish_translation(job, run, &model, &day).await;
+            self.finish_translation(job, run, &model, &day, any_answer)
+                .await;
         }
         true
+    }
+
+    /// Today's translate spend in dollars, from the usage the provider
+    /// reported for the `translate` category, at the translate prices.
+    fn translate_spent_usd(&self, day: &str) -> crate::error::Result<f64> {
+        let u = self
+            .store
+            .category_usage_since(self.account_id, day, translate::USAGE_CATEGORY)?;
+        Ok(self.translate_price_usd(
+            u.input_tokens,
+            u.output_tokens,
+            u.cache_creation_tokens,
+            u.cache_read_tokens,
+        ))
+    }
+
+    /// Tokens priced at `[translate]`'s rates, cache tokens the way
+    /// `metrics::estimate_cost_usd` prices them.
+    fn translate_price_usd(&self, input: u64, output: u64, cache_w: u64, cache_r: u64) -> f64 {
+        let (pin, pout) = (
+            self.config.translate.price_in_per_mtok,
+            self.config.translate.price_out_per_mtok,
+        );
+        (input as f64 * pin
+            + output as f64 * pout
+            + cache_w as f64 * pin * crate::config::CACHE_WRITE_INPUT_MULT
+            + cache_r as f64 * pin * crate::config::CACHE_READ_INPUT_MULT)
+            / 1_000_000.0
+    }
+
+    /// Log the day's budget as spent, once per UTC day. The same stamp tells
+    /// ingest the translator has nothing left today ([`Self::translate_over_budget`]).
+    fn translate_budget_exhausted(&self, day: &str, spent: f64) {
+        if self.translate_budget().warn_once(CapKind::Translate, day) {
+            eprintln!(
+                "squelch: translate daily budget exhausted (${spent:.2} of ${:.2}); \
+                 queued translations wait for tomorrow",
+                self.config.translate.daily_budget_usd
+            );
+        }
+    }
+
+    /// Whether the translator has no budget left today: the pass found it
+    /// spent, or today's billed usage already reaches it. Ingest asks it of a
+    /// non-English message, to queue it without holding its triage (and a
+    /// backfilled one `deferred`). A ledger it cannot read says no.
+    pub(super) fn translate_over_budget(&self, now: DateTime<Utc>) -> bool {
+        let day = now.format("%Y-%m-%d").to_string();
+        let stamped = self
+            .warn_days
+            .lock()
+            .map(|g| g.translate.as_deref() == Some(day.as_str()))
+            .unwrap_or(false);
+        stamped
+            || self
+                .translate_spent_usd(&day)
+                .is_ok_and(|spent| spent >= self.config.translate.daily_budget_usd)
     }
 
     async fn finish_translation(
@@ -165,6 +244,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         run: TranslateRun,
         model: &str,
         day: &str,
+        any_answer: bool,
     ) {
         // BILLED FIRST, whatever the outcome: a refused or malformed answer
         // still cost what it cost. A call that reported no usage (a timeout,
@@ -210,18 +290,28 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     prompt_version: translate::PROMPT_VERSION,
                 }
             }
+            TranslateOutcome::Failed(kind) if failure_is_global(kind) && any_answer => {
+                // The gateway answered another row this round: this failure
+                // is the message's own, an ordinary failure with backoff.
+                eprintln!(
+                    "squelch: translation failed for message {} ({kind}, attempt {}; \
+                     other rows translated, so not a provider fault)",
+                    job.message_id, job.attempts
+                );
+                TranslationWrite::Failed { model }
+            }
             TranslateOutcome::Failed(kind) if crate::triage::llm::is_config_failure(kind) => {
-                self.metrics.record_llm_config_failure();
+                // Counted once per run of releases, not once per cycle: a
+                // row the store is about to charge has been counted already.
+                if job.releases == 0 {
+                    self.metrics.record_translate_config_failure();
+                }
                 let secs = self.config.triage.agent.outage_retry_secs.min(86_400) as i64;
                 self.translate_cool_down(now, secs, "rejected the request", kind);
-                self.translate_budget()
-                    .refund(TRANSLATE_BUDGET_KEY, day, "translate pass");
                 TranslationWrite::Released
             }
             TranslateOutcome::Failed(kind) if super::triage_worker::is_provider_outage(kind) => {
                 self.translate_cool_down(now, OUTAGE_COOLDOWN_SECS, "is unavailable", kind);
-                self.translate_budget()
-                    .refund(TRANSLATE_BUDGET_KEY, day, "translate pass");
                 TranslationWrite::Released
             }
             TranslateOutcome::Failed(kind) => {
@@ -252,7 +342,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
     }
 
-    /// The account's daily-budget ledger, for the translate cap.
+    /// The account's daily-budget ledger: its once-a-day warning slot.
     fn translate_budget(&self) -> BudgetLedger<'_, S> {
         BudgetLedger {
             store: &*self.store,

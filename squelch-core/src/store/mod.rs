@@ -323,6 +323,11 @@ pub struct TriagedMessage {
     /// the archive tier. Ingest leaves it `None` for spam and sent mail, and
     /// the store refuses both again, plus the account's own and sealed mail.
     pub translate_lang: Option<crate::translate::Lang>,
+    /// The translator has no budget left today (`translate.daily_budget_usd`
+    /// spent). Then live mail is queued without holding its triage, and a
+    /// backfilled message is queued `deferred` (translated when the reader
+    /// opens it) rather than `pending` for days.
+    pub translate_over_budget: bool,
 }
 
 /// Where a message's translation stands (`message_translations.status`).
@@ -394,6 +399,10 @@ pub struct TranslationJob {
     /// keeps its backoff.
     pub prev_status: TranslationStatus,
     pub prev_updated_at: i64,
+    /// Consecutive releases before this claim. At
+    /// `MAX_CONSECUTIVE_RELEASES` a [`TranslationWrite::Released`] is charged
+    /// to the row instead, so the pass knows not to raise the alarm again.
+    pub releases: i64,
 }
 
 /// What the translate pass writes back for a claimed row.
@@ -417,8 +426,13 @@ pub enum TranslationWrite<'a> {
     /// budget, a model the gateway will not serve, a provider outage or
     /// timeout), so the row is exactly as translatable as it was, and goes
     /// back to the status and backoff it had before the claim. The pass that
-    /// releases it stops and cools down.
+    /// releases it stops and cools down. After `MAX_CONSECUTIVE_RELEASES`
+    /// in a row it is charged instead (`failed`, the attempt spent): a
+    /// failure only this message keeps drawing is about the message.
     Released,
+    /// Hand the claim back untouched because the pass never tried it (no
+    /// room left in today's budget). Not counted as a release.
+    Returned,
 }
 
 /// A stored translation row.
@@ -3094,6 +3108,16 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// trailing-window Stage-1 averages on `/client/triage-config`.
     fn stage1_usage_since(&self, account_id: AccountId, since_day: &str) -> Result<Stage2Usage>;
 
+    /// Sum ONE usage-ledger category over every day `>= since_day`. The
+    /// translate pass reads today's `translate` line to settle its dollar
+    /// budget from what the provider actually billed.
+    fn category_usage_since(
+        &self,
+        account_id: AccountId,
+        since_day: &str,
+        category: &str,
+    ) -> Result<Stage2Usage>;
+
     /// Bump a SPECIALIST-EXTRACTOR usage line for `(account_id, day, category)`.
     /// `category` is the extractor's own ledger label (e.g. `extract_banking`),
     /// kept separate from `stage1`/`stage2` so per-specialist cost stays visible.
@@ -3301,9 +3325,9 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     // ---- auto-translate (docs/TRANSLATION.md) ------------------------------
 
     /// Queue one message for translation from `source_lang` (ISO 639-1),
-    /// `deferred` for the archive tier. A row that exists is left alone.
-    /// Ingest queues its own rows inside its transaction; this is for
-    /// everything else.
+    /// `deferred` for the archive tier. A row that exists is left alone. A
+    /// `pending` row holds its triage like newly arrived mail. Ingest queues
+    /// its own rows inside its transaction; this is for everything else.
     fn queue_translation(
         &self,
         account_id: AccountId,

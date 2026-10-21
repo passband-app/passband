@@ -583,6 +583,7 @@ pub(super) fn correct_agent_triage_conn(
         apply_corrections(conn, account, message, &mut decision)?;
         conn.execute("UPDATE agent_message_decisions SET decision_json=?3 WHERE account_id=?1 AND message_id=?2",
         params![account,message,json(&decision)?])?;
+        super::translations::close_if_untranslatable_conn(conn, account, message, now)?;
         if field == "destinations" {
             conn.execute(
                 "DELETE FROM agent_message_destinations WHERE account_id=?1 AND message_id=?2",
@@ -817,6 +818,24 @@ pub(crate) fn reseed_archive_snapshot_conn(
             ],
         )?;
     }
+    Ok(())
+}
+
+/// Bring `message`'s stored content snapshot in line with the row as it now
+/// stands, WITHOUT a new revision, an access reset or a job: for a change the
+/// agent must not be asked about again. The one caller is a sealed message
+/// losing its translation, where sealing is terminal.
+pub(crate) fn refresh_snapshot_in_place_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<()> {
+    let snapshot = content_snapshot(&read_message(conn, account, message)?)?;
+    conn.execute(
+        "UPDATE agent_message_state SET content_snapshot=?3
+         WHERE account_id=?1 AND message_id=?2 AND content_snapshot!=?3",
+        params![account, message, snapshot],
+    )?;
     Ok(())
 }
 
@@ -1912,6 +1931,14 @@ impl AgentTriageStore for SqliteStore {
              VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account_id,message_id) DO UPDATE SET
              revision=excluded.revision,decision_json=excluded.decision_json,decided_at=excluded.decided_at",
         params![job.account_id,job.message_id,revision,json(decision)?,Utc::now().to_rfc3339()])?;
+        // A decision that SEALS the message closes its translation here, at
+        // the event (docs/TRANSLATION.md, "Sealed mail").
+        super::translations::close_if_untranslatable_conn(
+            &tx,
+            job.account_id,
+            job.message_id,
+            Utc::now(),
+        )?;
         tx.execute(
             "UPDATE agent_message_state SET access=?1 WHERE account_id=?2 AND message_id=?3",
             params![

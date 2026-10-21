@@ -1465,23 +1465,38 @@ impl SqliteStore {
         //     spam, sent, the account's own or sealed mail, whatever the caller
         //     carried: the stored row is asked, with the same authorship test
         //     the human thread view uses and the same sealed predicate as the
-        //     Auth page. A re-ingest keeps the row it has (a live sighting of
-        //     a `deferred` row promotes it); a heal replaced the text the row
+        //     Auth page. A row that exists is kept (a re-ingest must not throw
+        //     away a translation it paid for), unless THIS ingest made the
+        //     message spam or own mail: then the row is closed here, at the
+        //     event, its served text dropped. A heal replaced the text the row
         //     was translated from, so it starts over.
+        //
+        //     Only NEWLY ARRIVED mail holds its triage for the translation; a
+        //     backfill is triaged on the original at once and re-triaged when
+        //     the English lands. Over the day's translate budget, nothing
+        //     holds, and a backfilled message waits `deferred` for its reader.
         if heal.is_some() {
             super::translations::drop_translation_conn(&tx, id)?;
         }
-        if let Some(lang) = triaged.translate_lang
+        if super::translations::is_untranslatable_conn(&tx, id)? {
+            super::translations::close_if_untranslatable_conn(
+                &tx,
+                triaged.message.account_id,
+                id,
+                Utc::now(),
+            )?;
+        } else if let Some(lang) = triaged.translate_lang
             && !triaged.message.is_spam
             && !triaged.message.is_sent
-            && !super::translations::is_untranslatable_conn(&tx, id)?
         {
+            let arrival = triaged.foreground_triage && heal.is_none();
             super::translations::queue_translation_conn(
                 &tx,
                 triaged.message.account_id,
                 id,
                 lang.code(),
-                archive,
+                archive || (!arrival && triaged.translate_over_budget),
+                arrival && !triaged.translate_over_budget,
                 Utc::now(),
             )?;
         }

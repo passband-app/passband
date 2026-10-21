@@ -488,14 +488,18 @@ pub struct TranslateConfig {
     /// USD per million output tokens for `model`. Default 10.0, Claude
     /// Sonnet 5's list price.
     pub price_out_per_mtok: f64,
-    /// Per-account-per-day cap on messages sent to the translator, counted in
-    /// the `wake_budget` ledger on its own key, like
-    /// [`NotifyConfig::daily_cap`] and [`RevisitPassConfig::daily_cap`]: a
-    /// runaway guard, not a working budget, and no `app_settings` override.
-    /// Over it, queued rows stay `pending` until the next UTC day, and triage
-    /// stops waiting on them after its bounded wait. A claim released on a
-    /// provider or configuration failure gives its charge back. Default 300.
-    pub daily_cap: u32,
+    /// Per-account-per-day spend cap in US dollars, priced at
+    /// [`Self::price_in_per_mtok`] / [`Self::price_out_per_mtok`] from the
+    /// `translate` usage ledger: a runaway guard on the tenant's LLM key,
+    /// which translation shares with triage. Each message's cost is
+    /// ESTIMATED before its call to decide whether it fits what is left
+    /// today, and the day's spend is SETTLED from the usage the provider
+    /// actually reported. Over it, live rows stay `pending` until the next
+    /// UTC day (and triage does not wait for them), backfill rows are queued
+    /// `deferred`. No `app_settings` override. Default 0.50: at Sonnet 5's
+    /// prices, roughly a hundred short messages a day, or twenty of 5,000
+    /// characters.
+    pub daily_budget_usd: f64,
 }
 
 impl Default for TranslateConfig {
@@ -505,7 +509,7 @@ impl Default for TranslateConfig {
             model: "claude-sonnet-5".to_string(),
             price_in_per_mtok: 2.0,
             price_out_per_mtok: 10.0,
-            daily_cap: 300,
+            daily_budget_usd: 0.50,
         }
     }
 }

@@ -1276,6 +1276,7 @@ pub fn ingest(
         date_offset_minutes,
         invite_zone,
         translate_lang,
+        translate_over_budget: false,
     }
 }
 

@@ -24,6 +24,9 @@ enum Answer {
     /// A provider outage: the retries inside the client ran out on a 529,
     /// and the call reported no usage at all.
     Outage,
+    /// French as [`Answer::French`], except that a batch carrying this text
+    /// times out every time (a message whose answer outruns the timeout).
+    TimesOutOn(&'static str),
 }
 
 struct Scripted {
@@ -113,6 +116,20 @@ impl crate::translate::TranslateBackend for Scripted {
                     retryable: true,
                 });
             }
+            Answer::TimesOutOn(marker) if user.contains(marker) => {
+                return Err(ClassifyError {
+                    kind: "transport".into(),
+                    retryable: true,
+                });
+            }
+            Answer::TimesOutOn(_) => LlmOutcome::Ok(
+                serde_json::json!({
+                    "source_language": "fr",
+                    "translations": segments.iter().map(|s| english(s)).collect::<Vec<_>>(),
+                })
+                .to_string(),
+                usage(),
+            ),
         })
     }
     fn model(&self) -> &str {
@@ -170,8 +187,28 @@ fn raw(acct: AccountId, id: &str, subject: &str, body: &str, sent: bool, spam: b
 /// Ingest through the engine's own path, the one that drops the queue
 /// when there is no translator.
 fn land(eng: &Engine, acct: AccountId, id: &str, sent: bool, spam: bool) -> i64 {
-    let fetched = raw(acct, id, SUBJECT, BODY, sent, spam);
-    match eng.ingest_one(&fetched, &[], Utc::now(), IngestOrigin::Incremental) {
+    land_as(
+        eng,
+        acct,
+        id,
+        SUBJECT,
+        IngestOrigin::Incremental,
+        sent,
+        spam,
+    )
+}
+
+fn land_as(
+    eng: &Engine,
+    acct: AccountId,
+    id: &str,
+    subject: &str,
+    origin: IngestOrigin,
+    sent: bool,
+    spam: bool,
+) -> i64 {
+    let fetched = raw(acct, id, subject, BODY, sent, spam);
+    match eng.ingest_one(&fetched, &[], Utc::now(), origin) {
         Ok(Some(ingested)) => ingested.id,
         other => panic!("ingest: {:?}", other.map(|i| i.map(|i| i.id))),
     }
@@ -462,26 +499,76 @@ async fn an_outage_releases_the_row_counts_the_call_and_cools_down_briefly() {
     assert!(until > now && until <= now + OUTAGE_COOLDOWN_SECS);
     assert!(!eng.translate_pass().await, "cooling down");
     assert_eq!(backend.calls(), 1);
-    // Triage's own circuit is untouched, and the cap charge was handed back.
+    // Triage's own circuit is untouched.
     assert_eq!(eng.agent_retry_after.load(Ordering::Relaxed), 0);
-    let day = Utc::now().format("%Y-%m-%d").to_string();
-    assert_eq!(
-        store
-            .stage2_budget_used(acct, TRANSLATE_BUDGET_KEY, &day)
-            .unwrap(),
-        0
-    );
 }
 
 #[tokio::test]
-async fn the_daily_cap_holds_the_rest_until_tomorrow() {
+async fn a_row_that_fails_alone_runs_out_of_releases() {
+    // One message whose batch times out every time, alone in the queue: the
+    // round cannot tell it from an outage, so it is released, but only
+    // MAX_CONSECUTIVE_RELEASES times; the next failure spends an attempt.
+    let backend = Scripted::new(Answer::TimesOutOn("Rappel"));
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let id = land_as(
+        &eng,
+        acct,
+        "fr1",
+        "Rappel",
+        IngestOrigin::Incremental,
+        false,
+        false,
+    );
+    for round in 0..2 {
+        eng.translate_retry_after.store(0, Ordering::Relaxed);
+        assert!(eng.translate_pass().await);
+        assert_eq!(
+            status(&store, id),
+            Some(("pending".into(), 0)),
+            "round {round}"
+        );
+    }
+    eng.translate_retry_after.store(0, Ordering::Relaxed);
+    assert!(eng.translate_pass().await);
+    assert_eq!(status(&store, id), Some(("failed".into(), 1)));
+    // Backing off now, like any failure: the next round claims nothing.
+    eng.translate_retry_after.store(0, Ordering::Relaxed);
+    assert!(!eng.translate_pass().await);
+}
+
+#[tokio::test]
+async fn a_failure_beside_a_translated_row_is_the_rows_own() {
+    let backend = Scripted::new(Answer::TimesOutOn("Rappel"));
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let bad = land_as(
+        &eng,
+        acct,
+        "fr1",
+        "Rappel",
+        IngestOrigin::Incremental,
+        false,
+        false,
+    );
+    let good = land(&eng, acct, "fr2", false, false);
+    assert!(eng.translate_pass().await);
+    assert_eq!(status(&store, good).unwrap().0, "done");
+    // Charged, backing off, and no cooldown for the pass.
+    assert_eq!(status(&store, bad), Some(("failed".into(), 1)));
+    assert_eq!(eng.translate_retry_after.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn the_daily_budget_holds_the_rest_until_tomorrow() {
     let backend = Scripted::new(Answer::French);
     let (mut eng, store, acct) = engine(Some(backend.clone()));
-    eng.config.translate.daily_cap = 1;
+    // One message's ESTIMATE fits ($0.0032 at Sonnet 5 prices), two do not;
+    // after the first is billed ($0.00104 reported), the second's estimate
+    // no longer fits what is left.
+    eng.config.translate.daily_budget_usd = 0.004;
     let a = land(&eng, acct, "fr1", false, false);
     let b = land(&eng, acct, "fr2", false, false);
     assert!(eng.translate_pass().await);
-    assert!(!eng.translate_pass().await, "capped");
+    assert!(!eng.translate_pass().await, "over budget");
     let done = [a, b]
         .iter()
         .filter(|id| status(&store, **id).unwrap().0 == "done")
@@ -497,6 +584,66 @@ async fn the_daily_cap_holds_the_rest_until_tomorrow() {
         "untouched, not failed"
     );
     assert_eq!(backend.calls(), 1);
+    assert!(eng.translate_over_budget(Utc::now()));
+    // Over budget: a new arrival does not hold its triage, and a backfilled
+    // message waits for its reader.
+    let live = land_as(
+        &eng,
+        acct,
+        "fr3",
+        "Facture",
+        IngestOrigin::Incremental,
+        false,
+        false,
+    );
+    assert_eq!(status(&store, live).unwrap().0, "pending");
+    assert_eq!(
+        count(
+            &store,
+            &format!(
+                "SELECT COUNT(*) FROM message_translations
+                 WHERE message_id={live} AND triage_wait_until IS NOT NULL"
+            )
+        ),
+        0
+    );
+    let old = land_as(
+        &eng,
+        acct,
+        "fr4",
+        "Ancienne facture",
+        IngestOrigin::Backfill,
+        false,
+        false,
+    );
+    assert_eq!(status(&store, old).unwrap().0, "deferred");
+}
+
+#[tokio::test]
+async fn only_new_arrivals_hold_their_triage() {
+    let (eng, store, acct) = engine(Some(Scripted::new(Answer::French)));
+    let live = land(&eng, acct, "fr1", false, false);
+    let old = land_as(
+        &eng,
+        acct,
+        "fr2",
+        SUBJECT,
+        IngestOrigin::Backfill,
+        false,
+        false,
+    );
+    let held = |id: i64| {
+        count(
+            &store,
+            &format!(
+                "SELECT COUNT(*) FROM message_translations
+                 WHERE message_id={id} AND triage_wait_until IS NOT NULL"
+            ),
+        )
+    };
+    assert_eq!(held(live), 1);
+    assert_eq!(held(old), 0);
+    assert_eq!(status(&store, old).unwrap().0, "pending");
 }
 
 #[tokio::test]

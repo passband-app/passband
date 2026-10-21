@@ -115,11 +115,6 @@ const GLOBAL_BUDGET_KEY: &str = crate::triage::agent_config::TOTAL_BUDGET_KEY;
 /// [`notify_lane`] code that spends it: a sentinel invented later, somewhere
 /// else, is a sentinel nobody ever checks these for a collision against.
 const NOTIFY_FAST_BUDGET_KEY: &str = "__notify_fast__";
-/// The `wake_budget` sentinel for the TRANSLATE PASS's daily cap
-/// (`[translate].daily_cap`, docs/TRANSLATION.md): messages sent to the
-/// translator per account per UTC day. Its own key for the notify lane's
-/// reason: a backlog of foreign mail must not spend any other lane's budget.
-const TRANSLATE_BUDGET_KEY: &str = "__translate__";
 /// The usage-ledger category the fast lane books under. NOT a literal here: it
 /// is the one category with prices of its own, and both cost estimators price
 /// it by matching this exact string, so a second spelling would not be a
@@ -542,7 +537,9 @@ enum CapKind {
     /// notifications stopped. The [[fleet LLM outage]] was a config-level 400
     /// that read as normal for four days.
     NotifyFastConfig,
-    /// The translate pass's daily cap ([`TRANSLATE_BUDGET_KEY`]).
+    /// The translate pass's daily dollar budget
+    /// (`[translate].daily_budget_usd`). Its stamp for today is also how
+    /// ingest knows the translator has nothing left.
     Translate,
 }
 
@@ -3489,6 +3486,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // free; the row is what promises a translation.
         if self.translator.is_none() {
             triaged.translate_lang = None;
+        }
+        // OVER TODAY'S TRANSLATE BUDGET, nothing holds triage, and a
+        // backfilled message waits `deferred` for its reader. Asked only of
+        // foreign mail: English mail has no row to queue.
+        if triaged.translate_lang.is_some() {
+            triaged.translate_over_budget = self.translate_over_budget(now);
         }
         let id = if origin == IngestOrigin::Archive {
             // Insert-only: an id the store already holds is left as it is, and

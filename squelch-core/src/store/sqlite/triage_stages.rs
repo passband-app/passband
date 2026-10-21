@@ -1013,6 +1013,16 @@ impl SqliteStore {
         usage_since_category(&conn, account_id, since_day, "stage1")
     }
 
+    pub(super) fn category_usage_since(
+        &self,
+        account_id: AccountId,
+        since_day: &str,
+        category: &str,
+    ) -> Result<Stage2Usage> {
+        let conn = self.lock()?;
+        usage_since_category(&conn, account_id, since_day, category)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn extract_bump_usage(
         &self,

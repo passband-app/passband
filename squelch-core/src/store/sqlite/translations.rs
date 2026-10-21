@@ -18,11 +18,17 @@
 //! claim re-checks all three, plus SEALED mail (an auth decision, or a legacy
 //! `triage.sensitivity = 'sealed'` row with no agent state: [`SEALED_SQL`],
 //! the predicate `sealed_messages` uses): a row can predate the verdict on
-//! its message. Such a row is CLOSED at the next claim, and a translation it
-//! was already serving is dropped with its index columns and vector.
-//! Because translation runs ahead of triage, brand-new auth mail may be
-//! translated before triage seals it; that is accepted (docs/TRANSLATION.md,
-//! "Sealed mail").
+//! its message. Such a row is CLOSED AT THE EVENT that changed the verdict
+//! (a re-ingest that made it spam or own mail, the agent decision that
+//! sealed it: [`close_if_untranslatable_conn`]), and a translation it was
+//! already serving is dropped with its index columns and vector. The claim
+//! keeps a cheap sweep over the rows it could claim (`pending`, retryable
+//! `failed`) only, never over the `deferred` or served backlog.
+//!
+//! Live mail is translated BEFORE its first triage (triage waits for it), so
+//! foreign auth mail is translated, then sealed, then dropped: sealing is
+//! terminal, so that drop re-triages nothing (docs/TRANSLATION.md, "Sealed
+//! mail").
 //!
 //! THE LEASE IS A TOKEN. A claim stamps `lease`, every write of a result
 //! matches on it, and every terminal write clears it, so a heal that dropped
@@ -52,6 +58,12 @@ pub const BACKOFF_CAP_SECS: i64 = 12 * 60 * 60;
 /// translation to land first, short enough that a translator that is down,
 /// over its daily cap or cooling down delays triage by minutes and no more.
 pub const TRIAGE_WAIT_SECS: i64 = 10 * 60;
+/// Consecutive RELEASES (a configuration or outage failure handed back
+/// without spending an attempt) a row gets before the next such failure is
+/// charged to it. A failure that recurs for one message alone (its batch
+/// times out every time, its content draws a 4xx) is about the message, and
+/// without this it would be claimed and released forever.
+pub const MAX_CONSECUTIVE_RELEASES: i64 = 2;
 /// The note an `incomplete` row carries when the engine translated only the
 /// head of an over-long message. Shown with the other missing facts.
 pub const TRUNCATED_NOTE: &str = "only the first part was translated";
@@ -119,7 +131,10 @@ pub(super) fn is_untranslatable_conn(conn: &Connection, message_id: i64) -> Resu
 
 /// Queue `message_id` for translation from `source_lang`, inside the caller's
 /// transaction. `deferred` parks it until the reader displaying its thread
-/// asks. A row that already exists is left as it is: a re-ingest of the same
+/// asks. `hold` makes agent triage wait for the translation (at most
+/// [`TRIAGE_WAIT_SECS`]): for newly arrived live mail only, never for a
+/// backfill, whose first triage must not stall behind a translation backlog,
+/// and never when the translator has no budget left today. A row that already exists is left as it is: a re-ingest of the same
 /// message must not throw away a translation it already paid for. (An archive
 /// row seen again live never gets here; ingest leaves it alone. The owner's
 /// promotion is what makes it live: [`promote_live_translation_conn`].)
@@ -129,6 +144,7 @@ pub(super) fn queue_translation_conn(
     message_id: i64,
     source_lang: &str,
     deferred: bool,
+    hold: bool,
     now: DateTime<Utc>,
 ) -> Result<()> {
     let (status, wait_until) = if deferred {
@@ -136,7 +152,7 @@ pub(super) fn queue_translation_conn(
     } else {
         (
             TranslationStatus::Pending,
-            Some(now.timestamp() + TRIAGE_WAIT_SECS),
+            hold.then(|| now.timestamp() + TRIAGE_WAIT_SECS),
         )
     };
     conn.execute(
@@ -247,9 +263,59 @@ pub(super) fn translation_changed_conn(
     super::agent_triage::reseed_archive_snapshot_conn(conn, account, message)
 }
 
+/// Close `message_id`'s row if its message no longer permits translation
+/// (spam, sealed, own mail), inside the caller's transaction: what the event
+/// that changed the verdict calls (ingest of the row, the agent decision).
+/// A row already terminal, or no row, is left alone.
+pub(super) fn close_if_untranslatable_conn(
+    conn: &Connection,
+    account: AccountId,
+    message_id: i64,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT status, attempts FROM message_translations WHERE message_id = ?1",
+            params![message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((status, attempts)) = row else {
+        return Ok(());
+    };
+    let open = match status.as_str() {
+        "deferred" | "pending" | "done" | "incomplete" => true,
+        "failed" => attempts < MAX_ATTEMPTS,
+        _ => false,
+    };
+    if !open || !is_untranslatable_conn(conn, message_id)? {
+        return Ok(());
+    }
+    let served = matches!(status.as_str(), "done" | "incomplete");
+    close_translation_conn(conn, account, message_id, served, now.timestamp())
+}
+
+/// Whether `message_id` is sealed ([`SEALED_SQL`]).
+fn is_sealed_conn(conn: &Connection, message_id: i64) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {SEALED_SQL} FROM messages m WHERE m.id = ?1"),
+            params![message_id],
+            |r| r.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
 /// Close a row its message no longer permits (spam, sealed, own mail):
 /// terminal `failed` with its attempts spent and its text gone, and when it
 /// was serving a translation, its vector and index columns with it.
+///
+/// A served translation dropped because the message was SEALED re-triages
+/// nothing: sealing is terminal, and the decision that sealed it already read
+/// the translation. The stored snapshot is brought in line in place, so a
+/// later content check does not read the drop as new content. Spam and own
+/// mail go through the agent bookkeeping as any content change does.
 fn close_translation_conn(
     conn: &Connection,
     account: AccountId,
@@ -271,7 +337,11 @@ fn close_translation_conn(
             params![message_id],
         )?;
         refresh_fts_conn(conn, message_id)?;
-        translation_changed_conn(conn, account, message_id)?;
+        if is_sealed_conn(conn, message_id)? {
+            super::agent_triage::refresh_snapshot_in_place_conn(conn, account, message_id)?;
+        } else {
+            translation_changed_conn(conn, account, message_id)?;
+        }
     }
     Ok(())
 }
@@ -290,7 +360,15 @@ impl SqliteStore {
         now: DateTime<Utc>,
     ) -> Result<()> {
         let conn = self.lock()?;
-        queue_translation_conn(&conn, account_id, message_id, source_lang, deferred, now)
+        queue_translation_conn(
+            &conn,
+            account_id,
+            message_id,
+            source_lang,
+            deferred,
+            !deferred,
+            now,
+        )
     }
 
     pub(super) fn claim_translations(
@@ -312,35 +390,41 @@ impl SqliteStore {
                AND attempts >= ?2 AND updated_at + ?3 <= ?4",
             params![account_id, MAX_ATTEMPTS, LEASE_SECS, now_s],
         )?;
-        // And rows whose message became spam, sealed or own mail after it
-        // was queued: closed, and a served translation dropped.
-        let closing: Vec<(i64, bool)> = {
+        // And claimable rows whose message became spam, sealed or own mail
+        // after it was queued, which an event did not already close. Only
+        // `pending` and retryable `failed`, over the claim index: a served
+        // row is closed at the event that changed its verdict, and a
+        // `deferred` one holds no text and becomes `pending` before anything
+        // is spent on it. Scanning either backlog here cost ~110 ms a claim
+        // at 100k deferred rows, under the store lock, twice a minute.
+        let closing: Vec<i64> = {
             let mut stmt = tx.prepare(&format!(
-                "SELECT t.message_id, t.status IN ('done','incomplete')
+                "SELECT t.message_id
                  FROM message_translations t
                  JOIN messages m ON m.id = t.message_id
                  WHERE t.account_id = ?1
-                   AND t.status IN ('deferred','pending','failed','done','incomplete')
-                   AND NOT (t.status = 'failed' AND t.attempts >= ?2)
+                   AND t.status IN ('pending', 'failed')
+                   AND (t.status = 'pending' OR t.attempts < ?2)
                    AND {}",
                 untranslatable_sql()
             ))?;
-            stmt.query_map(params![account_id, MAX_ATTEMPTS], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?
-            .collect::<rusqlite::Result<_>>()?
+            stmt.query_map(params![account_id, MAX_ATTEMPTS], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
         };
-        for (message_id, served) in closing {
-            close_translation_conn(&tx, account_id, message_id, served, now_s)?;
+        for message_id in closing {
+            close_translation_conn(&tx, account_id, message_id, false, now_s)?;
         }
         let jobs: Vec<TranslationJob> = {
             let mut stmt = tx.prepare(&format!(
                 "SELECT t.message_id, t.account_id, t.source_lang,
                         m.subject, m.body, m.body_html, t.attempts,
-                        t.status, t.updated_at
+                        t.status, t.updated_at, t.releases
                  FROM message_translations t
                  JOIN messages m ON m.id = t.message_id
                  WHERE t.account_id = ?1
+                   -- Spelled out for the claim index: the OR below alone
+                   -- reads every row of the account, deferred and done too.
+                   AND t.status IN ('pending', 'failed')
                    AND NOT {}
                    AND t.attempts < ?3
                    AND (
@@ -378,6 +462,7 @@ impl SqliteStore {
                         prev_status: TranslationStatus::parse(&prev)
                             .unwrap_or(TranslationStatus::Pending),
                         prev_updated_at: r.get(8)?,
+                        releases: r.get(9)?,
                     })
                 },
             )?
@@ -435,7 +520,7 @@ impl SqliteStore {
                          snippet = ?6, missing_facts = ?7, model = ?8,
                          prompt_version = ?9, updated_at = ?10,
                          source_lang = COALESCE(?11, source_lang),
-                         lease = NULL, triage_wait_until = NULL
+                         lease = NULL, triage_wait_until = NULL, releases = 0
                      WHERE message_id = ?1 AND status = 'pending' AND lease = ?12",
                     params![
                         message_id,
@@ -464,7 +549,7 @@ impl SqliteStore {
             TranslationWrite::Failed { model } => tx.execute(
                 "UPDATE message_translations
                  SET status = 'failed', model = ?2, updated_at = ?3, lease = NULL,
-                     triage_wait_until = NULL
+                     triage_wait_until = NULL, releases = 0
                  WHERE message_id = ?1 AND status = 'pending' AND lease = ?4",
                 params![message_id, model, now.timestamp(), job.lease],
             )?,
@@ -486,7 +571,7 @@ impl SqliteStore {
                      SET status = ?2, model = ?3, prompt_version = ?4,
                          subject = NULL, body = NULL, body_html = NULL,
                          snippet = NULL, missing_facts = NULL, updated_at = ?5,
-                         lease = NULL, triage_wait_until = NULL
+                         lease = NULL, triage_wait_until = NULL, releases = 0
                      WHERE message_id = ?1 AND status = 'pending' AND lease = ?6",
                     params![
                         message_id,
@@ -499,8 +584,34 @@ impl SqliteStore {
                 )?
             }
             // Back to exactly what the claim found: the status, the
-            // `updated_at` its backoff counts from, and the attempt.
+            // `updated_at` its backoff counts from, and the attempt. Unless
+            // the row has been released MAX_CONSECUTIVE_RELEASES times in a
+            // row already: then this failure is charged to it like any
+            // other, `failed` with the claim's attempt spent and its backoff
+            // starting now, so a failure only this message draws runs out of
+            // attempts instead of looping.
             TranslationWrite::Released => tx.execute(
+                "UPDATE message_translations
+                 SET status = CASE WHEN releases >= ?5 THEN 'failed' ELSE ?2 END,
+                     attempts = CASE WHEN releases >= ?5 THEN attempts
+                                     ELSE MAX(attempts - 1, 0) END,
+                     updated_at = CASE WHEN releases >= ?5 THEN ?6 ELSE ?3 END,
+                     triage_wait_until = CASE WHEN releases >= ?5 THEN NULL
+                                              ELSE triage_wait_until END,
+                     releases = releases + 1, lease = NULL
+                 WHERE message_id = ?1 AND status = 'pending' AND lease = ?4",
+                params![
+                    message_id,
+                    job.prev_status.as_str(),
+                    job.prev_updated_at,
+                    job.lease,
+                    MAX_CONSECUTIVE_RELEASES,
+                    now.timestamp(),
+                ],
+            )?,
+            // Handed back untouched: the pass never tried this row (no room
+            // in today's budget). Not a release: nothing failed.
+            TranslationWrite::Returned => tx.execute(
                 "UPDATE message_translations
                  SET status = ?2, attempts = MAX(attempts - 1, 0), updated_at = ?3,
                      lease = NULL

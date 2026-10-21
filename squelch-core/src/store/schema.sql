@@ -2074,9 +2074,11 @@ CREATE TABLE IF NOT EXISTS archive_walk (
 
 -- Auto-translate (docs/TRANSLATION.md): the English version of mail written in
 -- another language, BESIDE the message. `messages.subject`/`body`/`body_html`
--- are never rewritten, and nothing here is part of the agent's content
--- snapshot. Ingest inserts `pending` (live) or `deferred` (archive tier) for a
--- non-English message; spam and sent mail never get a row. Timestamps are
+-- are never rewritten. A SERVED translation (`done`, `incomplete`) IS part of
+-- the agent's content snapshot, hashed in only when one exists. Ingest
+-- inserts `pending` (live) or `deferred` (archive tier, or a backfill over
+-- the day's translate budget) for a non-English message; spam, sent, own and
+-- sealed mail never get a row. Timestamps are
 -- unix seconds. `missing_facts` is a JSON array, set when `incomplete`.
 -- `not_needed` is terminal: the translator read the message as English, so
 -- the local detection was a false positive and nothing is served.
@@ -2088,7 +2090,10 @@ CREATE TABLE IF NOT EXISTS archive_walk (
 -- (a heal dropped and re-queued the row, or the lease expired and another
 -- pass took it) writes nothing. `triage_wait_until` is how long agent triage
 -- holds this message's job back while the row is `pending`, so foreign mail
--- is normally triaged once, on the English (docs/TRANSLATION.md, Pipeline).
+-- is normally triaged once, on the English (docs/TRANSLATION.md, Pipeline);
+-- set for newly arrived live mail only. `releases` counts consecutive claims
+-- handed back on a configuration or outage failure without spending an
+-- attempt; past two, the next such failure is charged to the row.
 CREATE TABLE IF NOT EXISTS message_translations (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     account_id INTEGER NOT NULL,
@@ -2104,6 +2109,7 @@ CREATE TABLE IF NOT EXISTS message_translations (
     attempts INTEGER NOT NULL DEFAULT 0,
     lease TEXT,
     triage_wait_until INTEGER,
+    releases INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );

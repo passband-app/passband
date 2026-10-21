@@ -57,6 +57,9 @@ pub(super) struct TriagedBuilder {
     invite_zone: Option<crate::timezone::InviteZone>,
     /// The detected non-English language, as ingest carries it.
     translate_lang: Option<crate::translate::Lang>,
+    /// Newly arrived (incremental) rather than backfilled.
+    foreground: bool,
+    over_budget: bool,
 }
 
 /// A plain inbound message with a neutral triage shape — the base every other
@@ -100,6 +103,8 @@ pub(super) fn triaged(account_id: AccountId, gmail: &str, thread: &str) -> Triag
         date_offset_minutes: None,
         invite_zone: None,
         translate_lang: None,
+        foreground: false,
+        over_budget: false,
     }
 }
 
@@ -239,6 +244,17 @@ impl TriagedBuilder {
         assert!(self.translate_lang.is_some(), "unknown language {code}");
         self
     }
+    /// Newly arrived by incremental sync, as the engine marks it: its
+    /// first triage may hold for its translation.
+    pub(super) fn arrival(mut self) -> Self {
+        self.foreground = true;
+        self
+    }
+    /// Ingested with the day's translate budget spent.
+    pub(super) fn over_budget(mut self) -> Self {
+        self.over_budget = true;
+        self
+    }
     /// An invitation organized by `organizer` in `zone` (ingest only).
     pub(super) fn invite(mut self, organizer: &str, zone: &str) -> Self {
         self.invite_zone = Some(crate::timezone::InviteZone {
@@ -255,7 +271,7 @@ impl TriagedBuilder {
 
     pub(super) fn build(&self) -> TriagedMessage {
         TriagedMessage {
-            foreground_triage: false,
+            foreground_triage: self.foreground,
             message: self.msg(),
             recipients: vec![],
             // DERIVED from `to_addrs` rather than set separately, so a test that
@@ -290,6 +306,7 @@ impl TriagedBuilder {
             date_offset_minutes: self.date_offset_minutes,
             invite_zone: self.invite_zone.clone(),
             translate_lang: self.translate_lang,
+            translate_over_budget: self.over_budget,
         }
     }
 

@@ -48,6 +48,7 @@ fn job(store: &SqliteStore, id: i64) -> crate::store::TranslationJob {
         lease: lease.unwrap_or_default(),
         prev_status: TranslationStatus::Pending,
         prev_updated_at: 0,
+        releases: 0,
     }
 }
 
@@ -587,8 +588,28 @@ fn a_message_sealed_after_its_translation_landed_loses_it_everywhere() {
             .unwrap()
     };
     let before = revision(&store);
+    let jobs = |store: &SqliteStore| -> i64 {
+        store
+            .query_i64_for_test(&format!(
+                "SELECT COUNT(*) FROM agent_triage_jobs WHERE message_id={id}"
+            ))
+            .unwrap()
+    };
+    let jobs_before = jobs(&store);
+    // A served row is closed AT THE EVENT that sealed it (the decision write
+    // calls this in its transaction), not by a sweep of the served backlog.
     seal(&store, acct, id);
     store.claim_translations(acct, Utc::now(), 10).unwrap();
+    assert_eq!(
+        store.message_translations(acct, &[id]).unwrap()[0].status,
+        TranslationStatus::Done,
+        "the claim no longer sweeps served rows"
+    );
+    {
+        let conn = store.lock().unwrap();
+        super::super::translations::close_if_untranslatable_conn(&conn, acct, id, Utc::now())
+            .unwrap();
+    }
     let t = &store.message_translations(acct, &[id]).unwrap()[0];
     assert_eq!(t.status, TranslationStatus::Failed);
     assert!(t.subject.is_none() && t.body.is_none());
@@ -604,10 +625,22 @@ fn a_message_sealed_after_its_translation_landed_loses_it_everywhere() {
             .unwrap(),
         0
     );
-    assert_eq!(revision(&store), before + 1, "the snapshot moved with it");
+    // SEALING IS TERMINAL: the drop re-triages nothing. The stored snapshot
+    // is brought in line in place, so a later content check does not read
+    // the drop as new content either.
+    assert_eq!(revision(&store), before, "no new revision");
+    assert_eq!(jobs(&store), jobs_before, "no re-triage queued");
+    {
+        let conn = store.lock().unwrap();
+        crate::store::sqlite::agent_triage::enqueue_agent_triage_conn(
+            &conn, acct, id, "backfill", false,
+        )
+        .unwrap();
+    }
+    assert_eq!(revision(&store), before, "the snapshot already matches");
     // Idempotent: the next claim closes nothing more.
     store.claim_translations(acct, Utc::now(), 10).unwrap();
-    assert_eq!(revision(&store), before + 1);
+    assert_eq!(revision(&store), before);
 }
 
 #[test]
@@ -1137,9 +1170,12 @@ fn claim_triage(
 fn foreign_mail_is_triaged_once_on_the_english_when_it_lands_in_time() {
     use crate::store::agent_triage::AgentTriageStore;
     let (store, acct) = store();
-    let b = triaged(acct, "g1", "t1").lang("fr").body(FRENCH_BODY);
+    let b = triaged(acct, "g1", "t1")
+        .lang("fr")
+        .body(FRENCH_BODY)
+        .arrival();
     let fr = b.ingest(&store);
-    let en = triaged(acct, "g2", "t2").ingest(&store);
+    let en = triaged(acct, "g2", "t2").arrival().ingest(&store);
     let now = Utc::now();
     // English mail is unaffected; the French message is held back.
     let job = claim_triage(&store, acct, now).expect("the English job");
@@ -1269,4 +1305,125 @@ fn a_deferred_archive_row_never_holds_anything() {
         0,
         "the archive spends nothing unasked"
     );
+}
+
+// ---- who waits, and over the budget (docs/TRANSLATION.md, Pipeline) ---------
+
+fn wait_until(store: &SqliteStore, id: i64) -> i64 {
+    store
+        .query_i64_for_test(&format!(
+            "SELECT COUNT(*) FROM message_translations
+             WHERE message_id={id} AND triage_wait_until IS NOT NULL"
+        ))
+        .unwrap()
+}
+
+#[test]
+fn only_a_new_arrival_with_budget_left_holds_its_triage() {
+    let (store, acct) = store();
+    let arrival = triaged(acct, "g1", "t1")
+        .lang("fr")
+        .arrival()
+        .ingest(&store);
+    let backfill = triaged(acct, "g2", "t2").lang("fr").ingest(&store);
+    let broke = triaged(acct, "g3", "t3")
+        .lang("fr")
+        .arrival()
+        .over_budget()
+        .ingest(&store);
+    let old_broke = triaged(acct, "g4", "t4")
+        .lang("fr")
+        .over_budget()
+        .ingest(&store);
+    assert_eq!(row(&store, arrival).unwrap().1, "pending");
+    assert_eq!(wait_until(&store, arrival), 1);
+    // A backfill is triaged on the original at once.
+    assert_eq!(row(&store, backfill).unwrap().1, "pending");
+    assert_eq!(wait_until(&store, backfill), 0);
+    // Over budget, a new arrival is queued for tomorrow without a hold...
+    assert_eq!(row(&store, broke).unwrap().1, "pending");
+    assert_eq!(wait_until(&store, broke), 0);
+    // ...and a backfilled message waits for its reader.
+    assert_eq!(row(&store, old_broke).unwrap().1, "deferred");
+}
+
+/// The real event: the agent's decision that seals a message closes its
+/// served translation in the same transaction, and queues nothing more.
+#[test]
+fn the_decision_that_seals_foreign_auth_mail_drops_its_translation_and_stops() {
+    use crate::store::agent_triage::AgentTriageStore;
+    use crate::triage::decision::{AuthKind, MessageDecision};
+    let (store, acct) = store();
+    let id = triaged(acct, "g1", "t1")
+        .lang("fr")
+        .body(FRENCH_BODY)
+        .arrival()
+        .ingest(&store);
+    let tjob = store.claim_translations(acct, Utc::now(), 10).unwrap()[0].clone();
+    store
+        .record_translation(
+            &tjob,
+            &write(&translated("Your code", "Your login code is 123456")),
+            Utc::now(),
+        )
+        .unwrap();
+    // Translated first, then triaged on the English: one job.
+    let job = claim_triage(&store, acct, Utc::now()).expect("triage, after the English");
+    assert_eq!(job.message_id, id);
+    let before = revision(&store, id);
+    let ctx = store.load_agent_context(&job).unwrap();
+    let mut decision = MessageDecision::default();
+    decision.auth.kinds = vec![AuthKind::LoginAlert];
+    store
+        .commit_agent_decision(
+            &job,
+            &ctx,
+            &decision,
+            std::slice::from_ref(&ctx.message.source),
+        )
+        .unwrap();
+    let t = &store.message_translations(acct, &[id]).unwrap()[0];
+    assert_eq!(t.status, TranslationStatus::Failed);
+    assert!(t.body.is_none());
+    assert_eq!(revision(&store, id), before, "sealing is terminal");
+    assert_eq!(open_jobs(&store, id), 0, "no re-triage for the drop");
+}
+
+#[test]
+fn a_row_released_twice_in_a_row_is_charged_the_third_time() {
+    let (store, acct) = store();
+    let id = triaged(acct, "g1", "t1").lang("fr").ingest(&store);
+    for _ in 0..2 {
+        let j = store.claim_translations(acct, Utc::now(), 10).unwrap()[0].clone();
+        assert!(
+            store
+                .record_translation(&j, &TranslationWrite::Released, Utc::now())
+                .unwrap()
+        );
+        assert_eq!(row(&store, id).unwrap().1, "pending");
+        assert_eq!(row(&store, id).unwrap().2, 0);
+    }
+    let j = store.claim_translations(acct, Utc::now(), 10).unwrap()[0].clone();
+    assert_eq!(j.releases, 2);
+    store
+        .record_translation(&j, &TranslationWrite::Released, Utc::now())
+        .unwrap();
+    assert_eq!(row(&store, id).unwrap().1, "failed");
+    assert_eq!(row(&store, id).unwrap().2, 1, "the attempt is spent");
+    // Backing off: not claimable now.
+    assert!(
+        store
+            .claim_translations(acct, Utc::now(), 10)
+            .unwrap()
+            .is_empty()
+    );
+    // A Returned row is not a release.
+    let other = triaged(acct, "g2", "t2").lang("fr").ingest(&store);
+    let j = store.claim_translations(acct, Utc::now(), 10).unwrap()[0].clone();
+    assert_eq!(j.message_id, other);
+    store
+        .record_translation(&j, &TranslationWrite::Returned, Utc::now())
+        .unwrap();
+    let j = store.claim_translations(acct, Utc::now(), 10).unwrap()[0].clone();
+    assert_eq!(j.releases, 0);
 }

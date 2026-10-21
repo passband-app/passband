@@ -12,7 +12,10 @@ Decisions locked with the user (2026-10-21):
   shipping needs no `llm sync`/`mint`.
 - Rendering: **HTML text-node translation.** The visible text segments are
   pulled out of the already-sanitized `body_html`, translated as a numbered
-  array, and put back. The model never sees or produces markup.
+  array, and put back as escaped text. The model never sees or produces
+  markup: inline formatting inside a sentence (`Bon<b>jour</b>`) reaches it
+  as numbered markers (`Bon⟦1⟧jour⟦/1⟧`), and an answer whose markers do not
+  round-trip keeps its text and loses only that formatting.
 - Scope: **all live incoming mail, eagerly. Archive-tier mail is translated
   only when the reader displays it** (see Pipeline). No backfill of mail
   that is already stored.
@@ -34,16 +37,59 @@ Decisions locked with the user (2026-10-21):
 2. **Every fact is carried over.** The prompt demands a complete, faithful
    translation: no summarizing, no omissions, no additions, and numbers,
    amounts, dates, codes, names, URLs and addresses kept exactly. The code then
-   verifies this:
+   verifies this (`translate/facts.rs`):
    - The output array has the same length as the input array, one translation
      per segment.
-   - A fact check compares the source and the translation for every digit run
-     (separators inside a number are ignored, so `1.234,56` matches
-     `1,234.56`), every URL, every email address, and every token of 5 or more
-     uppercase letters or digits that looks like a code.
-   - On a failure the call is retried once with the missing items named.
-   - If it still fails, the row is stored with `status='incomplete'` and the
-     client warns about it.
+   - A TWO-WAY fact check over each batch. Both sides are normalized first
+     (fullwidth forms and every script's decimal digits become ASCII). Every
+     fact has a set of keys, the forms a faithful translation may write it
+     in, and two facts are the same fact when they share one:
+     - a number is its digits, separators and leading zeros dropped
+       (`1.234,56` matches `1,234.56`, `01` matches `1`);
+     - a number with a magnitude unit is also its value: `3万` is `3` and
+       `30000`, `12만 5천` is `125000`, `1,5 Mio.` is `1500000`, and so are
+       `千`/`천`, `百`/`백`, `億`/`억`, `Mrd.`, `Million(en)`, `Milliarde(n)`,
+       `тыс.`, `млн`, `млрд`, `lakh`, `crore`, `mil`, and on the English side
+       `thousand`, `million`, `billion`, `k`;
+     - a time is its (hour, minute): `18 Uhr`, `18h`, `14 h 30`, `14h30`,
+       `14.30 Uhr`, `14時30分`, `午後3時` match `18:00`, `6 PM`, `2:30 p.m.`,
+       with an hour of 12 or less and no a.m./p.m. read as either half of the
+       day;
+     - a dotted, slashed or ISO date (`21.10.2026`, `21/10/2026`,
+       `2026-10-21`) is its day, month and year, never one joined number, and
+       a month (as a CJK `10月`/`10월` is) may be written as the English month
+       name;
+     - a URL, an email address (case-insensitively) and a code-like token
+       (5 or more ASCII letters and digits with at least one of each,
+       compared case-insensitively) are kept verbatim.
+   - MISSING facts are what a maximum matching of source facts to
+     translation facts over shared keys leaves unmatched.
+   - ADDED facts are translation facts that share no key with anything the
+     source says or implies. What it implies counts: kanji numerals (`三千`
+     is 3000, `二〇二六` is 2026), Japanese era years (`令和8年` is 2026,
+     `平成` counts from 1988), every magnitude's value, and a phone number
+     the translation only prefixed with a country code. A number the source
+     repeats is not new.
+   - On a missing fact or a REJECT-CLASS addition the call is retried once,
+     naming them. Reject-class is an added URL, email address, all-caps
+     code, or number of seven digits or more (a phone number's length, its
+     groups taken together: `+1 555 0100` is one number). If the retry still
+     adds one, the row is terminal `rejected`.
+   - Any other added number (4 to 6 digits, a magnitude, a time) is most
+     likely a number word the source spelled out (`deux mille`, `dix-huit
+     heures`), which the check does not try to parse in every language. It
+     buys no retry (the retry would forbid the faithful digits): the row is
+     served `incomplete` with the note `added numbers: …` naming them (at
+     most eight). Numbers of 1 to 3 digits are let through: a translation
+     writes `3` for `trois`.
+   - If facts are still missing after the retry, the row is stored with
+     `status='incomplete'`, its `missing_facts` naming them, and the client
+     warns about it.
+   - The regression corpus (`facts/tests.rs`,
+     `faithful_idioms_are_never_rejected`) is 59 faithful translations of
+     everyday idioms: none is rejected, and the only six `incomplete` ones
+     are number words and a Roman numeral. CJK prices, dates and times and
+     German dates and times all pass outright.
 3. **Email text is untrusted.** Segments are fenced the same way the other
    prompts fence email content (`triage::text`). Translated strings are
    inserted as escaped text nodes, never parsed as HTML. The reassembled
@@ -61,8 +107,11 @@ Decisions locked with the user (2026-10-21):
    It is never served through a path the body could not take.
 6. Spend respects `refine_can_spend()` and is billed to usage category
    **`translate`** in `stage2_usage`. It is priced at the actual Sonnet 5
-   rates in `metrics.rs` `estimate_cost_usd` and the `/client/usage`
-   estimator. Without that it would fall through to the Opus arm.
+   rates (`[translate].price_in_per_mtok`/`price_out_per_mtok`, 2.0/10.0) in
+   `metrics.rs` `estimate_cost_usd` and the `/client/usage` estimator.
+   Without that it would fall through to the Opus arm. Translation spends
+   the tenant's TRIAGE key (the same `stage2.resolve_llm()`), so it has a
+   dollar cap of its own (Pipeline, "Daily budget").
 
 ## Detection
 
@@ -85,7 +134,8 @@ Decisions locked with the user (2026-10-21):
   text with quoted lines (`>`) removed.
 - When the language is not English, ingest inserts a
   `message_translations` row with `status='pending'`, inside the same
-  transaction. Archive rows get `status='deferred'`.
+  transaction. Archive rows get `status='deferred'`, and so does a
+  backfilled message while the day's translate budget is spent.
 
 ## Storage (`schema.sql`, `CREATE TABLE IF NOT EXISTS`)
 
@@ -101,13 +151,21 @@ message_translations(
   attempts INTEGER NOT NULL DEFAULT 0,
   lease TEXT,                           -- the claim token, NULL when not claimed
   triage_wait_until INTEGER,            -- how long triage holds the message back
+  releases INTEGER NOT NULL DEFAULT 0,  -- consecutive releases without a verdict
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 )
 ```
 
-- `body` is `html_to_text(translated body_html)` when there is HTML.
-  Otherwise it is the translated plain text, with paragraphs as segments.
-- `snippet` is the first 200 characters of the translated body.
+- `body` is `segment::html_to_block_text(translated body_html)` when there
+  is HTML: block elements keep their lines and paragraphs, quoted history is
+  prefixed `> `, hidden text and code are dropped. (Ingest's `html_to_text`
+  folds a whole mail into one line.) Otherwise it is the translated plain
+  text, with paragraphs as segments.
+- `snippet` is the first 200 characters of the translated body, whitespace
+  collapsed.
+- `missing_facts` is a JSON array: the source facts still missing, then
+  the notes `added numbers: …` and `only the first part was translated`
+  when they apply. Any entry makes the row `incomplete`.
 - **A claim is a lease with a token.** It counts an attempt, stamps a fresh
   random `lease`, and every write of the result matches on it (`status =
   'pending' AND lease = ?`); every terminal write clears it. A heal that
@@ -117,21 +175,39 @@ message_translations(
 - `failed` rows (refusals, malformed answers) are retried with backoff (10
   minutes, doubling, capped at 12 hours) and at most 5 attempts. They never
   loop forever.
-- **Nothing is left `pending` for good.** Each claim first settles rows
-  nothing will finish: a lease that expired on the last attempt is `failed`,
-  and a row whose message has since become spam, sealed or the account's own
-  mail is closed (terminal `failed`, text cleared), with a translation it was
-  serving dropped from the FTS columns and the vector table and the agent
-  snapshot moved with it.
+- **Nothing is left `pending` for good.** A lease that expired on the last
+  attempt is settled `failed` by the next claim. A row whose message has
+  since become spam, sealed or the account's own mail is closed (terminal
+  `failed`, text cleared, a served translation dropped from the FTS columns
+  and the vector table) AT THE EVENT that changed its verdict: the agent
+  decision that seals it (`commit_agent_decision`, and a correction that
+  rewrites a decision) and the ingest of the row. Spam and own mail move the
+  agent snapshot with it; a seal does not (Sealed mail). The claim keeps
+  only a cheap sweep of the rows it could claim (`pending` and retryable
+  `failed`, over the claim index) for anything an event missed. It never
+  scans the `deferred` or served backlog: that scan cost about 110 ms a
+  claim at 100k deferred and 20k done rows, under the store lock, twice a
+  minute; the claim now costs about 0.1 ms there.
 - A failure that is not about the message is not charged to it: a
   configuration failure (400/401/402/403/404, a model missing from the
   gateway's allow-list) and a provider outage (5xx, 429, 529, a timeout or
   transport error) RELEASE the row, which goes back to exactly the status,
   `updated_at` (so a `failed` row keeps its backoff) and attempt count the
-  claim found, with its daily-cap charge refunded. The translate pass then
-  cools down on its own clock, `triage.agent.outage_retry_secs` for a
-  configuration failure and 120 seconds for an outage, without touching
-  triage's own circuit.
+  claim found. The translate pass then cools down on its own clock,
+  `triage.agent.outage_retry_secs` for a configuration failure and 120
+  seconds for an outage, without touching triage's own circuit.
+- **Unless the failure is the message's own.** When another row of the same
+  round got an answer, the gateway works, and the failing row is charged an
+  ordinary `failed` with backoff (no cooldown). And a row released twice in
+  a row (`releases`, reset by any verdict) is charged on its third: `failed`,
+  the attempt spent, backoff from now. So a message whose batch times out
+  every time, or whose content draws a 4xx, runs out of its five attempts
+  instead of being claimed and released forever.
+- Configuration failures are counted in
+  `squelchd_translate_config_failures_total`, once per row per run of
+  releases. They are NOT in `squelchd_llm_config_failures_total`, which
+  counts triage and notify only, so a translate model missing from an
+  allow-list never reads as "triage is stalled" on the dashboard.
 - `rejected` is terminal: the engine refused its own output (it could not
   verify that the translation carries the original). Never served, never
   retried.
@@ -151,11 +227,17 @@ message_translations(
 - Sealed mail is never claimed, is never queued by a re-sighting, and a row
   queued before the seal is closed at the next claim, its served text, FTS
   columns and vector dropped.
-- **Accepted:** translation runs ahead of triage, so a brand-new auth message
-  in another language may be translated before triage seals it, and is then
-  dropped and re-triaged once. That is within what docs/SECURITY.md §4 allows
-  internal models to read; the translation is gated exactly like the body at
-  both doors, and the original body is already in FTS and the vectors.
+- **Accepted: foreign auth mail IS translated before triage seals it, then
+  dropped.** Newly arrived live mail is translated first and triaged on the
+  English (Pipeline), so every foreign OTP, password reset or login alert
+  costs one translation, and its English sits in `message_translations`,
+  the FTS `tbody` column and the translation vector until the decision that
+  seals it lands. That decision closes the row in its own transaction and
+  re-triages nothing: sealing is terminal, the stored snapshot is brought in
+  line in place (no new revision, no job). That is within what
+  docs/SECURITY.md §4 allows internal models to read; the translation is
+  gated exactly like the body at both doors, and the original body is
+  already in FTS and the vectors.
 
 ## Search
 
@@ -183,6 +265,11 @@ message_translations(
 - **Translate, then triage.** Agent triage holds back the triage or access
   job of a message whose translation row is `pending` (claimed or not), for
   at most 10 minutes from when the row was queued (`triage_wait_until`).
+  ONLY NEWLY ARRIVED LIVE MAIL holds (incremental sync, and an archive row
+  the owner promotes): a backfill (onboarding) is triaged on the original at
+  once and re-triaged when the English lands, so a foreign-heavy mailbox's
+  first impression does not wait on a translation backlog. Nothing holds
+  while the day's translate budget is spent.
   Normally the translation lands first, its snapshot change supersedes the
   waiting job with one at the new revision, and the message is triaged
   ONCE, on the English. A translation that lands after triage ran (the wait
@@ -193,10 +280,20 @@ message_translations(
 - Triage gets the translation as an extra field in the agent context
   (`translated_subject` and `translated_body` on the message). Its body is
   NOT replaced.
-- **Daily cap:** `[translate].daily_cap` (default 300) messages per account
-  per UTC day, on its own `wake_budget` key (`__translate__`), charged before
-  the call. Over it, rows stay `pending` until tomorrow; triage stops
-  waiting on them after the bounded wait.
+- **Daily budget:** `[translate].daily_budget_usd`, default **$0.50** per
+  account per UTC day: at Sonnet 5's prices, roughly a hundred short
+  messages a day, or twenty of 5,000 characters. Translation shares the
+  tenant's triage key and its monthly gateway budget, and this keeps a
+  foreign backlog from spending it. Each message's cost is ESTIMATED before
+  its call (`translate::estimate_tokens`, about one token per dense-script
+  character and a third per Latin one each way, plus the system prompt per
+  call) and goes only if it fits what is left beside the round's others; a
+  row that does not fit is handed back untouched. The day's spend is
+  SETTLED from the usage the provider reported on the `translate` ledger
+  line, priced at the translate prices. Over it, live rows stay `pending`
+  until tomorrow without holding triage, and a backfilled message is queued
+  `deferred` (translated when its reader opens it). The once-a-day log line
+  says the budget is spent. No `app_settings` override, no env var.
 - Every call is on the usage ledger, including one that reported no usage
   (a timeout), which is counted as a call with no tokens.
 - An archive row seen again by live sync stays exactly as it was,
@@ -221,8 +318,45 @@ message_translations(
   thread on screen has a `deferred` message. It runs off the loaded thread
   whichever way it arrived, prefetch cache included, because a warmed thread
   opens without a request. `ThreadPrefetch` never calls it.
-- Long mail is split into batches of about 6k source characters per call.
-  `LlmRequest` gains an optional `max_tokens`.
+- Long mail is split into batches of about 6k WEIGHTED source characters
+  per call, whole segments at a time; a segment longer than a batch is split
+  at sentence ends and rejoined. A CJK, kana, Hangul, Thai, Lao, Khmer or
+  Myanmar character weighs 3, because what a call costs in time is the
+  English it writes, so a CJK batch is about 2,000 characters and its answer
+  fits the 120-second request timeout. `LlmRequest` gains an optional
+  `max_tokens` (the batch's weight plus 4,000, at least the shared default,
+  at most 32,000).
+- A message is translated up to 60,000 weighted characters
+  (`MAX_SOURCE_CHARS`, so 20,000 CJK characters). Past it the head is
+  translated, the tail is kept in the original, and the row is `incomplete`
+  with the note "only the first part was translated".
+- **What is not sent at all** (`translate/segment.rs`), kept in place as
+  written: hidden text (`display:none`, `visibility:hidden`, `font-size:0`,
+  `opacity:0`, `mso-hide:all`, `max-height:0` or `height:0` with
+  `overflow:hidden`, inline or from a one-class rule at the top level of the
+  document's `<style>`; a class an `@media` block also styles stays
+  visible), and quoted history: `<blockquote>`, Outlook's reply header
+  (`div#divRplyFwdMsg`, or an `<hr>` followed by a `From:`/`De :`/`Von:`
+  header block) and everything after it, plain `>` lines with their "On ...
+  wrote:" line, and everything from a plain "-----Original Message-----"
+  (`Message d'origine`, `Ursprüngliche Nachricht` and the other Outlook
+  languages) or an underscore rule followed by a `From:` line. When that
+  leaves nothing (a forward), the quote IS the mail and is translated.
+  Known gaps: text hidden by colour (white on white), a 1px font, a
+  selector more complex than one class, or positioning is still sent.
+- A batch the model calls English (an English signature block, a quoted
+  English reply) keeps its own text; a message whose every batch is English
+  is `not_needed`.
+- **Thinking off.** Translation is not a reasoning task. On models that take
+  `thinking: {"type": "disabled"}` the call sends it (Claude Sonnet 5, Opus
+  5, Opus 4.8/4.7/4.6, Sonnet 4.6, Haiku 4.5, Haiku 5.5; gateway-qualified,
+  platform and dated ids included) and no `effort`. Every other model is
+  sent no `thinking` field, because the explicit switch is a 400 on Claude
+  Sonnet 5.5, Opus 5.5 and the Fable family. So pointing `translate.model`
+  at a model outside that list KEEPS THINKING ON (adaptive, billed at the
+  output price and spent against the batch's output ceiling and timeout):
+  Sonnet 5.5 turns it off only with `between_tools`, which this client does
+  not send.
 
 ## Wire
 

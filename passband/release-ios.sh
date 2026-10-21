@@ -25,8 +25,11 @@ EXPORT_PLIST="$OUT/export-options.plist"
 
 # On a signed-in Mac, -allowProvisioningUpdates rides Xcode's session. Headless
 # (CI), the same flag needs the App Store Connect API key handed to xcodebuild
-# itself — cloud signing then mints/uses a managed distribution cert with no
-# keychain on the runner.
+# itself. The key covers the profiles and the export, where cloud signing uses
+# a managed distribution cert that lives on Apple's side. It does NOT cover the
+# archive: that is signed "Apple Development", and with no such identity in the
+# keychain Xcode mints a new certificate every run until the account is full.
+# CI imports a stored one first (see release-passband-ios.yml).
 AUTH=()
 if [ -n "${SQUELCH_ASC_KEY_ID:-}" ] && [ -f "${SQUELCH_ASC_KEY_PATH:-}" ]; then
   AUTH=(-authenticationKeyPath "$(cd "$(dirname "$SQUELCH_ASC_KEY_PATH")" && pwd)/$(basename "$SQUELCH_ASC_KEY_PATH")"

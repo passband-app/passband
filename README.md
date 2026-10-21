@@ -225,11 +225,12 @@ cargo run --bin squelch-tui    # ranked digest, squelch line, sender rule tuning
 
 ## The agent door
 
-Seven tools plus drafts, nothing sent unless you turn that on, sealed mail structurally absent:
+Eight tools plus drafts, nothing sent unless you turn that on, sealed mail structurally absent:
 
 | Tool | What it returns |
 |---|---|
 | `get_inbox_updates` | ranked updates since a timestamp, with importance, a one-line "why", and the sender's standing instruction |
+| `get_reading` | the Reading band (newsletters and longer reads) since a timestamp, newest first: one-line summaries and thread ids |
 | `get_thread` | a full thread by id, with the standing instructions covering the people in it |
 | `search_mail` | full-text search over synced mail |
 | `get_deadlines` | upcoming deadlines extracted during triage |

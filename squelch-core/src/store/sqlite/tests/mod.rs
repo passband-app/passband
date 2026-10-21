@@ -4,6 +4,7 @@ mod archive;
 mod archive_surface;
 mod attention;
 mod audit;
+mod bench;
 mod device_tokens;
 mod drafts;
 mod events;

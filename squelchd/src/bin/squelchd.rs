@@ -623,12 +623,6 @@ fn build_embedder(config: &Config, metrics: Option<Arc<SyncMetrics>>) -> Option<
 /// leaving an operator who set 5 wondering why it took 65.
 const EMBEDDER_REAP_INTERVAL_SECS: u64 = 60;
 
-/// How often the scheduled-send worker looks for due mail. A scheduled mail
-/// goes out at most this late (plus the pass itself).
-const SCHEDULED_SEND_TICK_SECS: u64 = 10;
-/// The worker's first look, after startup.
-const SCHEDULED_SEND_FIRST_TICK_SECS: u64 = 5;
-
 /// How many consecutive contended ticks before the reaper says so. An embed
 /// holding the lock is normal and happens all day; a whole hour of them is a
 /// session no reaper can ever reach, which is the memory this feature exists to
@@ -2678,49 +2672,27 @@ fn cmd_serve(
 
         // SCHEDULED SEND fires here for the same reason the shredder runs
         // here: it sends on the WRITE credential (docs/SCHEDULED-SEND.md §4).
-        // The tick is the clock — no timer per row — so a restart costs
-        // punctuality and never a mail. Unlike the shredder it HONOURS THE
-        // SHUTDOWN WATCH: between ticks here, and between rows inside a pass
+        // The store is the clock — the worker sleeps until the next row's
+        // `send_at` and a handler's poke, no timer per row — so a restart
+        // costs punctuality and never a mail. Unlike the shredder it HONOURS
+        // THE SHUTDOWN WATCH: between rounds, and between rows inside a pass
         // (the pass reads the watch `api_state` carries), so a pass in flight
         // settles the row in hand and claims no more instead of leaving work
         // to lease recovery.
         let scheduled_handle = {
             let state = api_state.clone();
-            let mut shutdown_rx = shutdown_tx.subscribe();
+            let shutdown_rx = shutdown_tx.subscribe();
+            let timing = squelch_api::ScheduledWorkerTiming::daemon();
             eprintln!(
-                "squelchd: scheduled-send worker enabled ({SCHEDULED_SEND_TICK_SECS}s tick)"
+                "squelchd: scheduled-send worker enabled (sleeps to the next due send; \
+                 maintenance every {}s)",
+                timing.maintenance.as_secs()
             );
-            tokio::spawn(async move {
-                // First tick a few seconds in, past the bind and the first
-                // sync burst; then every tick.
-                let mut tick = tokio::time::interval_at(
-                    tokio::time::Instant::now()
-                        + std::time::Duration::from_secs(SCHEDULED_SEND_FIRST_TICK_SECS),
-                    std::time::Duration::from_secs(SCHEDULED_SEND_TICK_SECS),
-                );
-                // A pass that overran (a slow Gmail) is not followed by a burst
-                // of catch-up passes.
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    tokio::select! {
-                        _ = tick.tick() => {}
-                        // An Err is the sender dropped: the daemon is leaving.
-                        res = shutdown_rx.changed() => {
-                            if res.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                    if *shutdown_rx.borrow() {
-                        return;
-                    }
-                    let report = squelch_api::run_scheduled_send_pass(&state).await;
-                    if !report.is_idle() {
-                        // Counts only; the pass logged its own ids.
-                        eprintln!("squelchd: scheduled-send pass {report:?}");
-                    }
-                }
-            })
+            tokio::spawn(squelch_api::scheduled_send_worker(
+                state,
+                shutdown_rx,
+                timing,
+            ))
         };
 
         // Bind BEFORE building the embedder: its first-run model download must

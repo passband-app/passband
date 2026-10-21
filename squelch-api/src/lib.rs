@@ -43,9 +43,11 @@ pub use error::ApiError;
 /// WRITE credential, which the readonly-bound sync loop must never touch.
 pub use handlers::run_shred_pass;
 pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
-/// The scheduled-send worker's pass. Exported for the daemon's timer for the
+/// The scheduled-send worker and its pass. Exported for the daemon for the
 /// same reason as the shredder: it sends on the WRITE credential.
-pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
+pub use scheduled_send::{
+    ScheduledPassReport, ScheduledWorkerTiming, run_scheduled_send_pass, scheduled_send_worker,
+};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
 pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
@@ -212,7 +214,7 @@ fn client_router(state: ApiState) -> Router {
         // learns the table exists. POST schedules (running every check a send
         // runs, guard included, while the user is there to answer), GET lists
         // what is still owed an outcome, DELETE pulls one back into the
-        // composer, and /now sends one on the next tick. Its own router so
+        // composer, and /now wakes the worker to send one. Its own router so
         // one `no-store` layer covers every response on it, an extractor's
         // rejection included.
         .merge(scheduled_send::routes())

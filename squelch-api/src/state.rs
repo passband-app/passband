@@ -147,6 +147,13 @@ pub struct ApiState {
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
     pub(crate) shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    /// THE SCHEDULED-SEND WORKER'S WAKE: a row may just have been scheduled
+    /// or pulled forward. Poked by `POST /client/scheduled` and
+    /// `POST /client/scheduled/{id}/now` after their store write commits, and
+    /// awaited by [`crate::scheduled_send_worker`], which otherwise sleeps
+    /// until the next `send_at` it knows of. Always present: the worker and
+    /// the handlers share this state.
+    pub(crate) scheduled_wake: Arc<tokio::sync::Notify>,
     /// TEST HOOK: added to the wall clock the scheduled-send worker reads, so
     /// a test can step past a grace or a give-up without sleeping through it.
     /// Zero in production; nothing but the worker reads it.
@@ -561,6 +568,7 @@ impl ApiState {
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
             shutdown: None,
+            scheduled_wake: Arc::new(tokio::sync::Notify::new()),
             worker_clock_skew: chrono::Duration::zero(),
             tracking_base_url: None,
             pixel_slots: Arc::new(tokio::sync::Semaphore::new(
@@ -755,6 +763,12 @@ impl ApiState {
     pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
         self.shutdown = Some(shutdown);
         self
+    }
+
+    /// The scheduled-send worker's wake (see the field), for a test that
+    /// wants to see a handler poke it.
+    pub fn scheduled_wake(&self) -> &Arc<tokio::sync::Notify> {
+        &self.scheduled_wake
     }
 
     /// The event-notification broadcast, if one was wired in.

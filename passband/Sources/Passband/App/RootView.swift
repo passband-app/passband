@@ -675,17 +675,27 @@ struct MainShell: View {
         case .sitrep: SitrepView()
         // `route(to:)` never lands here with the gate closed; the shell's
         // watcher sends an open page back to the sitrep if it closes.
-        case .calendar: RoutedHost(view: .calendar) { CalendarPage() }
-        case .emails: EmailsView()
-        case .auth: RoutedHost(view: .auth) { AuthView() }
-        case .usage: UsageView()
-        case .settings: SettingsView()
-        case .process: RoutedHost(view: .process) { ProcessView() }
+        case .calendar: RoutedHost(view: .calendar) { CalendarPage() }.id(pageWorld)
+        case .emails: EmailsView().id(pageWorld)
+        case .auth: RoutedHost(view: .auth) { AuthView() }.id(pageWorld)
+        case .usage: UsageView().id(pageWorld)
+        case .settings: SettingsView().id(pageWorld)
+        case .process: RoutedHost(view: .process) { ProcessView() }.id(pageWorld)
         case .discovery:
             DiscoveryView()
                 .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
         }
     }
+
+    /// A PAGE IS MOUNTED PER ACCOUNT WORLD. An account switch keeps the page
+    /// on screen (`AppStore.pageKeptAcrossSwitch`), and a page that stayed
+    /// mounted would keep its `@State`, which holds rows and ids from the
+    /// daemon just left, and would never run its `.task` load for the new
+    /// one. A new identity is both: the old state goes, the load runs again,
+    /// in the same render as the wipe (see `AppStore.pageGeneration`). Not
+    /// the sitrep, whose rows are the store's and swapped with it, nor
+    /// Discover, which is a guide.
+    private var pageWorld: Int { store.pageGeneration }
 
     /// Digit view nav (the rail's pages, then the Rules and Groups panes in
     /// Settings) + ⌘[ back / ⌘] forward + ⌘K ask bar. The ⌘ chords use the

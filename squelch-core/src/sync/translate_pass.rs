@@ -192,9 +192,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // A row whose call failed in a message-shaped way while another row
         // of this round got an answer: the gateway works, the failure is
         // this message's.
-        let any_answer = runs.iter().any(|r| match &r.outcome {
-            TranslateOutcome::Failed(kind) => !failure_is_global(kind),
-            _ => true,
+        // A run that made no model call (nothing to translate) proves nothing
+        // about the gateway.
+        let any_answer = runs.iter().any(|r| {
+            r.model_calls > 0
+                && match &r.outcome {
+                    TranslateOutcome::Failed(kind) => !failure_is_global(kind),
+                    _ => true,
+                }
         });
         if any_answer {
             // Stamped before the rows are recorded, so a row released in

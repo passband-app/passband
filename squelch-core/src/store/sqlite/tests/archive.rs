@@ -1983,6 +1983,13 @@ fn only_a_check_in_flight_makes_an_archive_row_evidence() {
     store
         .request_archive_access(acct, &[old], Default::default(), Utc::now())
         .unwrap();
+    // The job is stamped by the store's own clock to the nanosecond and read
+    // against SQLite's `'now'`, which is truncated to the millisecond, so a
+    // request and a read inside one millisecond compare the job as not yet
+    // due. Harmless in the daemon (due a millisecond later); here, step the
+    // row a second into the past so "due" does not hinge on which
+    // millisecond the two clocks land in.
+    reschedule(Utc::now() - chrono::Duration::seconds(1), None);
     assert!(readable(), "queued, due, never pushed back");
 
     reschedule(Utc::now() + chrono::Duration::hours(20), None);

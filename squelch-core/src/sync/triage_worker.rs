@@ -468,9 +468,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     &sources,
                     &self.config.revisit,
                 ) {
-                    // The commit transaction queues a durable deliberate notification job.
+                    // For an arrival-eligible job the commit transaction
+                    // queued a durable `deliberate_notification`; wake the
+                    // lane that claims it. Any other job queued no push, and
+                    // a poke per revisit or backfill decision would be a lane
+                    // round each that finds nothing.
                     Ok(AgentCommitOutcome::Applied) => {
                         self.metrics.record_agent(AgentVerdict::Applied);
+                        if job.arrival_eligible {
+                            self.notify_wake.notify_one();
+                        }
                     }
                     Ok(AgentCommitOutcome::Stale) => {
                         self.metrics.record_agent(AgentVerdict::Stale);
@@ -656,27 +663,53 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
     }
 
+    /// THE NOTIFICATION LANE: claims and runs the two push-shaped job kinds.
+    ///
+    /// It used to loop on a fixed one-second sleep and open a `BEGIN
+    /// IMMEDIATE` claim per kind per second whether or not any job existed:
+    /// 172,800 write-lock acquisitions a day per tenant that found nothing,
+    /// each serialized against ingest and the doors. Now a READ asks when
+    /// each kind's next job is due (`next_agent_jobs_due`, a seek on the
+    /// account's ready index); a kind is claimed only when one is, the sleep
+    /// backs off from the poll interval to [`MAX_NOTIFY_IDLE_BACKOFF`] while
+    /// the queue stays empty, a job scheduled ahead (a retry, a lapsing
+    /// lease) cuts the sleep to its due time, and the producers'
+    /// `notify_wake` ends it at once, so an arrival is claimed as fast as
+    /// before and faster when the old loop would have been mid-sleep.
+    ///
+    /// A failing read is not a reason to stop claiming: the claim runs for
+    /// every kind, meets the same error or finds the job the read could not
+    /// describe, and the ladder keeps a broken store from being asked more
+    /// than a dozen times a minute. The error is logged on the first failing
+    /// read and once an hour while it persists, not once per round.
     pub(super) async fn agent_notification_lane(
         &self,
         shutdown: &mut tokio::sync::watch::Receiver<bool>,
     ) {
+        let interval = Duration::from_secs(self.config.triage.agent.worker_poll_secs);
+        let mut idle_rounds = 0u32;
+        let mut read_failing: Option<std::time::Instant> = None;
         loop {
             if *shutdown.borrow() {
                 return;
             }
+            let mut due = self.notification_jobs_due(&mut read_failing);
+            let now = Utc::now();
             let mut jobs = Vec::new();
-            for (kind, lease_secs) in [
-                (
-                    "notification",
-                    self.config.notify.fast_timeout_secs as i64 + 30,
-                ),
-                ("deliberate_notification", 30),
-            ] {
+            for kind in NOTIFICATION_JOB_KINDS {
+                let claimable = due.as_ref().map_or(true, |rows| {
+                    rows.iter().any(|(k, at)| k == kind && *at <= now)
+                });
+                if !claimable {
+                    continue;
+                }
                 for _ in 0..self.config.notify.fast_concurrency.max(1) {
-                    match self
-                        .store
-                        .claim_agent_job(self.account_id, kind, Utc::now(), lease_secs)
-                    {
+                    match self.store.claim_agent_job(
+                        self.account_id,
+                        kind,
+                        Utc::now(),
+                        self.notification_lease_secs(kind),
+                    ) {
                         Ok(Some(job)) => jobs.push(job),
                         Ok(None) => break,
                         Err(error) => {
@@ -686,6 +719,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     }
                 }
             }
+            let ran = !jobs.is_empty();
+            idle_rounds = if ran {
+                0
+            } else {
+                idle_rounds.saturating_add(1)
+            };
             futures::future::join_all(jobs.into_iter().map(|job| async move {
                 let context = match self.store.load_agent_context(&job) {
                     Ok(context) => context,
@@ -729,13 +768,103 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 }
             }))
             .await;
+            // After a round that ran, read again: what ran may have queued
+            // more (a retry of its own), and the rest of the queue may be due
+            // by now. After an empty round the first read still holds:
+            // nothing but a producer changes the queue, and a producer pokes.
+            if ran {
+                due = self.notification_jobs_due(&mut read_failing);
+            }
+            let until_due = due.ok().and_then(|rows| {
+                rows.iter()
+                    .map(|(_, at)| (*at - Utc::now()).to_std().unwrap_or(Duration::ZERO))
+                    .min()
+            });
+            let wait = notification_wait(idle_rounds, interval, until_due);
+            // A producer's poke ends the sleep and restarts the ladder: the
+            // next round is the first after an arrival.
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(self.config.triage.agent.worker_poll_secs)) => {},
+                _ = self.notify_wake.notified() => { idle_rounds = 0; }
+                _ = tokio::time::sleep(wait) => {}
                 _ = shutdown.changed() => { if *shutdown.borrow() { return; } }
             }
         }
     }
+
+    /// [`AgentTriageStore::next_agent_jobs_due`] for the lane's kinds.
+    /// `failing` is when the failure was last logged: the error is logged on
+    /// the first failing read, then once an hour while reads keep failing,
+    /// so a persistent one stays visible without a line per round.
+    fn notification_jobs_due(
+        &self,
+        failing: &mut Option<std::time::Instant>,
+    ) -> std::result::Result<Vec<(String, DateTime<Utc>)>, ()> {
+        match self
+            .store
+            .next_agent_jobs_due(self.account_id, &NOTIFICATION_JOB_KINDS)
+        {
+            Ok(rows) => {
+                *failing = None;
+                Ok(rows)
+            }
+            Err(error) => {
+                if failing.is_none_or(|at| at.elapsed() >= Duration::from_secs(3600)) {
+                    eprintln!("squelch: notification due read failed: {error}");
+                    *failing = Some(std::time::Instant::now());
+                }
+                Err(())
+            }
+        }
+    }
+
+    /// How long a claimed notification job is leased: the fast model call's
+    /// timeout with room to record its outcome, and a short lease for the
+    /// deliberate one, which makes no model call of its own.
+    fn notification_lease_secs(&self, kind: &str) -> i64 {
+        match kind {
+            "notification" => self.config.notify.fast_timeout_secs as i64 + 30,
+            _ => 30,
+        }
+    }
 }
+
+/// HOW LONG THE NOTIFICATION LANE SLEEPS after a round. The idle ladder:
+/// `interval` after a round that ran something (`idle_rounds` is zero),
+/// doubling per empty round to [`MAX_NOTIFY_IDLE_BACKOFF`], or to the
+/// interval itself when it is configured longer than that. Cut short by a
+/// job already on the calendar `until_due` from now (a retry the lane
+/// scheduled, a lease that has to lapse), to nothing when a round that ran
+/// left more due than it could claim. A job due now after an EMPTY round is
+/// one the read counts and the claim refused, which the read's own shape
+/// leaves to a race (see `NEXT_JOBS_DUE_SQL`): it does not cut the ladder,
+/// so such a row costs the lane a claim per rung, never a spin. Pure, so
+/// the ladder is testable without a clock.
+pub(super) fn notification_wait(
+    idle_rounds: u32,
+    interval: Duration,
+    until_due: Option<Duration>,
+) -> Duration {
+    let backoff = interval
+        .saturating_mul(1 << idle_rounds.min(5))
+        .min(MAX_NOTIFY_IDLE_BACKOFF.max(interval));
+    until_due
+        .filter(|d| idle_rounds == 0 || !d.is_zero())
+        .map_or(backoff, |d| d.min(backoff))
+}
+
+/// The longest the notification lane sleeps between looks at an empty queue.
+/// Shorter than the refine lane's [`MAX_LANE_IDLE_BACKOFF`] because this lane
+/// has producers it cannot hear: a correction, a rule change, a heal or a
+/// sent reply can re-queue a pending push through the store, which has no
+/// handle on the engine's `notify_wake`, and a push is the one output of the
+/// daemon measured in seconds. Five seconds bounds those, at a dozen index
+/// reads a minute over an empty queue; the old loop's two write-lock claims
+/// a second were a hundred and twenty.
+pub(super) const MAX_NOTIFY_IDLE_BACKOFF: Duration = Duration::from_secs(5);
+
+/// The job kinds the notification lane claims, in claim order: an arrival's
+/// push, then the deliberate one that follows a decision.
+pub(super) const NOTIFICATION_JOB_KINDS: [&str; 2] = ["notification", "deliberate_notification"];
 
 /// Provider failures describe shared availability, not a permanently bad email.
 fn is_provider_outage(kind: &str) -> bool {
@@ -772,6 +901,74 @@ fn investigation_budget_limits(config: &Config, job: &AgentJob) -> Vec<(String, 
         ));
     }
     limits
+}
+
+#[cfg(test)]
+mod notification_lane_tests {
+    use super::*;
+
+    /// THE SLEEP LADDER, as a table. Doubling from the interval while the
+    /// queue stays empty and capped at five seconds (or the interval, when
+    /// that is longer); the interval after a
+    /// round that ran something, nothing at all when it left more due than
+    /// it could claim; cut to a job already on the calendar; and a job due
+    /// now after an empty round, which the claim refused, rides the ladder
+    /// rather than spinning it.
+    #[test]
+    fn the_notification_wait_backs_off_cuts_to_the_calendar_and_never_spins() {
+        let s = Duration::from_secs;
+        for (idle_rounds, interval, until_due, expected, why) in [
+            (1, s(1), None, s(2), "the first empty round doubles"),
+            (2, s(1), None, s(4), "and keeps doubling"),
+            (3, s(1), None, s(5), "to the cap"),
+            (9, s(1), None, s(5), "which more rounds cannot pass"),
+            (0, s(1), None, s(1), "a round that ran waits the interval"),
+            (
+                0,
+                s(1),
+                Some(s(0)),
+                s(0),
+                "unless it left more due right now",
+            ),
+            (3, s(1), Some(s(3)), s(3), "a job ahead cuts the backoff"),
+            (1, s(1), Some(s(7)), s(2), "but never lengthens it"),
+            (
+                0,
+                s(3600),
+                None,
+                s(3600),
+                "an interval above the cap is honoured",
+            ),
+            (
+                3,
+                s(3600),
+                None,
+                s(3600),
+                "and the ladder does not shorten it",
+            ),
+            (
+                1,
+                s(3600),
+                Some(s(7)),
+                s(7),
+                "though a job ahead cuts it like any other",
+            ),
+            (
+                1,
+                s(1),
+                Some(s(0)),
+                s(2),
+                "due but refused by the claim: the ladder, not a spin",
+            ),
+            (5, s(1), Some(s(0)), s(5), "all the way up it"),
+        ] {
+            assert_eq!(
+                notification_wait(idle_rounds, interval, until_due),
+                expected,
+                "{why}: idle_rounds={idle_rounds} interval={interval:?} until_due={until_due:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

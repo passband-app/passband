@@ -3834,6 +3834,25 @@ struct PlainBody: View {
         return Text(out)
     }
 
+    /// The text itself, selectable on both platforms. The Mac's `Text` selects
+    /// for real; a phone's only copies the whole block on a long press, so the
+    /// phone draws a read-only UITextView instead (SelectableTextiOS, #522).
+    @ViewBuilder
+    private func lines(
+        _ text: String, _ hits: [Range<String.Index>], active: Int?, size: CGFloat, color: Color
+    ) -> some View {
+        #if os(iOS)
+            SelectableText(
+                text: text, hits: hits, active: active, size: Typo.size(size), color: color,
+                fills: fills)
+        #else
+            painted(text, hits, active: active)
+                .font(Typo.ui(size))
+                .foregroundStyle(color)
+                .textSelection(.enabled)
+        #endif
+    }
+
     /// The scroll target for the active match. Plain text has no document to
     /// ask where a range is drawn, so the match is placed by how far through
     /// the text it starts: off by a line or two in mail with uneven
@@ -3857,10 +3876,10 @@ struct PlainBody: View {
         let shown = split.quoted == nil ? content : split.visible
         let found = search(shown: shown, quoted: split.quoted)
         VStack(alignment: .leading, spacing: Space.s8) {
-            painted(shown, found?.visible ?? [], active: found?.active)
-                .font(Typo.ui(ReaderMetrics.plainBase))
-                .foregroundStyle(Palette.ink)
-                .textSelection(.enabled)
+            lines(
+                shown, found?.visible ?? [], active: found?.active,
+                size: ReaderMetrics.plainBase, color: Palette.ink
+            )
                 .frame(maxWidth: fills ? .infinity : nil, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .overlay(alignment: .topLeading) {
@@ -3883,10 +3902,7 @@ struct PlainBody: View {
                     // The cursor counts through the reply first, then the
                     // history under it, which is the order they are read in.
                     let active = found?.active.map { $0 - (found?.visible.count ?? 0) }
-                    painted(quoted, found?.quoted ?? [], active: active)
-                        .font(Typo.ui(13))
-                        .foregroundStyle(Palette.inkFaint)
-                        .textSelection(.enabled)
+                    lines(quoted, found?.quoted ?? [], active: active, size: 13, color: Palette.inkFaint)
                         .padding(.leading, Space.s10)
                         .overlay(alignment: .leading) {
                             Rectangle().fill(Palette.hairline).frame(width: 2)

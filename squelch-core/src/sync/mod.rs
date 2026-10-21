@@ -150,7 +150,16 @@ enum IngestOrigin {
 struct Ingested {
     id: i64,
     embed_text: Option<String>,
+    /// The row was stamped eligible to notify ([`notify_eligible_stamp`]),
+    /// so the ingest transaction queued its `notification` job: the one case
+    /// the notification lane is poked for.
+    notify_eligible: bool,
 }
+
+/// The longest the refine lane sleeps between looks at an empty queue. Its
+/// producers (ingest, the doors through `RefinePoke`) poke it awake, so this
+/// bounds only what nobody poked for.
+pub(crate) const MAX_LANE_IDLE_BACKOFF: Duration = Duration::from_secs(30);
 
 /// MAY THIS MESSAGE EVER NOTIFY, and from when — the whole of docs/NOTIFY.md
 /// §11.3, in one pure function so the engine and its tests cannot drift.
@@ -741,6 +750,19 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`SyncEngine::refine_lane`]; see [`SyncEngine::run_lanes`] for why the
     /// two are separate futures at all.
     refine_wake: tokio::sync::Notify,
+    /// THE NOTIFICATION LANE'S WAKE: a job it claims may just have been
+    /// queued. Poked by the two producers, this engine's own ingest of an
+    /// incremental arrival (its `notification` job is queued inside the
+    /// ingest transaction) and the investigation lane's commit of an
+    /// arrival-eligible job (which queues the `deliberate_notification`),
+    /// and awaited by [`SyncEngine::agent_notification_lane`], which
+    /// otherwise backs off to `MAX_NOTIFY_IDLE_BACKOFF` between looks at an
+    /// empty queue. Coalesces like `refine_wake`: a window of fifty arrivals
+    /// is one extra round. The store's other producers of a push job (a
+    /// correction, a rule change, a heal, a sent reply re-evaluating its
+    /// thread) have no handle on this engine and do not poke; that cap is
+    /// sized for them.
+    notify_wake: tokio::sync::Notify,
     /// ON-DEMAND SPAM SIGNAL: notifying it makes the poll loop run ONE spam
     /// window sync on its next pass. Separate from `refresh` because it is a
     /// different request — `refresh` means "check my mail now", this means "go
@@ -964,6 +986,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             refresh: Arc::new(tokio::sync::Notify::new()),
             event_listeners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             refine_wake: tokio::sync::Notify::new(),
+            notify_wake: tokio::sync::Notify::new(),
             spam_refresh: Arc::new(tokio::sync::Notify::new()),
             refine_poke: Default::default(),
             warn_days: Arc::new(std::sync::Mutex::new(WarnDays::default())),
@@ -2333,7 +2356,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             tokio::select! {
                 _ = self.refine_wake.notified() => { idle_rounds = 0; }
                 _ = self.refine_poke.poked() => { idle_rounds = 0; }
-                _ = tokio::time::sleep(interval.saturating_mul(1 << idle_rounds).min(Duration::from_secs(30))) => {}
+                _ = tokio::time::sleep(interval.saturating_mul(1 << idle_rounds).min(MAX_LANE_IDLE_BACKOFF)) => {}
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return; }
                 }
@@ -3484,20 +3507,24 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 count += 1;
                 continue;
             };
-            // THE FAST LANE, SPAWNED AND NEVER AWAITED (docs/NOTIFY.md §11.5).
-            //
-            // Here rather than after `embed_and_store` because the embedder is
-            // ONNX inference on a `spawn_blocking` thread and can take seconds
-            // per message: a notification queued behind it would be a
-            // notification arriving after the thing it was about. And spawned
-            // rather than awaited because the whole point of the lane is that a
-            // model call in front of a user does not become a model call in
-            // front of the next message's fetch.
-            //
-            // The candidate is built HERE, on the poll lane, because it is pure
-            // and cheap and because it is the gate: most messages are not
-            // candidates at all, and a `None` costs one spawn we never make.
-            // The ingest transaction queues independent durable notification work.
+            // POLL LANE -> NOTIFICATION LANE, BEFORE THE EMBED. The fast push
+            // used to be spawned from this spot (docs/NOTIFY.md §11.5 still
+            // describes that shape); it is a durable `notification` job now,
+            // queued inside the ingest transaction that just committed, and
+            // the lane that claims it is poked from the same spot for the
+            // same reason: the embedder below is ONNX inference on a
+            // `spawn_blocking` thread that can take seconds per message, and a
+            // poke behind it would be a notification arriving after the thing
+            // it was about. Only a row the ingest stamped eligible, which is
+            // the row it queued a push for: a backfill's rows, the user's own
+            // sent copies and a catch-up's stale rows are stamped ineligible
+            // and queue nothing, and a poke per such row would be a lane
+            // round per row (a read over the tenant's pending queue, under
+            // the store mutex the ingest itself needs) for the length of a
+            // first backfill or a post-outage catch-up.
+            if ingested.notify_eligible && !mailbox.is_spam() {
+                self.notify_wake.notify_one();
+            }
             if let Some(text) = ingested.embed_text {
                 self.embed_and_store(ingested.id, text).await;
             }
@@ -3607,7 +3634,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 self.config.embed.max_chars,
             ))
         };
-        Ok(Some(Ingested { id, embed_text }))
+        Ok(Some(Ingested {
+            id,
+            embed_text,
+            notify_eligible: triaged.notify_eligible_at.is_some(),
+        }))
     }
 
     /// The fast lane, built on first use. See the [`SyncEngine::notify_lane`]
@@ -6215,6 +6246,125 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// THE POKE REACHES THE LANE. Idle for a hundred-odd seconds of paused
+    /// time, the notification lane has backed off to its five-second sleep,
+    /// four seconds of which remain. An arrival's `notification` job is then
+    /// queued and the wake poked (by hand here; the producers' pokes are
+    /// [`an_incremental_arrival_pokes_the_notification_lane_but_a_backfill_does_not`]
+    /// and the applied-commit assertion in
+    /// [`agent_worker_commits_model_decision_without_legacy_placement`]),
+    /// and the job is claimed and run inside the next few milliseconds of
+    /// the clock: the poke ended the sleep, the timer did not.
+    ///
+    /// MUTATION: dropping the `notified()` arm from the lane's `select!`
+    /// leaves the job for the timer, four seconds on, and the elapsed-time
+    /// assertion fails.
+    #[tokio::test(start_paused = true)]
+    async fn a_poke_claims_a_queued_notification_inside_the_backoff() {
+        let (store, acct) = store_at_cursor(None);
+        let eng = Arc::new(engine(store.clone(), acct, "http://127.0.0.1:9"));
+        let (stop, mut rx) = tokio::sync::watch::channel(false);
+        let lane = {
+            let eng = eng.clone();
+            tokio::spawn(async move { eng.agent_notification_lane(&mut rx).await })
+        };
+        // Rounds at 0, 2, 6, then every five seconds (11, 16, ... 101) of
+        // the paused clock: the next timer is at 106 s.
+        tokio::time::sleep(Duration::from_secs(102)).await;
+        use crate::store::agent_triage::AgentTriageStore;
+        let kinds = ["notification", "deliberate_notification"];
+        assert_eq!(store.next_agent_jobs_due(acct, &kinds).unwrap(), []);
+        // A fresh incremental arrival queues its push job inside the ingest.
+        let raw = "From: friend@example.com\r\nTo: me@example.com\r\nSubject: now\r\n\r\nhello\r\n";
+        eng.ingest_one(
+            &fixture(acct, "g-now", raw, false),
+            &[],
+            Utc::now(),
+            IngestOrigin::Incremental,
+        )
+        .unwrap()
+        .expect("ingested");
+        let queued = store.next_agent_jobs_due(acct, &kinds).unwrap();
+        assert_eq!(queued.len(), 1, "the arrival queued a notification job");
+        assert_eq!(queued[0].0, "notification");
+        assert!(queued[0].1 <= Utc::now(), "due now");
+        let poked_at = tokio::time::Instant::now();
+        eng.notify_wake.notify_one();
+        // Claimed and run (no model configured: recorded unavailable and
+        // completed) in the same poll, so the queue reads empty again.
+        wait_for(5, "the lane to claim and complete the job", || {
+            store.next_agent_jobs_due(acct, &kinds).unwrap().is_empty()
+        })
+        .await;
+        let waited = poked_at.elapsed();
+        assert!(
+            waited < Duration::from_secs(1),
+            "claimed on the poke, not the timer: {waited:?}"
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lane)
+            .await
+            .expect("the lane stops on shutdown")
+            .unwrap();
+    }
+
+    /// IDLE COST OF THE NOTIFICATION LANE, ignored by default: ten seconds of
+    /// the lane over an empty queue on a FILE-backed store, printing the
+    /// process CPU it burned. Run it under
+    /// `strace -f -c -e trace=fcntl,pread64,pwrite64,fdatasync` on the test
+    /// binary to count what those seconds asked the kernel for:
+    ///
+    /// ```text
+    /// cargo test -p squelch-core --lib sync::tests::notification_lane_idle_cost -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn notification_lane_idle_cost() {
+        let dir = std::env::temp_dir().join(format!("squelch-notify-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(SqliteStore::open(dir.join("store.sqlite3")).unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        let eng = engine(store, acct, "http://127.0.0.1:9");
+        let (stop, mut rx) = tokio::sync::watch::channel(false);
+        // `SQUELCH_BENCH_SKIP=1` runs the setup alone, so a syscall count of
+        // the two runs differs by the lane's own.
+        if std::env::var_os("SQUELCH_BENCH_SKIP").is_some() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let cpu_start = process_cpu();
+        let start = std::time::Instant::now();
+        let lane = eng.agent_notification_lane(&mut rx);
+        tokio::pin!(lane);
+        tokio::select! {
+            _ = &mut lane => {}
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+        }
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lane)
+            .await
+            .expect("the lane stops on shutdown");
+        eprintln!(
+            "BENCH notification_lane_idle: {:?} wall, {:?} process cpu",
+            start.elapsed(),
+            process_cpu() - cpu_start
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CPU consumed by the whole process so far, user and system.
+    fn process_cpu() -> Duration {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: `usage` is a valid, writable rusage for the call's duration.
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        assert_eq!(rc, 0, "getrusage(RUSAGE_SELF)");
+        let secs = |tv: libc::timeval| {
+            Duration::from_secs(tv.tv_sec as u64) + Duration::from_micros(tv.tv_usec as u64)
+        };
+        secs(usage.ru_utime) + secs(usage.ru_stime)
+    }
+
     /// Poll `cond` every 10ms until it holds, or panic after `secs`.
     async fn wait_for(secs: u64, what: &str, cond: impl Fn() -> bool) {
         tokio::time::timeout(Duration::from_secs(secs), async {
@@ -8157,6 +8307,79 @@ mod tests {
 
         // ...and the permit COALESCES rather than accumulating: one round is
         // queued, not one per message.
+        assert!(
+            poked().await.is_err(),
+            "the permit was consumed by the wait above; Notify holds exactly one"
+        );
+    }
+
+    /// THE NOTIFICATION LANE'S PRODUCER POKE, through `fetch_raw_and_ingest`.
+    /// A backfill queues no `notification` job (its rows are stamped
+    /// ineligible), so it does not poke: a poke per backfilled row would be a
+    /// lane round per row of the first backfill. Neither does the user's own
+    /// sent copy. An incremental arrival does, and the permit is stored
+    /// before `poll_once` returns, so a lane that is mid-round when the row
+    /// lands wakes as soon as it finishes. One permit, however many rows:
+    /// the lane's rounds coalesce.
+    #[tokio::test]
+    async fn an_incremental_arrival_pokes_the_notification_lane_but_a_backfill_does_not() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let now = Utc::now();
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::added(140, &[(140, "g-new")]));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.listing(LABEL_INBOX, &["g-old"]);
+        g.listing(LABEL_SENT, &[]);
+        g.body("g-new", alert_eml(now));
+        g.body(
+            "g-old",
+            alert_eml(now).replace("checkout api", "billing api"),
+        );
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+
+        let poked = || tokio::time::timeout(Duration::ZERO, eng.notify_wake.notified());
+        assert!(poked().await.is_err(), "a fresh engine holds no permit");
+
+        let n = eng
+            .fetch_raw_and_ingest(
+                &["g-old".to_string()],
+                Mailbox::Inbox,
+                IngestOrigin::Backfill,
+                GmailRetry::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "the backfill really did ingest a row");
+        assert!(
+            poked().await.is_err(),
+            "a backfilled row queues no push and must not wake the lane"
+        );
+
+        // Nor does the user's own sent copy, incremental or not: never
+        // eligible, never queued.
+        g.body("g-sent", alert_eml(now).replace("checkout api", "sent api"));
+        let n = eng
+            .fetch_raw_and_ingest(
+                &["g-sent".to_string()],
+                Mailbox::Sent,
+                IngestOrigin::Incremental,
+                GmailRetry::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "the sent copy really did ingest");
+        assert!(
+            poked().await.is_err(),
+            "a sent copy queues no push and must not wake the lane"
+        );
+
+        eng.poll_once().await.unwrap();
+        assert!(
+            poked().await.is_ok(),
+            "an incremental arrival's push job must be claimed now, not at \
+             the lane's next timer"
+        );
         assert!(
             poked().await.is_err(),
             "the permit was consumed by the wait above; Notify holds exactly one"
@@ -10426,6 +10649,13 @@ mod tests {
             )
             .await;
         assert_eq!(store.agent_reading(account, 20).unwrap()[0].message_id, id);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, engine.notify_wake.notified())
+                .await
+                .is_ok(),
+            "an applied commit of an arrival-eligible job wakes the notification \
+             lane for the deliberate push it queued"
+        );
         assert!(
             store
                 .agent_fye(account, 20, &Default::default(), Utc::now())

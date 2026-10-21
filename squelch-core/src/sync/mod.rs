@@ -3594,10 +3594,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .map(|m| crate::embed::message_embed_text(&m.subject, &m.body, max_chars))
                     .collect();
                 let vecs = embedder.embed_batch(&texts)?;
-                for (m, vec) in missing.iter().zip(vecs.iter()) {
-                    store.upsert_message_vector(account_id, m.message_id, vec)?;
-                }
-                Ok(())
+                // One commit for the batch, not two per vector.
+                let items: Vec<(i64, &[f32])> = missing
+                    .iter()
+                    .zip(vecs.iter())
+                    .map(|(m, vec)| (m.message_id, vec.as_slice()))
+                    .collect();
+                store.upsert_message_vectors(account_id, &items)
             })
             .await;
 

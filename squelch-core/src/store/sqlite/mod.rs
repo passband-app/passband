@@ -1948,6 +1948,10 @@ impl Store for SqliteStore {
         self.upsert_message_vector(account_id, message_id, embedding)
     }
 
+    fn upsert_message_vectors(&self, account_id: AccountId, items: &[(i64, &[f32])]) -> Result<()> {
+        self.upsert_message_vectors(account_id, items)
+    }
+
     fn messages_missing_vectors(
         &self,
         account_id: AccountId,

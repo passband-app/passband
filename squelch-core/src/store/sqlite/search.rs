@@ -1992,24 +1992,43 @@ impl SqliteStore {
         message_id: i64,
         embedding: &[f32],
     ) -> Result<()> {
-        if embedding.len() != VEC_DIMS {
-            return Err(CoreError::InvalidInput(format!(
-                "embedding len {} != vec0 width {VEC_DIMS}",
-                embedding.len()
-            )));
+        self.upsert_message_vectors(account_id, &[(message_id, embedding)])
+    }
+
+    /// Every vector in `items`, under ONE commit. vec0 rejects a re-INSERT on
+    /// an existing rowid, so an idempotent write is a DELETE then an INSERT,
+    /// and in autocommit that was two commits per vector, two fsyncs at
+    /// `synchronous=FULL`: a backfill batch of eight paid sixteen. Here the
+    /// batch pays one, and a single vector (ingest's embed-at-write) one
+    /// instead of two. All or nothing: a bad width anywhere in the batch
+    /// writes nothing.
+    pub(super) fn upsert_message_vectors(
+        &self,
+        account_id: AccountId,
+        items: &[(i64, &[f32])],
+    ) -> Result<()> {
+        for (_, embedding) in items {
+            if embedding.len() != VEC_DIMS {
+                return Err(CoreError::InvalidInput(format!(
+                    "embedding len {} != vec0 width {VEC_DIMS}",
+                    embedding.len()
+                )));
+            }
         }
-        let conn = self.lock()?;
-        // vec0 rejects a re-INSERT on an existing rowid, so delete-then-insert
-        // keeps re-embed idempotent.
-        conn.execute(
-            "DELETE FROM message_vecs WHERE message_id = ?1",
-            params![message_id],
-        )?;
-        conn.execute(
-            "INSERT INTO message_vecs(message_id, embedding, account_id)
-             VALUES (?1, ?2, ?3)",
-            params![message_id, embedding.as_bytes(), account_id],
-        )?;
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        {
+            let mut delete = tx.prepare_cached("DELETE FROM message_vecs WHERE message_id = ?1")?;
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO message_vecs(message_id, embedding, account_id)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for (message_id, embedding) in items {
+                delete.execute(params![message_id])?;
+                insert.execute(params![message_id, embedding.as_bytes(), account_id])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

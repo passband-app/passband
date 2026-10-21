@@ -1161,37 +1161,92 @@ fn ensure_source_assessments(
     account: AccountId,
     messages: &[AgentMessage],
 ) -> Result<()> {
+    // Reads first, then every enqueue under ONE commit. An enqueue is three
+    // or four writes, and a thread read that queued ten sources paid each one
+    // as its own autocommit transaction: thirty fsyncs at `synchronous=FULL`,
+    // under the store mutex, on a READ (measured at 97 ms for ten on a
+    // file-backed store; 31 ms and one fsync with one commit). The common
+    // case, nothing to queue, never takes the write lock.
+    let mut wanted = Vec::new();
     for message in messages {
-        if is_archive_conn(conn, account, message.id)? {
-            continue;
+        if source_assessment_wanted(conn, account, message.id)? {
+            wanted.push(message.id);
         }
-        let access: Option<String> = conn
-            .query_row(
-                "SELECT access FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
-                params![account, message.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if access.as_deref().is_some_and(|state| state != "pending") {
-            continue;
-        }
-        let active: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
-             AND kind IN ('triage','access') AND state IN ('queued','leased'))",
-            params![account, message.id],
-            |row| row.get(0),
-        )?;
-        let terminal: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs j JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
-             WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access') AND j.state IN ('failed','completed') AND j.input_revision=a.revision)",
-            params![account,message.id],|row|row.get(0),
-        )?;
-        if active || terminal {
-            continue;
-        }
-        enqueue_agent_triage_conn(conn, account, message.id, "source_access", false)?;
     }
-    Ok(())
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    in_write_transaction(conn, |tx| {
+        for id in &wanted {
+            // Asked again inside the transaction, because an enqueue can queue
+            // work for a LATER source in the same batch (a dependent's refresh
+            // through `queue_dependent_refreshes`), and that source is then
+            // active and must be skipped, exactly as the one-at-a-time loop
+            // skipped it. The answer can also have changed under a caller
+            // that took its time between the two phases.
+            if source_assessment_wanted(tx, account, *id)? {
+                enqueue_agent_triage_conn(tx, account, *id, "source_access", false)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Does reading this source as evidence call for an access job: not an
+/// archive row (see [`ensure_source_assessments`]), no assessment yet or one
+/// still pending, and no job already queued, leased, or finished against the
+/// current revision.
+fn source_assessment_wanted(conn: &Connection, account: AccountId, message: i64) -> Result<bool> {
+    if is_archive_conn(conn, account, message)? {
+        return Ok(false);
+    }
+    let access: Option<String> = conn
+        .query_row(
+            "SELECT access FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
+            params![account, message],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if access.as_deref().is_some_and(|state| state != "pending") {
+        return Ok(false);
+    }
+    let active: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
+         AND kind IN ('triage','access') AND state IN ('queued','leased'))",
+        params![account, message],
+        |row| row.get(0),
+    )?;
+    let terminal: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs j JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
+         WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access') AND j.state IN ('failed','completed') AND j.input_revision=a.revision)",
+        params![account,message],|row|row.get(0),
+    )?;
+    Ok(!active && !terminal)
+}
+
+/// Run `f` under ONE write transaction: the caller's when one is open (the
+/// `_conn` helpers compose, and SQLite refuses a nested BEGIN), otherwise an
+/// IMMEDIATE one of its own, committed when `f` returns Ok and rolled back
+/// when it does not.
+///
+/// IMMEDIATE rather than DEFERRED on purpose. A deferred transaction whose
+/// first statement is a SELECT pins a read snapshot, and if another process
+/// commits before this one's first write (`squelchd token`, `squelchd pair`,
+/// which share the file with a serving daemon) that write fails at once with
+/// `SQLITE_BUSY_SNAPSHOT`: the busy handler is never consulted for it. Taking
+/// the write lock up front waits out `busy_timeout` instead, which is what
+/// each autocommit statement did before the writes were batched.
+pub(super) fn in_write_transaction<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    if !conn.is_autocommit() {
+        return f(conn);
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let out = f(&tx)?;
+    tx.commit()?;
+    Ok(out)
 }
 
 fn leased(conn: &Connection, job: &AgentJob) -> Result<bool> {

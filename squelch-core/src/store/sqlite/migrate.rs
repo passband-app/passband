@@ -750,9 +750,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // it something to read.
     //
     // Self-triggering and idempotent: the candidate predicate is "sent, has
-    // recipients, has no index rows", so a completed pass matches nothing and an
-    // interrupted one resumes where it stopped. No done-flag and no `added_*`
-    // gate — a plain re-run is free.
+    // recipients, has no index rows", so a completed pass matches nothing. It
+    // runs under one commit, so an interrupted one starts over on the next
+    // open rather than resuming. No done-flag and no `added_*` gate — a plain
+    // re-run is free.
     backfill_message_recipients(conn)?;
 
     // ---- THE FTS INDEX'S OPTIONS CHANGED ----------------------------------
@@ -1369,20 +1370,23 @@ fn clear_stale_no_extractor_markers(conn: &Connection) -> Result<()> {
         )?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let tx = conn.unchecked_transaction()?;
     for category in stranded {
         if crate::triage::extract::extractor_for_category(&category).is_some() {
-            conn.execute(
+            tx.execute(
                 "UPDATE triage SET extractor_model_used = NULL
                  WHERE extractor_model_used = 'skip-no-extractor' AND category = ?1",
                 params![category],
             )?;
         }
     }
+    tx.commit()?;
     Ok(())
 }
 
-/// ONE-SHOT (and resumable): fill `message_recipients` from the recipient
-/// display strings already on disk.
+/// ONE-SHOT (and re-runnable): fill `message_recipients` from the recipient
+/// display strings already on disk, under one commit, so an open that dies
+/// halfway leaves nothing and the next one does it all again.
 ///
 /// Local and parse-only — no network, unlike the recipients sweep in the sync
 /// engine that produced those strings in the first place. Rows with no
@@ -1427,16 +1431,20 @@ fn backfill_message_recipients(conn: &Connection) -> Result<()> {
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
+    // One commit for the whole backfill: a row per recipient, each its own
+    // fsync in autocommit, over every sent message on a first open.
+    let tx = conn.unchecked_transaction()?;
     for (message_id, account_id, to, cc, bcc) in rows {
         let joined = crate::sync::ingest::join_recipient_lists(&[&to, &cc, &bcc]);
         for addr in crate::sync::ingest::parse_stored_recipients(&joined) {
-            conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO message_recipients(account_id, message_id, addr)
                  VALUES(?1,?2,?3)",
                 params![account_id, message_id, addr],
             )?;
         }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1460,11 +1468,8 @@ fn resanitize_institutions(conn: &Connection) -> Result<usize> {
     // mid-loop.
     //
     // The two other one-shots in THIS file (`backfill_message_recipients` and
-    // `clear_stale_no_extractor_markers`) are still bare autocommit loops with
-    // the same problem; the store-side cleanups in `specialists.rs` are the ones
-    // that take a transaction. Said plainly because an earlier draft of this
-    // comment claimed both neighbours already did, which points a reader away
-    // from two functions that want the same treatment.
+    // `clear_stale_no_extractor_markers`) take one too, as do the store-side
+    // cleanups in `specialists.rs`.
     // `unchecked_transaction` rather than `transaction`, so this stays a
     // `&Connection` and the whole migrate() chain keeps its signature.
     let tx = conn.unchecked_transaction()?;

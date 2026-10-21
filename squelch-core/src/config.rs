@@ -480,6 +480,14 @@ pub struct TranslateConfig {
     /// `claude-sonnet-5`, which every tenant's Bifrost allow-list already
     /// carries.
     pub model: String,
+    /// USD per million input tokens for `model`, for the usage estimators
+    /// (`metrics::estimate_cost_usd` and `/client/usage`), which price the
+    /// `translate` ledger category here rather than letting it fall through
+    /// to the Stage-1 arm. Default 2.0, Claude Sonnet 5's list price.
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, Claude
+    /// Sonnet 5's list price.
+    pub price_out_per_mtok: f64,
 }
 
 impl Default for TranslateConfig {
@@ -487,6 +495,8 @@ impl Default for TranslateConfig {
         Self {
             enabled: true,
             model: "claude-sonnet-5".to_string(),
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
         }
     }
 }

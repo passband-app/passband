@@ -585,6 +585,18 @@ impl SqliteStore {
         self.lock().unwrap().execute_batch(sql).unwrap();
     }
 
+    /// One integer off the store's connection, for a test outside this
+    /// module that has to read a row no store method returns.
+    #[cfg(test)]
+    pub(crate) fn query_i64_for_test(&self, sql: &str) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        self.lock()
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .optional()
+            .unwrap()
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
@@ -2007,5 +2019,22 @@ impl Store for SqliteStore {
         message_ids: &[i64],
     ) -> Result<Vec<crate::store::MessageTranslation>> {
         self.message_translations(account_id, message_ids)
+    }
+
+    fn upsert_translation_vector(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        embedding: &[f32],
+    ) -> Result<()> {
+        self.upsert_translation_vector(account_id, message_id, embedding)
+    }
+
+    fn translations_missing_vectors(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+    ) -> Result<Vec<crate::store::MissingVector>> {
+        self.translations_missing_vectors(account_id, limit)
     }
 }

@@ -14,7 +14,16 @@
 //! once it has had [`MAX_ATTEMPTS`].
 //!
 //! Spam and sent mail never get a row at ingest, and the claim re-checks
-//! both: a row can predate the spam walk's verdict on its message.
+//! both: a row can predate the spam walk's verdict on its message. Neither is
+//! mail a PERSON SEALED (`triage.sensitivity = 'sealed'`, which only
+//! `correct_triage` and legacy rows write): the extractors refuse
+//! `Sensitivity::Sealed` and so does this.
+//!
+//! THE SEARCH INDEX FOLLOWS THE ROW. `messages_fts.tsubject`/`tbody` and
+//! `message_translation_vecs` hold a translation exactly while it is served
+//! (`done` or `incomplete`): a translation landing rewrites the FTS row, and a
+//! translation dropped deletes its vector and rewrites the FTS row again. A
+//! vec0 table has no foreign keys, so nothing else would.
 
 use super::*;
 use crate::store::{MessageTranslation, TranslationJob, TranslationStatus, TranslationWrite};
@@ -27,6 +36,33 @@ pub const LEASE_SECS: i64 = 15 * 60;
 pub const BACKOFF_BASE_SECS: i64 = 10 * 60;
 /// The longest retry wait.
 pub const BACKOFF_CAP_SECS: i64 = 12 * 60 * 60;
+
+/// THE ONE SELECT that produces an FTS row: `(rowid, subject, body, tsubject,
+/// tbody)` for every message, the translation columns NULL unless a served
+/// translation exists. The rebuild refills from it, the test fixtures copy
+/// it, and [`refresh_fts_conn`] narrows it to one row, so the index can only
+/// ever hold what this says.
+pub(crate) const FTS_ROW_SELECT: &str = "SELECT m.id, m.subject, m.body, tr.subject, tr.body
+     FROM messages m
+     LEFT JOIN message_translations tr
+       ON tr.message_id = m.id AND tr.status IN ('done','incomplete')";
+
+/// Rewrite one message's FTS row from the stored message and its served
+/// translation, inside the caller's transaction.
+pub(super) fn refresh_fts_conn(conn: &Connection, message_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM messages_fts WHERE rowid = ?1",
+        params![message_id],
+    )?;
+    conn.execute(
+        &format!(
+            "INSERT INTO messages_fts(rowid, subject, body, tsubject, tbody)
+             {FTS_ROW_SELECT} WHERE m.id = ?1"
+        ),
+        params![message_id],
+    )?;
+    Ok(())
+}
 
 /// Queue `message_id` for translation from `source_lang`, inside the caller's
 /// transaction. `deferred` parks it until its thread is opened. A row that
@@ -65,10 +101,19 @@ pub(super) fn queue_translation_conn(
 /// heal does before it re-queues: the text the row was translated from is
 /// the text the heal just replaced.
 pub(super) fn drop_translation_conn(conn: &Connection, message_id: i64) -> Result<()> {
-    conn.execute(
+    let dropped = conn.execute(
         "DELETE FROM message_translations WHERE message_id = ?1",
         params![message_id],
     )?;
+    if dropped > 0 {
+        // vec0 has no foreign key to cascade on: the vector goes by hand, and
+        // the FTS row is rewritten so the dropped text stops matching.
+        conn.execute(
+            "DELETE FROM message_translation_vecs WHERE message_id = ?1",
+            params![message_id],
+        )?;
+        refresh_fts_conn(conn, message_id)?;
+    }
     Ok(())
 }
 
@@ -104,8 +149,10 @@ impl SqliteStore {
                         m.subject, m.body, m.body_html, t.attempts
                  FROM message_translations t
                  JOIN messages m ON m.id = t.message_id
+                 LEFT JOIN triage tg ON tg.message_id = m.id
                  WHERE t.account_id = ?1
                    AND m.is_spam = 0 AND m.is_sent = 0
+                   AND COALESCE(tg.sensitivity, 'normal') != 'sealed'
                    AND t.attempts < ?3
                    AND (
                         (t.status = 'pending'
@@ -161,7 +208,10 @@ impl SqliteStore {
         write: &TranslationWrite<'_>,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        // Every arm writes only over a row still in flight (`pending`): a
+        // heal that dropped and re-queued it meanwhile owns it now.
         match write {
             TranslationWrite::Translated {
                 translated: t,
@@ -173,14 +223,12 @@ impl SqliteStore {
                 } else {
                     TranslationStatus::Incomplete
                 };
-                // Only over a row still in flight: a heal that dropped and
-                // re-queued it meanwhile owns it now, and so does a reset to
-                // `deferred` (none exists today, but the guard is free).
-                conn.execute(
+                let n = tx.execute(
                     "UPDATE message_translations
                      SET status = ?2, subject = ?3, body = ?4, body_html = ?5,
                          snippet = ?6, missing_facts = ?7, model = ?8,
-                         prompt_version = ?9, updated_at = ?10
+                         prompt_version = ?9, updated_at = ?10,
+                         source_lang = COALESCE(?11, source_lang)
                      WHERE message_id = ?1 AND status = 'pending'",
                     params![
                         message_id,
@@ -192,19 +240,48 @@ impl SqliteStore {
                         strings_json(&t.missing_facts),
                         model,
                         prompt_version,
-                        now.timestamp()
+                        now.timestamp(),
+                        t.source_lang.map(|l| l.code()),
                     ],
                 )?;
+                // THE KEYWORD INDEX LEARNS THE ENGLISH in the same
+                // transaction; the vector is the caller's, embedded off the
+                // store lock.
+                if n > 0 {
+                    refresh_fts_conn(&tx, message_id)?;
+                }
             }
             TranslationWrite::Failed { model } => {
-                conn.execute(
+                tx.execute(
                     "UPDATE message_translations
                      SET status = 'failed', model = ?2, updated_at = ?3
                      WHERE message_id = ?1 AND status = 'pending'",
                     params![message_id, model, now.timestamp()],
                 )?;
             }
+            TranslationWrite::NotNeeded {
+                model,
+                prompt_version,
+            } => {
+                tx.execute(
+                    "UPDATE message_translations
+                     SET status = 'not_needed', model = ?2, prompt_version = ?3,
+                         subject = NULL, body = NULL, body_html = NULL,
+                         snippet = NULL, missing_facts = NULL, updated_at = ?4
+                     WHERE message_id = ?1 AND status = 'pending'",
+                    params![message_id, model, prompt_version, now.timestamp()],
+                )?;
+            }
+            TranslationWrite::Released => {
+                tx.execute(
+                    "UPDATE message_translations
+                     SET attempts = MAX(attempts - 1, 0), updated_at = ?2
+                     WHERE message_id = ?1 AND status = 'pending'",
+                    params![message_id, now.timestamp()],
+                )?;
+            }
         }
+        tx.commit()?;
         Ok(())
     }
 

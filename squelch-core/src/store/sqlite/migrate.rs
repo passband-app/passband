@@ -1128,9 +1128,11 @@ pub(super) fn normalize_fts_sql(sql: &str) -> String {
 /// exists, so the old definition would live forever on every mailbox that
 /// predates those lines.
 ///
-/// Refilling from `messages(subject, body)` is exact, not approximate: the
-/// message upsert writes the FTS row from those same two columns, so this
-/// reproduces the index rather than reinterpreting it.
+/// Refilling from `messages(subject, body)` plus the served translation is
+/// exact, not approximate: every FTS writer goes through the same
+/// `translations::FTS_ROW_SELECT`, so this reproduces the index rather than
+/// reinterpreting it. The translation columns (`tsubject`, `tbody`) arrived
+/// this way: a column list that differs from `schema.sql`'s is a rebuild.
 ///
 /// THE TRIGGER IS ANY DIFFERENCE AT ALL between the CREATE text in
 /// `sqlite_master` — what SQLite itself stored when the table was made — and
@@ -1193,12 +1195,21 @@ pub(super) fn rebuild_fts_if_stale(conn: &Connection) -> Result<()> {
     // `IF NOT EXISTS` rides along in the canonical text and is a no-op one
     // statement after the DROP; stripping it would mean editing the string,
     // which is how the two copies started drifting in the first place.
+    // The refill is the store's own FTS row SELECT, translations included.
+    // A partial schema (the migration unit tests build them) may lack
+    // `message_translations`; its rows then refill with no translation, which
+    // is what such a mailbox has.
+    let refill = if tables_exist(conn, &["message_translations"])? {
+        super::translations::FTS_ROW_SELECT.to_string()
+    } else {
+        "SELECT id, subject, body, NULL, NULL FROM messages m".to_string()
+    };
     let batch = format!(
         "BEGIN IMMEDIATE;
          DROP TABLE messages_fts;
          {canonical};
-         INSERT INTO messages_fts(rowid, subject, body)
-             SELECT id, subject, body FROM messages;
+         INSERT INTO messages_fts(rowid, subject, body, tsubject, tbody)
+             {refill};
          COMMIT;"
     );
     if let Err(e) = conn.execute_batch(&batch) {

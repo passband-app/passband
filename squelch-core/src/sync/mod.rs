@@ -10,6 +10,7 @@ pub mod html;
 pub mod ingest;
 pub mod notify_lane;
 mod profile;
+mod translate_pass;
 mod triage_worker;
 
 use std::sync::Arc;
@@ -834,6 +835,14 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// Shared cooldown after provider failure. Rejected configuration must not
     /// trigger one request per queued message or consume message retry attempts.
     agent_retry_after: AtomicI64,
+    /// THE TRANSLATOR (docs/TRANSLATION.md): `None` when translation is
+    /// switched off or no LLM is configured. A trait object so the tests can
+    /// stand a scripted one in its place.
+    translator: Option<Arc<dyn crate::translate::TranslateBackend>>,
+    /// The translate pass's own cooldown after a configuration failure (unix
+    /// seconds). Separate from `agent_retry_after`: the translate model can be
+    /// missing from an allow-list that carries the triage model.
+    translate_retry_after: AtomicI64,
     /// Scrape-facing counters. Its own registry unless the daemon shares one
     /// via [`SyncEngine::with_metrics`], so an engine built anywhere (tests, the
     /// contacts harvest, `run`) still records rather than branching on absence.
@@ -904,6 +913,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             );
         }
         let gmail_budget = Arc::new(GmailBudget::new(config.sync.gmail_quota_profile));
+        let translator = crate::translate::TranslateClient::from_config(&config)
+            .map(|c| Arc::new(c) as Arc<dyn crate::translate::TranslateBackend>);
         Self {
             store,
             creds,
@@ -934,6 +945,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             archive: ArchiveRun::default(),
             vectors_dirty: Arc::new(AtomicBool::new(true)),
             agent_retry_after: AtomicI64::new(0),
+            translator,
+            translate_retry_after: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
             profile_url: profile::PEOPLE_ME_URL.to_string(),
@@ -2250,7 +2263,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // while this is true.
             self.refine_poke.set_runnable(self.refine_can_spend());
             if self.poll_healthy.load(Ordering::Relaxed) {
-                if self.agent_triage_pass().await {
+                // TRANSLATION FIRST (docs/TRANSLATION.md), so a message that
+                // arrived in French usually reaches triage with its English
+                // beside it. Triage does not wait for it: a pass that claimed
+                // nothing, or is cooling down, costs nothing here.
+                let translated = self.translate_pass().await;
+                if self.agent_triage_pass().await | translated {
                     idle_rounds = 0;
                 } else {
                     idle_rounds = idle_rounds.saturating_add(1).min(5);
@@ -3445,6 +3463,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         triaged.foreground_triage = origin == IngestOrigin::Incremental
             && !triaged.message.is_sent
             && !triaged.message.is_spam;
+        // NO TRANSLATOR, NO QUEUE: a row queued here with nothing to work it
+        // would read as "Translating..." in the reader for good. Detection is
+        // free; the row is what promises a translation.
+        if self.translator.is_none() {
+            triaged.translate_lang = None;
+        }
         let id = if origin == IngestOrigin::Archive {
             // Insert-only: an id the store already holds is left as it is, and
             // there is nothing to embed for a row this call did not write.
@@ -3566,22 +3590,50 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             flag: &self.vectors_dirty,
             drained: false,
         };
+        let mut total = 0usize;
+        // The originals first, then the translations' own table: the same
+        // drain, the same batches, a different source and destination.
+        for translations in [false, true] {
+            match self.drain_vector_kind(&embedder, translations).await {
+                Some(n) => total += n,
+                // Stopped short: the guard leaves the debt on the books.
+                None => {
+                    Self::trim_after_drain(total).await;
+                    return;
+                }
+            }
+        }
+        pass.drained = true;
+        Self::trim_after_drain(total).await;
+    }
+
+    /// One table's half of [`Self::backfill_missing_vectors`]: `Some(embedded)`
+    /// when the queue came back empty or short, `None` when a query or a batch
+    /// failed and the rest is owed.
+    async fn drain_vector_kind(
+        &self,
+        embedder: &Arc<dyn crate::embed::Embedder>,
+        translations: bool,
+    ) -> Option<usize> {
         let batch = self.config.embed.backfill_batch.max(1);
         let max_chars = self.config.embed.max_chars;
         let account_id = self.account_id;
         let mut total = 0usize;
-
         loop {
-            let missing = match self.store.messages_missing_vectors(account_id, batch) {
+            let missing = if translations {
+                self.store.translations_missing_vectors(account_id, batch)
+            } else {
+                self.store.messages_missing_vectors(account_id, batch)
+            };
+            let missing = match missing {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("squelch: vector backfill query failed ({e}); stopping pass");
-                    return;
+                    return None;
                 }
             };
             if missing.is_empty() {
-                pass.drained = true;
-                break;
+                return Some(total);
             }
             let n = missing.len();
             // Flatten each message the SAME way ingest does. (Query text takes a
@@ -3595,7 +3647,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .collect();
                 let vecs = embedder.embed_batch(&texts)?;
                 for (m, vec) in missing.iter().zip(vecs.iter()) {
-                    store.upsert_message_vector(account_id, m.message_id, vec)?;
+                    if translations {
+                        store.upsert_translation_vector(account_id, m.message_id, vec)?;
+                    } else {
+                        store.upsert_message_vector(account_id, m.message_id, vec)?;
+                    }
                 }
                 Ok(())
             })
@@ -3605,18 +3661,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 Ok(Ok(())) => total += n,
                 Ok(Err(e)) => {
                     eprintln!("squelch: vector backfill batch failed ({e}); stopping pass");
-                    break;
+                    return None;
                 }
                 Err(e) => {
                     eprintln!("squelch: vector backfill task join error ({e}); stopping pass");
-                    break;
+                    return None;
                 }
             }
 
             // A short batch means we drained the queue; stop before re-querying.
             if n < batch {
-                pass.drained = true;
-                break;
+                return Some(total);
             }
             // Throttle between batches so a large backfill doesn't peg the CPU
             // or starve the poll lane, which shares this task: the two lanes are
@@ -3624,7 +3679,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // here still delays the next `history.list`.
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
 
+    async fn trim_after_drain(total: usize) {
         if total > 0 {
             eprintln!("squelch: vector backfill embedded {total} message(s) for semantic recall");
             // A batch pass is the single largest transient this process makes:

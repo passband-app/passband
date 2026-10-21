@@ -51,7 +51,11 @@ const MESSAGE_COLUMNS: &str = concat!(
     t.notify_eligible_at, COALESCE((SELECT
              revision FROM agent_thread_attention a WHERE a.account_id=m.account_id AND
              a.thread_id=m.thread_id),0),COALESCE((SELECT group_concat(field || value_json || revision)
-             FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),'')"
+             FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),''),
+    (SELECT tr.subject FROM message_translations tr WHERE tr.message_id=m.id
+             AND tr.status IN ('done','incomplete')),
+    (SELECT tr.body FROM message_translations tr WHERE tr.message_id=m.id
+             AND tr.status IN ('done','incomplete'))"
 );
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     let mut message = AgentMessage {
@@ -73,6 +77,12 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
         opened_at: row.get(9)?,
         remind_at: row.get(10)?,
         notify_eligible_at: row.get(11)?,
+        // The machine translation rides along for the model to READ; it is
+        // deliberately NOT in `content_snapshot` below (docs/TRANSLATION.md,
+        // invariant 1), so a translation landing never re-triages a message
+        // or resets its external access.
+        translated_subject: row.get(14)?,
+        translated_body: row.get(15)?,
     };
     // Only serde primitives are hashed, so serialization cannot fail here.
     message.source.content = content_snapshot(&message).expect("serializable message");
@@ -4653,7 +4663,10 @@ mod tests {
             .lock()
             .unwrap()
             .execute(
-                "INSERT INTO messages_fts(rowid,subject,body) SELECT id,subject,body FROM messages",
+                &format!(
+                    "INSERT INTO messages_fts(rowid,subject,body,tsubject,tbody) {}",
+                    crate::store::sqlite::translations::FTS_ROW_SELECT
+                ),
                 [],
             )
             .unwrap();
@@ -4794,7 +4807,10 @@ mod tests {
             conn.execute("UPDATE messages SET body=CASE id WHEN 1 THEN 'invoice zebra' ELSE 'zebra shipment' END",[]).unwrap();
             conn.execute("DELETE FROM messages_fts", []).unwrap();
             conn.execute(
-                "INSERT INTO messages_fts(rowid,subject,body) SELECT id,subject,body FROM messages",
+                &format!(
+                    "INSERT INTO messages_fts(rowid,subject,body,tsubject,tbody) {}",
+                    crate::store::sqlite::translations::FTS_ROW_SELECT
+                ),
                 [],
             )
             .unwrap();

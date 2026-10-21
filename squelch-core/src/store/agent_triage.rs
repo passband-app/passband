@@ -37,6 +37,15 @@ pub struct AgentMessage {
     pub notify_eligible_at: Option<String>,
     pub opened_at: Option<String>,
     pub remind_at: Option<String>,
+    /// A MACHINE TRANSLATION into English of `subject` and `body`, present
+    /// only for mail written in another language once the translate pass has
+    /// produced one (docs/TRANSLATION.md). Context for reading the message;
+    /// the original fields stay the source of truth. Never hashed into the
+    /// content snapshot, and absent from the JSON when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated_subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated_body: Option<String>,
 }
 
 /// Captured with the evidence read and checked before any decision writes.

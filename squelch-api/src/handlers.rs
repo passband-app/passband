@@ -592,7 +592,19 @@ pub async fn get_thread(
 ) -> Result<impl IntoResponse, ApiError> {
     // Sealed and nonexistent threads are the SAME NotFound. Each message carries
     // its server-sanitized `html`, null for plain-text-only mail.
+    //
+    // OPENING AN ARCHIVE THREAD BUYS ITS TRANSLATION (docs/TRANSLATION.md):
+    // the thread's `deferred` rows become `pending` BEFORE the view is read,
+    // so this very response already says "translating", and the refine lane
+    // is poked to start on them now rather than at its next interval.
+    let poke = state.archive_surfacing.poke.clone();
     query(&state, move |store, account_id| {
+        let promoted = store.promote_deferred_translations(account_id, &thread_id, Utc::now())?;
+        if promoted > 0
+            && let Some(poke) = &poke
+        {
+            poke.poke();
+        }
         let view = store.thread_view_with_html(account_id, &thread_id)?;
         // Memoized per distinct sender: a thread is usually two addresses
         // repeated, and each miss is a round trip to `contacts`. The store
@@ -4074,6 +4086,12 @@ pub async fn get_usage(
                 state.stage2_model.as_ref(),
                 state.stage2_price_in_per_mtok,
                 state.stage2_price_out_per_mtok,
+            )
+        } else if name == squelch_core::translate::USAGE_CATEGORY {
+            (
+                state.translate_model.as_ref(),
+                state.translate_price_in_per_mtok,
+                state.translate_price_out_per_mtok,
             )
         } else if squelch_core::metrics::runs_notify_model(name) {
             (

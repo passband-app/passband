@@ -338,6 +338,8 @@ pub enum TranslationStatus {
     /// Nothing usable came back; retried with backoff, a bounded number of
     /// times.
     Failed,
+    /// Terminal: the translator read the message as English. Served nowhere.
+    NotNeeded,
 }
 
 impl TranslationStatus {
@@ -348,6 +350,7 @@ impl TranslationStatus {
             Self::Done => "done",
             Self::Incomplete => "incomplete",
             Self::Failed => "failed",
+            Self::NotNeeded => "not_needed",
         }
     }
 
@@ -358,6 +361,7 @@ impl TranslationStatus {
             "done" => Self::Done,
             "incomplete" => Self::Incomplete,
             "failed" => Self::Failed,
+            "not_needed" => Self::NotNeeded,
             _ => return None,
         })
     }
@@ -388,6 +392,13 @@ pub enum TranslationWrite<'a> {
     },
     /// `failed`: retried after a backoff until the attempts run out.
     Failed { model: &'a str },
+    /// `not_needed`: the translator read the message as English. Terminal.
+    NotNeeded { model: &'a str, prompt_version: i64 },
+    /// Hand the claim back WITHOUT spending its attempt: the call never
+    /// reached a verdict about this message (a rejected key, an exhausted
+    /// budget, a model the gateway will not serve), so the row is exactly as
+    /// translatable as it was. The pass that releases it stops and cools down.
+    Released,
 }
 
 /// A stored translation row.
@@ -3318,4 +3329,22 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         account_id: AccountId,
         message_ids: &[i64],
     ) -> Result<Vec<MessageTranslation>>;
+
+    /// Write the English translation's vector for one message
+    /// (`message_translation_vecs`), replacing any. A no-op (beyond removing a
+    /// stale vector) unless the translation is served (`done`/`incomplete`).
+    fn upsert_translation_vector(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        embedding: &[f32],
+    ) -> Result<()>;
+
+    /// Up to `limit` served translations still missing a vector, newest mail
+    /// first, carrying the TRANSLATED subject and body.
+    fn translations_missing_vectors(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+    ) -> Result<Vec<MissingVector>>;
 }

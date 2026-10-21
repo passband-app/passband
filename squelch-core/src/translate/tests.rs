@@ -355,3 +355,95 @@ fn from_config_honours_the_switch_and_defaults_to_sonnet() {
     assert!(!parsed.translate.enabled);
     assert_eq!(parsed.translate.model, "claude-sonnet-5");
 }
+
+fn english_answer(_: &[String]) -> LlmOutcome<String> {
+    LlmOutcome::Ok(
+        serde_json::json!({ "source_language": "en", "translations": [] }).to_string(),
+        usage(),
+    )
+}
+
+fn spanish_toy(segments: &[String]) -> LlmOutcome<String> {
+    LlmOutcome::Ok(
+        serde_json::json!({
+            "source_language": "es",
+            "translations": segments.iter().map(|s| s.replace("Hola", "Hello")).collect::<Vec<_>>(),
+        })
+        .to_string(),
+        usage(),
+    )
+}
+
+#[tokio::test]
+async fn a_message_the_model_calls_english_is_not_needed_and_still_billed() {
+    let backend = Scripted::new(vec![ok(english_answer)]);
+    let run = translate_message(
+        &backend,
+        TranslateInput {
+            subject: "Lunch",
+            body: "Hola, see you at noon",
+            body_html: None,
+        },
+    )
+    .await;
+    assert_eq!(run.outcome, TranslateOutcome::NotNeeded);
+    assert_eq!(
+        run.model_calls, 1,
+        "no retry for a count it was told to leave empty"
+    );
+    assert_eq!(run.usage.len(), 1);
+}
+
+#[tokio::test]
+async fn the_language_the_model_names_is_kept() {
+    let backend = Scripted::new(vec![ok(spanish_toy)]);
+    let run = translate_message(
+        &backend,
+        TranslateInput {
+            subject: "Hola",
+            body: "Hola amigo",
+            body_html: None,
+        },
+    )
+    .await;
+    let TranslateOutcome::Translated(t) = run.outcome else {
+        panic!("{:?}", run.outcome)
+    };
+    assert_eq!(t.source_lang.map(Lang::code), Some("es"));
+    assert_eq!(t.subject, "Hello");
+}
+
+#[tokio::test]
+async fn an_english_batch_of_a_long_mail_keeps_its_own_text() {
+    // Two batches: a Spanish one and an English one (a long English quote or
+    // signature). The English batch comes back as itself; the message is
+    // translated, not "not needed".
+    let spanish = "Hola ".repeat(BATCH_SOURCE_CHARS / 5);
+    let english = "Regards ".repeat(BATCH_SOURCE_CHARS / 8);
+    let body = format!("{spanish}\n\n{english}");
+    let backend = Scripted::new(vec![ok(spanish_toy), ok(english_answer)]);
+    let run = translate_message(
+        &backend,
+        TranslateInput {
+            subject: "",
+            body: &body,
+            body_html: None,
+        },
+    )
+    .await;
+    assert_eq!(run.model_calls, 2);
+    let TranslateOutcome::Translated(t) = run.outcome else {
+        panic!("{:?}", run.outcome)
+    };
+    assert!(t.body.contains("Hello Hello"));
+    assert!(t.body.contains("Regards Regards"));
+    assert_eq!(t.source_lang.map(Lang::code), Some("es"));
+}
+
+#[test]
+fn the_schema_asks_for_the_source_language() {
+    let schema = output_schema();
+    let required = schema["required"].as_array().unwrap();
+    assert!(required.iter().any(|r| r == "source_language"));
+    assert!(SYSTEM_PROMPT.contains("source_language"));
+}

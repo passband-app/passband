@@ -60,9 +60,18 @@ Decisions locked with the user (2026-10-21):
 - Detection runs locally with `whatlang`. It is a pure function over the
   original subject and body text, run at ingest. English mail creates no row
   and costs nothing.
-- Detection runs only when there are at least 40 letters of text and whatlang
-  reports `is_reliable()`. The MIME `Content-Language` header is a tiebreaker
-  only.
+- Detection needs at least 40 letters of text (12 in a non-Latin script,
+  where English is not a candidate). The question asked is "is this English",
+  not whatlang's `is_reliable()`, which rejected short personal mail (a
+  two-sentence German note scored 0.61) because close neighbours such as
+  Spanish and Portuguese compete for the top spot. whatlang's top guess must be
+  non-English and must beat English with confidence of at least 0.6 on a
+  detection restricted to the two of them. The MIME `Content-Language` header
+  is a tiebreaker only, when English is still in play.
+- A false positive corrects itself: the translator reports `source_language`,
+  and a message it reads as English is closed as `not_needed` and served
+  nowhere. When it names a different language than whatlang did, its answer
+  is stored.
 - Mixed mail, such as an English reply over a foreign quote, is judged on the
   text with quoted lines (`>`) removed.
 - When the language is not English, ingest inserts a
@@ -76,7 +85,7 @@ message_translations(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
   account_id INTEGER NOT NULL,
   source_lang TEXT NOT NULL,            -- ISO 639-1, e.g. 'fr'
-  status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed')),
+  status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed','not_needed')),
   subject TEXT, body TEXT, body_html TEXT, snippet TEXT,
   missing_facts TEXT,                   -- JSON array when incomplete
   model TEXT, prompt_version INTEGER,
@@ -90,6 +99,11 @@ message_translations(
 - `snippet` is the first 200 characters of the translated body.
 - `failed` rows (transport or refusal errors) are retried with backoff and a
   bounded attempt count. They never loop forever.
+- A configuration failure (401/402/403/404, a model missing from the
+  gateway's allow-list) is not a fact about the message: the row is released
+  with its attempt handed back, and the translate pass cools down for
+  `triage.agent.outage_retry_secs` without touching triage's own circuit.
+- Mail a person sealed (`triage.sensitivity = 'sealed'`) is never claimed.
 
 ## Search
 
@@ -134,7 +148,8 @@ message_translations(
   - `html` (optional)
   - `missing_facts` (optional)
 - `deferred` is reported as `pending` after the open promotes it.
-- `failed` is omitted, so the client shows the original and nothing else.
+- `failed` and `not_needed` are omitted, so the client shows the original and
+  nothing else.
 - MCP `SanitizedMessage` gains an optional `translation { source_language,
   subject, content, status }`, joined inside `thread_view`.
 

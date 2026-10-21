@@ -46,6 +46,58 @@ fn bump_unsub_violation_conn(
     Ok(())
 }
 
+/// A stored ISO 639-1 code as the reader names it ("French"), the code
+/// itself for one no detection would have written.
+fn language_name(code: &str) -> String {
+    crate::translate::Lang::from_code(code)
+        .map(|l| l.english_name().to_string())
+        .unwrap_or_else(|| code.to_string())
+}
+
+/// The human door's translation off a thread row whose columns from `at` are
+/// `source_lang, status, subject, body, body_html, missing_facts`. The join
+/// admits `pending`, `done` and `incomplete` only; a `pending` one carries no
+/// text (the reader shows the original and says it is translating), and
+/// `missing_facts` rides only on `incomplete`.
+fn client_translation(
+    r: &rusqlite::Row<'_>,
+    at: usize,
+) -> rusqlite::Result<Option<crate::types::ClientTranslation>> {
+    let Some(code) = r.get::<_, Option<String>>(at)? else {
+        return Ok(None);
+    };
+    let status: String = r.get(at + 1)?;
+    let ready = status != "pending";
+    let text = |i: usize| -> rusqlite::Result<String> {
+        Ok(if ready {
+            r.get::<_, Option<String>>(i)?.unwrap_or_default()
+        } else {
+            String::new()
+        })
+    };
+    let missing_facts = if status == "incomplete" {
+        r.get::<_, Option<String>>(at + 5)?
+            .and_then(|m| serde_json::from_str::<Vec<String>>(&m).ok())
+            .filter(|m| !m.is_empty())
+    } else {
+        None
+    };
+    Ok(Some(crate::types::ClientTranslation {
+        source_language: language_name(&code),
+        source_lang: code,
+        subject: text(at + 2)?,
+        content: text(at + 3)?,
+        html: if ready {
+            r.get::<_, Option<String>>(at + 4)?
+                .filter(|h| !h.is_empty())
+        } else {
+            None
+        },
+        missing_facts,
+        status,
+    }))
+}
+
 /// Upsert a message + FTS + Sent-derived contacts against an explicit
 /// connection/transaction handle. Shared by [`SqliteStore::upsert_message`] and
 /// the transactional [`Store::ingest_message`] path so both stay in sync.
@@ -144,12 +196,10 @@ fn upsert_message_conn(
         |r| r.get(0),
     )?;
 
-    // Keep the FTS index in sync.
-    conn.execute("DELETE FROM messages_fts WHERE rowid=?1", params![id])?;
-    conn.execute(
-        "INSERT INTO messages_fts(rowid, subject, body) VALUES(?1,?2,?3)",
-        params![id, msg.subject, msg.body],
-    )?;
+    // Keep the FTS index in sync: the row just written, plus its served
+    // translation when one exists (a re-sighting of translated mail must not
+    // drop the English from the index).
+    super::translations::refresh_fts_conn(conn, id)?;
 
     // The sender directory, for the search field's `from:` menu. Inbound and
     // non-spam only: sent mail's From is the user, and spam is a structural
@@ -676,23 +726,41 @@ impl SqliteStore {
         // AND NO UNASSESSED ARCHIVE ROW, for the reason on
         // `archive_unassessed_sql`: the guard above let the thread through
         // without looking at those rows, so this select is what keeps them in.
+        //
+        // THE TRANSLATION IS JOINED HERE, in the one query that reads the
+        // body under the guard above, so it can reach no reader the body
+        // could not (docs/TRANSLATION.md, invariant 5). Served statuses only.
         let mut stmt = conn.prepare(concat!(
-            "SELECT m.id, m.from_addr, m.from_name, m.received_at, m.body
+            "SELECT m.id, m.from_addr, m.from_name, m.received_at, m.body,
+                    tr.source_lang, tr.subject, tr.body, tr.status
              FROM messages m
              LEFT JOIN agent_message_state a
                ON a.account_id=m.account_id AND a.message_id=m.id
+             LEFT JOIN message_translations tr
+               ON tr.message_id=m.id AND tr.account_id=m.account_id
+              AND tr.status IN ('done','incomplete')
              WHERE m.account_id=?1 AND m.thread_id=?2 AND m.is_spam = 0 AND NOT ",
             archive_unassessed_sql!(),
             " ORDER BY m.received_at ASC"
         ))?;
         let messages = stmt
             .query_map(params![account_id, thread_id], |r| {
+                let translation = match r.get::<_, Option<String>>(5)? {
+                    Some(code) => Some(crate::types::ExternalTranslation {
+                        source_language: language_name(&code),
+                        subject: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                        content: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                        status: r.get(8)?,
+                    }),
+                    None => None,
+                };
                 Ok(SanitizedMessage {
                     id: r.get(0)?,
                     from_addr: r.get(1)?,
                     from_name: r.get(2)?,
                     received_at: dt(r, 3)?,
                     content: r.get(4)?,
+                    translation,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -770,10 +838,15 @@ impl SqliteStore {
                     (m.is_sent = 1
                      OR (TRIM(COALESCE(m.from_addr, '')) != ''
                          AND LOWER(TRIM(COALESCE(m.from_addr, ''))) =
-                             LOWER(TRIM(COALESCE(a.email, ''))))) AS authored_by_account
+                             LOWER(TRIM(COALESCE(a.email, ''))))) AS authored_by_account,
+                    tr.source_lang, tr.status, tr.subject, tr.body, tr.body_html,
+                    tr.missing_facts
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id
              LEFT JOIN accounts a ON a.id = m.account_id
+             LEFT JOIN message_translations tr
+               ON tr.message_id = m.id AND tr.account_id = m.account_id
+              AND tr.status IN ('pending','done','incomplete')
              WHERE m.account_id=?1 AND m.thread_id=?2
              ORDER BY m.received_at ASC",
         )?;
@@ -821,6 +894,7 @@ impl SqliteStore {
                     attention_open: r.get::<_, Option<String>>(8)?.map(|s| s != "done"),
                     one_line: r.get::<_, Option<String>>(9)?.filter(|s| !s.is_empty()),
                     auth_pass: r.get::<_, Option<bool>>(10)?,
+                    translation: client_translation(r, 17)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

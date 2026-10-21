@@ -102,6 +102,13 @@ pub struct ApiState {
     /// the whole ratio between a small model and a capable one.
     pub(crate) notify_price_in_per_mtok: f64,
     pub(crate) notify_price_out_per_mtok: f64,
+    /// The TRANSLATE model and its per-MTok prices (docs/TRANSLATION.md),
+    /// which `/client/usage` costs the `translate` category with. Its own arm
+    /// for the notify arm's reason: it is neither Stage-1's model nor the
+    /// notify model, so either one's prices would misreport it.
+    pub(crate) translate_model: Arc<str>,
+    pub(crate) translate_price_in_per_mtok: f64,
+    pub(crate) translate_price_out_per_mtok: f64,
     /// Manual-refresh signal shared with the Gmail sync loop, fired by
     /// `POST /client/refresh`. `None` when no sync loop is wired in, which the
     /// endpoint reports as `triggered: false` rather than faking a poke.
@@ -546,6 +553,15 @@ impl ApiState {
             notify_price_in_per_mtok: squelch_core::config::NotifyConfig::default()
                 .price_in_per_mtok,
             notify_price_out_per_mtok: squelch_core::config::NotifyConfig::default()
+                .price_out_per_mtok,
+            translate_model: Arc::from(
+                squelch_core::config::TranslateConfig::default()
+                    .model
+                    .as_str(),
+            ),
+            translate_price_in_per_mtok: squelch_core::config::TranslateConfig::default()
+                .price_in_per_mtok,
+            translate_price_out_per_mtok: squelch_core::config::TranslateConfig::default()
                 .price_out_per_mtok,
             refresh: None,
             spam_refresh: None,
@@ -1097,6 +1113,20 @@ impl ApiState {
         self
     }
 
+    /// Set the TRANSLATE model + its per-MTok prices, which `/client/usage`
+    /// costs the `translate` category with.
+    pub fn with_translate_config(
+        mut self,
+        model: impl Into<String>,
+        price_in_per_mtok: f64,
+        price_out_per_mtok: f64,
+    ) -> Self {
+        self.translate_model = Arc::from(model.into().as_str());
+        self.translate_price_in_per_mtok = price_in_per_mtok;
+        self.translate_price_out_per_mtok = price_out_per_mtok;
+        self
+    }
+
     /// TEST HOOK: run the scheduled-send worker's clock `skew` ahead of the
     /// wall clock (see `worker_clock_skew`). Never used in production.
     #[doc(hidden)]
@@ -1256,6 +1286,11 @@ impl ApiState {
                 cfg.notify.model.clone(),
                 cfg.notify.price_in_per_mtok,
                 cfg.notify.price_out_per_mtok,
+            )
+            .with_translate_config(
+                cfg.translate.model.clone(),
+                cfg.translate.price_in_per_mtok,
+                cfg.translate.price_out_per_mtok,
             )
             .with_tracking_base_url(cfg.tracking.base_url.clone())
             .with_console_allow_insecure_cookie(cfg.console.allow_insecure_cookie)

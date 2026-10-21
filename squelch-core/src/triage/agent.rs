@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v8";
+pub const PROMPT_VERSION: &str = "agent-triage-v9";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
 
 /// The one sentence of the prompt that offers the review step, and what it
@@ -287,8 +287,12 @@ async fn run_bounded(
 /// and say so. Runs BEFORE [`bound_evidence_text`], so the byte budget is
 /// spent on text that can still decide something.
 fn condense_initial_context(initial: &mut Value, config: &super::agent_config::ContextConfig) {
-    if let Some(Value::String(body)) = initial.pointer_mut("/message/body") {
-        *body = super::condense::condense_body(body);
+    // A machine translation (docs/TRANSLATION.md) is condensed exactly like
+    // the body it translates, so neither outweighs the other in the budget.
+    for pointer in ["/message/body", "/message/translated_body"] {
+        if let Some(Value::String(body)) = initial.pointer_mut(pointer) {
+            *body = super::condense::condense_body(body);
+        }
     }
     let Some(Value::Array(siblings)) = initial.get_mut("thread") else {
         return;
@@ -297,16 +301,20 @@ fn condense_initial_context(initial: &mut Value, config: &super::agent_config::C
         let Some(fields) = sibling.as_object_mut() else {
             continue;
         };
-        let Some(Value::String(body)) = fields.get_mut("body") else {
-            continue;
-        };
-        if index < config.full_sibling_bodies {
-            *body = super::condense::condense_body(body);
-            continue;
+        let mut excerpted = false;
+        for key in ["body", "translated_body"] {
+            let Some(Value::String(body)) = fields.get_mut(key) else {
+                continue;
+            };
+            if index < config.full_sibling_bodies {
+                *body = super::condense::condense_body(body);
+                continue;
+            }
+            let (excerpt, cut) = super::condense::excerpt(body, config.sibling_excerpt_chars);
+            *body = excerpt;
+            excerpted |= cut && key == "body";
         }
-        let (excerpt, cut) = super::condense::excerpt(body, config.sibling_excerpt_chars);
-        *body = excerpt;
-        if cut {
+        if excerpted {
             fields.insert("body_excerpted".into(), Value::Bool(true));
         }
     }
@@ -324,8 +332,10 @@ fn condense_evidence(data: &mut Value) {
         if fields.contains_key("body_offset") {
             return;
         }
-        if let Some(Value::String(body)) = fields.get_mut("body") {
-            *body = super::condense::condense_body(body);
+        for key in ["body", "translated_body"] {
+            if let Some(Value::String(body)) = fields.get_mut(key) {
+                *body = super::condense::condense_body(body);
+            }
         }
     }
     if let Some(message) = data.get_mut("message") {
@@ -350,8 +360,10 @@ fn bound_evidence_text(value: &mut Value, budget: usize) {
                     if key == "source" {
                         continue;
                     }
-                    if matches!(key.as_str(), "body" | "content" | "text" | "snippet")
-                        && let Value::String(text) = value
+                    if matches!(
+                        key.as_str(),
+                        "body" | "translated_body" | "content" | "text" | "snippet"
+                    ) && let Value::String(text) = value
                     {
                         if text.len() > limit {
                             let mut end = limit;

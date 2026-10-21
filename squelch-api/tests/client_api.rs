@@ -15347,3 +15347,65 @@ async fn json_gzips_when_asked_and_the_event_stream_never_does() {
         "and arrives byte for byte"
     );
 }
+
+// --- GET /client/thread/{id}: opening an archive thread buys its translation --
+
+#[tokio::test]
+async fn opening_a_thread_promotes_its_deferred_translations_and_pokes_the_lane() {
+    let (state, store, acct) = common::state_with(|store, acct| {
+        let id = store
+            .upsert_message(&msg(acct, "g-fr", "t-fr", "Votre facture", "Bonjour"))
+            .unwrap();
+        store
+            .set_triage(
+                id,
+                acct,
+                40,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+        // An archive row: parked until somebody opens the thread.
+        store
+            .queue_translation(acct, id, "fr", true, chrono::Utc::now())
+            .unwrap();
+        // And an English neighbour, which carries no translation at all.
+        store
+            .upsert_message(&msg(acct, "g-en", "t-fr", "Re: Votre facture", "Thanks"))
+            .unwrap();
+    });
+    let poke = squelch_core::store::archive_surface::RefinePoke::new();
+    let app = router(state.with_refine_poke(poke.clone()));
+
+    let resp = app
+        .oneshot(authed("GET", "/client/thread/t-fr"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let msgs = json["messages"].as_array().unwrap();
+    // `deferred` reads as `pending` now that the open has promoted it.
+    assert_eq!(msgs[0]["translation"]["status"], "pending");
+    assert_eq!(msgs[0]["translation"]["source_lang"], "fr");
+    assert_eq!(msgs[0]["translation"]["source_language"], "French");
+    assert_eq!(msgs[0]["translation"]["content"], "");
+    assert!(
+        msgs[1].get("translation").is_none(),
+        "English mail has no key"
+    );
+    // The lane was poked to start on it now.
+    tokio::time::timeout(std::time::Duration::from_millis(100), poke.poked())
+        .await
+        .expect("the refine lane was poked");
+    let rows = store
+        .message_translations(acct, &[msgs[0]["id"].as_i64().unwrap()])
+        .unwrap();
+    assert_eq!(
+        rows[0].status,
+        squelch_core::store::TranslationStatus::Pending
+    );
+}

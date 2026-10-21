@@ -925,8 +925,15 @@ CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(account_id, me
 -- rebuilds any `messages_fts` whose stored definition differs from it at all.
 -- There is no second copy to update and no list of options to remember to
 -- extend, so an edit here cannot ship unmigrated.
+--
+-- `tsubject`/`tbody` are the ENGLISH TRANSLATION (docs/TRANSLATION.md), from
+-- `message_translations` while its status is `done` or `incomplete`, NULL
+-- otherwise. Columns are APPENDED so every positional reference to 0 (subject)
+-- and 1 (body) keeps its meaning; bm25 weighs them 4.0 and 1.0 like the
+-- originals. Every writer fills all four: the message upsert, the translate
+-- pass when a translation lands, a heal that drops one, and the rebuild.
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    subject, body, tokenize = 'porter unicode61', prefix = '2 3'
+    subject, body, tsubject, tbody, tokenize = 'porter unicode61', prefix = '2 3'
 );
 
 -- ON-BOX SEMANTIC RECALL. A sqlite-vec `vec0` table holding one embedding per
@@ -942,6 +949,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 -- configured embedder matches at attach time. Changing it means editing this
 -- literal AND resetting the dev db — there are no migrations for a vec0 table.
 CREATE VIRTUAL TABLE IF NOT EXISTS message_vecs USING vec0(
+    message_id INTEGER PRIMARY KEY,
+    embedding  FLOAT[384],
+    account_id INTEGER
+);
+
+-- THE ENGLISH TRANSLATION'S VECTOR (docs/TRANSLATION.md), one per message whose
+-- `message_translations` row is `done` or `incomplete`, embedded the same way
+-- as the original (`message_embed_text(subject, body)`). The original's vector
+-- in `message_vecs` is untouched; the KNN legs take the nearer of the two per
+-- message. Same width, same metadata column, and the same rule that a vec0
+-- table has no foreign keys: whoever deletes a translation deletes this row.
+CREATE VIRTUAL TABLE IF NOT EXISTS message_translation_vecs USING vec0(
     message_id INTEGER PRIMARY KEY,
     embedding  FLOAT[384],
     account_id INTEGER
@@ -2059,11 +2078,13 @@ CREATE TABLE IF NOT EXISTS archive_walk (
 -- snapshot. Ingest inserts `pending` (live) or `deferred` (archive tier) for a
 -- non-English message; spam and sent mail never get a row. Timestamps are
 -- unix seconds. `missing_facts` is a JSON array, set when `incomplete`.
+-- `not_needed` is terminal: the translator read the message as English, so
+-- the local detection was a false positive and nothing is served.
 CREATE TABLE IF NOT EXISTS message_translations (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     account_id INTEGER NOT NULL,
     source_lang TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed')),
+    status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed','not_needed')),
     subject TEXT,
     body TEXT,
     body_html TEXT,

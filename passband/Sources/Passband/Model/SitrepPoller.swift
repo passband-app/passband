@@ -261,6 +261,9 @@ final class SitrepPoller {
             // first visit of a session still pays five round-trips. Its own TTL
             // makes this a date compare on most polls.
             await store.refreshZones()
+            // Bands and zones have both been asked of this daemon: a board
+            // repainted from a switch's snapshot is the mailbox's again.
+            if store.isCurrent(e) { store.noteBoardConfirmed() }
             // The outbox, so a scheduled mail that FAILS toasts wherever the
             // person is, not only on the Sent page. Its own TTL and an
             // empty-outbox skip make this free on most ticks.

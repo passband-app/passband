@@ -253,9 +253,14 @@ struct SidebarRail: View {
     /// 256pt square over the bottom of the rail. A bitmap that is already a
     /// 26pt circle has nothing left to get wrong. The initial stays a real
     /// view, as it always was: text in a menu label is laid out by SwiftUI.
+    ///
+    /// THE ACCOUNT BEING SWITCHED TO, while a switch is asking after it: the
+    /// press is answered here at once, whatever the daemon takes. A refused
+    /// switch puts the live account's mark back, beside the toast saying why.
     @ViewBuilder
     private var accountMark: some View {
-        let active = AccountManager.shared.active
+        let manager = AccountManager.shared
+        let active = manager.accounts.first { $0.id == store.switchingTo } ?? manager.active
         if let active, AccountPhotos.shared.image(for: active.id) != nil,
             let bitmap = markBitmap(active, size: 26, font: Typo.ui(13, weight: .semibold))
         {

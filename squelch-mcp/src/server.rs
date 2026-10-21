@@ -530,6 +530,12 @@ pub struct ReadingItem {
 /// Newsletters pile up; a week of them is plenty for one context window.
 const READING_LIMIT: usize = 200;
 
+/// How far back `get_reading` reaches, however early `since` is. The store
+/// access-checks every row in the window under its lock BEFORE the cap
+/// applies, so an unbounded `since` would walk a mailbox's whole newsletter
+/// history per call. Same default as the HTTP agent door's lists.
+const READING_MAX_DAYS: i64 = 30;
+
 /// A `get_thread` result: the sanitized thread, plus the standing instructions
 /// covering the people in it.
 ///
@@ -829,7 +835,8 @@ impl SquelchServer {
         name = "get_reading",
         description = "Mail the account owner's triage set aside to read later \
                        (newsletters, articles, promotions) received since a \
-                       timestamp, newest first, at most 200. Summaries only: \
+                       timestamp, newest first, at most 200, reaching back at \
+                       most 30 days however early `since` is. Summaries only: \
                        each result's `thread_id` is the id to pass to get_thread \
                        to read it. `reading_kind` is \"content\" (meant to be read \
                        like an article) or \"promotion\". A result may carry \
@@ -844,8 +851,9 @@ impl SquelchServer {
         Parameters(params): Parameters<GetReadingParams>,
     ) -> Result<CallToolResult, ErrorData> {
         use squelch_core::store::agent_triage::AgentListQuery;
+        let floor = Utc::now() - chrono::Duration::days(READING_MAX_DAYS);
         let query = AgentListQuery {
-            since: Some(params.since),
+            since: Some(params.since.max(floor)),
             include_done: false,
         };
         let items = self
@@ -855,9 +863,10 @@ impl SquelchServer {
         let rules = self.sender_rules()?;
         let mut out = Vec::new();
         for item in items {
-            // The store already restricts these; the per-row checks are the
-            // same belt-and-braces `get_inbox_updates` wears, so the two
-            // listings cannot drift apart on what an agent may see.
+            // The store already restricts these (and is what the tests can
+            // see). The per-row checks are the same second layer
+            // `get_inbox_updates` wears, kept so a regression in the store's
+            // restriction still has to get past this door.
             if !self
                 .store
                 .agent_access_allowed(self.account_id, item.message_id)
@@ -2059,8 +2068,18 @@ mod tests {
     }
 
     fn seed(store: &SqliteStore, account: i64, thread: &str, text: &str) -> i64 {
+        seed_at(store, account, thread, text, Utc::now())
+    }
+
+    /// `seed`, received (and ingested) at `now` instead of the real clock.
+    fn seed_at(
+        store: &SqliteStore,
+        account: i64,
+        thread: &str,
+        text: &str,
+        now: DateTime<Utc>,
+    ) -> i64 {
         use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
-        let now = Utc::now();
         let raw = RawFetched {
             account_id: account,
             gmail_msg_id: format!("{thread}-{text}"),
@@ -3411,28 +3430,97 @@ mod tests {
         assert!(later.as_array().unwrap().is_empty(), "{later}");
     }
 
+    /// Each sealed shape on its own, next to an allowed control row, so a
+    /// guard that stops working shows up as one extra thread id.
     #[tokio::test]
     async fn sealed_reading_mail_is_absent() {
         let store = Arc::new(SqliteStore::open_in_memory().unwrap());
         let account = store.ensure_account("me@localhost").unwrap();
+        let control = seed(&store, account, "control", "plain newsletter");
+        decide_reading(&store, account, control, false);
         // A restricted Reading row.
         let sealed = seed(&store, account, "sealed", "reset code digest");
         decide_reading(&store, account, sealed, true);
-        // An allowed Reading row whose thread holds a restricted sibling.
+        // An allowed Reading row whose thread holds a restricted sibling. The
+        // sibling stays out of FYE and names no attention sources, so only
+        // the THREAD guard can close this, not the attention-source check.
         let open = seed(&store, account, "mixed", "ordinary newsletter");
         decide_reading(&store, account, open, false);
         let secret = seed(&store, account, "mixed", "reset token");
-        decide(&store, account, secret, true, None);
-        // A pending (unassessed) row never reaches a listing at all.
-        seed(&store, account, "pending", "unassessed newsletter");
+        decide_as(&store, account, secret, true, None, |d| {
+            d.attention.show_in_fye = false;
+            d.attention.relevant_message_ids = vec![];
+        });
+        // An allowed Reading row whose summary was DERIVED from a restricted
+        // message in another thread.
+        let source = seed(&store, account, "source", "your login code");
+        decide(&store, account, source, true, None);
+        let derived = seed(&store, account, "derived", "weekly digest");
+        decide_as(&store, account, derived, false, Some(source), |d| {
+            d.destinations = vec![MessageDestination::Reading];
+            d.reading_kind = Some(ReadingKind::Content);
+            d.attention.show_in_fye = false;
+        });
         let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
 
         let out = reading(&server).await;
-        assert!(out.as_array().unwrap().is_empty(), "{out}");
-        let wire = out.to_string();
-        for secret in ["reset", "ordinary", "unassessed", "sealed", "mixed"] {
-            assert!(!wire.contains(secret), "{secret} leaked: {wire}");
-        }
+        let threads: Vec<_> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["thread_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(threads, ["control"], "{out}");
+    }
+
+    #[tokio::test]
+    async fn reading_leaves_out_done_mail_and_lists_newest_first() {
+        use squelch_core::types::AttentionStatus;
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let first = seed(&store, account, "first", "issue one");
+        decide_reading(&store, account, first, false);
+        let second = seed(&store, account, "second", "issue two");
+        decide_reading(&store, account, second, false);
+        let done = seed(&store, account, "done", "issue zero");
+        decide_reading(&store, account, done, false);
+        assert!(
+            store
+                .set_attention_status(account, done, AttentionStatus::Done)
+                .unwrap()
+        );
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        let ids: Vec<_> = reading(&server)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["message_id"].as_i64().unwrap())
+            .collect();
+        // Same received second, so the newer message id breaks the tie.
+        assert_eq!(ids, [second, first]);
+    }
+
+    #[tokio::test]
+    async fn reading_reaches_back_thirty_days_at_most() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let old = Utc::now() - chrono::Duration::days(35);
+        let stale = seed_at(&store, account, "stale", "last month's issue", old);
+        decide_reading(&store, account, stale, false);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        // An ancient `since` is clamped rather than refused: the fresh row
+        // answers, the 35-day-old one is past the window.
+        let out = reading_since(&server, Utc::now() - chrono::Duration::days(3650)).await;
+        let threads: Vec<_> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["thread_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(threads, ["essay"], "{out}");
     }
 
     #[tokio::test]

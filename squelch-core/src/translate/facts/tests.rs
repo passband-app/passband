@@ -377,3 +377,64 @@ fn faithful_idioms_are_never_rejected() {
     }
     assert_eq!(incomplete, INCOMPLETE);
 }
+
+/// A magnitude's bare digits alone do not carry it: `3 yen` for `3万円` is
+/// ten thousand times off. The translation is incomplete, never rejected,
+/// and its `3` is not an addition.
+#[test]
+fn a_dropped_magnitude_is_a_missing_fact() {
+    for (src, out) in [
+        ("お支払いは3万円です", "The payment is 3 yen"),
+        ("請求額は1億円", "The bill is 1 yen"),
+        ("Betrag: 1,5 Mio. Euro", "Amount: 1.5 euros"),
+        ("Montant : 2 milliards", "Amount: 2"),
+        ("18時にお越しください", "Please come on the 18th"),
+    ] {
+        let c = check(&v(&[src]), &v(&[out]));
+        assert!(!c.missing.is_empty(), "{src:?} -> {out:?}: {c:?}");
+        assert!(c.added.is_empty(), "{src:?} -> {out:?}: {c:?}");
+        assert!(c.added_numbers.is_empty(), "{src:?} -> {out:?}: {c:?}");
+    }
+    // Its value, or a magnitude carrying the value, does.
+    for (src, out) in [
+        ("お支払いは3万円です", "The payment is 30,000 yen"),
+        ("お支払いは3万円です", "The payment is 30 thousand yen"),
+        ("請求額は1億円", "The bill is 100 million yen"),
+        ("Betrag: 1,5 Mio. Euro", "Amount: 1.5 million euros"),
+        ("Montant : 2 milliards", "Amount: 2 billion"),
+        ("18時にお越しください", "Please come at 18:00"),
+        ("18時にお越しください", "Please come at 6 PM"),
+        ("3時間かかります", "It takes 3 hours"),
+    ] {
+        assert!(check(&v(&[src]), &v(&[out])).passed(), "{src:?} -> {out:?}");
+    }
+}
+
+/// A compound amount past u128 has no derived value: no overflow panic,
+/// and the digits are still checked as numbers.
+#[test]
+fn an_overflowing_compound_amount_does_not_panic() {
+    let src = "200000000000000000000000000兆2000000000000000000000000000000億";
+    let c = check(&v(&[src]), &v(&[src]));
+    assert!(c.added.is_empty(), "{c:?}");
+    let _ = check(&v(&[src]), &v(&["nothing"]));
+}
+
+/// Interchangeable facts are matched as groups: three thousand `1`s against
+/// fifteen hundred is one augmenting path, not a cubic search.
+#[test]
+fn a_batch_of_identical_numbers_matches_quickly() {
+    let src = "1 ".repeat(3000);
+    let out = "1 ".repeat(1500);
+    let at = std::time::Instant::now();
+    let c = check(&v(&[&src]), &v(&[&out]));
+    let took = at.elapsed();
+    assert_eq!(c.missing.len(), 1500);
+    // Release runs this in a few ms; the bound leaves room for debug builds.
+    assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    // Groups still find a maximum matching through a reroute: the source's
+    // `15000` first takes `15 thousand` (keys 15 and 15000), and must give
+    // it up to the `15` that has no other partner.
+    let c = check(&v(&["15000 15"]), &v(&["15 thousand 15000"]));
+    assert!(c.passed(), "{c:?}");
+}

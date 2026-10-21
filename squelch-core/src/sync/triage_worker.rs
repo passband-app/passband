@@ -434,6 +434,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         };
         match run_agent(connection, &config, input, &reader).await {
             Ok(run) => {
+                // The gateway answered: the translate pass's release cap
+                // may now charge a row that keeps failing alone.
+                self.note_gateway_answer();
                 let until = self.agent_retry_after.load(Ordering::Relaxed);
                 if until > 0 && until <= Utc::now().timestamp() {
                     let _ = self.agent_retry_after.compare_exchange(
@@ -602,6 +605,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         .await
         {
             Ok(run) => {
+                // The gateway answered: the translate pass's release cap
+                // may now charge a row that keeps failing alone.
+                self.note_gateway_answer();
                 let until = self.agent_retry_after.load(Ordering::Relaxed);
                 if until > 0 && until <= Utc::now().timestamp() {
                     let _ = self.agent_retry_after.compare_exchange(

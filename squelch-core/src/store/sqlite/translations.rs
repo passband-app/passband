@@ -64,6 +64,11 @@ pub const TRIAGE_WAIT_SECS: i64 = 10 * 60;
 /// times out every time, its content draws a 4xx) is about the message, and
 /// without this it would be claimed and released forever.
 pub const MAX_CONSECUTIVE_RELEASES: i64 = 2;
+/// When a [`TranslationWrite::Released`] is charged instead (`?5` the cap,
+/// `?7` the pass's last answer in ms): past the cap, and the gateway has
+/// answered some other translation since this row's run of releases began.
+const RELEASE_CHARGED_SQL: &str = "(releases >= ?5 AND ?7 IS NOT NULL
+     AND first_released_at IS NOT NULL AND ?7 > first_released_at)";
 /// The note an `incomplete` row carries when the engine translated only the
 /// head of an over-long message. Shown with the other missing facts.
 pub const TRUNCATED_NOTE: &str = "only the first part was translated";
@@ -520,7 +525,8 @@ impl SqliteStore {
                          snippet = ?6, missing_facts = ?7, model = ?8,
                          prompt_version = ?9, updated_at = ?10,
                          source_lang = COALESCE(?11, source_lang),
-                         lease = NULL, triage_wait_until = NULL, releases = 0
+                         lease = NULL, triage_wait_until = NULL, releases = 0,
+                         first_released_at = NULL
                      WHERE message_id = ?1 AND status = 'pending' AND lease = ?12",
                     params![
                         message_id,
@@ -549,7 +555,8 @@ impl SqliteStore {
             TranslationWrite::Failed { model } => tx.execute(
                 "UPDATE message_translations
                  SET status = 'failed', model = ?2, updated_at = ?3, lease = NULL,
-                     triage_wait_until = NULL, releases = 0
+                     triage_wait_until = NULL, releases = 0,
+                     first_released_at = NULL
                  WHERE message_id = ?1 AND status = 'pending' AND lease = ?4",
                 params![message_id, model, now.timestamp(), job.lease],
             )?,
@@ -571,7 +578,8 @@ impl SqliteStore {
                      SET status = ?2, model = ?3, prompt_version = ?4,
                          subject = NULL, body = NULL, body_html = NULL,
                          snippet = NULL, missing_facts = NULL, updated_at = ?5,
-                         lease = NULL, triage_wait_until = NULL, releases = 0
+                         lease = NULL, triage_wait_until = NULL, releases = 0,
+                         first_released_at = NULL
                      WHERE message_id = ?1 AND status = 'pending' AND lease = ?6",
                     params![
                         message_id,
@@ -586,20 +594,27 @@ impl SqliteStore {
             // Back to exactly what the claim found: the status, the
             // `updated_at` its backoff counts from, and the attempt. Unless
             // the row has been released MAX_CONSECUTIVE_RELEASES times in a
-            // row already: then this failure is charged to it like any
-            // other, `failed` with the claim's attempt spent and its backoff
-            // starting now, so a failure only this message draws runs out of
-            // attempts instead of looping.
-            TranslationWrite::Released => tx.execute(
+            // row already AND the gateway has answered another translation
+            // since its first release (`last_answer_ms`, which the pass
+            // passes only for a message-shaped failure): then this failure is
+            // charged to it like any other, `failed` with the claim's attempt
+            // spent and its backoff starting now, so a failure only this
+            // message draws runs out of attempts instead of looping. In a
+            // total outage nothing answers, and nothing is charged.
+            TranslationWrite::Released { last_answer_ms } => tx.execute(
                 "UPDATE message_translations
-                 SET status = CASE WHEN releases >= ?5 THEN 'failed' ELSE ?2 END,
-                     attempts = CASE WHEN releases >= ?5 THEN attempts
+                 SET status = CASE WHEN {c} THEN 'failed' ELSE ?2 END,
+                     attempts = CASE WHEN {c} THEN attempts
                                      ELSE MAX(attempts - 1, 0) END,
-                     updated_at = CASE WHEN releases >= ?5 THEN ?6 ELSE ?3 END,
-                     triage_wait_until = CASE WHEN releases >= ?5 THEN NULL
+                     updated_at = CASE WHEN {c} THEN ?6 ELSE ?3 END,
+                     triage_wait_until = CASE WHEN {c} THEN NULL
                                               ELSE triage_wait_until END,
+                     first_released_at = CASE WHEN {c} THEN ?8
+                                              ELSE COALESCE(first_released_at, ?8) END,
                      releases = releases + 1, lease = NULL
-                 WHERE message_id = ?1 AND status = 'pending' AND lease = ?4",
+                 WHERE message_id = ?1 AND status = 'pending' AND lease = ?4"
+                    .replace("{c}", RELEASE_CHARGED_SQL)
+                    .as_str(),
                 params![
                     message_id,
                     job.prev_status.as_str(),
@@ -607,6 +622,8 @@ impl SqliteStore {
                     job.lease,
                     MAX_CONSECUTIVE_RELEASES,
                     now.timestamp(),
+                    last_answer_ms,
+                    now.timestamp_millis(),
                 ],
             )?,
             // Handed back untouched: the pass never tried this row (no room

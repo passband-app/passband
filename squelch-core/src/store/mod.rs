@@ -427,9 +427,14 @@ pub enum TranslationWrite<'a> {
     /// timeout), so the row is exactly as translatable as it was, and goes
     /// back to the status and backoff it had before the claim. The pass that
     /// releases it stops and cools down. After `MAX_CONSECUTIVE_RELEASES`
-    /// in a row it is charged instead (`failed`, the attempt spent): a
-    /// failure only this message keeps drawing is about the message.
-    Released,
+    /// in a row it is charged instead (`failed`, the attempt spent), but
+    /// only when `last_answer_ms` (when the gateway last answered any
+    /// translation call for the account, unix ms) is later than the row's
+    /// first release: a failure only this message keeps drawing while
+    /// others get answers is about the message. `None` (a capacity failure,
+    /// 429/5xx, or no answer seen) never charges, so a total outage keeps
+    /// every row pending with its attempts untouched.
+    Released { last_answer_ms: Option<i64> },
     /// Hand the claim back untouched because the pass never tried it (no
     /// room left in today's budget). Not counted as a release.
     Returned,

@@ -27,6 +27,12 @@ enum Answer {
     /// French as [`Answer::French`], except that a batch carrying this text
     /// times out every time (a message whose answer outruns the timeout).
     TimesOutOn(&'static str),
+    /// French as [`Answer::French`], except that a batch carrying this text
+    /// draws a 429 (a rate limit that happens to land on that call).
+    RateLimitedOn(&'static str),
+    /// French for the first `n` calls, then every call times out: the
+    /// gateway goes down entirely.
+    DownAfter(usize),
 }
 
 struct Scripted {
@@ -86,7 +92,7 @@ impl crate::translate::TranslateBackend for Scripted {
         user: &str,
         _max_tokens: u32,
     ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
         self.sent.lock().unwrap().push(user.to_string());
         let start = user
             .find("-----BEGIN UNTRUSTED EMAIL SEGMENTS-----\n")
@@ -122,14 +128,28 @@ impl crate::translate::TranslateBackend for Scripted {
                     retryable: true,
                 });
             }
-            Answer::TimesOutOn(_) => LlmOutcome::Ok(
-                serde_json::json!({
-                    "source_language": "fr",
-                    "translations": segments.iter().map(|s| english(s)).collect::<Vec<_>>(),
-                })
-                .to_string(),
-                usage(),
-            ),
+            Answer::RateLimitedOn(marker) if user.contains(marker) => {
+                return Err(ClassifyError {
+                    kind: "http_429".into(),
+                    retryable: true,
+                });
+            }
+            Answer::DownAfter(n) if call >= n => {
+                return Err(ClassifyError {
+                    kind: "transport".into(),
+                    retryable: true,
+                });
+            }
+            Answer::TimesOutOn(_) | Answer::RateLimitedOn(_) | Answer::DownAfter(_) => {
+                LlmOutcome::Ok(
+                    serde_json::json!({
+                        "source_language": "fr",
+                        "translations": segments.iter().map(|s| english(s)).collect::<Vec<_>>(),
+                    })
+                    .to_string(),
+                    usage(),
+                )
+            }
         })
     }
     fn model(&self) -> &str {
@@ -504,36 +524,135 @@ async fn an_outage_releases_the_row_counts_the_call_and_cools_down_briefly() {
 }
 
 #[tokio::test]
-async fn a_row_that_fails_alone_runs_out_of_releases() {
+async fn a_row_that_fails_alone_is_released_until_the_gateway_answers_someone_else() {
     // One message whose batch times out every time, alone in the queue: the
-    // round cannot tell it from an outage, so it is released, but only
-    // MAX_CONSECUTIVE_RELEASES times; the next failure spends an attempt.
+    // round cannot tell it from an outage, and nothing else has answered,
+    // so it is released round after round without spending an attempt.
     let backend = Scripted::new(Answer::TimesOutOn("Rappel"));
     let (eng, store, acct) = engine(Some(backend.clone()));
-    let id = land_as(
+    let bad = land_as(
         &eng,
         acct,
-        "fr1",
+        "fr0",
         "Rappel",
         IngestOrigin::Incremental,
         false,
         false,
     );
-    for round in 0..2 {
+    for round in 0..6 {
         eng.translate_retry_after.store(0, Ordering::Relaxed);
         assert!(eng.translate_pass().await);
         assert_eq!(
-            status(&store, id),
+            status(&store, bad),
             Some(("pending".into(), 0)),
             "round {round}"
         );
     }
+    // Others answer in a round of their own (the four newest are claimed).
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let good: Vec<i64> = (1..=4)
+        .map(|i| land(&eng, acct, &format!("fr{i}"), false, false))
+        .collect();
     eng.translate_retry_after.store(0, Ordering::Relaxed);
     assert!(eng.translate_pass().await);
-    assert_eq!(status(&store, id), Some(("failed".into(), 1)));
-    // Backing off now, like any failure: the next round claims nothing.
+    for id in good {
+        assert_eq!(status(&store, id).unwrap().0, "done");
+    }
+    assert_eq!(status(&store, bad), Some(("pending".into(), 0)));
+    // The gateway answers, this message still times out: past the cap, the
+    // next release is charged, and the row backs off like any failure.
+    eng.translate_retry_after.store(0, Ordering::Relaxed);
+    assert!(eng.translate_pass().await);
+    assert_eq!(status(&store, bad), Some(("failed".into(), 1)));
     eng.translate_retry_after.store(0, Ordering::Relaxed);
     assert!(!eng.translate_pass().await);
+}
+
+#[tokio::test]
+async fn a_lone_timing_out_row_is_charged_once_triage_succeeds() {
+    // The only queued translation times out every time. With nothing else
+    // answering it is released and spends nothing; once agent triage gets
+    // an answer from the same gateway, the cap charges it.
+    let backend = Scripted::new(Answer::TimesOutOn("Rappel"));
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let lone = land_as(
+        &eng,
+        acct,
+        "fr0",
+        "Rappel",
+        IngestOrigin::Incremental,
+        false,
+        false,
+    );
+    for round in 0..4 {
+        eng.translate_retry_after.store(0, Ordering::Relaxed);
+        assert!(eng.translate_pass().await);
+        assert_eq!(
+            status(&store, lone),
+            Some(("pending".into(), 0)),
+            "nothing answered, round {round}"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    // What the triage worker calls on a successful agent run.
+    eng.note_gateway_answer();
+    eng.translate_retry_after.store(0, Ordering::Relaxed);
+    assert!(eng.translate_pass().await);
+    assert_eq!(status(&store, lone), Some(("failed".into(), 1)));
+}
+
+#[tokio::test]
+async fn a_six_hour_total_outage_spends_no_attempts() {
+    // One translation lands, then the gateway goes down for six hours of
+    // rounds (one per OUTAGE_COOLDOWN_SECS). The answer before the outage is
+    // older than every row's first release, so the cap never charges.
+    let backend = Scripted::new(Answer::DownAfter(1));
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let first = land(&eng, acct, "fr0", false, false);
+    assert!(eng.translate_pass().await);
+    assert_eq!(status(&store, first).unwrap().0, "done");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let rows: Vec<i64> = (1..=6)
+        .map(|i| land(&eng, acct, &format!("fr{i}"), false, false))
+        .collect();
+    let rounds = 6 * 3600 / OUTAGE_COOLDOWN_SECS;
+    for _ in 0..rounds {
+        eng.translate_retry_after.store(0, Ordering::Relaxed);
+        assert!(eng.translate_pass().await);
+    }
+    for id in rows {
+        assert_eq!(status(&store, id), Some(("pending".into(), 0)));
+    }
+}
+
+#[tokio::test]
+async fn a_rate_limit_beside_successes_is_never_the_rows_fault() {
+    let backend = Scripted::new(Answer::RateLimitedOn("Rappel"));
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let limited = land_as(
+        &eng,
+        acct,
+        "fr0",
+        "Rappel",
+        IngestOrigin::Incremental,
+        false,
+        false,
+    );
+    for round in 1..=6 {
+        let good = land(&eng, acct, &format!("fr{round}"), false, false);
+        eng.translate_retry_after.store(0, Ordering::Relaxed);
+        assert!(eng.translate_pass().await);
+        assert_eq!(status(&store, good).unwrap().0, "done");
+        // Released, not charged, even with answers all around it, and the
+        // pass cools down as for any capacity failure.
+        assert_eq!(
+            status(&store, limited),
+            Some(("pending".into(), 0)),
+            "round {round}"
+        );
+        assert!(eng.translate_retry_after.load(Ordering::Relaxed) > 0);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 #[tokio::test]

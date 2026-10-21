@@ -23,14 +23,22 @@
 //! cooldown is this pass's own: a translate model missing from an allow-list
 //! says nothing about the triage model, and must not stop triage.
 //!
-//! UNLESS THE FAILURE IS THE MESSAGE'S OWN. When another row of the same
-//! round got an answer, the gateway is fine and this row's failure (a batch
-//! that times out every time, a 4xx its content draws) is charged to it as
-//! an ordinary failure. And a row released `MAX_CONSECUTIVE_RELEASES` times
-//! in a row is charged on the next one by the store. Either way it runs out
-//! of attempts instead of being claimed and released forever, and the config
-//! failure counter (`squelchd_translate_config_failures_total`, its own,
-//! never triage's) counts a row's first release only.
+//! UNLESS THE FAILURE IS THE MESSAGE'S OWN. Only a MESSAGE-SHAPED failure
+//! can be: a timeout or transport error on this row's call, or a 400 its
+//! content draws. When another row of the same round got an answer, the
+//! gateway is fine and such a failure is charged to it as an ordinary
+//! failure. And a row released `MAX_CONSECUTIVE_RELEASES` times in a row is
+//! charged on the next one by the store, but only if the gateway has
+//! answered since that row's first release (`translate_last_answer_ms`,
+//! stamped by any translation verdict and by every successful agent triage
+//! run, [`SyncEngine::note_gateway_answer`]): in a total outage nothing answers, so every
+//! row stays pending with its attempts untouched, however long it lasts.
+//! A CAPACITY failure (429, 529, 503, any 5xx) and a key, budget or model
+//! failure (401, 402, 403, 404) is never the message's: partial 429s beside
+//! successes are the normal shape of a rate limit, so those always release
+//! and cool down. The config failure counter
+//! (`squelchd_translate_config_failures_total`, its own, never triage's)
+//! counts a row's first release only.
 //!
 //! THE DAILY BUDGET (`[translate].daily_budget_usd`) is dollars, priced at
 //! the translate prices from today's `translate` usage line. Each message's
@@ -47,6 +55,16 @@ use crate::translate::{self, TranslateInput, TranslateOutcome, TranslateRun};
 /// provider outage, which every other row would draw too.
 fn failure_is_global(kind: &str) -> bool {
     crate::triage::llm::is_config_failure(kind) || super::triage_worker::is_provider_outage(kind)
+}
+
+/// A failure the message itself can draw: its own call timing out or
+/// dropping (`transport`, a batch whose answer outruns the timeout), or a
+/// 400 its content draws. Never a capacity failure (429, 5xx) and never a
+/// key, budget or model failure (401, 402, 403, 404): those are about the
+/// deployment whatever else answered. Any other 4xx is not global at all
+/// and is already an ordinary failure.
+fn failure_is_message_shaped(kind: &str) -> bool {
+    kind == "transport" || kind == "http_400" || kind.starts_with("http_400:")
 }
 
 /// Rows one round claims. Small on purpose: a round's results land together,
@@ -167,13 +185,19 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }))
         .await;
         let model = backend.model().to_string();
-        // A row whose call failed on configuration or an outage while
-        // another row of this round got an answer: the gateway works, the
-        // failure is this message's.
+        // A row whose call failed in a message-shaped way while another row
+        // of this round got an answer: the gateway works, the failure is
+        // this message's.
         let any_answer = runs.iter().any(|r| match &r.outcome {
             TranslateOutcome::Failed(kind) => !failure_is_global(kind),
             _ => true,
         });
+        if any_answer {
+            // Stamped before the rows are recorded, so a row released in
+            // this same round (its first release later than this) is not
+            // charged by the cap on the strength of it.
+            self.note_gateway_answer();
+        }
         for (job, run) in charged.iter().zip(runs) {
             self.finish_translation(job, run, &model, &day, any_answer)
                 .await;
@@ -290,7 +314,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     prompt_version: translate::PROMPT_VERSION,
                 }
             }
-            TranslateOutcome::Failed(kind) if failure_is_global(kind) && any_answer => {
+            TranslateOutcome::Failed(kind) if failure_is_message_shaped(kind) && any_answer => {
                 // The gateway answered another row this round: this failure
                 // is the message's own, an ordinary failure with backoff.
                 eprintln!(
@@ -308,11 +332,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 }
                 let secs = self.config.triage.agent.outage_retry_secs.min(86_400) as i64;
                 self.translate_cool_down(now, secs, "rejected the request", kind);
-                TranslationWrite::Released
+                self.translate_release(kind)
             }
             TranslateOutcome::Failed(kind) if super::triage_worker::is_provider_outage(kind) => {
                 self.translate_cool_down(now, OUTAGE_COOLDOWN_SECS, "is unavailable", kind);
-                TranslationWrite::Released
+                self.translate_release(kind)
             }
             TranslateOutcome::Failed(kind) => {
                 // Redacted: the id and the kind, never the text.
@@ -339,6 +363,30 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             let text =
                 crate::embed::message_embed_text(&t.subject, &t.body, self.config.embed.max_chars);
             self.embed_translation(job.message_id, text).await;
+        }
+    }
+
+    /// THE GATEWAY ANSWERED this account: a translation call reached any
+    /// verdict, or an agent triage run (or access assessment) succeeded on
+    /// the same gateway and key. The release cap charges a row only when
+    /// this is later than the row's first release, so a lone row that times
+    /// out every time on a healthy gateway runs out of attempts (each
+    /// abandoned generation is billed by the provider and recorded as a
+    /// zero-token call), while a true outage, where nothing answers, spends
+    /// nothing.
+    pub(super) fn note_gateway_answer(&self) {
+        self.translate_last_answer_ms
+            .fetch_max(Utc::now().timestamp_millis(), Ordering::Relaxed);
+    }
+
+    /// Hand a claim back. Only a message-shaped failure carries the pass's
+    /// last answer, so only it can be charged by the release cap, and only
+    /// once the gateway has answered something since the row's first
+    /// release. A capacity, key, budget or model failure never is.
+    fn translate_release(&self, kind: &str) -> TranslationWrite<'static> {
+        let last = self.translate_last_answer_ms.load(Ordering::Relaxed);
+        TranslationWrite::Released {
+            last_answer_ms: (failure_is_message_shaped(kind) && last > 0).then_some(last),
         }
     }
 

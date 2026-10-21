@@ -219,33 +219,89 @@ fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&tag[at..at + len])
 }
 
-/// Classes the document's `<style>` hides outright.
-type HiddenClasses = std::collections::HashSet<String>;
+/// Classes the document's `<style>` hides outright, each with the
+/// properties that hide it and whether the rule marked that one
+/// `!important` (which an inline style without it does not override).
+type HiddenClasses = std::collections::HashMap<String, Vec<(HideProp, bool)>>;
+
+/// A property a rule hides an element with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HideProp {
+    Display,
+    Visibility,
+    MsoHide,
+    FontSize,
+    Opacity,
+    /// A zero `height` / `max-height` with `overflow:hidden`.
+    Height,
+}
+
+/// `prop:0`, `prop:0px`, `prop:0.0em`...: whether `decl` sets `prop` to a
+/// zero length. `None` when it does not set `prop` at all.
+fn zero_length(decl: &str, prop: &str) -> Option<bool> {
+    let v = decl.strip_prefix(prop)?;
+    let num: String = v
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let unit = &v[num.len()..];
+    Some(
+        num.parse::<f64>().is_ok_and(|n| n == 0.0)
+            && ["", "px", "pt", "em", "rem", "%"].contains(&unit),
+    )
+}
+
+/// The properties a declaration list (whitespace removed, lowercased,
+/// `!important` dropped) hides what it applies to with.
+fn hiding_props(decls: &[&str]) -> Vec<HideProp> {
+    let has = |decl: &str| decls.contains(&decl);
+    let zero = |prop: &str| decls.iter().any(|d| zero_length(d, prop) == Some(true));
+    let mut out = Vec::new();
+    if has("display:none") {
+        out.push(HideProp::Display);
+    }
+    if has("visibility:hidden") {
+        out.push(HideProp::Visibility);
+    }
+    if has("mso-hide:all") {
+        out.push(HideProp::MsoHide);
+    }
+    if zero("font-size:") {
+        out.push(HideProp::FontSize);
+    }
+    if zero("opacity:") {
+        out.push(HideProp::Opacity);
+    }
+    if (zero("max-height:") || zero("height:")) && has("overflow:hidden") {
+        out.push(HideProp::Height);
+    }
+    out
+}
+
+/// Whether an inline declaration list sets `prop` to a value that shows
+/// the element again (`display:block` over a class's `display:none`).
+fn unhides(prop: HideProp, decls: &[&str]) -> bool {
+    let nonzero = |p: &str| decls.iter().any(|d| zero_length(d, p) == Some(false));
+    match prop {
+        HideProp::Display => decls
+            .iter()
+            .any(|d| d.strip_prefix("display:").is_some_and(|v| v != "none")),
+        HideProp::Visibility => decls.contains(&"visibility:visible"),
+        // Outlook's own switch: no inline value turns it back.
+        HideProp::MsoHide => false,
+        HideProp::FontSize => nonzero("font-size:"),
+        HideProp::Opacity => nonzero("opacity:"),
+        HideProp::Height => decls.iter().any(|d| {
+            d.strip_prefix("overflow:")
+                .is_some_and(|v| v != "hidden" && v != "clip")
+        }),
+    }
+}
 
 /// Whether a declaration list (whitespace removed, lowercased, `!important`
 /// dropped) hides what it applies to.
 fn hides(decls: &[&str]) -> bool {
-    let has = |decl: &str| decls.contains(&decl);
-    // `prop:0`, `prop:0px`, `prop:0.0em`...: a zero length.
-    let zero = |prop: &str| {
-        decls.iter().any(|d| {
-            d.strip_prefix(prop).is_some_and(|v| {
-                let num: String = v
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.')
-                    .collect();
-                let unit = &v[num.len()..];
-                num.parse::<f64>().is_ok_and(|n| n == 0.0)
-                    && ["", "px", "pt", "em", "rem", "%"].contains(&unit)
-            })
-        })
-    };
-    has("display:none")
-        || has("visibility:hidden")
-        || has("mso-hide:all")
-        || zero("font-size:")
-        || zero("opacity:")
-        || ((zero("max-height:") || zero("height:")) && has("overflow:hidden"))
+    !hiding_props(decls).is_empty()
 }
 
 /// The declarations of one CSS block body, as [`hides`] reads them.
@@ -263,7 +319,10 @@ fn css_decls(body: &str) -> Vec<String> {
 /// selector is one class (`.x`, or `div.x`), at the top level. A class any
 /// `@media` (or other at-rule) block also names is left out: a responsive
 /// mail hides the desktop or the mobile version, and the reader may be
-/// either.
+/// either. So is a class any COMPLEX top-level selector names (`p .x`,
+/// `.a > .x`, `.x:hover`, `.x + p`): whether it applies depends on where
+/// the element sits, which this does not resolve, and text a rule may show
+/// is never treated as hidden.
 fn hidden_classes(html: &str) -> HiddenClasses {
     let mut css = String::new();
     let mut at = 0;
@@ -302,7 +361,7 @@ fn hidden_classes(html: &str) -> HiddenClasses {
         .then(|| class.to_ascii_lowercase())
     };
     let mut hidden = HiddenClasses::new();
-    let mut conditional = HiddenClasses::new();
+    let mut conditional = std::collections::HashSet::<String>::new();
     let bytes = clean.as_bytes();
     let (mut i, mut depth, mut sel_start) = (0, 0usize, 0);
     let mut in_at = 0usize; // depth at which an at-rule block opened, 0 = none
@@ -318,17 +377,36 @@ fn hidden_classes(html: &str) -> HiddenClasses {
                     continue;
                 }
                 let close = clean[i..].find('}').map_or(clean.len(), |j| i + j);
-                let decls = css_decls(&clean[i + 1..close]);
+                let body = &clean[i + 1..close];
+                let decls = css_decls(body);
                 let decls: Vec<&str> = decls.iter().map(String::as_str).collect();
+                // Which of the hiding declarations were `!important`.
+                let important: Vec<HideProp> = {
+                    let raw: Vec<String> = body
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect::<String>()
+                        .to_ascii_lowercase()
+                        .split(';')
+                        .filter_map(|d| d.strip_suffix("!important").map(str::to_string))
+                        .collect();
+                    let raw: Vec<&str> = raw.iter().map(String::as_str).collect();
+                    hiding_props(&raw)
+                };
+                let props = hiding_props(&decls);
                 for sel in selector.split(',') {
                     if let Some(class) = simple_class(sel) {
                         if in_at > 0 {
                             conditional.insert(class);
-                        } else if hides(&decls) {
-                            hidden.insert(class);
+                        } else if !props.is_empty() {
+                            let entry = hidden.entry(class).or_default();
+                            for p in &props {
+                                entry.push((*p, important.contains(p)));
+                            }
                         }
-                    } else if in_at > 0 {
-                        // Any class an at-rule's complex selector names.
+                    } else {
+                        // Any class a complex selector names, at the top
+                        // level or inside an at-rule.
                         for part in sel.split(|c: char| {
                             !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
                         }) {
@@ -354,7 +432,7 @@ fn hidden_classes(html: &str) -> HiddenClasses {
         }
         i += 1;
     }
-    hidden.retain(|c| !conditional.contains(c));
+    hidden.retain(|c, _| !conditional.contains(c));
     hidden
 }
 
@@ -372,10 +450,26 @@ fn own_ctx(tag: &str, name: &str, hidden_classes: &HiddenClasses) -> Ctx {
         .split(';')
         .map(|d| d.trim_end_matches("!important"))
         .collect();
+    let inline_important: Vec<&str> = style
+        .split(';')
+        .filter_map(|d| d.strip_suffix("!important"))
+        .collect();
+    // A class hides the element unless the inline style shows it again on
+    // every property the class hides it with: inline beats a class rule,
+    // except over the rule's `!important` (which only an inline
+    // `!important` beats).
     let by_class = !hidden_classes.is_empty()
         && attr(tag, "class").is_some_and(|c| {
-            c.split_ascii_whitespace()
-                .any(|c| hidden_classes.contains(&c.to_ascii_lowercase()))
+            c.split_ascii_whitespace().any(|c| {
+                hidden_classes
+                    .get(&c.to_ascii_lowercase())
+                    .is_some_and(|props| {
+                        props.iter().any(|&(p, important)| {
+                            let over = if important { &inline_important } else { &decls };
+                            !unhides(p, over)
+                        })
+                    })
+            })
         });
     Ctx {
         hidden: by_class || hides(&decls),
@@ -416,9 +510,55 @@ const REPLY_HEADER_LABELS: [&str; 16] = [
     "寄件者:",
 ];
 
+/// Outlook's "Sent:" / "Date:" header labels, which a real reply header
+/// carries beside its `From:` (normalized as [`header_label_text`] does).
+const REPLY_SENT_LABELS: [&str; 26] = [
+    "sent:",
+    "date:",
+    "envoyé:",
+    "date d'envoi:",
+    "gesendet:",
+    "datum:",
+    "verzonden:",
+    "verstuurd:",
+    "inviato:",
+    "data:",
+    "enviado:",
+    "enviada:",
+    "fecha:",
+    "skickat:",
+    "sendt:",
+    "wysłano:",
+    "data wysłania:",
+    "отправлено:",
+    "дата:",
+    "gönderildi:",
+    "tarih:",
+    "送信日時:",
+    "日付:",
+    "发送时间:",
+    "日期:",
+    "寄件日期:",
+];
+
+/// A header label's text lowercased, no-break spaces as spaces, a fullwidth
+/// colon and the French space before a colon folded (`Envoyé :` is
+/// `envoyé:`).
+fn header_label_text(text: &str) -> String {
+    text.trim()
+        .to_lowercase()
+        .replace(['\u{a0}', '\u{202f}'], " ")
+        .replace('：', ":")
+        .replace(" :", ":")
+}
+
 /// OUTLOOK'S QUOTE: from a `div#divRplyFwdMsg`, or from an `<hr>` whose next
-/// visible text is a `From:` header label, to the end of the document, every
-/// token is quoted history. Outlook writes no `<blockquote>`.
+/// visible text is a `From:` header label AND whose next few texts carry a
+/// `Sent:` / `Date:` label (`De :` with `Envoyé :`, `Von:` with
+/// `Gesendet:`), to the end of the document, every token is quoted history.
+/// Outlook writes no `<blockquote>`. The second label is what tells a reply
+/// header from a sender's own `<hr><p>De: la banque</p>`, which would
+/// otherwise keep the rest of the mail untranslated.
 fn mark_outlook_quote(toks: &mut [Tok<'_>]) -> Option<usize> {
     let start = toks.iter().enumerate().find_map(|(i, t)| {
         if !matches!(t.kind, TokKind::Open | TokKind::Void) {
@@ -430,17 +570,26 @@ fn mark_outlook_quote(toks: &mut [Tok<'_>]) -> Option<usize> {
         if t.name != "hr" {
             return None;
         }
-        let next = toks[i + 1..]
+        let mut texts = toks[i + 1..]
             .iter()
             .take(40)
             .filter(|n| matches!(n.kind, TokKind::Text))
             .map(|n| decode_entities(n.raw))
-            .find(|text| !text.trim().is_empty())?;
+            .filter(|text| !text.trim().is_empty());
+        let next = texts.next()?;
         let head = next.trim_start().to_lowercase();
-        REPLY_HEADER_LABELS
+        let from = REPLY_HEADER_LABELS
             .iter()
-            .any(|l| head.starts_with(l) || head == l.trim_end_matches(':').trim())
-            .then_some(i)
+            .any(|l| head.starts_with(l) || head == l.trim_end_matches(':').trim());
+        let mut sent = || {
+            texts.any(|t| {
+                let t = header_label_text(&t);
+                REPLY_SENT_LABELS
+                    .iter()
+                    .any(|l| t.starts_with(l) || t == l.trim_end_matches(':'))
+            })
+        };
+        (from && sent()).then_some(i)
     });
     if let Some(start) = start {
         for t in &mut toks[start..] {
@@ -1700,6 +1849,51 @@ mod tests {
             segment_html(&html).segments(),
             strs(&["Version mobile du message", "Votre facture est disponible."])
         );
+    }
+
+    #[test]
+    fn an_inline_style_or_a_complex_rule_shows_a_hidden_class() {
+        // Inline beats the class rule, property by property.
+        let html = sanitize_email_html(
+            "<style>.h{display:none} .i{display:none !important} .f{display:none;font-size:0}\
+             .g{display:none} p .g{display:inline} .k{display:none} .k:hover{display:block}</style>\
+             <p><span class=\"h\" style=\"display:inline\">Texte visible un</span></p>\
+             <p><span class=\"i\" style=\"display:inline\">Texte cache deux</span></p>\
+             <p><span class=\"f\" style=\"display:inline\">Texte cache trois</span></p>\
+             <p><span class=\"g\">Texte visible quatre</span></p>\
+             <p><span class=\"k\">Texte visible cinq</span></p>",
+        );
+        assert_eq!(
+            segment_html(&html).segments(),
+            strs(&[
+                "Texte visible un",
+                "Texte visible quatre",
+                "Texte visible cinq"
+            ])
+        );
+    }
+
+    #[test]
+    fn an_hr_and_a_from_line_alone_are_not_a_reply_header() {
+        // A sender's own `De:` after a rule, with no `Envoyé :` beside it.
+        let html = sanitize_email_html(
+            "<p>Votre code arrive.</p><hr><p>De: la banque</p>\
+             <p>Ne partagez jamais ce code.</p>",
+        );
+        assert_eq!(
+            segment_html(&html).segments(),
+            strs(&[
+                "Votre code arrive.",
+                "De: la banque",
+                "Ne partagez jamais ce code."
+            ])
+        );
+        // German labels, the real thing.
+        let html = sanitize_email_html(
+            "<p>Danke.</p><hr><p><b>Von:</b> Jan<br><b>Gesendet:</b> Dienstag</p>\
+             <p>Old text.</p>",
+        );
+        assert_eq!(segment_html(&html).segments(), strs(&["Danke."]));
     }
 
     #[test]

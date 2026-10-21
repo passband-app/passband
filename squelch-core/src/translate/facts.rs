@@ -13,10 +13,13 @@
 //!
 //! - A plain number is its digits, separators removed (`1.234,56` and
 //!   `1,234.56` are both `123456`), leading zeros dropped.
-//! - A number with a magnitude unit is ALSO its value: `3万` is `3` and
-//!   `30000`, `1,5 Mio.` is `15` and `1500000`, `30 thousand` is `30` and
-//!   `30000`. English has no 万, so the faithful English of `3万円` is
-//!   `30,000 yen`.
+//! - A number with a magnitude unit is its value: `3万` is `30000`, `1,5
+//!   Mio.` is `1500000`. English has no 万, so the faithful English of
+//!   `3万円` is `30,000 yen` (or `30 thousand yen`, which the translation's
+//!   side reads as `30` and `30000`). A SOURCE magnitude is satisfied by its
+//!   value only: `3 yen` dropped the 万. Its bare digits only explain an
+//!   addition ([`Fact::explain`]); so do a source CJK clock time's (`18時`
+//!   is `18:00` or `6 PM`, not `the 18th`).
 //! - A time is its (hour, minute): `18 Uhr`, `18h`, `14 h 30`, `14.30 Uhr`,
 //!   `14時30分`, `午後3時` against `18:00`, `6 PM`, `2:30 p.m.`. An hour of 12
 //!   or less with no a.m./p.m. may be either half of the day.
@@ -27,6 +30,7 @@
 //!
 //! MISSING is a maximum matching between the source's facts and the
 //! translation's over shared keys: each source fact needs its own partner.
+//! Facts with the same key set are matched as one group with a capacity.
 //!
 //! ADDED is a translation fact that shares no key with anything the source
 //! says, the source's DERIVED values included: kanji numerals (`三千` is
@@ -253,6 +257,11 @@ struct Fact {
     raw: String,
     kind: Kind,
     keys: Vec<String>,
+    /// Keys that explain an addition but never satisfy this fact: a source
+    /// magnitude's or CJK clock time's bare digits (`3` of `3万`, `18` of
+    /// `18時`). A translation that writes `3 yen` for `3万円` dropped the
+    /// magnitude, and misses the fact; its `3` is still not an addition.
+    explain: Vec<String>,
     /// Literal digits in it, for the weight of an addition.
     digits: usize,
 }
@@ -466,6 +475,30 @@ fn time_keys(hour: u32, minute: u32, meridiem: Option<bool>, literal_digits: &st
     keys
 }
 
+/// A magnitude's keys and explain-only keys from its bare digits `d` and
+/// its computed `values`. On the SOURCE side a magnitude with a value is
+/// satisfied only by that value (`30,000`, `30 thousand`): its bare digits
+/// alone (`3 yen` for `3万円`) dropped the magnitude, so they only explain
+/// an addition. The translation's side keeps them as keys, so a magnitude
+/// the translation kept as written still finds its source.
+fn magnitude_keys(
+    d: &str,
+    mut values: Vec<String>,
+    translated: bool,
+) -> (Vec<String>, Vec<String>) {
+    let bare = num_key(d);
+    values.dedup();
+    if translated || values.is_empty() {
+        values.retain(|v| *v != bare);
+        values.insert(0, bare);
+        return (values, Vec::new());
+    }
+    if values.contains(&bare) {
+        return (values, Vec::new());
+    }
+    (values, vec![bare])
+}
+
 /// THE EXTRACTION, one text. `translated` turns on the English month names,
 /// which only the translation's side has use for.
 fn extract(text: &str, translated: bool) -> Extracted {
@@ -490,6 +523,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
             raw: url.to_string(),
             kind: Kind::Url,
             keys: vec![format!("u:{url}")],
+            explain: Vec::new(),
             digits: 0,
         });
         taken.push((m.start(), m.end()));
@@ -502,6 +536,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
             raw: m.as_str().to_string(),
             kind: Kind::Email,
             keys: vec![format!("e:{}", m.as_str().to_lowercase())],
+            explain: Vec::new(),
             digits: 0,
         });
         taken.push((m.start(), m.end()));
@@ -526,6 +561,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
                     raw: whole.as_str().trim().to_string(),
                     kind: Kind::Digits,
                     keys: vec![num_key(n), format!("n:{}", base + v)],
+                    explain: Vec::new(),
                     digits: n.len(),
                 });
             }
@@ -541,21 +577,40 @@ fn extract(text: &str, translated: bool) -> Extracted {
     blank(&mut s, &taken);
 
     // TIMES, most specific form first.
-    let push_time =
-        |out: &mut Extracted, raw: &str, hour: u32, minute: u32, meridiem: Option<bool>| -> bool {
-            if hour > 24 || minute > 59 {
-                return false;
+    // A CJK CLOCK TIME on the source side (`18時`, `午後3時`, `3시`) is not
+    // satisfied by its bare digits: `on the 18th` for `18時` dropped the
+    // time. Its digits only explain an addition. (A Western `18 Uhr` or
+    // `3 heures` keeps them: `heures` and `h` are durations too.)
+    let push_time = |out: &mut Extracted,
+                     raw: &str,
+                     hour: u32,
+                     minute: u32,
+                     meridiem: Option<bool>,
+                     clock: bool|
+     -> bool {
+        if hour > 24 || minute > 59 {
+            return false;
+        }
+        let lit = digits_of(raw);
+        let mut keys = time_keys(hour, minute, meridiem, &lit);
+        let mut explain = Vec::new();
+        if clock && !translated {
+            let bare = num_key(&lit);
+            if keys.len() > 1 && bare != num_key(&format!("{hour}{minute:02}")) {
+                keys.retain(|k| *k != bare);
+                explain.push(bare);
             }
-            let lit = digits_of(raw);
-            out.facts.push(Fact {
-                text: raw.trim().to_string(),
-                raw: raw.trim().to_string(),
-                kind: Kind::Time,
-                keys: time_keys(hour, minute, meridiem, &lit),
-                digits: lit.len(),
-            });
-            true
-        };
+        }
+        out.facts.push(Fact {
+            text: raw.trim().to_string(),
+            raw: raw.trim().to_string(),
+            kind: Kind::Time,
+            keys,
+            explain,
+            digits: lit.len(),
+        });
+        true
+    };
     let mut taken = Vec::new();
     for c in p.time_cjk.captures_iter(&s) {
         let whole = c.get(0).expect("match");
@@ -573,7 +628,25 @@ fn extract(text: &str, translated: bool) -> Extracted {
             _ => 0,
         };
         let start = c.get(1).map_or(num.start(), |m| m.start());
-        if push_time(&mut out, &s[start..whole.end()], hour, minute, meridiem) {
+        let unit = s[num.end()..].trim_start().chars().next().unwrap_or(' ');
+        // `3時間`, `3시간` are three hours, not three o'clock: plain numbers.
+        // And `点` is as often a count (`商品3点`, three items) as a time.
+        let after = &s[whole.end()..];
+        if c.get(3).is_none()
+            && c.get(4).is_none()
+            && (after.starts_with('間') || after.starts_with('间') || after.starts_with('간'))
+        {
+            continue;
+        }
+        let clock = matches!(unit, '時' | '时' | '시');
+        if push_time(
+            &mut out,
+            &s[start..whole.end()],
+            hour,
+            minute,
+            meridiem,
+            clock,
+        ) {
             taken.push((start, whole.end()));
         }
     }
@@ -592,7 +665,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
             .get(2)
             .or(c.get(3))
             .map_or(0, |m| m.as_str().parse().unwrap_or(99));
-        if push_time(&mut out, whole.as_str(), hour, minute, None) {
+        if push_time(&mut out, whole.as_str(), hour, minute, None, false) {
             taken.push((whole.start(), whole.end()));
         }
     }
@@ -615,7 +688,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
         }
         let minute: u32 = c.get(2).map_or(0, |m| m.as_str().parse().unwrap_or(99));
         let pm = c[3].eq_ignore_ascii_case("p");
-        if push_time(&mut out, whole.as_str(), hour, minute, Some(pm)) {
+        if push_time(&mut out, whole.as_str(), hour, minute, Some(pm), false) {
             taken.push((whole.start(), whole.end()));
         }
     }
@@ -632,7 +705,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
             }
             let hour: u32 = c[1].parse().unwrap_or(99);
             let minute: u32 = c.get(2).map_or(0, |m| m.as_str().parse().unwrap_or(99));
-            if push_time(&mut out, whole.as_str(), hour, minute, None) {
+            if push_time(&mut out, whole.as_str(), hour, minute, None, false) {
                 taken.push((whole.start(), whole.end()));
             }
         }
@@ -646,7 +719,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
         }
         let hour: u32 = c[1].parse().unwrap_or(99);
         let minute: u32 = c[2].parse().unwrap_or(99);
-        if hour <= 24 && push_time(&mut out, whole.as_str(), hour, minute, None) {
+        if hour <= 24 && push_time(&mut out, whole.as_str(), hour, minute, None, false) {
             taken.push((whole.start(), whole.end()));
         }
     }
@@ -667,6 +740,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
             raw: d.to_string(),
             kind: Kind::Digits,
             keys,
+            explain: Vec::new(),
             digits: d.len(),
         });
     };
@@ -730,6 +804,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
             } else {
                 vec![format!("c:{upper}")]
             },
+            explain: Vec::new(),
             digits: digits.len(),
         });
         taken.push((m.start(), m.end()));
@@ -766,22 +841,36 @@ fn extract(text: &str, translated: bool) -> Extracted {
         let raw = m.as_str().trim().to_string();
         if pairs.len() == 1 && trailing.is_empty() {
             let d = digits_of(&pairs[0].0);
-            let mut keys = vec![num_key(&d)];
-            keys.extend(values[0].iter().map(|v| format!("n:{v}")));
+            let (keys, explain) = magnitude_keys(
+                &d,
+                values[0].iter().map(|v| format!("n:{v}")).collect(),
+                translated,
+            );
             out.facts.push(Fact {
                 text: d.clone(),
                 raw,
                 kind: Kind::Magnitude,
                 keys,
+                explain,
                 digits: d.len(),
             });
         } else if descending && values.iter().all(|v| !v.is_empty()) {
-            let mut total: u128 = values.iter().map(|v| v[0]).sum();
+            // CHECKED: a sender can write a sum past u128. An amount that
+            // overflows has no derived value, and is left to the plain scan.
+            let Some(mut total) = values
+                .iter()
+                .try_fold(0u128, |acc, v| acc.checked_add(v[0]))
+            else {
+                continue;
+            };
             let last_unit = 10u128.pow(pairs.last().map_or(0, |p| p.1));
             if let Ok(t) = trailing.parse::<u128>()
                 && t < last_unit
             {
-                total += t;
+                let Some(sum) = total.checked_add(t) else {
+                    continue;
+                };
+                total = sum;
             }
             for ((n, _), v) in pairs.iter().zip(&values) {
                 out.implied.push(num_key(&digits_of(n)));
@@ -795,6 +884,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
                 raw,
                 kind: Kind::Magnitude,
                 keys: vec![format!("n:{total}")],
+                explain: Vec::new(),
                 digits: total.to_string().len(),
             });
         } else {
@@ -827,20 +917,21 @@ fn extract(text: &str, translated: bool) -> Extracted {
             continue;
         };
         let d = digits_of(&c[1]);
-        let mut keys = vec![num_key(&d)];
+        let mut values = Vec::new();
         for r in mantissa_readings(&c[1]) {
             for pow in pows {
                 if let Some(v) = scaled(r, *pow) {
-                    keys.push(format!("n:{v}"));
+                    values.push(format!("n:{v}"));
                 }
             }
         }
-        keys.dedup();
+        let (keys, explain) = magnitude_keys(&d, values, translated);
         out.facts.push(Fact {
             text: d.clone(),
             raw: whole.as_str().trim().to_string(),
             kind: Kind::Magnitude,
             keys,
+            explain,
             digits: d.len(),
         });
         taken.push((whole.start(), whole.end()));
@@ -879,6 +970,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
             raw: s[start..end].to_string(),
             kind: Kind::Digits,
             keys,
+            explain: Vec::new(),
             digits: joined.len(),
         });
     }
@@ -895,6 +987,7 @@ fn extract(text: &str, translated: bool) -> Extracted {
                     raw: m.as_str().to_string(),
                     kind: Kind::Month,
                     keys: vec![format!("m:{}", i + 1)],
+                    explain: Vec::new(),
                     digits: 0,
                 });
             }
@@ -1037,22 +1130,47 @@ impl Check {
     }
 }
 
+/// Facts grouped by identical key set: each group's key set, and the
+/// indices of its members in order.
+fn key_groups<'a>(facts: &[&'a Fact]) -> Vec<(Vec<&'a str>, Vec<usize>)> {
+    let mut index: HashMap<Vec<&'a str>, usize> = HashMap::new();
+    let mut groups: Vec<(Vec<&'a str>, Vec<usize>)> = Vec::new();
+    for (i, f) in facts.iter().enumerate() {
+        let mut keys: Vec<&str> = f.keys.iter().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let g = *index.entry(keys.clone()).or_insert_with(|| {
+            groups.push((keys, Vec::new()));
+            groups.len() - 1
+        });
+        groups[g].1.push(i);
+    }
+    groups
+}
+
 /// A maximum matching of `left` facts to `right` facts over shared keys:
-/// for each left fact, the right fact it took.
-fn max_matching(left: &[&Fact], right: &[&Fact]) -> Vec<Option<usize>> {
+/// for each left fact, whether it found a partner of its own.
+///
+/// GROUPED FIRST: facts with the same key set are interchangeable, so the
+/// matching runs over groups with their sizes as capacities (a flow), not
+/// over facts. A batch of three thousand `1`s against fifteen hundred is
+/// two groups and one augmenting path, where fact-by-fact augmenting would
+/// be cubic.
+fn max_matching(left: &[&Fact], right: &[&Fact]) -> Vec<bool> {
+    let lg = key_groups(left);
+    let rg = key_groups(right);
     let mut by_key: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (j, f) in right.iter().enumerate() {
-        for k in &f.keys {
-            by_key.entry(k.as_str()).or_default().push(j);
+    for (h, (keys, _)) in rg.iter().enumerate() {
+        for k in keys {
+            by_key.entry(k).or_default().push(h);
         }
     }
-    let adj: Vec<Vec<usize>> = left
+    let adj: Vec<Vec<usize>> = lg
         .iter()
-        .map(|f| {
-            let mut v: Vec<usize> = f
-                .keys
+        .map(|(keys, _)| {
+            let mut v: Vec<usize> = keys
                 .iter()
-                .filter_map(|k| by_key.get(k.as_str()))
+                .filter_map(|k| by_key.get(k))
                 .flatten()
                 .copied()
                 .collect();
@@ -1061,42 +1179,101 @@ fn max_matching(left: &[&Fact], right: &[&Fact]) -> Vec<Option<usize>> {
             v
         })
         .collect();
-    let mut owner: Vec<Option<usize>> = vec![None; right.len()];
-    let mut taken: Vec<Option<usize>> = vec![None; left.len()];
+    // Edges into each right group, for walking a flow backwards.
+    let mut rev: Vec<Vec<(usize, usize)>> = vec![Vec::new(); rg.len()];
+    for (u, vs) in adj.iter().enumerate() {
+        for (i, &v) in vs.iter().enumerate() {
+            rev[v].push((u, i));
+        }
+    }
+    let mut flow: Vec<Vec<usize>> = adj.iter().map(|vs| vec![0; vs.len()]).collect();
+    let mut supply: Vec<usize> = lg.iter().map(|(_, m)| m.len()).collect();
+    let mut cap: Vec<usize> = rg.iter().map(|(_, m)| m.len()).collect();
     // Greedy first: almost every fact has one obvious partner.
     for (u, vs) in adj.iter().enumerate() {
-        if let Some(&v) = vs.iter().find(|&&v| owner[v].is_none()) {
-            owner[v] = Some(u);
-            taken[u] = Some(v);
+        for (i, &v) in vs.iter().enumerate() {
+            let n = supply[u].min(cap[v]);
+            flow[u][i] += n;
+            supply[u] -= n;
+            cap[v] -= n;
         }
     }
-    fn augment(
-        u: usize,
-        adj: &[Vec<usize>],
-        seen: &mut [bool],
-        owner: &mut [Option<usize>],
-        taken: &mut [Option<usize>],
-    ) -> bool {
-        for &v in &adj[u] {
-            if seen[v] {
+    /// One step of an augmenting path: a forward edge gains flow, a
+    /// backward one gives it up.
+    enum Step {
+        Fwd(usize, usize),
+        Back(usize, usize),
+    }
+    struct Walk<'w> {
+        adj: &'w [Vec<usize>],
+        rev: &'w [Vec<(usize, usize)>],
+        flow: &'w [Vec<usize>],
+        cap: &'w [usize],
+        seen_l: Vec<bool>,
+        seen_r: Vec<bool>,
+    }
+    /// A path from left group `u` to a right group with room, as its steps
+    /// in reverse and the right group it ends at.
+    fn walk(w: &mut Walk<'_>, u: usize) -> Option<(Vec<Step>, usize)> {
+        for (i, &v) in w.adj[u].iter().enumerate() {
+            if w.seen_r[v] {
                 continue;
             }
-            seen[v] = true;
-            if owner[v].is_none_or(|w| augment(w, adj, seen, owner, taken)) {
-                owner[v] = Some(u);
-                taken[u] = Some(v);
-                return true;
+            w.seen_r[v] = true;
+            if w.cap[v] > 0 {
+                return Some((vec![Step::Fwd(u, i)], v));
+            }
+            for &(x, j) in &w.rev[v] {
+                if w.flow[x][j] == 0 || w.seen_l[x] {
+                    continue;
+                }
+                w.seen_l[x] = true;
+                if let Some((mut path, end)) = walk(w, x) {
+                    path.push(Step::Back(x, j));
+                    path.push(Step::Fwd(u, i));
+                    return Some((path, end));
+                }
             }
         }
-        false
+        None
     }
-    for u in 0..left.len() {
-        if taken[u].is_none() && !adj[u].is_empty() {
-            let mut seen = vec![false; right.len()];
-            augment(u, &adj, &mut seen, &mut owner, &mut taken);
+    for u in 0..lg.len() {
+        while supply[u] > 0 && !adj[u].is_empty() {
+            let mut w = Walk {
+                adj: &adj,
+                rev: &rev,
+                flow: &flow,
+                cap: &cap,
+                seen_l: vec![false; lg.len()],
+                seen_r: vec![false; rg.len()],
+            };
+            w.seen_l[u] = true;
+            let Some((path, end)) = walk(&mut w, u) else {
+                break;
+            };
+            let mut n = supply[u].min(cap[end]);
+            for step in &path {
+                if let Step::Back(x, j) = step {
+                    n = n.min(flow[*x][*j]);
+                }
+            }
+            for step in &path {
+                match step {
+                    Step::Fwd(x, j) => flow[*x][*j] += n,
+                    Step::Back(x, j) => flow[*x][*j] -= n,
+                }
+            }
+            supply[u] -= n;
+            cap[end] -= n;
         }
     }
-    taken
+    let mut matched = vec![false; left.len()];
+    for ((_, members), spare) in lg.iter().zip(&supply) {
+        for &i in &members[..members.len() - spare] {
+            matched[i] = true;
+        }
+    }
+    matched
 }
 
 /// A translation's phone number is the source's when the digits agree, or
@@ -1119,7 +1296,7 @@ pub fn check(source: &[String], translated: &[String]) -> Check {
     let missing = s_facts
         .iter()
         .zip(&taken)
-        .filter(|(_, t)| t.is_none())
+        .filter(|(_, t)| !**t)
         .map(|(f, _)| f.text.clone())
         .collect();
 
@@ -1128,6 +1305,7 @@ pub fn check(source: &[String], translated: &[String]) -> Check {
     for e in &src {
         for f in &e.facts {
             universe.extend(f.keys.iter().map(String::as_str));
+            universe.extend(f.explain.iter().map(String::as_str));
         }
         universe.extend(e.implied.iter().map(String::as_str));
     }

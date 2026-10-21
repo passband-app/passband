@@ -461,7 +461,13 @@ fn a_released_claim_gives_its_attempt_back() {
     assert_eq!(claimed[0].attempts, 1);
     assert!(
         store
-            .record_translation(&claimed[0], &TranslationWrite::Released, now)
+            .record_translation(
+                &claimed[0],
+                &TranslationWrite::Released {
+                    last_answer_ms: None
+                },
+                now
+            )
             .unwrap()
     );
     assert_eq!(row(&store, id), Some(("fr".into(), "pending".into(), 0)));
@@ -1013,7 +1019,13 @@ fn a_released_failed_row_keeps_its_backoff() {
     assert_eq!(second.prev_status, TranslationStatus::Failed);
     assert!(
         store
-            .record_translation(&second, &TranslationWrite::Released, t1)
+            .record_translation(
+                &second,
+                &TranslationWrite::Released {
+                    last_answer_ms: None
+                },
+                t1
+            )
             .unwrap()
     );
     assert_eq!(row(&store, id), Some(("fr".into(), "failed".into(), 1)));
@@ -1393,11 +1405,19 @@ fn the_decision_that_seals_foreign_auth_mail_drops_its_translation_and_stops() {
 fn a_row_released_twice_in_a_row_is_charged_the_third_time() {
     let (store, acct) = store();
     let id = triaged(acct, "g1", "t1").lang("fr").ingest(&store);
+    // The gateway answered someone else after this row's first release.
+    let answered = Some(Utc::now().timestamp_millis() + 60_000);
     for _ in 0..2 {
         let j = store.claim_translations(acct, Utc::now(), 10).unwrap()[0].clone();
         assert!(
             store
-                .record_translation(&j, &TranslationWrite::Released, Utc::now())
+                .record_translation(
+                    &j,
+                    &TranslationWrite::Released {
+                        last_answer_ms: answered
+                    },
+                    Utc::now()
+                )
                 .unwrap()
         );
         assert_eq!(row(&store, id).unwrap().1, "pending");
@@ -1406,7 +1426,13 @@ fn a_row_released_twice_in_a_row_is_charged_the_third_time() {
     let j = store.claim_translations(acct, Utc::now(), 10).unwrap()[0].clone();
     assert_eq!(j.releases, 2);
     store
-        .record_translation(&j, &TranslationWrite::Released, Utc::now())
+        .record_translation(
+            &j,
+            &TranslationWrite::Released {
+                last_answer_ms: answered,
+            },
+            Utc::now(),
+        )
         .unwrap();
     assert_eq!(row(&store, id).unwrap().1, "failed");
     assert_eq!(row(&store, id).unwrap().2, 1, "the attempt is spent");
@@ -1426,4 +1452,45 @@ fn a_row_released_twice_in_a_row_is_charged_the_third_time() {
         .unwrap();
     let j = store.claim_translations(acct, Utc::now(), 10).unwrap()[0].clone();
     assert_eq!(j.releases, 0);
+}
+
+#[test]
+fn a_six_hour_outage_never_charges_a_released_row() {
+    // A round every two minutes for six hours, every call failing. The last
+    // answer predates the outage (or there is none): no row is charged.
+    let (store, acct) = store();
+    let a = triaged(acct, "g1", "t1").lang("fr").ingest(&store);
+    let b = triaged(acct, "g2", "t2").lang("fr").ingest(&store);
+    let t0 = Utc::now();
+    let before = Some(t0.timestamp_millis() - 1_000);
+    for round in 0..180 {
+        let now = t0 + Duration::minutes(2 * round);
+        let jobs = store.claim_translations(acct, now, 10).unwrap();
+        assert_eq!(jobs.len(), 2, "round {round}");
+        for (i, j) in jobs.iter().enumerate() {
+            let last_answer_ms = if i == 0 { before } else { None };
+            store
+                .record_translation(j, &TranslationWrite::Released { last_answer_ms }, now)
+                .unwrap();
+        }
+    }
+    for id in [a, b] {
+        assert_eq!(row(&store, id).unwrap().1, "pending");
+        assert_eq!(row(&store, id).unwrap().2, 0, "no attempt spent");
+    }
+    // The gateway comes back and answers someone else; a row that still
+    // fails is now charged, and the verdict clears its run of releases.
+    let later = t0 + Duration::hours(7);
+    let j = store.claim_translations(acct, later, 1).unwrap()[0].clone();
+    store
+        .record_translation(
+            &j,
+            &TranslationWrite::Released {
+                last_answer_ms: Some(later.timestamp_millis() - 1),
+            },
+            later,
+        )
+        .unwrap();
+    assert_eq!(row(&store, j.message_id).unwrap().1, "failed");
+    assert_eq!(row(&store, j.message_id).unwrap().2, 1);
 }

@@ -46,15 +46,26 @@ Decisions locked with the user (2026-10-21):
      in, and two facts are the same fact when they share one:
      - a number is its digits, separators and leading zeros dropped
        (`1.234,56` matches `1,234.56`, `01` matches `1`);
-     - a number with a magnitude unit is also its value: `3万` is `3` and
-       `30000`, `12만 5천` is `125000`, `1,5 Mio.` is `1500000`, and so are
+     - a number with a magnitude unit is its VALUE: `3万` is `30000`,
+       `12만 5천` is `125000`, `1,5 Mio.` is `1500000`, and so are
        `千`/`천`, `百`/`백`, `億`/`억`, `Mrd.`, `Million(en)`, `Milliarde(n)`,
        `тыс.`, `млн`, `млрд`, `lakh`, `crore`, `mil`, and on the English side
-       `thousand`, `million`, `billion`, `k`;
+       `thousand`, `million`, `billion`, `k`. A source magnitude is matched
+       only by its value (`30,000`, or a translated magnitude such as `30
+       thousand`, `1.5 million`, `2 billion`, which carries it): its bare
+       digits alone (`3 yen` for `3万円`, `Amount: 2` for `2 milliards`)
+       dropped the magnitude, so the fact is missing and the row ends
+       `incomplete`. The bare digits still explain an addition. A compound
+       amount whose value overflows has no derived value and is checked as
+       plain numbers;
      - a time is its (hour, minute): `18 Uhr`, `18h`, `14 h 30`, `14h30`,
        `14.30 Uhr`, `14時30分`, `午後3時` match `18:00`, `6 PM`, `2:30 p.m.`,
        with an hour of 12 or less and no a.m./p.m. read as either half of the
-       day;
+       day. A source CJK CLOCK time (`18時`, `午後3時`, `3시`) is not
+       satisfied by its bare digits (`on the 18th`); a Western `18 Uhr`,
+       `3 heures` or `18h` still is, because `heures` and `h` are durations
+       too. `3時間` / `3시간` (three hours) are plain numbers, and a `点`
+       time keeps its digits (`点` is as often a count: `商品3点`);
      - a dotted, slashed or ISO date (`21.10.2026`, `21/10/2026`,
        `2026-10-21`) is its day, month and year, never one joined number, and
        a month (as a CJK `10月`/`10월` is) may be written as the English month
@@ -63,7 +74,10 @@ Decisions locked with the user (2026-10-21):
        (5 or more ASCII letters and digits with at least one of each,
        compared case-insensitively) are kept verbatim.
    - MISSING facts are what a maximum matching of source facts to
-     translation facts over shared keys leaves unmatched.
+     translation facts over shared keys leaves unmatched. Facts with the
+     same key set are interchangeable, so the matching runs over groups with
+     their sizes as capacities: a batch of 3,000 `1`s against 1,500 takes
+     milliseconds, not seconds.
    - ADDED facts are translation facts that share no key with anything the
      source says or implies. What it implies counts: kanji numerals (`三千`
      is 3000, `二〇二六` is 2026), Japanese era years (`令和8年` is 2026,
@@ -152,6 +166,8 @@ message_translations(
   lease TEXT,                           -- the claim token, NULL when not claimed
   triage_wait_until INTEGER,            -- how long triage holds the message back
   releases INTEGER NOT NULL DEFAULT 0,  -- consecutive releases without a verdict
+  first_released_at INTEGER,            -- unix ms of the run's first release (or
+                                        -- last charge); NULL after any verdict
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 )
 ```
@@ -196,13 +212,31 @@ message_translations(
   claim found. The translate pass then cools down on its own clock,
   `triage.agent.outage_retry_secs` for a configuration failure and 120
   seconds for an outage, without touching triage's own circuit.
-- **Unless the failure is the message's own.** When another row of the same
-  round got an answer, the gateway works, and the failing row is charged an
-  ordinary `failed` with backoff (no cooldown). And a row released twice in
-  a row (`releases`, reset by any verdict) is charged on its third: `failed`,
-  the attempt spent, backoff from now. So a message whose batch times out
-  every time, or whose content draws a 4xx, runs out of its five attempts
-  instead of being claimed and released forever.
+- **Unless the failure is the message's own.** Only a MESSAGE-SHAPED
+  failure can be: a timeout or transport error on this row's call, or a 400
+  its content draws. When another row of the same round got an answer, the
+  gateway works, and such a row is charged an ordinary `failed` with backoff
+  (no cooldown). And a row released twice in a row (`releases`, reset by any
+  verdict) is charged on its third (`failed`, the attempt spent, backoff
+  from now), but ONLY if the gateway has answered the account since the
+  row's first release (the engine's in-memory `translate_last_answer_ms`
+  against the row's `first_released_at`). The gateway counts as answering
+  when any translation call reaches an outcome that is not a configuration
+  failure or an outage, or when an agent triage run or access assessment
+  succeeds (the translator uses the same `[stage2]` gateway and key).
+  Otherwise the row keeps being released with no attempt spent. So a
+  message whose batch times out every time on a healthy gateway runs out
+  of its five attempts, even when it is the only translation queued,
+  instead of being claimed and released forever (each abandoned generation
+  is billed by the provider and recorded as a zero-token call). A total
+  outage of any length (the 4-day allow-list outage of August 2026, say)
+  leaves every row `pending` with its attempts untouched. A daemon restart forgets the last answer, which only delays a
+  charge.
+- **A capacity failure is never the message's.** A 429, 529, 503 or any
+  other 5xx, and a key, budget or model failure (401, 402, 403, 404), always
+  releases and cools down, however many other rows of the round succeeded,
+  and the release cap never charges it: partial 429s beside successes are
+  the normal shape of a rate limit on a key shared with triage.
 - Configuration failures are counted in
   `squelchd_translate_config_failures_total`, once per row per run of
   releases. They are NOT in `squelchd_llm_config_failures_total`, which
@@ -334,16 +368,22 @@ message_translations(
   written: hidden text (`display:none`, `visibility:hidden`, `font-size:0`,
   `opacity:0`, `mso-hide:all`, `max-height:0` or `height:0` with
   `overflow:hidden`, inline or from a one-class rule at the top level of the
-  document's `<style>`; a class an `@media` block also styles stays
-  visible), and quoted history: `<blockquote>`, Outlook's reply header
-  (`div#divRplyFwdMsg`, or an `<hr>` followed by a `From:`/`De :`/`Von:`
-  header block) and everything after it, plain `>` lines with their "On ...
+  document's `<style>`; a class an `@media` block or any complex top-level
+  selector (`p .x`, `.a > .x`, `.x:hover`) also names stays visible, and so
+  does an element whose inline style shows it again on every property the
+  class hides it with, unless the class rule was `!important` and the
+  inline one is not), and quoted history: `<blockquote>`, Outlook's reply
+  header (`div#divRplyFwdMsg`, or an `<hr>` followed by a `From:`/`De :`/
+  `Von:` header block that also carries a `Sent:`/`Envoyé :`/`Gesendet:`/
+  `Date:` line, so a sender's own `<hr><p>De: la banque</p>` does not hide
+  the rest of its mail) and everything after it, plain `>` lines with their "On ...
   wrote:" line, and everything from a plain "-----Original Message-----"
   (`Message d'origine`, `Ursprüngliche Nachricht` and the other Outlook
   languages) or an underscore rule followed by a `From:` line. When that
   leaves nothing (a forward), the quote IS the mail and is translated.
   Known gaps: text hidden by colour (white on white), a 1px font, a
-  selector more complex than one class, or positioning is still sent.
+  class hidden only through a complex selector, or positioning is still
+  sent.
 - A batch the model calls English (an English signature block, a quoted
   English reply) keeps its own text; a message whose every batch is English
   is `not_needed`.

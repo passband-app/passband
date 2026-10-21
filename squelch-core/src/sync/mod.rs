@@ -854,6 +854,13 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// seconds). Separate from `agent_retry_after`: the translate model can be
     /// missing from an allow-list that carries the triage model.
     translate_retry_after: AtomicI64,
+    /// When the gateway last ANSWERED this account (unix milliseconds, 0 =
+    /// not since start): a translation outcome that is not a configuration
+    /// failure or an outage, or a successful agent triage run on the same
+    /// gateway and key. The release cap charges a row
+    /// only when this is later than the row's first release, so a total
+    /// outage never spends an attempt.
+    translate_last_answer_ms: AtomicI64,
     /// Scrape-facing counters. Its own registry unless the daemon shares one
     /// via [`SyncEngine::with_metrics`], so an engine built anywhere (tests, the
     /// contacts harvest, `run`) still records rather than branching on absence.
@@ -959,6 +966,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             agent_retry_after: AtomicI64::new(0),
             translator,
             translate_retry_after: AtomicI64::new(0),
+            translate_last_answer_ms: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
             profile_url: profile::PEOPLE_ME_URL.to_string(),

@@ -2093,7 +2093,11 @@ CREATE TABLE IF NOT EXISTS archive_walk (
 -- is normally triaged once, on the English (docs/TRANSLATION.md, Pipeline);
 -- set for newly arrived live mail only. `releases` counts consecutive claims
 -- handed back on a configuration or outage failure without spending an
--- attempt; past two, the next such failure is charged to the row.
+-- attempt; past two, the next message-shaped such failure (a timeout, a 400)
+-- is charged to the row, but only if the gateway has answered some other
+-- translation since `first_released_at` (unix MILLISECONDS, the first release
+-- of the run, or the last charge; NULL after any verdict). A total outage
+-- therefore never spends an attempt.
 CREATE TABLE IF NOT EXISTS message_translations (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     account_id INTEGER NOT NULL,
@@ -2110,6 +2114,7 @@ CREATE TABLE IF NOT EXISTS message_translations (
     lease TEXT,
     triage_wait_until INTEGER,
     releases INTEGER NOT NULL DEFAULT 0,
+    first_released_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );

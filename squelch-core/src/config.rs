@@ -288,6 +288,17 @@ pub struct SyncConfig {
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
     pub poll_secs: u64,
+    /// THE POLL INTERVAL THE LANE BACKS OFF TO while the mailbox is idle, in
+    /// seconds: after a tick that found nothing changed the wait doubles from
+    /// `poll_secs` up to this, and a tick that found a change, a manual
+    /// refresh, or a connected event stream (a client with the app open)
+    /// resets it to `poll_secs`. 0, the default, is no backoff: every tick
+    /// waits `poll_secs`, as it always has. Off by default because the poll
+    /// is how new mail is noticed, so the backoff is a trade of idle Gmail
+    /// requests for arrival latency up to this many seconds when no client
+    /// is connected, and that trade is the operator's to make.
+    /// Env: SQUELCH_IDLE_POLL_SECS.
+    pub idle_poll_secs: u64,
     /// HOW MANY `messages.get` CALLS ARE IN FLIGHT AT ONCE while a window of
     /// mail is fetched (the first backfill, a catch-up, a history walk).
     ///
@@ -334,6 +345,7 @@ impl Default for SyncConfig {
             archive_min_free_mb: 2048,
             archive_max_db_mb: 4096,
             poll_secs: 5,
+            idle_poll_secs: 0,
             fetch_concurrency: 2,
             spam_max: 200,
         }
@@ -2002,6 +2014,7 @@ impl Config {
             self.sync.archive_days = ARCHIVE_DAYS_MAX;
         }
         env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
+        env_override("SQUELCH_IDLE_POLL_SECS", &mut self.sync.idle_poll_secs);
         env_override(
             "SQUELCH_FETCH_CONCURRENCY",
             &mut self.sync.fetch_concurrency,
@@ -2572,6 +2585,7 @@ mod tests {
         assert_eq!(c.sync.archive_min_free_mb, 2048);
         assert_eq!(c.sync.archive_max_db_mb, 4096);
         assert_eq!(c.sync.poll_secs, 5);
+        assert_eq!(c.sync.idle_poll_secs, 0, "no idle backoff unless asked for");
         assert_eq!(c.sync.fetch_concurrency, 2);
         assert!(c.client_id.is_none());
     }

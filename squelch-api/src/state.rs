@@ -106,6 +106,12 @@ pub struct ApiState {
     /// `POST /client/refresh`. `None` when no sync loop is wired in, which the
     /// endpoint reports as `triggered: false` rather than faking a poke.
     pub(crate) refresh: Option<Arc<tokio::sync::Notify>>,
+    /// HOW MANY `GET /client/events` STREAMS ARE OPEN, counted by the handler
+    /// for the life of each response body and shared with the sync loop
+    /// through [`Self::with_event_listeners`], whose poll lane stays at its
+    /// fast interval while the count is nonzero. Private to this state when
+    /// nothing is wired in; the count is still kept, nobody reads it.
+    pub(crate) event_listeners: Arc<std::sync::atomic::AtomicUsize>,
     /// On-demand spam-fetch signal shared with the Gmail sync loop, fired by
     /// `POST /client/spam/refresh`. `None` when no sync loop is wired in, which
     /// the endpoint reports as `triggered: false` rather than pretending.
@@ -548,6 +554,7 @@ impl ApiState {
             notify_price_out_per_mtok: squelch_core::config::NotifyConfig::default()
                 .price_out_per_mtok,
             refresh: None,
+            event_listeners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             spam_refresh: None,
             archive_surfacing: Default::default(),
             event_notifier: None,
@@ -608,6 +615,16 @@ impl ApiState {
     /// [`SyncEngine::with_refresh`]: squelch_core::sync::SyncEngine::with_refresh
     pub fn with_refresh(mut self, refresh: Arc<tokio::sync::Notify>) -> Self {
         self.refresh = Some(refresh);
+        self
+    }
+
+    /// Share the count of open event streams with the sync loop. Wire the
+    /// SAME handle you pass to `SyncEngine::with_event_listeners`; without it
+    /// the poll lane never learns a client has the app open, and its idle
+    /// ladder (`sync.idle_poll_secs`, off by default) runs on as if nobody
+    /// were watching.
+    pub fn with_event_listeners(mut self, listeners: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.event_listeners = listeners;
         self
     }
 

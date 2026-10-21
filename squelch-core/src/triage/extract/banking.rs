@@ -16,13 +16,13 @@ use crate::config::{Stage1Config, Stage2Provider};
 use crate::store::{BankingApplied, ExtractQueued};
 use crate::triage::extract::{ExtractContext, build_extract_user_message};
 use crate::triage::llm::{self, ClassifyError, LlmOutcome, LlmRequest, classify_entrypoint};
-use crate::triage::stage1_llm::RECORD_CATEGORIES;
 use crate::triage::text::{self, truncate_chars, truncate_trimmed};
 use serde::{Deserialize, Serialize};
 
-/// The categories this extractor handles: exactly the RECORD categories, which
-/// is why every row it writes auto-resolves.
-pub const CATEGORIES: &[&str] = RECORD_CATEGORIES;
+/// The categories this extractor handles: exactly the RECORD categories (rows
+/// that live in the Banking rail, never the attention bands), which is why
+/// every row it writes auto-resolves.
+pub const CATEGORIES: &[&str] = &["banking_statement", "transaction_alert", "autopay_bill"];
 
 /// The usage-ledger category this extractor bills its token usage to.
 pub const LEDGER_CATEGORY: &str = "extract_banking";

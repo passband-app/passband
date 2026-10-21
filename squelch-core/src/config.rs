@@ -487,9 +487,8 @@ impl Default for NotifyConfig {
     }
 }
 
-/// Scheduled re-evaluation tunables. The serde-facing shape of
-/// [`crate::triage::revisit::RevisitConfig`], in plain numbers rather than
-/// `chrono::Duration`s, so it round-trips through TOML and env vars.
+/// Scheduled re-evaluation tunables for agent triage's revisit jobs, in plain
+/// numbers so they round-trip through TOML and env vars.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RevisitPassConfig {
@@ -514,18 +513,9 @@ pub struct RevisitPassConfig {
     /// Furthest out a revisit may be scheduled (days); beyond this it is dropped
     /// as a hallucinated date. Env: `SQUELCH_REVISIT_MAX_HORIZON_DAYS`.
     pub max_horizon_days: i64,
-    /// Legacy deterministic scheduler only; unused by agent triage.
-    /// How long after a deadline to re-evaluate automatically (hours). Env:
-    /// `SQUELCH_REVISIT_DEADLINE_GRACE_HOURS`.
-    pub deadline_grace_hours: i64,
     /// Revisits closer together than this are one revisit (hours). Env:
     /// `SQUELCH_REVISIT_DEDUPE_HOURS`.
     pub dedupe_window_hours: i64,
-    /// Legacy deterministic scheduler only; unused by agent triage.
-    /// Days a row may sit in the standing band, untouched and with nothing
-    /// scheduled, before the staleness sweep re-evaluates it anyway. 0 disables
-    /// the sweep. Env: `SQUELCH_REVISIT_FYE_STALE_DAYS`.
-    pub fye_stale_days: i64,
 }
 
 impl Default for RevisitPassConfig {
@@ -541,50 +531,31 @@ impl Default for RevisitPassConfig {
             max_per_message_lifetime: 6,
             min_lead_hours: 1,
             max_horizon_days: 400,
-            deadline_grace_hours: 24,
             dedupe_window_hours: 12,
-            // 14 days: long enough that a real obligation still in play is not
-            // churned, short enough that a row nobody has touched in a fortnight
-            // gets questioned.
-            fye_stale_days: 14,
         }
     }
 }
 
 impl RevisitPassConfig {
-    /// The planner's view of these settings.
-    ///
-    /// Every duration goes through the fallible constructor. `Duration::days`
-    /// PANICS out of range, and these numbers come from an operator's TOML or
-    /// env: `SQUELCH_REVISIT_MAX_HORIZON_DAYS` with one too many digits would
-    /// otherwise take down the sync task the first time a verdict scheduled
-    /// anything. Every other bound in this module is defensive against a hostile
-    /// model; a typo deserves the same treatment, and the default is a better
-    /// answer than a crash.
-    pub fn planner(&self) -> crate::triage::revisit::RevisitConfig {
-        let d = crate::triage::revisit::RevisitConfig::default();
-        crate::triage::revisit::RevisitConfig {
-            max_per_message: self.max_per_message,
-            min_lead: hours_or(self.min_lead_hours, d.min_lead),
-            max_horizon: days_or(self.max_horizon_days, d.max_horizon),
-            deadline_grace: hours_or(self.deadline_grace_hours, d.deadline_grace),
-            dedupe_window: hours_or(self.dedupe_window_hours, d.dedupe_window),
-            max_per_message_lifetime: self.max_per_message_lifetime,
-            max_why_chars: d.max_why_chars,
-        }
+    // Every duration goes through a clamp. `Duration::days` PANICS out of
+    // range, and these numbers come from an operator's TOML or env:
+    // `SQUELCH_REVISIT_MAX_HORIZON_DAYS` with one too many digits would
+    // otherwise take down the triage worker the first time a verdict
+    // scheduled anything. A typo deserves the default, not a crash.
+
+    /// Nearest a revisit may be scheduled.
+    pub fn min_lead(&self) -> chrono::Duration {
+        hours_or(self.min_lead_hours, chrono::Duration::hours(1))
     }
 
-    /// The staleness window as a duration, or `None` when the sweep is off.
-    /// Clamped like the planner's knobs and for the same reason: the sync task
-    /// subtracts this from `now`, and that subtraction panics out of range.
-    pub fn fye_stale_window(&self) -> Option<chrono::Duration> {
-        if self.fye_stale_days <= 0 {
-            return None;
-        }
-        Some(days_or(
-            self.fye_stale_days,
-            chrono::Duration::days(Self::default().fye_stale_days),
-        ))
+    /// Furthest out a revisit may be scheduled.
+    pub fn max_horizon(&self) -> chrono::Duration {
+        days_or(self.max_horizon_days, chrono::Duration::days(400))
+    }
+
+    /// Revisits closer together than this are one revisit.
+    pub fn dedupe_window(&self) -> chrono::Duration {
+        hours_or(self.dedupe_window_hours, chrono::Duration::hours(12))
     }
 }
 
@@ -1243,11 +1214,6 @@ pub struct Stage1Config {
     /// a harder look. Set to `None` when pointing `model` at one that rejects
     /// the field (Haiku 4.5, Sonnet 4.5). Env: `SQUELCH_STAGE1_EFFORT`.
     pub effort: Option<String>,
-    /// How close to the surface threshold counts as a boundary row for
-    /// [`crate::triage::router::EscalationReason::Boundary`]. Widening this
-    /// escalates more mail near the line, which is where a scoring error flips
-    /// visibility. Env: `SQUELCH_STAGE1_BOUNDARY_MARGIN`.
-    pub escalation_boundary_margin: u8,
     /// Cap on the flattened email body (chars) fed into the UNTRUSTED block.
     /// Env: `SQUELCH_STAGE1_MAX_BODY_CHARS`.
     pub max_body_chars: usize,
@@ -1291,7 +1257,6 @@ impl Default for Stage1Config {
             // Stage-1 LLM defaults. Same model as Stage-2; see there.
             model: "claude-opus-5-5".to_string(),
             effort: Some("low".to_string()),
-            escalation_boundary_margin: 10,
             // 6000, not 1500: the old cap was sized for a 200K-context small
             // model and routinely cut the body before the part that decides the
             // verdict (the amount, the date, the ask). The model reading this
@@ -1951,18 +1916,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The escalation router's tunables, assembled HERE and nowhere else so the
-    /// surface threshold cannot fork: the router's idea of "the line" is the
-    /// same [`NotifyConfig::min_importance`] that decides whether a row earns a
-    /// notification, because a row on the boundary of being seen at all is
-    /// exactly the row worth a second look.
-    pub fn router(&self) -> crate::triage::router::RouterConfig {
-        crate::triage::router::RouterConfig {
-            surface_threshold: self.notify.min_importance,
-            boundary_margin: self.stage1.escalation_boundary_margin,
-        }
-    }
-
     /// Default config path: `~/.config/squelch/config.toml`.
     pub fn default_path() -> Option<PathBuf> {
         std::env::var_os("HOME")
@@ -2341,24 +2294,12 @@ impl Config {
             &mut self.revisit.max_horizon_days,
         );
         env_override(
-            "SQUELCH_REVISIT_DEADLINE_GRACE_HOURS",
-            &mut self.revisit.deadline_grace_hours,
-        );
-        env_override(
             "SQUELCH_REVISIT_DEDUPE_HOURS",
             &mut self.revisit.dedupe_window_hours,
-        );
-        env_override(
-            "SQUELCH_REVISIT_FYE_STALE_DAYS",
-            &mut self.revisit.fye_stale_days,
         );
 
         env_override("SQUELCH_STAGE1_MODEL", &mut self.stage1.model);
         env_override_effort("SQUELCH_STAGE1_EFFORT", &mut self.stage1.effort);
-        env_override(
-            "SQUELCH_STAGE1_BOUNDARY_MARGIN",
-            &mut self.stage1.escalation_boundary_margin,
-        );
         env_override(
             "SQUELCH_STAGE1_MAX_BODY_CHARS",
             &mut self.stage1.max_body_chars,
@@ -3430,24 +3371,15 @@ archive_access_daily_cap = 9
         let cfg = RevisitPassConfig {
             min_lead_hours: i64::MIN,
             max_horizon_days: i64::MAX,
-            deadline_grace_hours: i64::MAX,
             dedupe_window_hours: -5,
             ..RevisitPassConfig::default()
         };
-        let planner = cfg.planner();
-        assert_eq!(planner.min_lead, chrono::Duration::zero());
-        assert_eq!(planner.dedupe_window, chrono::Duration::zero());
-        assert_eq!(
-            planner.max_horizon,
-            chrono::Duration::days(REVISIT_MAX_DAYS)
-        );
-        assert_eq!(
-            planner.deadline_grace,
-            chrono::Duration::days(REVISIT_MAX_DAYS)
-        );
-        // The addition the planner actually performs, which is what panics.
+        assert_eq!(cfg.min_lead(), chrono::Duration::zero());
+        assert_eq!(cfg.dedupe_window(), chrono::Duration::zero());
+        assert_eq!(cfg.max_horizon(), chrono::Duration::days(REVISIT_MAX_DAYS));
+        // The addition the scheduler actually performs, which is what panics.
         let now = chrono::Utc::now();
-        let _ = now + planner.max_horizon;
+        let _ = now + cfg.max_horizon();
     }
 
     /// Both stages run the SAME model on purpose: escalation buys context,

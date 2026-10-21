@@ -4750,19 +4750,14 @@ mod tests {
     /// one the `DO UPDATE SET` quietly rewrote, would pass every in-memory check
     /// and still leave the emission sites reading the wrong clock.
     ///
-    /// `triage_seed_verdict` because it is the one read that carries the column
-    /// for ANY normal row, sent copies included — the queue SELECTs filter
-    /// `m.is_sent = 0`, so they cannot see half of what these tests assert on.
+    /// `notify_eligible_at` because it reads the column for ANY row, sent
+    /// copies and sealed mail included.
     fn stamp_of(
         store: &SqliteStore,
         account_id: AccountId,
         message_id: i64,
     ) -> Option<DateTime<Utc>> {
-        store
-            .triage_seed_verdict(account_id, message_id)
-            .unwrap()
-            .expect("a triage row for this message")
-            .notify_eligible_at
+        store.notify_eligible_at(account_id, message_id).unwrap()
     }
 
     /// An ops-alert EML dated `at`: automated sender + alert language, so it

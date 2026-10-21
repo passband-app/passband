@@ -1147,8 +1147,8 @@ fn schedule_revisit(
     let Some(revisit) = decision.revisit.as_ref().filter(|_| policy.enabled) else {
         return Ok(());
     };
-    let earliest = now + Duration::hours(policy.min_lead_hours.max(0));
-    let latest = now + Duration::days(policy.max_horizon_days.max(0));
+    let earliest = now + policy.min_lead();
+    let latest = now + policy.max_horizon();
     let at = revisit.at.max(earliest);
     if at > latest || policy.max_per_message == 0 || policy.max_per_message_lifetime == 0 {
         return Ok(());
@@ -1163,7 +1163,7 @@ fn schedule_revisit(
     {
         return Ok(());
     }
-    let radius = Duration::hours(policy.dedupe_window_hours.max(0));
+    let radius = policy.dedupe_window();
     let duplicate: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
          AND trigger LIKE 'revisit:%' AND available_at>=?3 AND available_at<=?4)",

@@ -1913,7 +1913,7 @@
     "type": "prometheus",
     "uid": "prometheus"
    },
-   "description": "Who is still using the thing. Last action, App seen and the two Actions columns are read off the daemon's own request counters (2xx only, so a scanner or a revoked token cannot make a dead tenant look alive). Last action is the newest successful WRITE on the client door: opening a message, dismissing a card, drafting, sending, a rule. Push registration and pairing are left out because the app does those by itself. App seen is ANY client request, which includes the background polling an open app does on its own and the iOS notification extension fetching an event when a push lands, so it means 'something holding a token is running', not 'a person is looking at it'. A tenant whose app is seen but whose last action is a week old has it open in a corner and is not reading mail in it. Both ages are the end of the last ten-minute step whose trailing twelve minutes saw a matching counter rise or a matching series appear that had not existed in the day before (a route's first request after a restart is a series born at 1, which increase() cannot see; a series that merely comes back after a scrape outage is not new). So an age can read up to twelve minutes younger than the truth, 'now' means the last twelve minutes, and the horizon is Prometheus's 30 days of retention: older than that reads as 'none in 30d', and so does a tenant that has never done the thing at all. The Actions counts are each series' increase over the window, plus the whole count of any series born inside it. Mac and iOS are the app version of each platform that connected MOST RECENTLY (not the highest: two Macs on different builds show whichever spoke last) and how long ago, from squelchd_client_last_seen_timestamp_seconds, which the daemon keeps in the tenant's own store, so it has no 30 day horizon. The app proper only: the notification extension does not count. It is exact to the minute except after an update: a CHANGED version is recorded only once the old one has been quiet for an hour, and until then the old version shows and its age keeps counting. The four columns do not exist until some daemon exports the metric. After that a '-' means no app of that platform has named itself to that tenant's daemon: the daemon or the app predates the header, or the tenant has no such device.",
+   "description": "Who is still using the thing. Last action, App seen and the two Actions columns are read off the daemon's own request counters (2xx only, so a scanner or a revoked token cannot make a dead tenant look alive). Last action is the newest successful WRITE on the client door: opening a message, dismissing a card, drafting, sending, a rule. Push registration and pairing are left out because the app does those by itself. App seen is ANY client request, which includes the background polling an open app does on its own and the iOS notification extension fetching an event when a push lands, so it means 'something holding a token is running', not 'a person is looking at it'. A tenant whose app is seen but whose last action is a week old has it open in a corner and is not reading mail in it. Both ages are the end of the last ten-minute step whose trailing twelve minutes saw a matching counter rise or a matching series appear that had not existed in the day before (a route's first request after a restart is a series born at 1, which increase() cannot see; a series that merely comes back after a scrape outage is not new). So an age can read up to twelve minutes younger than the truth, 'now' means the last twelve minutes, and the horizon is Prometheus's 30 days of retention: older than that reads as 'none in 30d', and so does a tenant that has never done the thing at all. The Actions counts are each series' increase over the window, plus the whole count of any series born inside it. Mac and iOS are the app version of each platform that connected MOST RECENTLY (not the highest: two Macs on different builds show whichever spoke last) and how long ago, from squelchd_client_last_seen_timestamp_seconds, which the daemon keeps in the tenant's own store, so it has no 30 day horizon. The app proper only: the notification extension does not count. It is exact to the minute except after an update: a CHANGED version is recorded only once the old one has been quiet for an hour, and until then the old version shows and its age keeps counting. The four columns do not exist until some daemon exports the metric. After that a '-' means no app of that platform has named itself to that tenant's daemon: the daemon or the app predates the header, or the tenant has no such device. Mac acted and iOS acted are the Last action question asked per app: the last successful write on the client door from an app that named itself as that platform, from squelchd_client_last_action_timestamp_seconds. Same definition of a write as Last action (push registration and pairing left out), but stamped by the daemon in the tenant's own store, so it is exact to the second, has no 30 day horizon, and survives a restart. A phone that is opened, read and closed makes no write, so a tenant can show a fresh iOS seen and an old or empty iOS acted; opening a message does count. These two columns do not exist until some daemon exports the metric, and an action taken before that daemon was rolled out is not in them.",
    "gridPos": {
     "h": 9,
     "w": 24,
@@ -1997,6 +1997,28 @@
      "range": false,
      "instant": true,
      "format": "table"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "time() - max by (tenant) (squelchd_client_last_action_timestamp_seconds{platform=\"macos\"})",
+     "refId": "H",
+     "range": false,
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "time() - max by (tenant) (squelchd_client_last_action_timestamp_seconds{platform=\"ios\"})",
+     "refId": "I",
+     "range": false,
+     "instant": true,
+     "format": "table"
     }
    ],
    "transformations": [
@@ -2018,7 +2040,9 @@
        "Time 4": true,
        "Time 5": true,
        "Time 6": true,
-       "Time 7": true
+       "Time 7": true,
+       "Time 8": true,
+       "Time 9": true
       },
       "renameByName": {
        "tenant": "Tenant",
@@ -2026,8 +2050,10 @@
        "Value #B": "App seen (ago)",
        "mac": "Mac",
        "Value #F": "Mac seen (ago)",
+       "Value #H": "Mac acted (ago)",
        "ios": "iOS",
        "Value #G": "iOS seen (ago)",
+       "Value #I": "iOS acted (ago)",
        "Value #C": "Actions (24h)",
        "Value #D": "Actions (7d)",
        "Value #E": "Devices paired"
@@ -2038,11 +2064,13 @@
        "Value #B": 2,
        "mac": 3,
        "Value #F": 4,
-       "ios": 5,
-       "Value #G": 6,
-       "Value #C": 7,
-       "Value #D": 8,
-       "Value #E": 9
+       "Value #H": 5,
+       "ios": 6,
+       "Value #G": 7,
+       "Value #I": 8,
+       "Value #C": 9,
+       "Value #D": 10,
+       "Value #E": 11
       }
      }
     }
@@ -2348,7 +2376,107 @@
      {
       "matcher": {
        "id": "byName",
+       "options": "Mac acted (ago)"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "s"
+       },
+       {
+        "id": "decimals",
+        "value": 1
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "green",
+           "value": null
+          },
+          {
+           "color": "yellow",
+           "value": 259200
+          },
+          {
+           "color": "orange",
+           "value": 604800
+          },
+          {
+           "color": "red",
+           "value": 1209600
+          }
+         ]
+        }
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       },
+       {
+        "id": "noValue",
+        "value": "-"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
        "options": "iOS seen (ago)"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "s"
+       },
+       {
+        "id": "decimals",
+        "value": 1
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "green",
+           "value": null
+          },
+          {
+           "color": "yellow",
+           "value": 259200
+          },
+          {
+           "color": "orange",
+           "value": 604800
+          },
+          {
+           "color": "red",
+           "value": 1209600
+          }
+         ]
+        }
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       },
+       {
+        "id": "noValue",
+        "value": "-"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "iOS acted (ago)"
       },
       "properties": [
        {

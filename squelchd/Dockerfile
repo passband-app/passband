@@ -11,10 +11,19 @@
 
 # Trixie, not bookworm: ort's prebuilt static onnxruntime is compiled against
 # glibc >= 2.38 (__isoc23_strtol and friends); bookworm's 2.36 can't link it.
-FROM --platform=$BUILDPLATFORM rust:1-slim-trixie AS builder
+FROM --platform=$BUILDPLATFORM rust:1-slim-trixie AS chef
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 WORKDIR /build
+
+# cargo-chef, so the dependency compile (the ONNX tree, most of this build) is
+# its own layer keyed on the dependency graph alone. A plain `COPY Cargo.toml
+# Cargo.lock` + `cargo build` cannot cache it across releases: every daemon tag
+# bumps the workspace version, which rewrites both files. chef's recipe masks
+# the workspace crates' own versions, so a release that changes no dependency
+# reuses the cooked layer from the registry cache and compiles only our crates.
+# Installed before the toolchain COPY so a toolchain bump does not reinstall it.
+RUN cargo install cargo-chef --locked --version 0.1.78
 
 # The compiler is rust-toolchain.toml's, not the image's; see that file's
 # header for why, and for what a bump of it reaches. Before the platform RUN
@@ -42,8 +51,20 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends $pkgs; \
     rm -rf /var/lib/apt/lists/*; \
-    rustup target add "$triple"
+    rustup target add "$triple"; \
+    # The cross linker env, written once and sourced by both cargo steps below:
+    # chef's cooked dependencies are reused only if the final build sees the
+    # same target, profile and compilers they were built with.
+    : > /cross-env; \
+    if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ]; then \
+      lower="$(echo "$triple" | tr '-' '_')"; \
+      upper="$(echo "$lower" | tr '[:lower:]' '[:upper:]')"; \
+      { echo "export CARGO_TARGET_${upper}_LINKER=${prefix}-gcc"; \
+        echo "export CC_${lower}=${prefix}-gcc"; \
+        echo "export CXX_${lower}=${prefix}-g++"; } > /cross-env; \
+    fi
 
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY squelch-core ./squelch-core
 COPY squelch-httpauth ./squelch-httpauth
@@ -58,19 +79,20 @@ COPY squelch-broker ./squelch-broker
 COPY squelch-control ./squelch-control
 COPY squelch-warden ./squelch-warden
 COPY squelchd ./squelchd
+RUN cargo chef prepare --recipe-path recipe.json
 
-RUN set -eux; \
-    triple="$(cat /rust-triple)"; \
-    if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ]; then \
-      prefix="$(echo "$triple" | sed 's/-unknown//')"; \
-      lower="$(echo "$triple" | tr '-' '_')"; \
-      upper="$(echo "$lower" | tr '[:lower:]' '[:upper:]')"; \
-      export "CARGO_TARGET_${upper}_LINKER=${prefix}-gcc" \
-             "CC_${lower}=${prefix}-gcc" \
-             "CXX_${lower}=${prefix}-g++"; \
-    fi; \
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN set -eux; . /cross-env; \
+    cargo chef cook --release --locked -p squelchd --target "$(cat /rust-triple)" \
+      --recipe-path recipe.json
+COPY --from=planner /build ./
+# The target dir is deleted in the same layer, so the layer the registry cache
+# re-uploads every tag is the binary, not gigabytes of build tree.
+RUN set -eux; . /cross-env; triple="$(cat /rust-triple)"; \
     cargo build --release --locked -p squelchd --target "$triple"; \
-    cp "target/$triple/release/squelchd" /squelchd
+    cp "target/$triple/release/squelchd" /squelchd; \
+    rm -rf target
 
 FROM debian:trixie-slim
 # rustls everywhere — the only runtime need is CA roots for Google's APIs (and

@@ -504,6 +504,7 @@ pub async fn headline_at(
         // One attempt: the client already has a line to show without us.
         max_tries: 1,
         max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(
         &client.http,

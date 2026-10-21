@@ -160,6 +160,7 @@ async fn run_bounded(
             effort: connection.effort,
             max_tries: 1,
             max_tokens: None,
+            disable_thinking: false,
         };
         // Retain provider usage before decoding either JSON syntax or step
         // structure. A malformed paid answer still belongs in the spend ledger.

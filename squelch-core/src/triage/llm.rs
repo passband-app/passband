@@ -77,6 +77,13 @@ pub struct LlmRequest<'a> {
     /// every classifier uses; a caller whose answer grows with its input (the
     /// translator, whose output is as long as the mail) sizes its own.
     pub max_tokens: Option<u32>,
+    /// Send `thinking: {"type": "disabled"}` on the Anthropic wire. `false`
+    /// (every classifier) omits the field, which on the current models means
+    /// ADAPTIVE thinking at the default effort. Only a caller whose task is
+    /// not reasoning (the translator) and whose model accepts the explicit
+    /// off switch sets it: Sonnet 5 does, while Sonnet 5.5, Opus 5.5 and the
+    /// Fable family answer it with a 400. Ignored on the OpenAI wire.
+    pub disable_thinking: bool,
 }
 
 /// The outcome of a single LLM call, generic over the verdict `T`. Every stage
@@ -238,6 +245,16 @@ struct MessagesRequest<'a> {
     system: Vec<SystemBlock<'a>>,
     messages: Vec<RequestMessage<'a>>,
     output_config: OutputConfig<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+/// The request's `thinking` block. Only the explicit off switch is ever sent;
+/// leaving the field out keeps the model's default.
+#[derive(Debug, Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -461,6 +478,9 @@ async fn classify_anthropic(
             },
             effort: req.effort,
         },
+        thinking: req
+            .disable_thinking
+            .then_some(ThinkingConfig { kind: "disabled" }),
     };
 
     let mut body = serde_json::to_value(body).map_err(|_| ClassifyError {
@@ -842,6 +862,8 @@ mod tests {
                 let schema = expected_schema.clone();
                 async move {
                     assert!(body["output_config"].get("format").is_none());
+                    // Classifiers never send `thinking`: the model default stands.
+                    assert!(body.get("thinking").is_none());
                     assert_eq!(body["output_config"]["effort"], "low");
                     assert_eq!(body["tools"][0]["input_schema"], schema);
                     assert!(body["tools"][0].get("strict").is_none());
@@ -863,6 +885,7 @@ mod tests {
                 effort: Some("low"),
                 max_tries: 1,
                 max_tokens: None,
+                disable_thinking: false,
             };
             let result = classify_agent_step(
                 &reqwest::Client::new(),
@@ -987,6 +1010,7 @@ mod tests {
                 effort: None,
                 max_tries: 1,
                 max_tokens: None,
+                disable_thinking: false,
             };
             let result = classify_into(
                 &reqwest::Client::new(),

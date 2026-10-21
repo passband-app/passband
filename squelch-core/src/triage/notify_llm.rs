@@ -113,6 +113,7 @@ pub async fn classify_at(
         effort: cfg.effort.as_deref(),
         max_tries: 1,
         max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(http, url, api_key, provider, &req, |out: NotifyOutput| {
         if !(0..=100).contains(&out.notify_importance) {

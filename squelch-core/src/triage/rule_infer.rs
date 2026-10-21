@@ -262,6 +262,7 @@ pub async fn classify_at(
         // has no second lane to fall back on, so a 429 is worth waiting out.
         max_tries: llm::MAX_TRIES,
         max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(
         http,

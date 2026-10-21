@@ -285,6 +285,7 @@ pub async fn classify_at(
         // fallback (hand the link to the user) is never wrong.
         max_tries: 2,
         max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(
         &client.http,

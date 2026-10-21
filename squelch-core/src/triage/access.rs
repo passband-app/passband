@@ -46,6 +46,7 @@ pub async fn run_access(
         effort: connection.effort,
         max_tries: 1,
         max_tokens: None,
+        disable_thinking: false,
     };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(config.fast_timeout_secs.max(1)),

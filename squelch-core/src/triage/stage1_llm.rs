@@ -447,6 +447,7 @@ pub async fn classify_revisit_at(
         // A BATCH pass: it is grinding a queue, so a 429 is worth sleeping on.
         max_tries: llm::MAX_TRIES,
         max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(http, url, api_key, provider, &req, |out: Stage1Output| {
         check_importance(out.importance).map(|()| Box::new(out))
@@ -537,6 +538,7 @@ pub async fn classify_at(
         // A BATCH pass: it is grinding a queue, so a 429 is worth sleeping on.
         max_tries: llm::MAX_TRIES,
         max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(http, url, api_key, provider, &req, |out: Stage1Output| {
         check_importance(out.importance).map(|()| Box::new(out))

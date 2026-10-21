@@ -40,8 +40,10 @@ pub struct AgentMessage {
     /// A MACHINE TRANSLATION into English of `subject` and `body`, present
     /// only for mail written in another language once the translate pass has
     /// produced one (docs/TRANSLATION.md). Context for reading the message;
-    /// the original fields stay the source of truth. Never hashed into the
-    /// content snapshot, and absent from the JSON when there is none.
+    /// the original fields stay the source of truth. Hashed into the content
+    /// snapshot when present (the agent door serves it beside the body, so
+    /// the access assessment must have read it), and absent from the JSON
+    /// when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translated_subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

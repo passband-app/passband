@@ -488,6 +488,14 @@ pub struct TranslateConfig {
     /// USD per million output tokens for `model`. Default 10.0, Claude
     /// Sonnet 5's list price.
     pub price_out_per_mtok: f64,
+    /// Per-account-per-day cap on messages sent to the translator, counted in
+    /// the `wake_budget` ledger on its own key, like
+    /// [`NotifyConfig::daily_cap`] and [`RevisitPassConfig::daily_cap`]: a
+    /// runaway guard, not a working budget, and no `app_settings` override.
+    /// Over it, queued rows stay `pending` until the next UTC day, and triage
+    /// stops waiting on them after its bounded wait. A claim released on a
+    /// provider or configuration failure gives its charge back. Default 300.
+    pub daily_cap: u32,
 }
 
 impl Default for TranslateConfig {
@@ -497,7 +505,19 @@ impl Default for TranslateConfig {
             model: "claude-sonnet-5".to_string(),
             price_in_per_mtok: 2.0,
             price_out_per_mtok: 10.0,
+            daily_cap: 300,
         }
+    }
+}
+
+impl Config {
+    /// Whether a translator will ever work a queued row: translation is on
+    /// and an LLM is configured. The same two facts
+    /// [`crate::translate::TranslateClient::from_config`] needs. The human
+    /// door asks it so it never tells the reader "Translating..." about a
+    /// row nothing will translate.
+    pub fn translation_active(&self) -> bool {
+        self.translate.enabled && self.stage2.resolve_llm().is_some()
     }
 }
 

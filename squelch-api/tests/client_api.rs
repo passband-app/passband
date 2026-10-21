@@ -15467,6 +15467,63 @@ async fn reading_a_thread_never_promotes_and_the_translate_post_does() {
 }
 
 #[tokio::test]
+async fn without_a_translator_nothing_promises_a_translation() {
+    // Translation off or no LLM: a queued row would never finish, so the
+    // reader is not told "Translating...", and the POST promotes nothing. A
+    // translation that already landed is still served.
+    let (state, store, acct) = common::state_with(|store, acct| {
+        let parked = store
+            .upsert_message(&msg(acct, "g-fr", "t-fr", "Votre facture", "Bonjour"))
+            .unwrap();
+        store
+            .queue_translation(acct, parked, "fr", true, chrono::Utc::now())
+            .unwrap();
+        let queued = store
+            .upsert_message(&msg(acct, "g-fr2", "t-fr", "Re: Votre facture", "Merci"))
+            .unwrap();
+        store
+            .queue_translation(acct, queued, "fr", false, chrono::Utc::now())
+            .unwrap();
+    });
+    let poke = squelch_core::store::archive_surface::RefinePoke::new();
+    let app = router(
+        state
+            .with_refine_poke(poke.clone())
+            .with_translate_active(false),
+    );
+    let json = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/thread/t-fr"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let ids: Vec<i64> = json["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            assert!(m.get("translation").is_none(), "{m}");
+            m["id"].as_i64().unwrap()
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let resp = app
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+    let rows = store
+        .message_translations(acct, &ids)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.status)
+        .collect::<Vec<_>>();
+    assert!(rows.contains(&squelch_core::store::TranslationStatus::Deferred));
+}
+
+#[tokio::test]
 async fn the_translate_post_needs_the_human_door_token() {
     let (state, _store, _acct) = common::state_with(|_, _| {});
     let resp = router(state)

@@ -21,6 +21,9 @@ enum Answer {
     English,
     /// A gateway that rejects the key or the model.
     Rejected,
+    /// A provider outage: the retries inside the client ran out on a 529,
+    /// and the call reported no usage at all.
+    Outage,
 }
 
 struct Scripted {
@@ -104,6 +107,12 @@ impl crate::translate::TranslateBackend for Scripted {
                 usage(),
             ),
             Answer::Rejected => LlmOutcome::Failed("http_402:payment_required".into(), usage()),
+            Answer::Outage => {
+                return Err(ClassifyError {
+                    kind: "http_529".into(),
+                    retryable: true,
+                });
+            }
         })
     }
     fn model(&self) -> &str {
@@ -352,23 +361,18 @@ async fn spam_and_sent_mail_are_never_sent_to_the_translator() {
 }
 
 #[tokio::test]
-async fn mail_a_person_sealed_is_skipped() {
+async fn sealed_mail_is_skipped_and_closed() {
     let backend = Scripted::new(Answer::French);
     let (eng, store, acct) = engine(Some(backend.clone()));
     let id = land(&eng, acct, "fr1", false, false);
-    store
-        .correct_triage(
-            acct,
-            id,
-            crate::types::TriageAxis::Sensitivity,
-            "sealed",
-            None,
-            Utc::now(),
-        )
-        .unwrap();
+    // Sealed the way production seals: an auth decision.
+    store.execute_batch_for_test(&format!(
+        "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+         VALUES({acct},{id},1,'{{\"auth\":{{\"kinds\":[\"otp\"]}}}}','2026-10-21T00:00:00Z')"
+    ));
     assert!(!eng.translate_pass().await);
     assert_eq!(backend.calls(), 0);
-    assert_eq!(status(&store, id), Some(("pending".into(), 0)));
+    assert_eq!(status(&store, id), Some(("failed".into(), 5)));
 }
 
 #[tokio::test]
@@ -441,4 +445,78 @@ async fn the_drain_embeds_a_translation_that_landed_without_a_vector() {
             .is_empty()
     );
     assert!(!eng.vectors_dirty.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn an_outage_releases_the_row_counts_the_call_and_cools_down_briefly() {
+    let backend = Scripted::new(Answer::Outage);
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let id = land(&eng, acct, "fr1", false, false);
+    assert!(eng.translate_pass().await);
+    // No attempt spent on a fact about the provider.
+    assert_eq!(status(&store, id), Some(("pending".into(), 0)));
+    // The call reported no usage and is still on the ledger as a call.
+    assert_eq!(billed(&store, acct), (1, 0));
+    let until = eng.translate_retry_after.load(Ordering::Relaxed);
+    let now = Utc::now().timestamp();
+    assert!(until > now && until <= now + OUTAGE_COOLDOWN_SECS);
+    assert!(!eng.translate_pass().await, "cooling down");
+    assert_eq!(backend.calls(), 1);
+    // Triage's own circuit is untouched, and the cap charge was handed back.
+    assert_eq!(eng.agent_retry_after.load(Ordering::Relaxed), 0);
+    let day = Utc::now().format("%Y-%m-%d").to_string();
+    assert_eq!(
+        store
+            .stage2_budget_used(acct, TRANSLATE_BUDGET_KEY, &day)
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn the_daily_cap_holds_the_rest_until_tomorrow() {
+    let backend = Scripted::new(Answer::French);
+    let (mut eng, store, acct) = engine(Some(backend.clone()));
+    eng.config.translate.daily_cap = 1;
+    let a = land(&eng, acct, "fr1", false, false);
+    let b = land(&eng, acct, "fr2", false, false);
+    assert!(eng.translate_pass().await);
+    assert!(!eng.translate_pass().await, "capped");
+    let done = [a, b]
+        .iter()
+        .filter(|id| status(&store, **id).unwrap().0 == "done")
+        .count();
+    assert_eq!(done, 1);
+    let waiting = [a, b]
+        .into_iter()
+        .find(|id| status(&store, *id).unwrap().0 != "done")
+        .unwrap();
+    assert_eq!(
+        status(&store, waiting),
+        Some(("pending".into(), 0)),
+        "untouched, not failed"
+    );
+    assert_eq!(backend.calls(), 1);
+}
+
+#[tokio::test]
+async fn the_translate_lane_works_the_queue_and_wakes_triage() {
+    let backend = Scripted::new(Answer::French);
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let id = land(&eng, acct, "fr1", false, false);
+    let (tx, mut rx) = tokio::sync::watch::channel(false);
+    let ((), ()) = tokio::join!(eng.translate_lane(&mut rx), async {
+        for _ in 0..200 {
+            if status(&store, id).is_some_and(|s| s.0 == "done") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tx.send(true).unwrap();
+    });
+    assert_eq!(status(&store, id).unwrap().0, "done");
+    // The landing queued the re-triage, and the refine lane was told.
+    tokio::time::timeout(Duration::ZERO, eng.refine_wake.notified())
+        .await
+        .expect("refine lane poked");
 }

@@ -738,7 +738,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 }
 
 /// Provider failures describe shared availability, not a permanently bad email.
-fn is_provider_outage(kind: &str) -> bool {
+pub(super) fn is_provider_outage(kind: &str) -> bool {
     crate::triage::llm::is_config_failure(kind)
         || matches!(kind, "transport" | "http_429")
         || kind

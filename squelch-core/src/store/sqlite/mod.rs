@@ -1997,11 +1997,11 @@ impl Store for SqliteStore {
 
     fn record_translation(
         &self,
-        message_id: i64,
+        job: &crate::store::TranslationJob,
         write: &crate::store::TranslationWrite<'_>,
         now: DateTime<Utc>,
-    ) -> Result<()> {
-        self.record_translation(message_id, write, now)
+    ) -> Result<bool> {
+        self.record_translation(job, write, now)
     }
 
     fn promote_deferred_translations(

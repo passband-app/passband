@@ -23,11 +23,14 @@ Decisions locked with the user (2026-10-21):
 ## Invariants
 
 1. **`messages.body`, `messages.subject` and `messages.body_html` are never
-   rewritten.** `body` and `subject` are hashed into the agent triage
-   `content_snapshot` (`store/sqlite/agent_triage.rs`). Changing them
-   re-triages the message and resets external access to `pending`. A
-   translation lives only in `message_translations`, and it is NOT part of
-   `content_snapshot`.
+   rewritten.** A translation lives only in `message_translations`.
+   **The served translation IS part of the agent triage `content_snapshot`**
+   (`store/sqlite/agent_triage.rs`), hashed in only when one exists, so mail
+   without a translation keeps the snapshot it always had. The agent door
+   serves the translation beside the body, so the access assessment has to
+   have read it: a translation that lands (or is dropped) after triage
+   re-triages the message once and resets its external access to `pending`
+   until then. See Pipeline for why that is normally zero extra runs.
 2. **Every fact is carried over.** The prompt demands a complete, faithful
    translation: no summarizing, no omissions, no additions, and numbers,
    amounts, dates, codes, names, URLs and addresses kept exactly. The code then
@@ -45,8 +48,12 @@ Decisions locked with the user (2026-10-21):
    prompts fence email content (`triage::text`). Translated strings are
    inserted as escaped text nodes, never parsed as HTML. The reassembled
    document goes through `sanitize_email_html` again.
-4. **Spam never reaches a model**, as everywhere else. **Sent mail is never
-   translated**, because the user wrote it. Archive-tier rows spend nothing
+4. **Spam never reaches a model**, as everywhere else. **The account's own
+   mail is never translated**, because the user wrote it: not only stored
+   sent mail but anything passing the same authorship test the human thread
+   view uses (`own_mail_sql!`: `is_sent`, or From is the account address),
+   which covers self-addressed notes and group echoes. Checked at ingest and
+   again at every claim. Archive-tier rows spend nothing
    until the reader displaying the thread asks for them. Reading the thread
    is not asking: the client prefetches threads through the same GET.
 5. **External doors (MCP, agent HTTP) see a translation exactly when they may
@@ -87,11 +94,13 @@ message_translations(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
   account_id INTEGER NOT NULL,
   source_lang TEXT NOT NULL,            -- ISO 639-1, e.g. 'fr'
-  status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed','not_needed')),
+  status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed','not_needed','rejected')),
   subject TEXT, body TEXT, body_html TEXT, snippet TEXT,
   missing_facts TEXT,                   -- JSON array when incomplete
   model TEXT, prompt_version INTEGER,
   attempts INTEGER NOT NULL DEFAULT 0,
+  lease TEXT,                           -- the claim token, NULL when not claimed
+  triage_wait_until INTEGER,            -- how long triage holds the message back
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 )
 ```
@@ -99,13 +108,54 @@ message_translations(
 - `body` is `html_to_text(translated body_html)` when there is HTML.
   Otherwise it is the translated plain text, with paragraphs as segments.
 - `snippet` is the first 200 characters of the translated body.
-- `failed` rows (transport or refusal errors) are retried with backoff and a
-  bounded attempt count. They never loop forever.
-- A configuration failure (401/402/403/404, a model missing from the
-  gateway's allow-list) is not a fact about the message: the row is released
-  with its attempt handed back, and the translate pass cools down for
-  `triage.agent.outage_retry_secs` without touching triage's own circuit.
-- Mail a person sealed (`triage.sensitivity = 'sealed'`) is never claimed.
+- **A claim is a lease with a token.** It counts an attempt, stamps a fresh
+  random `lease`, and every write of the result matches on it (`status =
+  'pending' AND lease = ?`); every terminal write clears it. A heal that
+  drops and re-queues the row, or a pass that re-takes an expired lease, owns
+  the row from then on: a late result writes nothing, and the pass embeds no
+  vector for a result that wrote nothing.
+- `failed` rows (refusals, malformed answers) are retried with backoff (10
+  minutes, doubling, capped at 12 hours) and at most 5 attempts. They never
+  loop forever.
+- **Nothing is left `pending` for good.** Each claim first settles rows
+  nothing will finish: a lease that expired on the last attempt is `failed`,
+  and a row whose message has since become spam, sealed or the account's own
+  mail is closed (terminal `failed`, text cleared), with a translation it was
+  serving dropped from the FTS columns and the vector table and the agent
+  snapshot moved with it.
+- A failure that is not about the message is not charged to it: a
+  configuration failure (400/401/402/403/404, a model missing from the
+  gateway's allow-list) and a provider outage (5xx, 429, 529, a timeout or
+  transport error) RELEASE the row, which goes back to exactly the status,
+  `updated_at` (so a `failed` row keeps its backoff) and attempt count the
+  claim found, with its daily-cap charge refunded. The translate pass then
+  cools down on its own clock, `triage.agent.outage_retry_secs` for a
+  configuration failure and 120 seconds for an outage, without touching
+  triage's own circuit.
+- `rejected` is terminal: the engine refused its own output (it could not
+  verify that the translation carries the original). Never served, never
+  retried.
+- A translation the engine cut short (an over-long message, only its head
+  translated) is stored `incomplete` with the note "only the first part was
+  translated" among its `missing_facts`.
+
+## Sealed mail
+
+- Sealed means what the Auth page means (`sealed_messages` in
+  `store/sqlite/messages.rs`): an agent decision naming an auth kind
+  (`decision_json` `$.auth.kinds`), or a legacy `triage.sensitivity =
+  'sealed'` row with no agent state. `triage.sensitivity` alone is a retired
+  column and seals nothing; a person's restriction (`external_access`
+  corrected) is an external-door matter and does not stop translation, since
+  the translation is gated exactly like the body.
+- Sealed mail is never claimed, is never queued by a re-sighting, and a row
+  queued before the seal is closed at the next claim, its served text, FTS
+  columns and vector dropped.
+- **Accepted:** translation runs ahead of triage, so a brand-new auth message
+  in another language may be translated before triage seals it, and is then
+  dropped and re-triaged once. That is within what docs/SECURITY.md §4 allows
+  internal models to read; the translation is gated exactly like the body at
+  both doors, and the original body is already in FTS and the vectors.
 
 ## Search
 
@@ -125,13 +175,38 @@ message_translations(
 
 ## Pipeline
 
-- The **translate pass** runs in the refine lane before `agent_triage_pass`,
-  so triage usually sees the English.
+- The **translate pass runs in its own lane** (`translate_lane`, beside the
+  refine lane in `run_lanes`), so one long message never holds up triage of
+  everything that arrives after it. The refine lane pokes it at the top of
+  every round; it runs rounds back to back while it has work, and pokes the
+  refine lane whenever translations land. A round claims at most 4 rows.
+- **Translate, then triage.** Agent triage holds back the triage or access
+  job of a message whose translation row is `pending` (claimed or not), for
+  at most 10 minutes from when the row was queued (`triage_wait_until`).
+  Normally the translation lands first, its snapshot change supersedes the
+  waiting job with one at the new revision, and the message is triaged
+  ONCE, on the English. A translation that lands after triage ran (the wait
+  ran out: translator down, over its cap, cooling down) changes the
+  snapshot and re-triages exactly once.
+- No loops: `deferred`, `failed`, `not_needed` and `rejected` rows never hold
+  triage back and never change the snapshot, and English mail has no row.
 - Triage gets the translation as an extra field in the agent context
   (`translated_subject` and `translated_body` on the message). Its body is
-  NOT replaced, and the translation is not hashed into the snapshot.
-- Triage does NOT wait for a translation. If the translation is late, triage
-  runs on the original, as it does today.
+  NOT replaced.
+- **Daily cap:** `[translate].daily_cap` (default 300) messages per account
+  per UTC day, on its own `wake_budget` key (`__translate__`), charged before
+  the call. Over it, rows stay `pending` until tomorrow; triage stops
+  waiting on them after the bounded wait.
+- Every call is on the usage ledger, including one that reported no usage
+  (a timeout), which is counted as a call with no tokens.
+- An archive row seen again by live sync stays exactly as it was,
+  translation included (the archive tier's own rule, ingest step 00). The
+  owner's promotion of an archive row (`promote_archive_conn`) makes it live,
+  and its `deferred` translation becomes `pending` like live mail's.
+- **No translator, no promise.** With translation off or no LLM configured,
+  ingest queues nothing, and `GET /client/thread/{id}` does not serve a
+  `pending` or `deferred` row (nothing would ever finish it); the POST
+  promotes nothing. A translation that already landed is still served.
 - `GET /client/thread/{id}` promotes NOTHING. The Passband client
   prefetches threads through it (`ThreadPrefetch`: search results, list
   hovers, the sitrep's preload), so a promoting GET would buy translations
@@ -167,8 +242,8 @@ message_translations(
   `pending` once the reader's POST has promoted it.
 - `deferred` and `pending` both carry no text. Only `done` and `incomplete`
   carry the translation.
-- `failed` and `not_needed` are omitted, so the client shows the original and
-  nothing else.
+- `failed`, `not_needed` and `rejected` are omitted, so the client shows the
+  original and nothing else.
 - MCP `SanitizedMessage` gains an optional `translation { source_language,
   subject, content, status }`, joined inside `thread_view`. The agent doors
   see served statuses only (`done`, `incomplete`), never `deferred` or

@@ -2080,11 +2080,20 @@ CREATE TABLE IF NOT EXISTS archive_walk (
 -- unix seconds. `missing_facts` is a JSON array, set when `incomplete`.
 -- `not_needed` is terminal: the translator read the message as English, so
 -- the local detection was a false positive and nothing is served.
+-- `rejected` is terminal too: the engine refused its own output (a reverse or
+-- fact check it could not pass), so nothing is served and nothing is retried.
+--
+-- `lease` is the claim token: stamped by every claim, matched by every write
+-- of a result, cleared by every terminal write. A result whose lease is gone
+-- (a heal dropped and re-queued the row, or the lease expired and another
+-- pass took it) writes nothing. `triage_wait_until` is how long agent triage
+-- holds this message's job back while the row is `pending`, so foreign mail
+-- is normally triaged once, on the English (docs/TRANSLATION.md, Pipeline).
 CREATE TABLE IF NOT EXISTS message_translations (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     account_id INTEGER NOT NULL,
     source_lang TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed','not_needed')),
+    status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed','not_needed','rejected')),
     subject TEXT,
     body TEXT,
     body_html TEXT,
@@ -2093,6 +2102,8 @@ CREATE TABLE IF NOT EXISTS message_translations (
     model TEXT,
     prompt_version INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
+    lease TEXT,
+    triage_wait_until INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );

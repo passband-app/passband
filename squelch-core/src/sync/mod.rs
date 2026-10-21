@@ -115,6 +115,11 @@ const GLOBAL_BUDGET_KEY: &str = crate::triage::agent_config::TOTAL_BUDGET_KEY;
 /// [`notify_lane`] code that spends it: a sentinel invented later, somewhere
 /// else, is a sentinel nobody ever checks these for a collision against.
 const NOTIFY_FAST_BUDGET_KEY: &str = "__notify_fast__";
+/// The `wake_budget` sentinel for the TRANSLATE PASS's daily cap
+/// (`[translate].daily_cap`, docs/TRANSLATION.md): messages sent to the
+/// translator per account per UTC day. Its own key for the notify lane's
+/// reason: a backlog of foreign mail must not spend any other lane's budget.
+const TRANSLATE_BUDGET_KEY: &str = "__translate__";
 /// The usage-ledger category the fast lane books under. NOT a literal here: it
 /// is the one category with prices of its own, and both cost estimators price
 /// it by matching this exact string, so a second spelling would not be a
@@ -537,6 +542,8 @@ enum CapKind {
     /// notifications stopped. The [[fleet LLM outage]] was a config-level 400
     /// that read as normal for four days.
     NotifyFastConfig,
+    /// The translate pass's daily cap ([`TRANSLATE_BUDGET_KEY`]).
+    Translate,
 }
 
 /// Outcome of a check-then-increment budget gate.
@@ -554,6 +561,7 @@ enum BudgetGate {
 struct WarnDays {
     notify_fast: Option<String>,
     notify_fast_config: Option<String>,
+    translate: Option<String>,
 }
 
 /// The account's daily-budget ledger plus the warn-once state that goes with it:
@@ -588,6 +596,7 @@ impl<S: Store + ?Sized> BudgetLedger<'_, S> {
         let slot = match kind {
             CapKind::NotifyFast => &mut guard.notify_fast,
             CapKind::NotifyFastConfig => &mut guard.notify_fast_config,
+            CapKind::Translate => &mut guard.translate,
         };
         if slot.as_deref() == Some(day) {
             false
@@ -707,6 +716,11 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`SyncEngine::refine_lane`]; see [`SyncEngine::run_lanes`] for why the
     /// two are separate futures at all.
     refine_wake: tokio::sync::Notify,
+    /// REFINE LANE -> TRANSLATE LANE: poked at the top of every refine round,
+    /// so the translate lane (docs/TRANSLATION.md, Pipeline) starts whenever
+    /// the refine lane does (new mail, an archive thread the reader asked to
+    /// translate, the interval) without either lane waiting on the other.
+    translate_wake: tokio::sync::Notify,
     /// ON-DEMAND SPAM SIGNAL: notifying it makes the poll loop run ONE spam
     /// window sync on its next pass. Separate from `refresh` because it is a
     /// different request — `refresh` means "check my mail now", this means "go
@@ -930,6 +944,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             embedder_gate: None,
             refresh: Arc::new(tokio::sync::Notify::new()),
             refine_wake: tokio::sync::Notify::new(),
+            translate_wake: tokio::sync::Notify::new(),
             spam_refresh: Arc::new(tokio::sync::Notify::new()),
             refine_poke: Default::default(),
             warn_days: Arc::new(std::sync::Mutex::new(WarnDays::default())),
@@ -1474,6 +1489,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let mut refine_shutdown = shutdown.clone();
         let mut notify_shutdown = shutdown.clone();
         let mut archive_shutdown = shutdown.clone();
+        let mut translate_shutdown = shutdown.clone();
         tokio::select! {
             polled = async {
                 if backfill_first {
@@ -1484,6 +1500,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             () = self.agent_notification_lane(&mut notify_shutdown) => Ok(()),
             // Only ever completes on shutdown; it has no error to report.
             () = self.refine_lane(&mut refine_shutdown) => Ok(()),
+            // The same. Its own lane so a long translation never holds up
+            // triage of new mail (docs/TRANSLATION.md, Pipeline).
+            () = self.translate_lane(&mut translate_shutdown) => Ok(()),
             // The same: a Gmail error inside the walk is the walk's to wait
             // out, never a reason to bounce the lifecycle.
             () = self.archive_lane(&mut archive_shutdown) => Ok(()),
@@ -2262,13 +2281,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // is closed. An agent search waits on its access checks only
             // while this is true.
             self.refine_poke.set_runnable(self.refine_can_spend());
+            // TRANSLATION RUNS BESIDE THIS LANE, never in it
+            // (docs/TRANSLATION.md, Pipeline): one long message must not hold
+            // up triage of everything that arrives after it. Triage instead
+            // holds back the one message whose translation is pending, for a
+            // bounded wait (`TRIAGE_WAIT_SECS` in the store), so foreign mail
+            // is normally triaged once, on the English.
+            self.translate_wake.notify_one();
             if self.poll_healthy.load(Ordering::Relaxed) {
-                // TRANSLATION FIRST (docs/TRANSLATION.md), so a message that
-                // arrived in French usually reaches triage with its English
-                // beside it. Triage does not wait for it: a pass that claimed
-                // nothing, or is cooling down, costs nothing here.
-                let translated = self.translate_pass().await;
-                if self.agent_triage_pass().await | translated {
+                if self.agent_triage_pass().await {
                     idle_rounds = 0;
                 } else {
                     idle_rounds = idle_rounds.saturating_add(1).min(5);

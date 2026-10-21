@@ -1462,15 +1462,19 @@ impl SqliteStore {
         // 7b. TRANSLATION: a message detected as not English is queued in this
         //     same transaction (docs/TRANSLATION.md), `deferred` on the archive
         //     tier, which spends nothing until its thread is opened. Never for
-        //     spam or sent mail, whatever the caller carried. A re-ingest keeps
-        //     the row it has; a heal replaced the text the row was translated
-        //     from, so it starts over.
+        //     spam, sent, the account's own or sealed mail, whatever the caller
+        //     carried: the stored row is asked, with the same authorship test
+        //     the human thread view uses and the same sealed predicate as the
+        //     Auth page. A re-ingest keeps the row it has (a live sighting of
+        //     a `deferred` row promotes it); a heal replaced the text the row
+        //     was translated from, so it starts over.
         if heal.is_some() {
             super::translations::drop_translation_conn(&tx, id)?;
         }
         if let Some(lang) = triaged.translate_lang
             && !triaged.message.is_spam
             && !triaged.message.is_sent
+            && !super::translations::is_untranslatable_conn(&tx, id)?
         {
             super::translations::queue_translation_conn(
                 &tx,

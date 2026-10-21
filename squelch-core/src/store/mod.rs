@@ -321,7 +321,7 @@ pub struct TriagedMessage {
     /// ([`crate::translate::detect`]). `Some` queues a `message_translations`
     /// row in the ingest transaction: `pending` for live mail, `deferred` for
     /// the archive tier. Ingest leaves it `None` for spam and sent mail, and
-    /// the store refuses both again.
+    /// the store refuses both again, plus the account's own and sealed mail.
     pub translate_lang: Option<crate::translate::Lang>,
 }
 
@@ -341,6 +341,9 @@ pub enum TranslationStatus {
     Failed,
     /// Terminal: the translator read the message as English. Served nowhere.
     NotNeeded,
+    /// Terminal: the engine refused its own output (it could not verify the
+    /// translation carries the original). Served nowhere, never retried.
+    Rejected,
 }
 
 impl TranslationStatus {
@@ -352,6 +355,7 @@ impl TranslationStatus {
             Self::Incomplete => "incomplete",
             Self::Failed => "failed",
             Self::NotNeeded => "not_needed",
+            Self::Rejected => "rejected",
         }
     }
 
@@ -363,6 +367,7 @@ impl TranslationStatus {
             "incomplete" => Self::Incomplete,
             "failed" => Self::Failed,
             "not_needed" => Self::NotNeeded,
+            "rejected" => Self::Rejected,
             _ => return None,
         })
     }
@@ -380,12 +385,22 @@ pub struct TranslationJob {
     pub body_html: Option<String>,
     /// Attempts including this one.
     pub attempts: i64,
+    /// THE CLAIM TOKEN. Every write of this job's result matches on it, so a
+    /// result for a row that a heal dropped and re-queued, or that another
+    /// pass took after the lease expired, writes nothing.
+    pub lease: String,
+    /// The status and `updated_at` the row had before this claim, which a
+    /// [`TranslationWrite::Released`] puts back, so a released `failed` row
+    /// keeps its backoff.
+    pub prev_status: TranslationStatus,
+    pub prev_updated_at: i64,
 }
 
 /// What the translate pass writes back for a claimed row.
 #[derive(Debug, Clone, Copy)]
 pub enum TranslationWrite<'a> {
-    /// `done`, or `incomplete` when `missing_facts` is not empty.
+    /// `done`, or `incomplete` when `missing_facts` is not empty or only the
+    /// head of the message was translated (`truncated`).
     Translated {
         translated: &'a crate::translate::Translated,
         model: &'a str,
@@ -395,10 +410,14 @@ pub enum TranslationWrite<'a> {
     Failed { model: &'a str },
     /// `not_needed`: the translator read the message as English. Terminal.
     NotNeeded { model: &'a str, prompt_version: i64 },
+    /// `rejected`: the engine refused its own output. Terminal, never served.
+    Rejected { model: &'a str, prompt_version: i64 },
     /// Hand the claim back WITHOUT spending its attempt: the call never
     /// reached a verdict about this message (a rejected key, an exhausted
-    /// budget, a model the gateway will not serve), so the row is exactly as
-    /// translatable as it was. The pass that releases it stops and cools down.
+    /// budget, a model the gateway will not serve, a provider outage or
+    /// timeout), so the row is exactly as translatable as it was, and goes
+    /// back to the status and backoff it had before the claim. The pass that
+    /// releases it stops and cools down.
     Released,
 }
 
@@ -3296,8 +3315,12 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
 
     /// Claim up to `limit` rows due for translation, newest mail first:
     /// `pending` ones, and `failed` ones whose backoff has passed. Each claim
-    /// counts an attempt and holds a lease, and a row out of attempts is
-    /// never claimed again. Spam and sent mail are never claimed.
+    /// counts an attempt and stamps a lease token, and a row out of attempts is
+    /// never claimed again. Spam, sealed and the account's own mail are never
+    /// claimed. The claim first settles rows nothing will ever finish: a lease
+    /// that expired on the last attempt is `failed`, and a row whose message
+    /// became spam, sealed or own mail is closed (its served text, index
+    /// columns and vector dropped).
     fn claim_translations(
         &self,
         account_id: AccountId,
@@ -3305,14 +3328,16 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         limit: usize,
     ) -> Result<Vec<TranslationJob>>;
 
-    /// Write a claimed row's result. A row no longer `pending` (dropped and
-    /// re-queued by a heal meanwhile) is left as it is.
+    /// Write a claimed row's result. Only over the job's own lease: a row a
+    /// heal dropped and re-queued meanwhile, or one another pass re-claimed,
+    /// is left as it is. `true` when it wrote, which is what lets the caller
+    /// embed the translation (a stale one must not get a vector).
     fn record_translation(
         &self,
-        message_id: i64,
+        job: &TranslationJob,
         write: &TranslationWrite<'_>,
         now: DateTime<Utc>,
-    ) -> Result<()>;
+    ) -> Result<bool>;
 
     /// Promote a thread's `deferred` rows to `pending`, which is what the
     /// reader DISPLAYING an archive thread asks for (`POST

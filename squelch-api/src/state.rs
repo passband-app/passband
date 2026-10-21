@@ -109,6 +109,13 @@ pub struct ApiState {
     pub(crate) translate_model: Arc<str>,
     pub(crate) translate_price_in_per_mtok: f64,
     pub(crate) translate_price_out_per_mtok: f64,
+    /// Whether a translator will ever work a queued translation (translation
+    /// on and an LLM configured, [`squelch_core::config::Config::translation_active`]).
+    /// Without one, `GET /client/thread/{id}` serves no `pending` or
+    /// `deferred` translation (nothing would ever finish it, and the reader
+    /// would say "Translating..." for good), and the translate POST promotes
+    /// nothing. Default `true`, matching `[translate].enabled`.
+    pub(crate) translate_active: bool,
     /// Manual-refresh signal shared with the Gmail sync loop, fired by
     /// `POST /client/refresh`. `None` when no sync loop is wired in, which the
     /// endpoint reports as `triggered: false` rather than faking a poke.
@@ -563,6 +570,7 @@ impl ApiState {
                 .price_in_per_mtok,
             translate_price_out_per_mtok: squelch_core::config::TranslateConfig::default()
                 .price_out_per_mtok,
+            translate_active: true,
             refresh: None,
             spam_refresh: None,
             archive_surfacing: Default::default(),
@@ -1127,6 +1135,13 @@ impl ApiState {
         self
     }
 
+    /// Whether a translator exists to finish queued translations (see the
+    /// field). `from_config` sets it from the config.
+    pub fn with_translate_active(mut self, active: bool) -> Self {
+        self.translate_active = active;
+        self
+    }
+
     /// TEST HOOK: run the scheduled-send worker's clock `skew` ahead of the
     /// wall clock (see `worker_clock_skew`). Never used in production.
     #[doc(hidden)]
@@ -1292,6 +1307,7 @@ impl ApiState {
                 cfg.translate.price_in_per_mtok,
                 cfg.translate.price_out_per_mtok,
             )
+            .with_translate_active(cfg.translation_active())
             .with_tracking_base_url(cfg.tracking.base_url.clone())
             .with_console_allow_insecure_cookie(cfg.console.allow_insecure_cookie)
             // The poller's retirement cap doubles as the listing's suppression

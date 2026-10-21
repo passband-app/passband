@@ -599,8 +599,24 @@ pub async fn get_thread(
     // results, list hovers, the sitrep), so promoting here would spend on
     // archive mail nobody opened. The reader that DISPLAYS the thread asks
     // for them over `POST /client/thread/{id}/translate` instead.
+    //
+    // NO TRANSLATOR, NO PROMISE: without one (translation off, no LLM), a
+    // `pending` or `deferred` row would never finish, so it is not served and
+    // the reader shows the original alone. A finished translation still is.
+    let translate_active = state.translate_active;
     query(&state, move |store, account_id| {
-        let view = store.thread_view_with_html(account_id, &thread_id)?;
+        let mut view = store.thread_view_with_html(account_id, &thread_id)?;
+        if !translate_active {
+            for message in &mut view.messages {
+                if message
+                    .translation
+                    .as_ref()
+                    .is_some_and(|t| t.status == "pending" || t.status == "deferred")
+                {
+                    message.translation = None;
+                }
+            }
+        }
         // Memoized per distinct sender: a thread is usually two addresses
         // repeated, and each miss is a round trip to `contacts`. The store
         // compares under COLLATE NOCASE, so the memo key is lowercased to match.
@@ -688,6 +704,10 @@ pub async fn translate_thread(
     State(state): State<ApiState>,
     Path(thread_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if !state.translate_active {
+        // Nothing would ever work a promoted row.
+        return Ok(Json(json!({ "promoted": 0 })));
+    }
     let poke = state.archive_surfacing.poke.clone();
     let promoted = store_call(&state, move |store, account_id| {
         store.promote_deferred_translations(account_id, &thread_id, Utc::now())

@@ -247,8 +247,8 @@ fn set_sender_rule_audited_writes_both_rows() {
 #[test]
 fn filtered_rules_reject_an_empty_want_text_on_every_write_path() {
     // A Filtered rule's want_text IS the rule ("filter everything except
-    // <this>"). Empty, it degrades silently: `stage2_queue` maps it to None
-    // and Stage-2 gets no instruction, while the UI still shows a rule. So
+    // <this>"). Empty, it degrades silently: the model gets no instruction,
+    // while the UI still shows a rule. So
     // all three write paths reject it up front (`InvalidInput`).
     let (store, acct) = store();
     let audit = NewAuditEntry {

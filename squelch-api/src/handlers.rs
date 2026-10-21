@@ -4078,9 +4078,7 @@ pub async fn get_usage(
     // is neither, and folding it into the arm below would bill a Haiku call at
     // Opus rates and overstate the cheapest pass in the pipeline by ~25x.
     // EVERYTHING ELSE — Stage-1 and every extractor — runs the stage-1 small
-    // model and shares its config, so it costs at stage-1 rates. See
-    // `extract_pass`: "Extractors run on the STAGE-1 (small) model and share its
-    // config + cap."
+    // model and shares its config, so it costs at stage-1 rates.
     //
     // The two STAGES are always present, empty or not: they are permanent parts
     // of the pipeline, and a reader who spent nothing on escalations today is

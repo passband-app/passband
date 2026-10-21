@@ -234,19 +234,20 @@ use crate::store::{
     DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread,
     IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer,
     MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode, MissingVector,
-    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
-    SenderDigestRow, SenderDomainEntry, SenderEntry, SentMessage,
-    Stage1Applied, Stage2CapOverrides,
-    Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, SPAM_SYNCED_AT_KEY,
+    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
+    SenderDomainEntry, SenderEntry, SentMessage, Stage1Applied, Stage2CapOverrides, Stage2Usage,
+    Stage2UsageDay, Store, SyncState, TermDf, TrackedMessage, TriageDebug, TriagedMessage,
+    UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
-    AccountId, AttachmentInfo, AttentionStatus, AuditEntry, BandCounts, Banking,
-    CalendarUpdate, ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition,
-    Event, EventKind, GroupHistoryEntry, GroupMember, GroupMode, NewMessage, OpenRate, Receipt,
-    RetriageProgress, SanitizedMessage, SealedKind, SearchHit, SendGroup, SenderRule, Sensitivity,
-    ShredCandidate, StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
-    };
+    AccountId, AttachmentInfo, AttentionStatus, AuditEntry, BandCounts, Banking, CalendarUpdate,
+    ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition, Event, EventKind,
+    GroupHistoryEntry, GroupMember, GroupMode, NewMessage, OpenRate, Receipt, RetriageProgress,
+    SanitizedMessage, SealedKind, SearchHit, SendGroup, SenderRule, Sensitivity, ShredCandidate,
+    StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
+};
 
 /// `app_settings` key recording when this account's open ledger started, so the
 /// share stat can refuse to look back further than the column has existed. See

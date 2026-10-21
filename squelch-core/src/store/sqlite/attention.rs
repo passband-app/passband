@@ -137,7 +137,6 @@ pub(super) const STANDING_BAND: &str = "(t.tier IN ('past_due','deadline')
        AND t.status != 'done'";
 
 impl SqliteStore {
-
     pub(super) fn mark_surfaced(
         &self,
         account_id: AccountId,
@@ -325,8 +324,8 @@ impl SqliteStore {
             AttentionStatus::Done => Some(Utc::now().to_rfc3339()),
             _ => None,
         };
-        // DONE RESOLVES THE WHOLE THREAD: the bands show one row per thread
-        // (attention_updates), so resolving the representative must also resolve
+        // DONE RESOLVES THE WHOLE THREAD: the bands show one row per thread,
+        // so resolving the representative must also resolve
         // its siblings — otherwise a hidden sibling pops straight back into the
         // band and done becomes whack-a-mole. Reopen (open/new) stays
         // message-scoped: the undo path restores exactly the one row it removed,
@@ -572,15 +571,11 @@ impl SqliteStore {
             )
             .optional()?;
 
-        // Sitrep band counts over non-sealed rows. These definitions MUST match
-        // the `band` query on attention_updates, or header and list disagree —
-        // including its one-row-per-thread collapse, hence DISTINCT thread keys
-        // (blank thread_id falls back to the message id, same as the list),
-        // and its received_at window, hence `bands_since` AND the same
-        // WITHIN_WINDOW reminder exemption the list runs under — a fired
-        // reminder the header refused to count is a header contradicting its
-        // list (the list's default min importance is 0, a no-op, so it is not
-        // mirrored here).
+        // Sitrep band counts over non-sealed rows, one per THREAD, hence
+        // DISTINCT thread keys (blank thread_id falls back to the message id),
+        // over the received_at window, hence `bands_since` AND the WITHIN_WINDOW
+        // reminder exemption: a fired reminder still counts however old the
+        // mail is.
         // Standing is decided in the subquery, where the `m` join alias the
         // shared expression is written against is still in scope.
         let (standing, new_count, open_count): (i64, i64, i64) = conn.query_row(

@@ -22,6 +22,19 @@ pub(super) fn assess_external(store: &SqliteStore, account: AccountId, message: 
         .unwrap();
 }
 
+/// The stored legacy verdict columns for one message: (importance, one_line, tier).
+fn stored_verdict(store: &SqliteStore, message: i64) -> (i64, String, String) {
+    store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT importance, one_line, tier FROM triage WHERE message_id = ?1",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+}
+
 #[test]
 fn thread_subject_seeks_thread_in_date_order_after_reopening_old_store() {
     let dir = std::env::temp_dir().join(format!("squelch-thread-index-{}", std::process::id()));
@@ -439,7 +452,7 @@ fn human_attachment_bytes_allow_restricted_parents_and_guard_size_and_ownership(
 }
 
 #[test]
-fn field_reasons_roundtrip_through_ingest_and_attention_updates() {
+fn field_reasons_roundtrip_through_ingest() {
     use crate::types::FieldReasons;
     let (store, acct) = store();
 
@@ -455,80 +468,22 @@ fn field_reasons_roundtrip_through_ingest_and_attention_updates() {
         })
         .ingest(&store);
 
-    // HUMAN DOOR: attention_updates carries the parsed field_reasons.
-    let ups = store
-        .attention_updates(
-            acct,
-            Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
+    let raw: String = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT field_reasons FROM triage WHERE message_id = ?1",
+            [id],
+            |r| r.get(0),
         )
         .unwrap();
-    let u = ups.iter().find(|u| u.update.id == id).expect("row present");
-    let fr = u
-        .update
-        .field_reasons
-        .as_ref()
-        .expect("field_reasons present");
+    let fr: FieldReasons = serde_json::from_str(&raw).expect("field_reasons is JSON");
     assert_eq!(
         fr.importance.as_deref(),
         Some("known contact -> signal importance 72")
     );
     assert_eq!(fr.tier.as_deref(), Some("known contact -> signal"));
     assert!(fr.deadline.is_none());
-    // And it serializes into the /client/updates JSON as an object.
-    let v = serde_json::to_value(&u.update).unwrap();
-    assert_eq!(
-        v["field_reasons"]["tier"],
-        serde_json::json!("known contact -> signal")
-    );
-
-    // AGENT DOOR: ranked_updates (MCP) never carries field_reasons — the key
-    // is absent from the serialized Update.
-    let ranked = store
-        .ranked_updates(acct, Utc::now() - chrono::Duration::days(1), None)
-        .unwrap();
-    let r = ranked.iter().find(|u| u.id == id).expect("row present");
-    assert!(r.field_reasons.is_none());
-    let rv = serde_json::to_value(r).unwrap();
-    assert!(
-        rv.get("field_reasons").is_none(),
-        "MCP payload must omit field_reasons: {rv}"
-    );
-    // Same byte-absence discipline for the paperclip flag.
-    assert!(r.has_attachments.is_none());
-    assert!(
-        rv.get("has_attachments").is_none(),
-        "MCP payload must omit has_attachments: {rv}"
-    );
-}
-
-#[test]
-fn predating_triage_row_reads_back_as_none() {
-    // A row written with no field_reasons (NULL column) reads back as None.
-    let (store, acct) = store();
-    let mid = triaged(acct, "g1", "t1")
-        .importance(60)
-        .tier(Tier::Signal)
-        .one_line("x")
-        .reason("y")
-        .seed(&store);
-    let ups = store
-        .attention_updates(
-            acct,
-            Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
-    let u = ups.iter().find(|u| u.update.id == mid).unwrap();
-    assert!(u.update.field_reasons.is_none());
 }
 
 #[test]
@@ -541,16 +496,15 @@ fn round_trips_a_message() {
         .reason("known contact")
         .seed(&store);
 
-    let updates = store
-        .ranked_updates(acct, Utc::now() - chrono::Duration::days(1), Some(1))
-        .unwrap();
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0].sender, "alice@example.com");
-    assert_eq!(updates[0].tier, Tier::Signal);
+    assert_eq!(
+        stored_verdict(&store, id),
+        (80, "Lunch invite".into(), "signal".into())
+    );
 
     assess_external(&store, acct, id, "allowed");
     let tv = store.thread_view(acct, "t1").unwrap();
     assert_eq!(tv.messages.len(), 1);
+    assert_eq!(tv.messages[0].id, id);
     assert_eq!(tv.subject, "Lunch?");
 }
 
@@ -614,12 +568,28 @@ fn restricted_mail_is_readable_by_humans_but_not_external_agents() {
     assess_external(&store, acct, allowed, "allowed");
     assess_external(&store, acct, restricted, "restricted");
     assert!(store.thread_view(acct, "t1").is_ok());
-    // Human ranked updates include both rows.
-    let updates = store
-        .ranked_updates(acct, Utc::now() - chrono::Duration::days(1), None)
-        .unwrap();
+    // The human door's mail list includes both rows.
+    let updates = {
+        use crate::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+        store
+            .human_agent_updates(
+                acct,
+                &AgentInventoryQuery {
+                    since: Utc::now() - chrono::Duration::days(1),
+                    min_importance: None,
+                    status: None,
+                    band: None,
+                    pending_reminders: false,
+                    spam: crate::store::SpamScope::Exclude,
+                    ranking: Default::default(),
+                    before: None,
+                    limit: None,
+                },
+            )
+            .unwrap()
+    };
     assert_eq!(updates.len(), 2);
-    assert!(updates.iter().any(|u| u.thread_id == "t2"));
+    assert!(updates.iter().any(|u| u.update.thread_id == "t2"));
 
     // thread_view on the sealed thread => NotFound.
     let err = store.thread_view(acct, "t2").unwrap_err();
@@ -722,7 +692,6 @@ fn sealed_body_reveal_audit_and_stats() {
 #[test]
 fn reingest_preserves_llm_classification_but_refreshes_heuristic_rows() {
     let (store, acct) = store();
-    let since = Utc::now() - chrono::Duration::days(3650);
 
     // --- Row A: LLM-classified, then re-delivered. ---
     let a = triaged_row(acct, "g-a", "t-a", None, false, Sensitivity::Normal).ingest(&store);
@@ -745,14 +714,10 @@ fn reingest_preserves_llm_classification_but_refreshes_heuristic_rows() {
         .unwrap();
     // Re-deliver the SAME message (heuristic seed carries importance 40).
     triaged_row(acct, "g-a", "t-a", None, false, Sensitivity::Normal).ingest(&store);
-    let ups = store.ranked_updates(acct, since, None).unwrap();
-    let ua = ups.iter().find(|u| u.id == a).expect("row A present");
-    assert_eq!(
-        ua.importance, 88,
-        "paid LLM importance preserved on re-ingest"
-    );
-    assert_eq!(ua.one_line, "LLM verdict", "paid LLM one_line preserved");
-    assert_eq!(ua.tier, Tier::Signal, "paid LLM tier preserved");
+    let (importance, one_line, tier) = stored_verdict(&store, a);
+    assert_eq!(importance, 88, "paid LLM importance preserved on re-ingest");
+    assert_eq!(one_line, "LLM verdict", "paid LLM one_line preserved");
+    assert_eq!(tier, "signal", "paid LLM tier preserved");
 
     // --- Row B: still heuristic-only -> re-ingest refreshes the seed. ---
     let b = triaged_row(acct, "g-b", "t-b", None, false, Sensitivity::Normal).ingest(&store);
@@ -761,10 +726,9 @@ fn reingest_preserves_llm_classification_but_refreshes_heuristic_rows() {
         .tier(Tier::Signal)
         .one_line("fresh seed")
         .ingest(&store);
-    let ups = store.ranked_updates(acct, since, None).unwrap();
-    let ub = ups.iter().find(|u| u.id == b).expect("row B present");
-    assert_eq!(ub.importance, 71, "still-heuristic row adopts the new seed");
-    assert_eq!(ub.one_line, "fresh seed");
+    let (importance, one_line, _) = stored_verdict(&store, b);
+    assert_eq!(importance, 71, "still-heuristic row adopts the new seed");
+    assert_eq!(one_line, "fresh seed");
 }
 
 /// A RE-INGEST MAY NOT UNDO A PERSON'S SEAL, and this is the one verdict column

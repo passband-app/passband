@@ -216,10 +216,10 @@ fn migrate_adds_field_reasons_to_a_preexisting_triage_table() {
 }
 
 #[test]
-fn migrate_adds_two_stage_columns_so_ingest_and_both_queues_work() {
+fn migrate_adds_two_stage_columns_so_ingest_works() {
     // A `triage` table with no stage1_model_used / needs_stage2 /
-    // field_reasons. The migration must add them so ingest and both queue
-    // SELECTs, which NAME those columns, don't fail with "no such column".
+    // field_reasons. The migration must add them so ingest, which NAMES those
+    // columns, doesn't fail with "no such column".
     register_vec_extension();
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -239,11 +239,20 @@ fn migrate_adds_two_stage_columns_so_ingest_and_both_queues_work() {
     let acct = store.ensure_account("me@example.com").unwrap();
 
     let id = triaged_row(acct, "g-x", "t-x", None, false, Sensitivity::Normal).ingest(&store);
-    // Both queue SELECTs run cleanly on the upgraded table.
-    let s1 = store.stage1_queue(acct, 10).unwrap();
-    assert_eq!(s1.len(), 1, "the fresh normal row enters Stage-1");
-    assert_eq!(s1[0].message_id, id);
-    assert!(store.stage2_queue(acct, 10).unwrap().is_empty());
+    // The upgraded table carries the columns, and ingest wrote through them.
+    let conn = store.lock().unwrap();
+    let (stage1, needs_stage2): (Option<String>, i64) = conn
+        .query_row(
+            "SELECT stage1_model_used, needs_stage2 FROM triage WHERE message_id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(stage1.is_none(), "a fresh normal row is unmodelled");
+    assert_eq!(
+        needs_stage2, 1,
+        "an unconfident seed is written through the new column"
+    );
 }
 
 #[test]

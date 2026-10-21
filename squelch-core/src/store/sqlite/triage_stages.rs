@@ -137,7 +137,7 @@ impl SqliteStore {
             .map(|i| format!("?{}", i + 3))
             .collect::<Vec<_>>()
             .join(",");
-        // Hand-requested rows sort first; see `stage1_queue`.
+        // Hand-requested rows (`retriage_at` set) sort first.
         let sql = format!(
             "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject, m.body,
                     t.category, t.sensitivity, m.received_at, t.retriage_at
@@ -199,7 +199,7 @@ impl SqliteStore {
         // COALESCE on the category because the trigger is stamped at INGEST: a row
         // can queue here before Stage-1 ever assigns a category, and
         // `ExtractQueued.category` is a `String`.
-        // Hand-requested rows sort first; see `stage1_queue`.
+        // Hand-requested rows (`retriage_at` set) sort first.
         let mut stmt = conn.prepare(
             "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject, m.body,
                     COALESCE(t.category, ''), t.sensitivity, m.received_at, t.retriage_at

@@ -208,8 +208,10 @@ overrides: `enabled`, `batch_per_cycle`, `daily_cap`, `max_per_message`,
 `dedupe_window_hours`. Defaults allow 4 pending revisits, 6 lifetime revisits,
 one-hour minimum lead, a 400-day horizon, 12-hour deduplication, and 50 revisit
 investigations/account/day, within the shared account/background ceilings.
-Timestamp changes do not evade lifetime limits. The retired deterministic
-`deadline_grace_hours` and `fye_stale_days` sweeps do not run in agent triage.
+Timestamp changes do not evade lifetime limits. Absurd values (a negative lead,
+a horizon past ten years) are clamped rather than trusted. The retired
+deterministic sweeps' `deadline_grace_hours` and `fye_stale_days` knobs are
+gone; a config file that still sets them is ignored.
 
 ## Recovery and diagnostics
 

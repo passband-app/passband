@@ -1295,7 +1295,6 @@ pub fn ingest_sent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::SpamScope;
 
     fn raw(account_id: AccountId, msgid: &str, bytes: &str, is_sent: bool) -> RawFetched {
         RawFetched {
@@ -2808,19 +2807,13 @@ mod tests {
             view.messages[0].is_sent,
             "the outbound copy is flagged for the reader's right-aligned bubble"
         );
-        let updates = store
-            .attention_updates(
-                acct,
-                now - chrono::Duration::days(1),
-                None,
-                None,
-                None,
-                false,
-                SpamScope::Exclude,
-            )
-            .unwrap();
-        assert!(
-            updates.is_empty(),
+        let bands = store
+            .stats(acct, now - chrono::Duration::days(1))
+            .unwrap()
+            .bands;
+        assert_eq!(
+            (bands.standing, bands.new, bands.open),
+            (0, 0, 0),
             "sent mail never enters the attention bands"
         );
         // Recipients still seed contacts, and ride along on the row itself so the

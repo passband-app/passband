@@ -27,15 +27,16 @@ use crate::triage::extract::shipments::ShipmentsApplied;
 use crate::triage::rule_suggest::SmartBlock;
 use crate::triage::{CalendarInfo, CarrierTrack, DeadlineHit, ReceiptInfo, ShipmentInfo};
 use crate::types::{
-    AccountId, AttachmentInfo, AttentionStatus, AuditEntry, Banking,
-    CalendarUpdate, Deadline, Disposition, Event, EventKind, FieldReasons, NewMessage, OpenRate,
-    Receipt, RetriageProgress, SealedKind, SearchHit, SenderRule, Sensitivity, ShredCandidate,
-    StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord, };
+    AccountId, AttachmentInfo, AttentionStatus, AuditEntry, Banking, CalendarUpdate, Deadline,
+    Disposition, Event, EventKind, FieldReasons, NewMessage, OpenRate, Receipt, RetriageProgress,
+    SealedKind, SearchHit, SenderRule, Sensitivity, ShredCandidate, StoreStats, ThreadView, Tier,
+    TriageAxis, TriageFeedback, UnsubscribeRecord,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Server-side bucket for the sitrep chassis, selected by the `band` param on
-/// `/client/updates`. See [`Store::attention_updates`].
+/// `/client/updates`.
 ///
 /// - `Standing` — mail owed the user's attention, immune to the surfacing clock
 ///   and never rotating out until resolved: a dated obligation (tier
@@ -1047,12 +1048,10 @@ pub struct Stage1Applied {
     pub field_reasons: FieldReasons,
     /// The Stage-1 model id to stamp `stage1_model_used` with.
     pub stage1_model_used: String,
-    /// `true` when [`crate::triage::router::should_escalate`] found a reason:
-    /// sets `needs_stage2=1` so the Stage-2 queue predicate picks the row up.
+    /// Stored as `needs_stage2`. Historical: the retired escalation router set
+    /// it; nothing reads it to route mail any more.
     pub needs_stage2: bool,
-    /// The routing reason's slug, stored so the escalation MIX is inspectable
-    /// after the fact. Tuning the router without knowing which arm is firing is
-    /// guesswork, and the arms are the whole design.
+    /// Stored as `escalation_reason`. Historical, like `needs_stage2`.
     pub escalation_reason: Option<&'static str>,
     /// A deadline to (re)write for this message, if the model extracted one.
     pub deadline: Option<DeadlineHit>,
@@ -1352,8 +1351,8 @@ impl ArchiveDisk {
 
 /// The squelch local store. Implemented by [`SqliteStore`].
 ///
-/// SECURITY: every method that can feed the MCP surface (`ranked_updates`,
-/// `thread_view`, `deadlines`) MUST exclude `sensitivity = 'sealed'` in the SQL
+/// SECURITY: every method that can feed the MCP surface (`thread_view`,
+/// `deadlines`, the agent listings) MUST exclude `sensitivity = 'sealed'` in the SQL
 /// itself. `sealed_messages` is the sole local-only escape hatch (TUI).
 pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// Insert or update a message (and its FTS body + derived contacts).
@@ -2124,7 +2123,7 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// two different things depending on which mode served it. Use
     /// [`Store::search_filtered`] to rank on relevance alone.
     ///
-    /// SECURITY: sealed rows are excluded in SQL, exactly like `ranked_updates`.
+    /// SECURITY: sealed rows are excluded in SQL, exactly like `thread_view`.
     fn search(
         &self,
         account_id: AccountId,
@@ -2659,8 +2658,6 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         account_id: AccountId,
         message_id: i64,
     ) -> Result<Option<DateTime<Utc>>>;
-
-    // ---- REVISITS (see `crate::triage::revisit`) --------------------------
 
     /// Bump the Stage-1 usage ledger for `(account_id, day)`: +1 call plus the
     /// response's token counts. Kept separate from Stage-2's ledger.

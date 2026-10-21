@@ -1200,8 +1200,7 @@ pub struct Stage1Config {
 
     // ---- Stage-1 LLM pass (the model run on every non-sealed email) --------
     // The heuristic fields above are its WITNESS and its offline fallback, never
-    // an alternative verdict: see [`crate::triage::router`]. Key, provider, and
-    // endpoint come from [`Stage2Config::resolve_llm`]; only the fields below
+    // an alternative verdict. Key, provider, and endpoint come from [`Stage2Config::resolve_llm`]; only the fields below
     // are Stage-1's own.
     /// The Stage-1 model id string. Default `claude-opus-5-5`: triage is the
     /// product, so the pass that sees every email runs the best model there is,

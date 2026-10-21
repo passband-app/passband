@@ -74,6 +74,13 @@ struct ThreadViewer: View {
     @State private var debugInfo: JSONValue?
     /// True for `Clip.flashWindow` after the subject is clicked-to-copy.
     @State private var subjectCopied = false
+    /// THE MESSAGES THE READER ASKED TO SEE IN THEIR OWN LANGUAGE ("show
+    /// original" on a translated card). Per message, and held HERE rather than
+    /// on the card because the subject in the bar follows the message it came
+    /// from: a card flipped to the French under an English subject would be
+    /// half a flip. Keyed by message id, which is global, so a thread switch
+    /// leaves nothing in here that could flip the wrong mail.
+    @State private var originals: Set<Int> = []
     /// messageId -> recorded opens of the user's own tracked sends. Only sent,
     /// tracked messages ever have an entry; see `refreshOpens`.
     @State private var opens: [Int: [MessageOpen]] = [:]
@@ -181,6 +188,18 @@ struct ThreadViewer: View {
     /// What a measuring pass is FOR. Any of the three changing means the
     /// heights on file answer a question nobody is asking any more: another
     /// thread, another message in this one, another column width.
+    private struct TranslationPoll: Equatable {
+        let thread: String
+        let pending: Bool
+    }
+
+    /// Seconds between refetches while a translation is pending; then stop.
+    private static let translationBackoff: [Int] = [3, 6, 12, 24]
+
+    private var translationPending: Bool {
+        messages.contains { $0.translation?.status == .pending }
+    }
+
     private struct MeasurePass: Equatable {
         let thread: String
         let count: Int
@@ -378,6 +397,21 @@ struct ThreadViewer: View {
             await refreshOpens()
         }
         .task(id: newestSender) { await refreshUnsub() }
+        // A TRANSLATION STILL BEING WRITTEN. The daemon translates on arrival
+        // (and on open, for archived mail), so a thread can land with a message
+        // whose English is seconds away. Refetched in place on a backoff that
+        // gives up: a translation that has not landed in about 45 seconds is
+        // one the next open or poll will bring, and a reader that kept asking
+        // would be polling for a model call that may never come back. Keyed on
+        // whether anything is pending, so the loop ends the moment nothing is.
+        .task(id: TranslationPoll(thread: threadId, pending: translationPending)) {
+            guard translationPending else { return }
+            for seconds in Self.translationBackoff {
+                try? await Task.sleep(for: .seconds(seconds))
+                guard !Task.isCancelled, translationPending else { return }
+                await refreshInPlace()
+            }
+        }
         // SIZE THE THREAD UP BEFORE IT IS SCROLLED THROUGH. Nothing here waits
         // on it: the pass runs off screen, fills the height memory message by
         // message, and the reader simply finds the sizes already there when it
@@ -663,11 +697,11 @@ struct ThreadViewer: View {
     private func subjectLine(lines: Int) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
             Button {
-                if let subject = thread?.subject, !subject.isEmpty {
+                if let subject = shownSubject, !subject.isEmpty {
                     Clip.copy(subject, flashing: $subjectCopied)
                 }
             } label: {
-                Text(thread?.subject ?? "…")
+                Text(shownSubject ?? "…")
                     .font(Typo.serif(19, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(lines)
@@ -675,7 +709,7 @@ struct ThreadViewer: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("copy subject")
+            .help(subjectHelp)
             if subjectCopied {
                 Text("copied!")
                     .font(Typo.micro)
@@ -684,6 +718,33 @@ struct ThreadViewer: View {
             }
         }
         .animation(.easeOut(duration: 0.18), value: subjectCopied)
+    }
+
+    /// The message the thread's subject belongs to: the oldest one whose own
+    /// subject header IS the thread's (or says nothing), else the oldest.
+    private var subjectSource: ClientMessage? {
+        guard let thread else { return nil }
+        return thread.messages.first { $0.subject == nil || $0.subject == thread.subject }
+            ?? thread.messages.first
+    }
+
+    /// The subject AS SHOWN: in English when the message it came from is being
+    /// shown translated, the thread's own otherwise. Only the bar uses this.
+    /// A reply still answers the original subject, since that is the one the
+    /// sender's mail client threads on.
+    private var shownSubject: String? {
+        guard let thread else { return nil }
+        guard let source = subjectSource, !originals.contains(source.id),
+            let t = source.readyTranslation, !t.subject.isEmpty
+        else { return thread.subject }
+        return t.subject
+    }
+
+    private var subjectHelp: String {
+        guard let thread, let shown = shownSubject, shown != thread.subject else {
+            return "copy subject"
+        }
+        return "copy subject. Original: \(thread.subject)"
     }
 
     private var participantsText: some View {
@@ -846,7 +907,11 @@ struct ThreadViewer: View {
                                     // and gets no marks: "everyone here is new"
                                     // is a claim, and nothing precedes it.
                                     previousRecipients: i > 0
-                                        ? messages[i - 1].audience : nil
+                                        ? messages[i - 1].audience : nil,
+                                    showingOriginal: originals.contains(m.id),
+                                    onToggleOriginal: {
+                                        if originals.remove(m.id) == nil { originals.insert(m.id) }
+                                    }
                                 ) {
                                     index = i
                                 }
@@ -1472,7 +1537,7 @@ struct ThreadViewer: View {
     /// whole rail hostage to a body no engine will ever be asked to lay out
     /// would mean a thread with one plain reply never gets a true map at all.
     private static func measuredCard(_ m: ClientMessage, style: ThreadStyle) -> CGFloat? {
-        guard let html = m.html, !html.isEmpty else {
+        guard let html = m.presented().html, !html.isEmpty else {
             // Its own guess, not `mapEstimate`: this card draws with its quoted
             // history collapsed behind a chip, exactly as the html ones do, and
             // the rail must not draw it at the length of the chain it is
@@ -1484,7 +1549,7 @@ struct ThreadViewer: View {
         // Under the STYLE's own key: the same message has one measurement per
         // measure it was laid out at, and a card's height on a bubble rail is
         // the wrong length of nub.
-        guard let body = FrameHeights.shared.get(style.frameKey(m.id)) else { return nil }
+        guard let body = FrameHeights.shared.get(style.frameKey(for: m)) else { return nil }
         return MinimapGeometry.card(
             bodyHeight: body, attachments: m.attachmentList.count, style: style, scale: .current)
     }
@@ -1497,7 +1562,8 @@ struct ThreadViewer: View {
     /// while you read it. A map that is uniformly approximate holds still, and
     /// holding still is the whole job.
     private static func mapEstimate(_ m: ClientMessage, style: ThreadStyle) -> CGFloat {
-        MinimapGeometry.estimate(
+        let m = m.presented()
+        return MinimapGeometry.estimate(
             text: m.content, html: m.html, attachments: m.attachmentList.count, style: style,
             scale: .current)
     }
@@ -1902,7 +1968,7 @@ struct ThreadViewer: View {
 
     /// What the find reads for a message nothing has mounted: its text.
     private var findCorpus: [(id: Int, text: String)] {
-        messages.map { (id: $0.id, text: $0.content) }
+        messages.map { (id: $0.id, text: $0.presented(original: originals.contains($0.id)).content) }
     }
 
     /// ⌘F. Again with the bar already up puts the caret back in it.
@@ -3191,7 +3257,8 @@ extension View {
                             selected: false, ruled: false, opens: [],
                             // A glimpse of the NEXT thread: no "you" rewrite and
                             // no diff against a message it is not beside.
-                            me: nil, previousRecipients: nil, onSelect: {})
+                            me: nil, previousRecipients: nil, showingOriginal: false,
+                            onToggleOriginal: {}, onSelect: {})
                     } else {
                         MessageSenderHeading(sender: row.senderString)
                             .padding(.leading, MessageCard.bodyInset)
@@ -3294,6 +3361,10 @@ private struct MessageCard: View, Equatable {
     /// first message of a thread and on any predecessor whose headers were never
     /// read — see `MessageRecipients`.
     nonisolated let previousRecipients: MessageAudience?
+    /// The reader asked for this message in its own language rather than the
+    /// translation. Meaningless on a message with no ready translation.
+    nonisolated let showingOriginal: Bool
+    let onToggleOriginal: () -> Void
     let onSelect: () -> Void
 
     /// The gutter the rules live in, which every body is inset by. Named
@@ -3309,6 +3380,7 @@ private struct MessageCard: View, Equatable {
         a.message == b.message && a.style == b.style && a.position == b.position
             && a.selected == b.selected && a.ruled == b.ruled && a.opens == b.opens
             && a.me == b.me && a.previousRecipients == b.previousRecipients
+            && a.showingOriginal == b.showingOriginal
     }
 
     /// Which side of the conversation this is. Only the chat style asks.
@@ -3329,6 +3401,11 @@ private struct MessageCard: View, Equatable {
         // keeping.
         VStack(alignment: chat ? side : .leading, spacing: chat ? Space.scaled(5) : Space.scaled(9)) {
             if chat { caption } else { cardHeader }
+            // Its own slot, ahead of the body and always in the tuple, so the
+            // body's position never moves when a translation lands or flips.
+            TranslationStrip(
+                translation: message.translation, showingOriginal: showingOriginal,
+                onToggle: onToggleOriginal)
             mail
             AttachmentStrip(attachments: message.attachmentList, inBody: inBodyImages)
         }
@@ -3395,10 +3472,16 @@ private struct MessageCard: View, Equatable {
     /// bubble fits fewer characters on a line than a card does, so the guess is
     /// a different number for the same words. Read from a view body, and the
     /// split is a regex walk of every line of the message.
-    static func guessedBody(_ message: ClientMessage, style: ThreadStyle) -> CGFloat {
-        FrameHeights.shared.guess(style.frameKey(message.id)) {
+    ///
+    /// Of the version being SHOWN, under that version's key: a translation is
+    /// a different length from the original.
+    static func guessedBody(
+        _ message: ClientMessage, style: ThreadStyle, original: Bool = false
+    ) -> CGFloat {
+        let shown = message.presented(original: original)
+        return FrameHeights.shared.guess(style.frameKey(for: message, original: original)) {
             MinimapGeometry.textHeight(
-                text: Quotes.splitText(message.content).visible, html: message.html, style: style,
+                text: Quotes.splitText(shown.content).visible, html: shown.html, style: style,
                 scale: .current)
         }
     }
@@ -3539,17 +3622,30 @@ private struct MessageCard: View, Equatable {
     /// conditional, and a flip would collapse the quoted history the reader
     /// opened. The bubble's chrome is values on that one view — zero padding
     /// and a clear fill ARE the card.
+    ///
+    /// IN TRANSLATION by default, when the daemon has one ready
+    /// (ClientMessage.presented). The two versions are two documents under two
+    /// keys, and `.id` on WHICH VERSION is what makes a language flip a fresh
+    /// frame: the web view prepares its body once, at init, so the same view
+    /// handed the other version's html would go on drawing the first. The id
+    /// is the version and NOT the whole key, which also carries the style: a
+    /// style flip must keep the frame's state (see `body`).
     @ViewBuilder
     private var mail: some View {
-        if let html = message.html, !html.isEmpty {
+        let shown = message.presented(original: showingOriginal)
+        let key = style.frameKey(for: message, original: showingOriginal)
+        let translated = !showingOriginal && message.readyTranslation != nil
+        if let html = shown.html, !html.isEmpty {
             EmailWebView(
-                html: html, cacheKey: style.frameKey(message.id),
+                html: html, cacheKey: key,
                 allowTrackers: message.allowsTrackers,
                 attachments: message.attachmentList,
-                textHeight: Self.guessedBody(message, style: style),
+                textHeight: Self.guessedBody(message, style: style, original: showingOriginal),
                 bubble: chat, mine: mine, findID: message.id)
+            .id(translated)
         } else {
-            PlainBody(content: message.content, fills: !chat, findID: message.id)
+            PlainBody(content: shown.content, fills: !chat, findID: message.id)
+                .id(translated)
                 .padding(.horizontal, chat ? Space.s12 : 0)
                 .padding(.vertical, chat ? Space.scaled(9) : 0)
                 // The same corner the web frame clips itself to, so a plain
@@ -3597,7 +3693,10 @@ private struct MessageCard: View, Equatable {
     /// and counting it here would take the tile away from a photo nothing draws.
     /// Only a body that actually names a cid pays for the extra pass.
     private var inBodyImages: Set<Int> {
-        guard let html = message.html, !html.isEmpty else { return [] }
+        // The body being SHOWN: a translation keeps the original's markup, cid
+        // references and all, but it is the one on screen.
+        guard let html = message.presented(original: showingOriginal).html, !html.isEmpty
+        else { return [] }
         return InBodyImages.shared.ids(
             messageId: message.id, html: html, allowTrackers: message.allowsTrackers,
             attachments: message.attachmentList)

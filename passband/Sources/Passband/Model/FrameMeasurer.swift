@@ -124,11 +124,11 @@ final class FrameMeasurer {
         // NEWEST FIRST: the thread opens on the newest message with the history
         // above it, so the next size anybody needs is the one just behind them.
         let jobs = messages.reversed().filter { message in
-            guard let html = message.html, !html.isEmpty else { return false }
+            guard let html = message.presented().html, !html.isEmpty else { return false }
             // AUTHORITATIVE, not merely present: a height a live frame put
             // there is a stopgap taken inside a box it had sized itself, and
             // replacing exactly those is what this pass is for.
-            return FrameHeights.shared.authoritative(style.frameKey(message.id)) == nil
+            return FrameHeights.shared.authoritative(style.frameKey(for: message)) == nil
         }
         guard !jobs.isEmpty else {
             onFinished()
@@ -153,7 +153,7 @@ final class FrameMeasurer {
                 guard ReaderMetrics.current == metrics else { return }
                 if height > 0 {
                     FrameHeights.shared.set(
-                        style.frameKey(message.id), height, authoritative: true)
+                        style.frameKey(for: message), height, authoritative: true)
                     misses = 0
                 } else {
                     misses += 1
@@ -279,7 +279,8 @@ final class FrameMeasurer {
     }
 
     private static func prepare(_ message: ClientMessage) async -> EmailWebView.Prepared {
-        let html = message.html ?? ""
+        // The document the card will draw: the translation, when there is one.
+        let html = message.presented().html ?? ""
         let allow = message.allowsTrackers
         let parts = message.attachmentList
         let key = EmailWebView.Prepared.cacheKey(html, allow, parts)
@@ -415,4 +416,14 @@ private final class MeasureRelay: NSObject, WKNavigationDelegate {
     /// A load that was claimed and then never started. Left standing, the claim
     /// would be spent on somebody else's navigation.
     func forgetOwnLoad() { pendingOwnLoads = max(0, pendingOwnLoads - 1) }
+}
+
+extension ThreadStyle {
+    /// The key for `message` as the reader draws it (ClientMessage.presented):
+    /// translated unless there is no ready translation or the reader asked for
+    /// the original. Here rather than beside `frameKey` because ThreadStyle (and
+    /// ThreadPrefetch) are compiled by the tests without the wire types.
+    func frameKey(for message: ClientMessage, original: Bool = false) -> String {
+        frameKey(message.id, translated: !original && message.readyTranslation != nil)
+    }
 }

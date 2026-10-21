@@ -2296,7 +2296,7 @@ final class FramePrewarmer {
         guard store.threadId != threadId else { return }
         guard let view = try? await ThreadPrefetch.shared.fetch(threadId),
             gen == generation, view.cache_allowed == true,
-            let message = view.messages.last, let html = message.html, !html.isEmpty
+            let message = view.messages.last, let html = message.presented().html, !html.isEmpty
         else { return }
         let style = ThreadViewer.resolveStyle(
             threadId: threadId, messages: view.messages,
@@ -2310,7 +2310,9 @@ final class FramePrewarmer {
     private func render(
         _ message: ClientMessage, style: ThreadStyle, width: CGFloat, prerendered: Bool, gen: Int
     ) async {
-        guard let html = message.html, !html.isEmpty else { return }
+        // The document the card will draw (the translation, when there is one)
+        // under the key the card will ask for it by.
+        guard let html = message.presented().html, !html.isEmpty else { return }
         let bubble = style == .bubbles
         let allowRemote = Prefs.shared.loadRemoteImages
 
@@ -2330,7 +2332,7 @@ final class FramePrewarmer {
         }
         guard gen == generation, !prepared.html.isEmpty else { return }
 
-        let poolKey = style.frameKey(message.id)
+        let poolKey = style.frameKey(for: message)
         guard
             let renderKey = EmailFrame.renderKey(
                 poolKey: poolKey, html: prepared.html, source: prepared.sourceHash,

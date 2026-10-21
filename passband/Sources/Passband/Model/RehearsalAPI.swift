@@ -69,6 +69,22 @@ actor RehearsalAPI {
         /// Sent mail and an outbox, for the same reason and the same caller:
         /// the lesson sends nothing and schedules nothing, so its Sent page is
         /// the empty one. Only a screenshot ever fills these.
+        /// THREADS IN ANOTHER LANGUAGE, which the lesson does not have: each
+        /// is a run of versions served one per fetch, the last one sticking, so
+        /// a pending translation can be seen to land the way a daemon's does.
+        /// See `TranslationFixture`.
+        private var stagedThreads: [String: [ClientThreadView]] = [:]
+        func stage(thread versions: [ClientThreadView]) {
+            guard let id = versions.first?.thread_id else { return }
+            stagedThreads[id] = versions
+        }
+        private func stagedThread(_ id: String) -> ClientThreadView? {
+            guard var versions = stagedThreads[id], let next = versions.first else { return nil }
+            if versions.count > 1 { versions.removeFirst() }
+            stagedThreads[id] = versions
+            return next
+        }
+
         private var stagedSent: [SentItem] = []
         private var stagedScheduled: [ScheduledSendView] = []
         func stage(sent: [SentItem], scheduled: [ScheduledSendView]) {
@@ -94,6 +110,19 @@ actor RehearsalAPI {
         let query = Dictionary((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { _, new in new })
         let body = (request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:]
         let data: Data
+
+        #if DEBUG
+            if method == "GET", components.count == 3, components[1] == "thread",
+                let staged = stagedThread(components[2])
+            {
+                return (
+                    try encode(staged),
+                    HTTPURLResponse(
+                        url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"])!
+                )
+            }
+        #endif
 
         switch (method, path) {
         case ("GET", "/client/v2/feed"):
@@ -665,3 +694,165 @@ actor RehearsalAPI {
     private func unsupported() -> APIError { APIError(.badRequest, 400, "This action isn't available in the practice inbox. Nothing was sent or changed outside this rehearsal.") }
     private func missing() -> APIError { APIError(.notFound, 404, "This message is not in the practice inbox.") }
 }
+
+#if DEBUG
+    /// MAIL IN FRENCH, for seeing the reader's translation strip without a
+    /// daemon that translates (PassbandiOS FixtureStage's `translated` scenes,
+    /// and any Mac hook that wants it). Debug only, and never part of the
+    /// lesson: the practice inbox is English, and a stranger's first look at
+    /// Passband is not the place to meet a language they may not read.
+    extension RehearsalAPI {
+        enum TranslationFixture {
+            enum Scene: String, CaseIterable, Sendable {
+                /// One message, translated, in HTML.
+                case done
+                /// One plain message whose fact check failed.
+                case incomplete
+                /// One plain message still being translated, which stays pending.
+                case pending
+                /// All three in one thread, oldest first, where the pending one
+                /// lands as done on the third fetch (the reader's third refetch).
+                case all
+            }
+
+            static let doneHTML = """
+                <div style="font-family:Georgia,serif;max-width:560px;margin:0 auto;color:#2b2b2b">
+                <h2 style="font-weight:normal;margin:0 0 12px">Votre réservation est confirmée</h2>
+                <p>Bonjour Jamie,</p>
+                <p>Nous avons le plaisir de confirmer votre table pour <strong>3 personnes</strong>
+                le <strong>jeudi 24 octobre à 20h00</strong>.</p>
+                <p>Numéro de confirmation : <strong>LB-48213</strong><br>
+                Adresse : 12 rue des Martyrs, 75009 Paris</p>
+                <p>Merci de nous prévenir au moins 24 heures à l'avance en cas d'annulation.
+                <a href="https://example.com/reservation">Gérer ma réservation</a></p>
+                <p>À très bientôt,<br>L'équipe du Bistrot Lumière</p>
+                </div>
+                """
+
+            static let doneHTMLEnglish = """
+                <div style="font-family:Georgia,serif;max-width:560px;margin:0 auto;color:#2b2b2b">
+                <h2 style="font-weight:normal;margin:0 0 12px">Your reservation is confirmed</h2>
+                <p>Hello Jamie,</p>
+                <p>We are pleased to confirm your table for <strong>3 people</strong>
+                on <strong>Thursday, October 24 at 8:00 PM</strong>.</p>
+                <p>Confirmation number: <strong>LB-48213</strong><br>
+                Address: 12 rue des Martyrs, 75009 Paris</p>
+                <p>Please let us know at least 24 hours in advance if you need to cancel.
+                <a href="https://example.com/reservation">Manage my reservation</a></p>
+                <p>See you very soon,<br>The Bistrot Lumière team</p>
+                </div>
+                """
+
+            static let incompletePlain = """
+                Bonjour,
+
+                Votre relevé de compte du mois de septembre est disponible.
+                Solde au 30/09 : 1.234,56 €
+                Prélèvement prévu le 05/10 : 89,90 € (référence FR-7730-XQ)
+
+                Cordialement,
+                Banque Horizon
+                """
+
+            static let incompleteEnglish = """
+                Hello,
+
+                Your account statement for September is available.
+                Balance on 09/30: 1,234.56 €
+                Direct debit scheduled for 10/05: 89.90 €
+
+                Kind regards,
+                Banque Horizon
+                """
+
+            static let pendingPlain = """
+                Salut Jamie !
+
+                On se retrouve toujours samedi au marché ? Je pensais arriver vers 10h, et on pourrait déjeuner ensuite chez Paulette.
+
+                Bises,
+                Camille
+                """
+
+            static let pendingEnglish = """
+                Hi Jamie!
+
+                Are we still meeting at the market on Saturday? I was thinking of getting there around 10, and we could have lunch at Paulette's afterwards.
+
+                Love,
+                Camille
+                """
+
+            private static func translation(
+                _ status: ClientTranslation.Status, subject: String, content: String,
+                html: String? = nil, missing: [String]? = nil
+            ) -> ClientTranslation {
+                ClientTranslation(
+                    source_lang: "fr", source_language: "French", status: status, subject: subject,
+                    content: content, html: html, missing_facts: missing)
+            }
+
+            private static func message(
+                id: Int, name: String, addr: String, minutesAgo: Double, subject: String,
+                content: String, html: String? = nil, translation: ClientTranslation?
+            ) -> ClientMessage {
+                ClientMessage(
+                    id: id, from_addr: addr, from_name: name,
+                    received_at: Date().addingTimeInterval(-minutesAgo * 60).ISO8601Format(),
+                    content: content, html: html, subject: subject, attachments: [],
+                    is_sent: false, is_spam: false, sender_known: true, translation: translation)
+            }
+
+            static func done() -> ClientMessage {
+                message(
+                    id: 9101, name: "Bistrot Lumière", addr: "reservations@bistrot-lumiere.example",
+                    minutesAgo: 90, subject: "Votre réservation est confirmée",
+                    content: "Votre réservation est confirmée", html: doneHTML,
+                    translation: translation(
+                        .done, subject: "Your reservation is confirmed",
+                        content: "Your reservation is confirmed", html: doneHTMLEnglish))
+            }
+
+            static func incomplete() -> ClientMessage {
+                message(
+                    id: 9102, name: "Banque Horizon", addr: "releves@banque-horizon.example",
+                    minutesAgo: 45, subject: "Votre relevé de septembre",
+                    content: incompletePlain,
+                    translation: translation(
+                        .incomplete, subject: "Your September statement", content: incompleteEnglish,
+                        missing: ["FR-7730-XQ"]))
+            }
+
+            static func pending(landed: Bool = false) -> ClientMessage {
+                message(
+                    id: 9103, name: "Camille Durand", addr: "camille@exemple.example",
+                    minutesAgo: 2, subject: "Samedi au marché ?", content: pendingPlain,
+                    translation: landed
+                        ? translation(.done, subject: "Saturday at the market?", content: pendingEnglish)
+                        : translation(.pending, subject: "", content: ""))
+            }
+
+            /// The versions to stage for `scene` under `threadId`, first fetch
+            /// first. Seed the prefetch cache with the first one too, so the
+            /// reader opens on it rather than on the practice thread it replaces.
+            static func versions(_ scene: Scene, threadId: String) -> [ClientThreadView] {
+                func view(_ subject: String, _ messages: [ClientMessage]) -> ClientThreadView {
+                    ClientThreadView(
+                        cache_allowed: true, thread_id: threadId, subject: subject, messages: messages)
+                }
+                switch scene {
+                case .done: return [view("Votre réservation est confirmée", [done()])]
+                case .incomplete: return [view("Votre relevé de septembre", [incomplete()])]
+                case .pending: return [view("Samedi au marché ?", [pending()])]
+                case .all:
+                    let subject = "Votre réservation est confirmée"
+                    return [
+                        view(subject, [done(), incomplete(), pending()]),
+                        view(subject, [done(), incomplete(), pending()]),
+                        view(subject, [done(), incomplete(), pending(landed: true)]),
+                    ]
+                }
+            }
+        }
+    }
+#endif

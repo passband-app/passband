@@ -343,8 +343,47 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// daemon, which reads as unknown — the strict side. Governs the reader's
     /// tracker strip: see `allowsTrackers`.
     var sender_known: Bool?
+    /// THIS MESSAGE IN ENGLISH, when it was written in another language (see
+    /// docs/TRANSLATION.md). ABSENT on a daemon too old to translate, on mail
+    /// that is already English, and on a translation that failed, and all
+    /// three read the same way: the original, with nothing said about it.
+    /// Optional so the notification extension, which decodes this type too,
+    /// never fails a push over a field it does not draw.
+    var translation: ClientTranslation?
 
     var attachmentList: [Attachment] { attachments ?? [] }
+
+    /// The translation the reader may show INSTEAD of the original: one that
+    /// has finished and actually carries a body. A pending one shows the
+    /// original under a "translating" note, so it is not this.
+    var readyTranslation: ClientTranslation? {
+        guard let translation, translation.ready else { return nil }
+        return translation
+    }
+
+    /// THE MESSAGE AS THE READER DRAWS IT. The translated subject and body
+    /// swapped in, or the message untouched when there is no ready translation
+    /// or the reader asked for the original. Everything that ACTS on mail
+    /// (reply, forward, quoting) keeps the original: this is for drawing, and
+    /// for sizing what is drawn.
+    ///
+    /// A translation without html is drawn as plain text even when the
+    /// original had html: the translated text is the thing to read, and
+    /// showing the untranslated document around it would be showing the
+    /// original.
+    func presented(original: Bool = false) -> ClientMessage {
+        guard !original, let t = readyTranslation else { return self }
+        var shown = self
+        if !t.subject.isEmpty { shown.subject = t.subject }
+        if let html = t.html, !html.isEmpty {
+            shown.html = html
+            if !t.content.isEmpty { shown.content = t.content }
+        } else {
+            shown.html = nil
+            shown.content = t.content
+        }
+        return shown
+    }
 
     /// The side of the conversation this message is on, for the chat style.
     /// `nil` (old daemon) is THEIRS: an unknown side drawn as the user's own
@@ -362,6 +401,76 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// and a mark on every message from a known contact answers nothing.
     var needsAttention: Bool {
         (attention_open ?? false) && (tier == .pastDue || tier == .deadline)
+    }
+}
+
+/// core::types::ClientTranslation: one message's English rendering. Decoded
+/// LENIENTLY, field by field: a missing or mistyped field takes its empty
+/// value rather than failing the message it rides on, because a thread that
+/// will not decode is a thread that will not open, and the translation is the
+/// optional half of it. An unknown status reads as `done`.
+struct ClientTranslation: Codable, Sendable, Hashable {
+    enum Status: String, LenientRawEnum {
+        case pending, done, incomplete
+        static var unknownFallback: Status { .done }
+    }
+
+    /// ISO code, e.g. "fr".
+    var source_lang: String
+    /// English name, e.g. "French". What the reader says.
+    var source_language: String
+    var status: Status
+    var subject: String
+    var content: String
+    var html: String?
+    /// What the daemon's fact check found in the original and not in the
+    /// translation (numbers, codes, links). Only on `incomplete`.
+    var missing_facts: [String]?
+
+    init(
+        source_lang: String, source_language: String, status: Status, subject: String,
+        content: String, html: String? = nil, missing_facts: [String]? = nil
+    ) {
+        self.source_lang = source_lang
+        self.source_language = source_language
+        self.status = status
+        self.subject = subject
+        self.content = content
+        self.html = html
+        self.missing_facts = missing_facts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case source_lang, source_language, status, subject, content, html, missing_facts
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func text(_ key: CodingKeys) -> String {
+            ((try? c.decodeIfPresent(String.self, forKey: key)) ?? nil) ?? ""
+        }
+        source_lang = text(.source_lang)
+        source_language = text(.source_language)
+        status = ((try? c.decodeIfPresent(Status.self, forKey: .status)) ?? nil) ?? .done
+        subject = text(.subject)
+        content = text(.content)
+        html = (try? c.decodeIfPresent(String.self, forKey: .html)) ?? nil
+        missing_facts = (try? c.decodeIfPresent([String].self, forKey: .missing_facts)) ?? nil
+    }
+
+    /// The language as the reader names it: the English name, else the code,
+    /// else a phrase that is still a sentence.
+    var languageName: String {
+        let name = source_language.trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty { return name }
+        let code = source_lang.trimmingCharacters(in: .whitespaces)
+        return code.isEmpty ? "another language" : code.uppercased()
+    }
+
+    /// Finished, and with something to show. A `done` that arrived with no
+    /// body at all is treated as no translation rather than a blank message.
+    var ready: Bool {
+        status != .pending && (!(html ?? "").isEmpty || !content.isEmpty)
     }
 }
 

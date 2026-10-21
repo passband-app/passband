@@ -83,6 +83,22 @@
                     store.openThread(first.thread_id, queue: store.sitrep.standing, from: .sitrep)
                     Task { await openReply(on: first.id, store) }
                 }
+            // MAIL IN FRENCH, which the practice inbox does not have: the
+            // reader's translation strip. `translated` is an HTML message
+            // shown in English, `translated-incomplete` one whose fact check
+            // failed, `translated-pending` one still being written (it stays
+            // pending, so the reader's backoff runs out), and
+            // `translated-all` the three in one thread, where the pending one
+            // lands on the reader's third refetch.
+            case let scene where scene.hasPrefix("translated"):
+                let kind: RehearsalAPI.TranslationFixture.Scene =
+                    switch scene {
+                    case "translated-incomplete": .incomplete
+                    case "translated-pending": .pending
+                    case "translated-all": .all
+                    default: .done
+                    }
+                if let first { Task { await stageTranslated(first, kind, store) } }
             case let chain where chain.hasPrefix("chain"):
                 if let first { Task { await stageChain(first, scene: chain, store) } }
             // THE READER ON A READING STACK, and the checkmark's hold on it.
@@ -263,6 +279,20 @@
             store.inlineReply?.recipients = set
             store.inlineReply?.seededRecipients = set
             store.inlineReply?.recipientsStated = true
+        }
+
+        /// A thread in French under a real practice thread's id, staged in the
+        /// fixture daemon (so the reader's refetches see it too) and in the
+        /// prefetch cache, in the same order `stageChain` explains.
+        private static func stageTranslated(
+            _ first: AttentionUpdate, _ kind: RehearsalAPI.TranslationFixture.Scene,
+            _ store: AppStore
+        ) async {
+            let versions = RehearsalAPI.TranslationFixture.versions(kind, threadId: first.thread_id)
+            guard let opening = versions.first else { return }
+            await RehearsalAPI.shared.stage(thread: versions)
+            store.openThread(first.thread_id, queue: store.sitrep.standing, from: .sitrep)
+            ThreadPrefetch.shared.note(first.thread_id, opening)
         }
 
         /// A CONVERSATION, which the practice mailbox does not have: every

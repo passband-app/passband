@@ -1248,37 +1248,92 @@ fn ensure_source_assessments(
     account: AccountId,
     messages: &[AgentMessage],
 ) -> Result<()> {
+    // Reads first, then every enqueue under ONE commit. An enqueue is three
+    // or four writes, and a thread read that queued ten sources paid each one
+    // as its own autocommit transaction: thirty fsyncs at `synchronous=FULL`,
+    // under the store mutex, on a READ (measured at 97 ms for ten on a
+    // file-backed store; 31 ms and one fsync with one commit). The common
+    // case, nothing to queue, never takes the write lock.
+    let mut wanted = Vec::new();
     for message in messages {
-        if is_archive_conn(conn, account, message.id)? {
-            continue;
+        if source_assessment_wanted(conn, account, message.id)? {
+            wanted.push(message.id);
         }
-        let access: Option<String> = conn
-            .query_row(
-                "SELECT access FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
-                params![account, message.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if access.as_deref().is_some_and(|state| state != "pending") {
-            continue;
-        }
-        let active: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
-             AND kind IN ('triage','access') AND state IN ('queued','leased'))",
-            params![account, message.id],
-            |row| row.get(0),
-        )?;
-        let terminal: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs j JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
-             WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access') AND j.state IN ('failed','completed') AND j.input_revision=a.revision)",
-            params![account,message.id],|row|row.get(0),
-        )?;
-        if active || terminal {
-            continue;
-        }
-        enqueue_agent_triage_conn(conn, account, message.id, "source_access", false)?;
     }
-    Ok(())
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    in_write_transaction(conn, |tx| {
+        for id in &wanted {
+            // Asked again inside the transaction, because an enqueue can queue
+            // work for a LATER source in the same batch (a dependent's refresh
+            // through `queue_dependent_refreshes`), and that source is then
+            // active and must be skipped, exactly as the one-at-a-time loop
+            // skipped it. The answer can also have changed under a caller
+            // that took its time between the two phases.
+            if source_assessment_wanted(tx, account, *id)? {
+                enqueue_agent_triage_conn(tx, account, *id, "source_access", false)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Does reading this source as evidence call for an access job: not an
+/// archive row (see [`ensure_source_assessments`]), no assessment yet or one
+/// still pending, and no job already queued, leased, or finished against the
+/// current revision.
+fn source_assessment_wanted(conn: &Connection, account: AccountId, message: i64) -> Result<bool> {
+    if is_archive_conn(conn, account, message)? {
+        return Ok(false);
+    }
+    let access: Option<String> = conn
+        .query_row(
+            "SELECT access FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
+            params![account, message],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if access.as_deref().is_some_and(|state| state != "pending") {
+        return Ok(false);
+    }
+    let active: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
+         AND kind IN ('triage','access') AND state IN ('queued','leased'))",
+        params![account, message],
+        |row| row.get(0),
+    )?;
+    let terminal: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs j JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
+         WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access') AND j.state IN ('failed','completed') AND j.input_revision=a.revision)",
+        params![account,message],|row|row.get(0),
+    )?;
+    Ok(!active && !terminal)
+}
+
+/// Run `f` under ONE write transaction: the caller's when one is open (the
+/// `_conn` helpers compose, and SQLite refuses a nested BEGIN), otherwise an
+/// IMMEDIATE one of its own, committed when `f` returns Ok and rolled back
+/// when it does not.
+///
+/// IMMEDIATE rather than DEFERRED on purpose. A deferred transaction whose
+/// first statement is a SELECT pins a read snapshot, and if another process
+/// commits before this one's first write (`squelchd token`, `squelchd pair`,
+/// which share the file with a serving daemon) that write fails at once with
+/// `SQLITE_BUSY_SNAPSHOT`: the busy handler is never consulted for it. Taking
+/// the write lock up front waits out `busy_timeout` instead, which is what
+/// each autocommit statement did before the writes were batched.
+pub(super) fn in_write_transaction<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    if !conn.is_autocommit() {
+        return f(conn);
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let out = f(&tx)?;
+    tx.commit()?;
+    Ok(out)
 }
 
 fn leased(conn: &Connection, job: &AgentJob) -> Result<bool> {
@@ -1324,6 +1379,33 @@ pub(crate) const TRIAGE_WAITING_SQL: &str = "SELECT
      FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
      WHERE account_id=?1 AND state IN ('queued','leased') AND kind IN ('triage','access')
        AND trigger NOT LIKE 'revisit:%' AND trigger!='archive_access'";
+
+/// [`SqliteStore::next_agent_jobs_due`], pinned to the same index: its
+/// `(account_id, state, kind, available_at)` seeks straight to the pending
+/// rows of the kinds asked for and serves `available_at` from the index, so
+/// only a leased row is fetched, for its `lease_until`. The partial index the
+/// claim itself seeks carries neither state nor kind and would walk every
+/// pending job of the tenant, a first backfill's whole triage backlog among
+/// them, to find the two notification kinds.
+///
+/// "Claimable" is [`CLAIM_JOB_SQL`]'s own notion, so that a job this read
+/// counts is one the claim will hand out: queued and available, or leased
+/// until its lease lapses (a leased row with no `lease_until`, which no claim
+/// writes, is never claimable, and `MAX` of a NULL is NULL, which `MIN`
+/// skips); and of a message that exists, the claim's own join. The per-thread
+/// exclusion the claim adds applies to triage and access jobs only. Both
+/// time columns are RFC 3339 text, which orders as text, as the claim's own
+/// comparison relies on. The kinds arrive as one JSON array, so the statement
+/// is one string whatever their number. A kind whose pending rows are all
+/// unclaimable comes back with a NULL time, which the caller drops.
+pub(crate) const NEXT_JOBS_DUE_SQL: &str = "SELECT j.kind,
+       MIN(CASE WHEN j.state='leased' THEN MAX(j.available_at, j.lease_until)
+                ELSE j.available_at END)
+     FROM agent_triage_jobs j INDEXED BY idx_agent_jobs_account_ready
+     JOIN messages m ON m.account_id=j.account_id AND m.id=j.message_id
+     WHERE j.account_id=?1 AND j.state IN ('queued','leased')
+       AND j.kind IN (SELECT value FROM json_each(?2))
+     GROUP BY j.kind";
 
 /// [`SqliteStore::triage_budget_parked`], pinned for the same reason.
 pub(crate) const TRIAGE_BUDGET_PARKED_SQL: &str = "SELECT COUNT(*), MIN(available_at)
@@ -1703,6 +1785,30 @@ impl AgentTriageStore for SqliteStore {
             arrival_eligible,
             foreground,
         }))
+    }
+    fn next_agent_jobs_due(
+        &self,
+        account: AccountId,
+        kinds: &[&str],
+    ) -> Result<Vec<(String, DateTime<Utc>)>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock()?;
+        let mut statement = conn.prepare_cached(NEXT_JOBS_DUE_SQL)?;
+        let rows = statement.query_map(params![account, json(&kinds)?], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        rows.filter_map(|row| match row {
+            Ok((kind, Some(due))) => Some(
+                DateTime::parse_from_rfc3339(&due)
+                    .map(|due| (kind, due.with_timezone(&Utc)))
+                    .map_err(|e| CoreError::Other(e.into())),
+            ),
+            Ok((_, None)) => None,
+            Err(e) => Some(Err(e.into())),
+        })
+        .collect()
     }
     fn load_agent_context(&self, job: &AgentJob) -> Result<AgentContext> {
         context(&*self.lock()?, job.account_id, job.message_id)
@@ -3003,6 +3109,122 @@ mod tests {
         }
         store
     }
+    /// THE LANE'S DUE READ: when the next claimable job of each notification
+    /// kind is due, over the rows the claim seeks, taking nothing. Queued and
+    /// available reads as its own time (in the past: due now); claimed, as
+    /// the end of its lease, which is when the claim would hand it out again;
+    /// completed, as nothing. A kind the lane does not claim, and another
+    /// tenant's job, are not counted. And it is a read: the job it reports
+    /// is still there for the claim.
+    #[test]
+    fn next_agent_jobs_due_read_the_queue_without_claiming() {
+        let store = fixture();
+        let kinds = ["notification", "deliberate_notification"];
+        let due = |kinds: &[&str]| {
+            let mut rows = store.next_agent_jobs_due(1, kinds).unwrap();
+            rows.sort();
+            rows
+        };
+        assert_eq!(due(&kinds), []);
+        let past = Utc::now() - Duration::minutes(5);
+        let ahead = Utc::now() + Duration::hours(1);
+        store.lock().unwrap().execute(
+            "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,available_at)
+             VALUES(1,1,'notification','arrival',1,?1),(1,2,'deliberate_notification','decision',1,?2),
+                   (1,2,'triage','arrival',1,?1),(2,3,'notification','arrival',1,?1)",
+            params![past.to_rfc3339(), ahead.to_rfc3339()],
+        ).unwrap();
+        assert_eq!(due(&[]), [], "no kinds, nothing");
+        assert_eq!(
+            due(&kinds),
+            [
+                ("deliberate_notification".to_string(), ahead),
+                ("notification".to_string(), past)
+            ],
+            "each kind's own next; the triage row at the same time is not the lane's"
+        );
+        assert!(past <= Utc::now(), "and the queued one is due now");
+        let job = store
+            .claim_agent_job(1, "notification", Utc::now(), 60)
+            .unwrap()
+            .expect("the read took nothing");
+        assert_eq!(job.message_id, 1);
+        let leased_until = due(&["notification"])[0].1;
+        assert!(
+            leased_until > Utc::now() + Duration::seconds(55)
+                && leased_until <= Utc::now() + Duration::seconds(60),
+            "leased, it is due when the lease lapses: {leased_until}"
+        );
+        assert!(store.complete_agent_job(&job).unwrap());
+        assert_eq!(
+            due(&kinds),
+            [("deliberate_notification".to_string(), ahead)],
+            "completed, its kind has nothing pending"
+        );
+        assert_eq!(
+            store.next_agent_jobs_due(2, &kinds).unwrap(),
+            [("notification".to_string(), past)],
+            "the other tenant's own queue"
+        );
+        // WHAT THE CLAIM WOULD REFUSE, THE READ DOES NOT COUNT: a job whose
+        // message is gone, and a leased row no claim wrote (no lease end).
+        store.lock().unwrap().execute(
+            "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,available_at,state)
+             VALUES(1,99,'notification','arrival',1,?1,'queued'),(1,1,'notification','orphan-lease',1,?1,'leased')",
+            params![past.to_rfc3339()],
+        ).unwrap();
+        assert_eq!(
+            due(&kinds),
+            [("deliberate_notification".to_string(), ahead)],
+            "neither the orphan nor the endless lease is a job to wake for"
+        );
+        assert!(
+            store
+                .claim_agent_job(1, "notification", Utc::now(), 60)
+                .unwrap()
+                .is_none(),
+            "and the claim agrees"
+        );
+    }
+
+    /// The due read SEARCHES the account's ready index on account, state and
+    /// kind, never scans the jobs table; and THE CANARY: with the index gone
+    /// the pinned statement no longer prepares, so the assertion above was
+    /// testing the index and not the planner's mood.
+    #[test]
+    fn next_jobs_due_seeks_the_account_ready_index() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {NEXT_JOBS_DUE_SQL}"))
+            .unwrap()
+            .query_map(
+                params![1, r#"["notification","deliberate_notification"]"#],
+                |r| r.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            plan.contains(
+                "INDEX idx_agent_jobs_account_ready (account_id=? AND state=? AND kind=?)"
+            ),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN agent_triage_jobs"), "{plan}");
+        assert!(
+            plan.contains("SEARCH m USING INTEGER PRIMARY KEY"),
+            "the message join is a rowid lookup per pending row:\n{plan}"
+        );
+        conn.execute_batch("DROP INDEX idx_agent_jobs_account_ready")
+            .unwrap();
+        assert!(
+            conn.prepare(NEXT_JOBS_DUE_SQL).is_err(),
+            "the statement is pinned to the index it was measured on"
+        );
+    }
+
     #[test]
     fn records_are_derived_from_facts_and_legacy_placements_are_retired() {
         let store = fixture();

@@ -239,6 +239,18 @@ pub trait AgentTriageStore: Send + Sync {
         now: DateTime<Utc>,
         lease_seconds: i64,
     ) -> Result<Option<AgentJob>>;
+    /// WHEN THE NEXT JOB OF EACH OF `kinds` IS DUE: one row per kind with a
+    /// pending job, carrying the time [`Self::claim_agent_job`] would first
+    /// hand one out. At or before now for a queued job already available;
+    /// later for one scheduled ahead (a retry) or leased until then. A READ
+    /// over the rows the claim seeks, so a lane can learn it has nothing to
+    /// claim, and when it next will, without taking the write lock the claim
+    /// takes. A kind with nothing pending is absent.
+    fn next_agent_jobs_due(
+        &self,
+        account: AccountId,
+        kinds: &[&str],
+    ) -> Result<Vec<(String, DateTime<Utc>)>>;
     fn load_agent_context(&self, job: &AgentJob) -> Result<AgentContext>;
     fn load_agent_access_message(&self, job: &AgentJob) -> Result<AgentMessage>;
     fn commit_agent_access(

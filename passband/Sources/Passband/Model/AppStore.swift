@@ -1628,6 +1628,10 @@ final class AppStore {
             epoch &+= 1
             wipeAccountState()
             wipeAccountCaches()
+            // A record reused by host match can be an account that was parked
+            // in the background, and these credentials may open a different
+            // mailbox behind the same host.
+            boardSnapshots[account.id] = nil
             // Arriving from the Connect gate the feeds are down, so this is a
             // no-op and the `.connected` transition below is what raises them
             // — the same route the single-account build took. Kept as a
@@ -1684,6 +1688,14 @@ final class AppStore {
             await APIClient.shared.configure(baseURL: serverURL, token: apiToken)
             AccountManager.shared.restartFeeds(account.id, with: fresh)
             settings = fresh
+            // The board on screen was read from the server these credentials
+            // replaced, which may not be the one they open. Nothing vouches
+            // for it until that one has been asked: the stamps go, so the
+            // next tick asks for everything, and a switch away before then
+            // keeps no snapshot (`keepBoardSnapshot` reads `statsEpoch`).
+            statsEpoch = nil
+            zonesLoadedAt = nil
+            mailLoadedAt = [:]
             #if os(iOS)
                 await PushRegistration.shared.registerAndSync()
             #endif
@@ -1819,6 +1831,7 @@ final class AppStore {
             SitrepPoller.shared.stop()
         }
         await AccountManager.shared.remove(id)
+        boardSnapshots[id] = nil
         // The saved headline can name people and plans from the mailbox just
         // forgotten. It is keyed by board, so it could never show for another
         // account, but it should not outlive the account either.
@@ -1878,16 +1891,31 @@ final class AppStore {
         defer { if switchIntent == intent { switchingTo = nil } }
         // One attempt, no retries: somebody is watching this one, and "that
         // server is not answering" now beats the same sentence in 15 seconds.
-        let checked = await switchPreflight(record, retrying: false)
+        //
+        // NOT ASKED AT ALL of an account whose board is being held: it has
+        // answered with these credentials this session, and there is a board
+        // to stand on if it no longer does. The round trip was the whole of
+        // what a switch back still waited for. A daemon that has died since
+        // shows its last board under the stale banner, which the first pull
+        // raises, and every other account is one press away as before.
+        let checked = await switchPreflight(
+            record, retrying: false, probing: boardSnapshots[record.id] == nil)
         guard switchIntent == intent else { return }
         guard case .ready(let next) = checked else {
             if case .refused(let why) = checked { reportSwitchFailure(why, for: record) }
             return
         }
         // (1) Never two at once — the awaits below are windows a second
-        //     switch could start in. The world may also have moved while the
-        //     target was being asked.
-        guard !accountActionsBlocked, !switching, record.id != AccountManager.shared.activeId
+        //     switch could start in. One already inside its teardown is
+        //     WAITED OUT, not lost to: the rail is showing this account's
+        //     mark, and a press dropped here put the old one back with
+        //     nothing said. The newest pick still wins, and the world may
+        //     have moved while the target was being asked, so everything is
+        //     read again on the far side.
+        while switching { try? await Task.sleep(for: .milliseconds(25)) }
+        guard switchIntent == intent, !accountActionsBlocked,
+            record.id != AccountManager.shared.activeId,
+            AccountManager.shared.accounts.contains(where: { $0.id == record.id })
         else { return }
         switching = true
         // (10) Whichever path we leave by.
@@ -1909,7 +1937,9 @@ final class AppStore {
     /// access panel, but nothing has been suspended or wiped yet, so blocking
     /// here is safe. The probe is built from the candidate credentials, so the
     /// live client is not touched either.
-    private func switchPreflight(_ record: AccountRecord, retrying: Bool) async -> SwitchPreflight {
+    private func switchPreflight(
+        _ record: AccountRecord, retrying: Bool, probing: Bool = true
+    ) async -> SwitchPreflight {
         let loaded = await AccountManager.shared.credentialLoad(for: record.id)
         guard case .ok(let next) = loaded else {
             if case .unreadable = loaded {
@@ -1917,6 +1947,7 @@ final class AppStore {
             }
             return .refused("no credentials for \(record.displayName) in the keychain")
         }
+        guard probing else { return .ready(next) }
         do {
             try await APIClient.shared.probe(
                 baseURL: next.serverURL, token: next.apiToken, retrying: retrying)
@@ -1963,6 +1994,13 @@ final class AppStore {
                 return false
             }
         }
+
+        // (2b) The board on screen, kept for the way back. BEFORE the fence:
+        //     whether it is this account's and whole is read off the epoch
+        //     the next line retires. Not on the removal path, where the index
+        //     has already handed `activeId` to the survivor and the world on
+        //     screen is the forgotten account's.
+        if !currentWorldGone { keepBoardSnapshot() }
 
         // (3) From here, every answer still in flight belongs to the old
         //     account and every writer that captured the old epoch is inert.
@@ -2013,6 +2051,12 @@ final class AppStore {
         AuthDecisions.shared.reload()
         ThreadStyleLedger.shared.reload()
         RecentSearchStore.shared.reload()
+        // The board this account had when it was last on screen, if it has
+        // been on screen this session. AFTER `markActive` and the client, not
+        // with the wipe in step (7): a row painted while the client still
+        // pointed at the old daemon could be clicked into it. Everything in
+        // (9) then runs as it would over an empty world, and replaces this.
+        restoreBoardSnapshot(for: record.id)
 
         // (9) Restart by hand. `connStatus` was never dropped, so the
         //     `.connected` transition that normally does this never fires.
@@ -2068,10 +2112,112 @@ final class AppStore {
         connError = error
     }
 
+    // MARK: - board snapshots
+
+    /// One account's board as it stood when the app last switched away from
+    /// it: what a switch back paints at once instead of an empty board and
+    /// three round trips. The READ MODEL only, and only the part a first
+    /// frame is made of. Nothing that acts (undos, held sends, overlays) and
+    /// nothing a daemon is still answering for: `resolvedIds` in particular
+    /// stays behind, because a resolve still on the wire at the switch can
+    /// fail, and the id would then hide its mail for the rest of the session.
+    ///
+    /// The id collision the wipe exists for does not apply: a snapshot is
+    /// held under its account's id, swapped in whole, and only ever shown
+    /// while the client points at the daemon that minted its ids.
+    private struct BoardSnapshot {
+        var sitrep: SitrepData
+        var stats: StoreStats?
+        var fyeHeadline: String?
+        var fyeHeadlineKey: String?
+        var zones: SitrepZoneCache
+        var mailPages: [MailMode: [AttentionUpdate]]
+        var mailKeyset: Bool
+        var selectedId: Int?
+        var lastRefresh: Date?
+    }
+
+    /// IN MEMORY ONLY, and only for accounts that are NOT live: an entry is
+    /// made when its account leaves the screen and taken when it comes back.
+    /// Mail on disk is a decision this cache does not get to make.
+    @ObservationIgnored private var boardSnapshots: [UUID: BoardSnapshot] = [:]
+
+    /// True from a snapshot's repaint until the daemon has answered for the
+    /// bands and the zones: the board on screen is what this mailbox held the
+    /// last time it was looked at, not what it holds now. Read by whatever
+    /// must not treat the difference between the two as something the person
+    /// just did (the clear chime).
+    private(set) var boardIsSnapshot = false
+
+    /// The poller's word that the board is the daemon's again: asked after
+    /// a pull and the zone pass behind it. NOT after a pass that missed a
+    /// zone, which kept the snapshot's rows for it; the retry confirms.
+    func noteBoardConfirmed() {
+        guard boardIsSnapshot, zonesLoadedAt != nil, !zoneRetryOwed else { return }
+        boardIsSnapshot = false
+    }
+
+    /// Keep the live board under the live account's id, when there is one
+    /// worth keeping: a board the daemon has answered for under THIS epoch.
+    /// Stats stamped with an older epoch, or never, mean the rows on screen
+    /// cannot be vouched for (a switch made before the first pull landed, the
+    /// wait for a daemon that is not answering), and a snapshot of that would
+    /// repaint an empty or half-loaded board as if it were the mailbox.
+    private func keepBoardSnapshot() {
+        guard connStatus == .connected, !RehearsalMode.isEnabled, statsEpoch == epoch,
+            lastRefresh != nil, let id = AccountManager.shared.activeId
+        else { return }
+        var bands = sitrep
+        // Sealed mail is login codes: minutes old is expired, and a stale
+        // list would be handed to watchers that raise prompts. Asked for
+        // again every time.
+        bands.sealed = []
+        boardSnapshots[id] = BoardSnapshot(
+            sitrep: bands, stats: stats, fyeHeadline: fyeHeadline, fyeHeadlineKey: fyeHeadlineKey,
+            zones: zones,
+            // The head of each page: the scroll refills the rest, and the
+            // head is what the refresh behind the repaint merges into. ONLY
+            // from a daemon that pages by arrival. One that pages by cursor
+            // gets its cursor from a head fetched over an EMPTY page, and a
+            // repainted head would leave the scroll with nowhere to go.
+            mailPages: mailKeyset
+                ? mailPages.compactMapValues { $0.value.map { Array($0.prefix(Self.mailLimit)) } }
+                : [:],
+            mailKeyset: mailKeyset, selectedId: selectedId, lastRefresh: lastRefresh)
+    }
+
+    /// Paint `id`'s kept board over the world `wipeAccountState` just
+    /// emptied. The TTL stamps stay nil, so every refresh a switch starts
+    /// still asks; each lands through its usual compare-and-assign and the
+    /// snapshot is simply the rows they compare against.
+    private func restoreBoardSnapshot(for id: UUID) {
+        guard let kept = boardSnapshots.removeValue(forKey: id) else { return }
+        sitrep = kept.sitrep
+        stats = kept.stats
+        // These ARE this account's stats, which is all the stamp claims.
+        statsEpoch = epoch
+        fyeHeadline = kept.fyeHeadline
+        fyeHeadlineKey = kept.fyeHeadlineKey
+        zones = kept.zones
+        mailPages = kept.mailPages.mapValues { Loadable(value: $0, error: nil, isLoading: false) }
+        mailKeyset = kept.mailKeyset
+        selectedId = kept.selectedId
+        // The account's own last sync, not the one just left: a daemon that
+        // has since gone quiet shows this board as stale, which it is.
+        lastRefresh = kept.lastRefresh
+        boardIsSnapshot = true
+        // What a zone pass does once its rows are in, done for these rows:
+        // the caches were wiped with the last account, and the cards are on
+        // screen a round trip before the pass that would refill them.
+        HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
+        warmZoneThreads()
+    }
+
     /// Everything in this store that belongs to ONE account. Message ids are
     /// per-daemon SQLite ints, so "looks plausible" is precisely the failure
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
+        boardIsSnapshot = false
         // The unsubscribe tray's rows and buttons belong to the old account:
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.
@@ -6376,8 +6522,12 @@ final class AppStore {
             }
         }
 
+        // The bands this hands back are the account's that was live when the
+        // row left them. A verb that fails after a switch must not lay them
+        // over the mailbox that is on screen by then.
+        let e = epoch
         return { [weak self] in
-            guard let self else { return }
+            guard let self, self.epoch == e else { return }
             self.sitrep.standing = prev.standing
             self.sitrep.new = prev.new
             self.sitrep.open = prev.open

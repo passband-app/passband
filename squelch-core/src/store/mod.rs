@@ -770,6 +770,15 @@ pub struct ClientSeen {
     pub seen_at: DateTime<Utc>,
 }
 
+/// One platform and the last time any of this account's devices acted as it.
+/// See
+/// [`SqliteStore::client_actions_seen`](sqlite::SqliteStore::client_actions_seen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientActed {
+    pub platform: ClientPlatform,
+    pub acted_at: DateTime<Utc>,
+}
+
 /// A device token at the ONE moment its plaintext exists.
 ///
 /// Returned by [`SqliteStore::issue_device_token`](sqlite::SqliteStore::issue_device_token)
@@ -3311,6 +3320,17 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         message_id: i64,
         embedding: &[f32],
     ) -> Result<()>;
+
+    /// [`Store::upsert_message_vector`] for a batch, which a store may write
+    /// under one commit (the SQLite store does; the backfill drain hands it
+    /// eight at a time). The default is the one-at-a-time loop, so a store
+    /// that has no cheaper shape is still correct. Same contract per item.
+    fn upsert_message_vectors(&self, account_id: AccountId, items: &[(i64, &[f32])]) -> Result<()> {
+        for (message_id, embedding) in items {
+            self.upsert_message_vector(account_id, *message_id, embedding)?;
+        }
+        Ok(())
+    }
 
     /// Up to `limit` NON-SEALED messages with no vector yet, newest-first, for
     /// the startup backfill pass. Sealed rows are excluded in SQL.

@@ -1449,6 +1449,10 @@ pub struct StoreSnapshot {
     /// one entry per (platform, version) and capped, so this is the series list
     /// as it will be exported.
     pub clients: Vec<crate::store::ClientSeen>,
+    /// When an app of each platform last did something
+    /// ([`crate::store::SqliteStore::client_actions_seen`]): one entry per
+    /// platform at most.
+    pub client_actions: Vec<crate::store::ClientActed>,
     /// Durable investigation jobs, including delayed retries; excludes notifications.
     pub triage_jobs: [u64; 2],
     /// Today's investigation runs against the daily caps, and what they hold.
@@ -2066,6 +2070,23 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
             );
         }
 
+        // WHEN A PERSON LAST DID SOMETHING, by the app they did it in. The
+        // gauge above moves whenever an open app polls; this one moves only on
+        // a successful write on the client door. No samples until a named
+        // client has made one, for the reason given above.
+        e.family(
+            "squelchd_client_last_action_timestamp_seconds",
+            MetricKind::Gauge,
+            "Unix time an app of this platform last made a successful write on the client door (opening a message, done, a draft, a send, a rule), per the X-Passband-Client header. Push registration and pairing are not counted.",
+        );
+        for acted in &db.client_actions {
+            e.sample(
+                "squelchd_client_last_action_timestamp_seconds",
+                &[("platform", acted.platform.as_str())],
+                acted.acted_at.timestamp() as f64,
+            );
+        }
+
         e.family(
             "squelchd_db_size_bytes",
             MetricKind::Gauge,
@@ -2514,6 +2535,10 @@ mod tests {
                     seen_at: chrono::DateTime::from_timestamp(1_789_000_000, 0).unwrap(),
                 },
             ],
+            client_actions: vec![crate::store::ClientActed {
+                platform: crate::store::ClientPlatform::Ios,
+                acted_at: chrono::DateTime::from_timestamp(1_788_000_000, 0).unwrap(),
+            }],
             triage_jobs: [9, 2],
             triage_budget: crate::triage::agent_config::DailyBudgetStatus {
                 total_used: 1000,
@@ -2578,6 +2603,11 @@ mod tests {
         assert!(text.contains(
             "squelchd_client_last_seen_timestamp_seconds{platform=\"ios\",version=\"0.0.6\"} 1789000000\n"
         ));
+        // By platform only: which build acted is not a question worth a series.
+        assert!(text.contains(
+            "squelchd_client_last_action_timestamp_seconds{platform=\"ios\"} 1788000000\n"
+        ));
+        assert!(!text.contains("squelchd_client_last_action_timestamp_seconds{platform=\"macos\""));
     }
 
     #[test]

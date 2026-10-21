@@ -171,7 +171,7 @@ PR: `search_settled { turns, hits, opened, lane }` and
 
 ## Dashboards to build
 
-None are defined in the repo; PostHog holds them. The five that cover the
+None are defined in the repo; PostHog holds them. The six that cover the
 questions above:
 
 1. **Activation funnel.** `milestone` by kind, as a funnel per person, split
@@ -189,6 +189,27 @@ questions above:
 5. **Compose and search.** `compose_send` outcome mix and attachment use;
    `assistant_asked` by model and transport; `search_deeper_started` by
    trigger.
+
+6. **Mac vs iOS.** Every event already carries `$os_name` (`macOS` / `iOS`),
+   compiled per target, so no event is needed for this, only a breakdown.
+   Filter `practice` is not set on all of them.
+   - Reach: unique users of `Application Opened`, weekly, broken down by
+     `$os_name`.
+   - Overlap: the same series with breakdown off and a formula, `A + B - C`
+     where A and B are the event filtered to each `$os_name` and C is
+     unfiltered: the people on both. Honest for hosted users only, where both
+     installs adopt the same `aid`; a self-run person on two devices is two
+     people.
+   - Depth: total count of `thread_opened` (minus `source = reader`),
+     `email_done` + `email_archived`, and `compose_send` with `outcome = sent`,
+     each divided by unique users, by `$os_name`. This is the usage RATE:
+     actions per active person per week on each app.
+   - Stickiness: `Application Opened` stickiness (days active per week) by
+     `$os_name`.
+   - Sessions: session count and median `$session_duration` by `$os_name`.
+
+   The operator's view of the same question, per tenant and with no opt-out,
+   is the Mac acted / iOS acted columns on the Grafana tenant table.
 
 ## Adding an event
 

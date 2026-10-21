@@ -156,7 +156,9 @@ kubectl -n monitoring top pod -l app.kubernetes.io/name=prometheus-agent
   which the daemon keeps in its own store; those columns do not appear until
   some daemon exports the metric, and read `-` where no app of that platform
   has named itself: the daemon or app predates the `X-Passband-Client`
-  header, or the tenant has no such device), pod count vs the 100-user cap,
+  header, or the tenant has no such device; and when each platform's app last
+  made a write, from `squelchd_client_last_action_timestamp_seconds`, which
+  is the last-action question split by Mac and iOS), pod count vs the 100-user cap,
   per-tenant CPU/memory/PVC/restarts.
 - **Daemon rollout** — which image version each tenant pod runs, and the
   switchover as it happens, plus the roller's own two vital signs: a casualty

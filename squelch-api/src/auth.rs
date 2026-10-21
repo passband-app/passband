@@ -23,7 +23,7 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{Request, StatusCode, header::AUTHORIZATION},
+    http::{Method, Request, StatusCode, header::AUTHORIZATION},
     middleware::Next,
     response::Response,
 };
@@ -111,11 +111,46 @@ pub async fn require_bearer(
         .and_then(|h| h.to_str().ok())
         .and_then(ClientTag::parse);
 
-    if authenticates(&state, presented, client).await? {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    // Decided now, while the request is still here to ask; acted on only once
+    // the response says the write happened.
+    let acting = client
+        .as_ref()
+        .filter(|_| is_client_action(req.method(), req.uri().path()))
+        .map(|c| (presented.clone(), c.platform));
+
+    if !authenticates(&state, presented, client).await? {
+        return Err(StatusCode::UNAUTHORIZED);
     }
+    let resp = next.run(req).await;
+    if let Some((presented, platform)) = acting
+        && resp.status().is_success()
+    {
+        // Best effort: this is a stamp for the operator's dashboard, and a
+        // store that cannot take it must not turn a write that worked into a
+        // failure.
+        let store = state.store.clone();
+        let _ = tokio::task::spawn_blocking(move || store.note_client_action(&presented, platform))
+            .await;
+    }
+    Ok(resp)
+}
+
+/// Is this request a person doing something in an app, as far as its method
+/// and path can say? A write on the client door, less the two the app makes by
+/// itself: push registration (every foreground) and pairing.
+///
+/// The dashboard's request-counter columns draw the same line in PromQL
+/// (`route=~"/client.*", route!~"/client/(devices.*|pair)", method!="GET"` in
+/// `passband-health.json`); change them together.
+fn is_client_action(method: &Method, path: &str) -> bool {
+    let write = matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    write
+        && path.starts_with("/client/")
+        && !path.starts_with("/client/devices")
+        && path != "/client/pair"
 }
 
 #[cfg(test)]
@@ -259,6 +294,93 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].platform.as_str(), "macos");
         assert_eq!(seen[0].version, "0.0.12");
+    }
+
+    /// A stamp per platform, and only for what a person did: a write that
+    /// worked, on the client door, from an app that named itself.
+    #[tokio::test]
+    async fn a_successful_client_write_is_recorded_as_an_action() {
+        use axum::routing::post;
+
+        let (store, acct, state) = fixture("");
+        let app = || {
+            Router::new()
+                .route("/client/feed", get(|| async { "ok" }))
+                .route("/client/done", post(|| async { "ok" }))
+                .route("/client/refused", post(|| async { StatusCode::FORBIDDEN }))
+                .route("/client/devices", post(|| async { "ok" }))
+                .route("/mcp", post(|| async { "ok" }))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    require_bearer,
+                ))
+                .with_state(state.clone())
+        };
+        let phone = store.issue_device_token(acct, "phone").unwrap();
+        let mac = store.issue_device_token(acct, "laptop").unwrap();
+        let send = async |token: &str, method: &str, path: &str, client: Option<&str>| {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"));
+            if let Some(client) = client {
+                req = req.header(CLIENT_HEADER, client);
+            }
+            app()
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        };
+        let ios = Some("ios/0.0.8");
+
+        // Everything that is not a person doing something.
+        assert_eq!(
+            send(&phone.token, "GET", "/client/feed", ios).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&phone.token, "POST", "/client/devices", ios).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&phone.token, "POST", "/mcp", ios).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&phone.token, "POST", "/client/refused", ios).await,
+            StatusCode::FORBIDDEN
+        );
+        // The notification extension's shape: a good token that names nothing.
+        assert_eq!(
+            send(&phone.token, "POST", "/client/done", None).await,
+            StatusCode::OK
+        );
+        assert!(store.client_actions_seen(acct).unwrap().is_empty());
+
+        assert_eq!(
+            send(&phone.token, "POST", "/client/done", ios).await,
+            StatusCode::OK
+        );
+        let acted = store.client_actions_seen(acct).unwrap();
+        assert_eq!(acted.len(), 1);
+        assert_eq!(acted[0].platform.as_str(), "ios");
+
+        // A Mac whose very first request is a write: the tag and the stamp land
+        // together, and the phone's entry is untouched.
+        assert_eq!(
+            send(&mac.token, "POST", "/client/done", Some("macos/0.0.13")).await,
+            StatusCode::OK
+        );
+        let acted = store.client_actions_seen(acct).unwrap();
+        assert_eq!(
+            acted
+                .iter()
+                .map(|a| a.platform.as_str())
+                .collect::<Vec<_>>(),
+            ["macos", "ios"],
+            "newest first"
+        );
     }
 
     /// A door with no `SQUELCH_API_TOKEN` still SERVES; it just has nothing to

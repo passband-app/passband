@@ -22,6 +22,14 @@ enum Actions {
     /// triage actually happens: on the sitrep, in the list, or inside the reader.
     enum Surface: String, Sendable { case sitrep, emails, reader }
 
+    // EVERY VERB BELOW FENCES ITS ANSWER ON THE EPOCH. The request was built
+    // for the account on screen when the key was pressed; by the time it
+    // answers, a switch may have put another mailbox there, and a switch back
+    // to an account whose board is held takes milliseconds. An undo pushed
+    // then would hold this account's message id over the other daemon, which
+    // has a message by that number too. The failure toast still shows: the
+    // verb did fail, wherever the person is now.
+
     private static func origin(_ via: Via, _ on: Surface) -> [String: Any] {
         ["via": via.rawValue, "surface": on.rawValue]
     }
@@ -30,9 +38,11 @@ enum Actions {
     /// revert.
     static func archive(_ u: AttentionUpdate, via: Via, on surface: Surface) async {
         let restore = store.removeFromBands(u.id)
+        let e = store.epoch
         do {
             try await APIClient.shared.actionArchive(u.id)
             Analytics.capture("email_archived", origin(via, surface))
+            guard store.isCurrent(e) else { return }
             store.pushUndo(kind: .archive, messageId: u.id, label: "archived \(u.sender)") {
                 // archive undo = re-add the INBOX label; the poll refreshes.
                 try await APIClient.shared.actionLabel(u.id, add: [inboxLabel])
@@ -65,9 +75,11 @@ enum Actions {
     /// message sitting visibly in the spam list until then reads as a failure.
     static func notSpam(_ u: AttentionUpdate, via: Via, on surface: Surface) async {
         let restore = store.removeFromBands(u.id)
+        let e = store.epoch
         do {
             try await APIClient.shared.actionNotSpam(u.id)
             Analytics.capture("email_not_spam", origin(via, surface))
+            guard store.isCurrent(e) else { return }
             store.removeFromMail(u.id)
             store.pushToast("moved to your inbox · \(u.sender)", .info)
         } catch {
@@ -85,10 +97,12 @@ enum Actions {
         _ u: AttentionUpdate, via: Via, on surface: Surface, rewind: WalkRewind? = nil
     ) async {
         let restore = store.removeFromBands(u.id)
+        let e = store.epoch
         do {
             try await APIClient.shared.setStatus(u.id, .done)
             Analytics.capture("email_done", origin(via, surface))
             Discovery.note(.emailDone)
+            guard store.isCurrent(e) else { return }
             // The message leaves the working set: drop its remembered heights and
             // unpin its images. The bytes stay on disk — the undo below is five
             // seconds away and re-pins them.
@@ -133,10 +147,13 @@ enum Actions {
         // remind_at is the new one. See the undo below.
         let prior = Fmt.date(row?.remind_at)
         let restore = store.removeFromBands(messageId)
+        let e = store.epoch
         do {
             let result = try await APIClient.shared.setReminder(messageId, at: date)
             Analytics.capture("email_remind")
             Discovery.note(.reminderSet)
+            // The stamp landed, which is what the return value reports.
+            guard store.isCurrent(e) else { return true }
             // Left IN the cached mail pages: `removeFromBands` recorded the id
             // in `resolvedIds`, which hides the row on To do and dims it on
             // Everything until the poll brings the server's parked row.
@@ -199,8 +216,10 @@ enum Actions {
     /// the reminder only: "no, I do not need to see this again."
     static func cancelReminder(_ u: AttentionUpdate) async {
         store.dropReminder(u.id)
+        let e = store.epoch
         do {
             try await APIClient.shared.clearReminder(u.id)
+            guard store.isCurrent(e) else { return }
             // The local list is now ahead of the cached one's TTL. Make the
             // next tick go and ask, so the truth arrives on its own rather than
             // up to a TTL later.
@@ -209,7 +228,7 @@ enum Actions {
         } catch {
             // Put it back: the daemon still holds the stamp, and a row missing
             // from this list is a reminder the user believes is gone.
-            store.noteReminder(u, remindAt: u.remind_at ?? "")
+            if store.isCurrent(e) { store.noteReminder(u, remindAt: u.remind_at ?? "") }
             store.pushToast(errText(error, "could not cancel the reminder"), .error)
         }
     }
@@ -228,9 +247,11 @@ enum Actions {
     /// Add/remove labels (undo-first for the common archive-restore inverse).
     /// The row is NOT pulled from its band for a plain label edit.
     static func label(_ u: AttentionUpdate, add: [String] = [], remove: [String] = []) async {
+        let e = store.epoch
         do {
             try await APIClient.shared.actionLabel(u.id, add: add, remove: remove)
             Analytics.capture("email_labeled")
+            guard store.isCurrent(e) else { return }
             store.pushUndo(kind: .label, messageId: u.id, label: "labeled \(u.sender)") {
                 try await APIClient.shared.actionLabel(u.id, add: remove, remove: add)
             }

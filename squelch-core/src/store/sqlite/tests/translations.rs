@@ -101,6 +101,26 @@ fn archive_rows_are_deferred_until_the_thread_is_opened() {
     let now = Utc::now();
     assert!(store.claim_translations(acct, now, 10).unwrap().is_empty());
 
+    // The human wire says a translation is available, as `deferred` and with
+    // no text, and reading it promotes nothing: the client prefetches threads
+    // through this read, and archive mail spends only when asked.
+    let wire = store.thread_view_with_html(acct, "t1").unwrap().messages[0]
+        .translation
+        .clone()
+        .unwrap();
+    assert_eq!(wire.status, "deferred");
+    assert_eq!(wire.source_lang, "de");
+    assert_eq!(wire.source_language, "German");
+    assert!(wire.subject.is_empty() && wire.content.is_empty() && wire.html.is_none());
+    assert_eq!(row(&store, a).unwrap().1, "deferred");
+    // The agent door never sees a deferred row.
+    assert!(
+        store
+            .thread_view(acct, "t1")
+            .map(|v| v.messages.iter().all(|m| m.translation.is_none()))
+            .unwrap_or(true)
+    );
+
     assert_eq!(
         store
             .promote_deferred_translations(acct, "t1", now)

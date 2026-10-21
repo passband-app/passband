@@ -14,7 +14,8 @@ Decisions locked with the user (2026-10-21):
   pulled out of the already-sanitized `body_html`, translated as a numbered
   array, and put back. The model never sees or produces markup.
 - Scope: **all live incoming mail, eagerly. Archive-tier mail is translated
-  only when it is opened.** No backfill of mail that is already stored.
+  only when the reader displays it** (see Pipeline). No backfill of mail
+  that is already stored.
 - No new env vars and no warden knobs. The feature is ON by default and takes
   effect when the daemon version rolls out. A config-file section with
   defaults is fine.
@@ -46,7 +47,8 @@ Decisions locked with the user (2026-10-21):
    document goes through `sanitize_email_html` again.
 4. **Spam never reaches a model**, as everywhere else. **Sent mail is never
    translated**, because the user wrote it. Archive-tier rows spend nothing
-   until the human opens the thread.
+   until the reader displaying the thread asks for them. Reading the thread
+   is not asking: the client prefetches threads through the same GET.
 5. **External doors (MCP, agent HTTP) see a translation exactly when they may
    see the body.** The translation is joined inside the same guarded query.
    It is never served through a path the body could not take.
@@ -118,8 +120,8 @@ message_translations(
   the translated text embedded with `message_embed_text(tsubject, tbody)`.
   The KNN legs (human and external) take the better distance across both
   tables, per message. The original vector stays as it is.
-- Archive-tier rows are searchable only in the original until they are
-  opened.
+- Archive-tier rows are searchable only in the original until the reader
+  has asked for them and the translation has landed.
 
 ## Pipeline
 
@@ -130,8 +132,20 @@ message_translations(
   NOT replaced, and the translation is not hashed into the snapshot.
 - Triage does NOT wait for a translation. If the translation is late, triage
   runs on the original, as it does today.
-- Opening a thread over `GET /client/thread/{id}` promotes that thread's
-  `deferred` rows to `pending` and wakes the refine lane.
+- `GET /client/thread/{id}` promotes NOTHING. The Passband client
+  prefetches threads through it (`ThreadPrefetch`: search results, list
+  hovers, the sitrep's preload), so a promoting GET would buy translations
+  for archive mail nobody opened. It serves `deferred` rows as `deferred`.
+- `POST /client/thread/{thread_id}/translate` is the ask. It promotes that
+  thread's `deferred` rows to `pending` and, when any moved, wakes the
+  refine lane. Human door only, scoped to the active account like the GET.
+  Idempotent: only `deferred` rows move, so a repeat promotes and pokes
+  nothing. It answers `200 {"promoted": n}`; an unknown thread is
+  `{"promoted": 0}`, not an error.
+- The client calls it from `ThreadViewer` only, once per open, when the
+  thread on screen has a `deferred` message. It runs off the loaded thread
+  whichever way it arrived, prefetch cache included, because a warmed thread
+  opens without a request. `ThreadPrefetch` never calls it.
 - Long mail is split into batches of about 6k source characters per call.
   `LlmRequest` gains an optional `max_tokens`.
 
@@ -142,16 +156,23 @@ message_translations(
 - `ClientTranslation` has these fields:
   - `source_lang` (ISO code)
   - `source_language` (English name, e.g. "French")
-  - `status`: `pending`, `done` or `incomplete`
+  - `status`: `deferred`, `pending`, `done` or `incomplete`
   - `subject`
   - `content`
   - `html` (optional)
   - `missing_facts` (optional)
-- `deferred` is reported as `pending` after the open promotes it.
+- `deferred` (archive tier, not yet asked for) is served as itself, with
+  `source_lang`/`source_language` set and empty `subject`/`content` and no
+  `html`, so the client knows a translation is available. It reads as
+  `pending` once the reader's POST has promoted it.
+- `deferred` and `pending` both carry no text. Only `done` and `incomplete`
+  carry the translation.
 - `failed` and `not_needed` are omitted, so the client shows the original and
   nothing else.
 - MCP `SanitizedMessage` gains an optional `translation { source_language,
-  subject, content, status }`, joined inside `thread_view`.
+  subject, content, status }`, joined inside `thread_view`. The agent doors
+  see served statuses only (`done`, `incomplete`), never `deferred` or
+  `pending`, and have no way to ask for a translation.
 
 ## Reader (Mac and iOS share `ThreadViewer.swift`)
 
@@ -165,6 +186,10 @@ message_translations(
   version is showing.
 - `pending`: the original shows, with "Translating from French…". The
   thread refetches on a bounded backoff until the status leaves `pending`.
+- `deferred` displays exactly like `pending`. The reader that shows it is
+  the one that asks (`POST .../translate`), then refetches in place and runs
+  the same backoff. The Swift status decodes `deferred` as itself; an
+  unknown status still falls back to `done`, which only shows with a body.
 - `incomplete`: the strip adds a note that the translation may have missed
   something and to check the original.
 - The `ProductGuide.swift` topic for the reader gains a line about it. No em

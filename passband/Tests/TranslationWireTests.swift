@@ -22,6 +22,8 @@ struct TranslationWireTests {
         missingAndMistypedFieldsDoNotFailTheMessage()
         theTranslationIsShownByDefault()
         thePendingOneShowsTheOriginal()
+        aDeferredOneDecodesAndIsNotDone()
+        onlyTheReaderAsksForADeferredTranslation()
         aTextOnlyTranslationDropsTheOriginalHTML()
         anEmptyFinishedTranslationIsNoTranslation()
         theTwoVersionsAreTwoFrameKeys()
@@ -109,6 +111,48 @@ struct TranslationWireTests {
         )
         expect(m?.readyTranslation == nil, "pending is not ready")
         expect(m?.presented().html == "<p>Bonjour</p>", "the original shows meanwhile")
+    }
+
+    /// ARCHIVE MAIL: the daemon serves its translation as `deferred`, with no
+    /// text, until the reader displaying the thread asks. It must decode as
+    /// itself: read as an unknown status it would fall back to `done`.
+    static func aDeferredOneDecodesAndIsNotDone() {
+        let m = message(
+            #","translation":{"source_lang":"fr","source_language":"French","status":"deferred","subject":"","content":""}"#
+        )
+        let t = m?.translation
+        expect(t?.status == .deferred, "deferred decodes as deferred, not done")
+        expect(t?.awaiting == true, "and is on its way, drawn like pending")
+        expect(t?.ready == false && m?.readyTranslation == nil, "deferred is not ready")
+        expect(m?.presented().html == "<p>Bonjour</p>", "the original shows meanwhile")
+        // Even with text on it (a daemon bug), deferred is never shown as done.
+        let odd = message(
+            #","translation":{"source_lang":"fr","status":"deferred","subject":"Hi","content":"Hello"}"#
+        )
+        expect(odd?.readyTranslation == nil, "a deferred one with text is still not ready")
+        let pending = message(
+            #","translation":{"source_lang":"fr","status":"pending","subject":"","content":""}"#
+        )
+        expect(pending?.translation?.awaiting == true, "pending is on its way too")
+    }
+
+    /// THE ASK SPENDS MONEY, so it is made by the reader that DISPLAYS a
+    /// thread and by nothing that merely reads one. The prefetch warms search
+    /// results, hovers and the sitrep through the same GET, and a prefetch
+    /// that asked would buy translations for archive mail nobody opened.
+    static func onlyTheReaderAsksForADeferredTranslation() {
+        func read(_ path: String) -> String? {
+            try? String(contentsOfFile: path, encoding: .utf8)
+        }
+        guard let prefetch = read("Sources/Passband/Model/ThreadPrefetch.swift"),
+            let viewer = read("Sources/Passband/Views/ThreadViewer.swift")
+        else { return expect(false, "read the sources (run from passband/)") }
+        expect(!prefetch.contains("translateThread"), "the prefetch never asks")
+        expect(!prefetch.contains("/translate"), "not even by path")
+        expect(viewer.contains("APIClient.shared.translateThread("), "the reader does")
+        expect(
+            viewer.contains("await requestDeferredTranslations()"),
+            "from its open task")
     }
 
     static func aTextOnlyTranslationDropsTheOriginalHTML() {

@@ -5,8 +5,9 @@
 //! would re-triage the message and reset its external access.
 //!
 //! LIFECYCLE. Ingest inserts `pending` (live mail) or `deferred` (archive
-//! tier, which spends nothing until the thread is opened) in its own
-//! transaction. The translate pass claims `pending` rows, and a claim is a
+//! tier, which spends nothing until the reader displaying its thread asks,
+//! over `POST /client/thread/{id}/translate`; a plain read of the thread
+//! serves it as `deferred` and promotes nothing) in its own transaction. The translate pass claims `pending` rows, and a claim is a
 //! LEASE: it counts an attempt and stamps the row, so a pass that dies
 //! mid-call leaves a row the next pass picks up after [`LEASE_SECS`], and a
 //! row that keeps killing passes runs out of attempts like any other failure.
@@ -65,7 +66,7 @@ pub(super) fn refresh_fts_conn(conn: &Connection, message_id: i64) -> Result<()>
 }
 
 /// Queue `message_id` for translation from `source_lang`, inside the caller's
-/// transaction. `deferred` parks it until its thread is opened. A row that
+/// transaction. `deferred` parks it until the reader displaying its thread asks. A row that
 /// already exists is left as it is: a re-ingest of the same message must not
 /// throw away a translation it already paid for.
 pub(super) fn queue_translation_conn(

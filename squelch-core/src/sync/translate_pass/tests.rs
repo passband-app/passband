@@ -387,16 +387,16 @@ async fn archive_mail_waits_for_the_thread_to_be_opened() {
         "the archive spends nothing unopened"
     );
     assert_eq!(backend.calls(), 0);
-    // Not even on the reader before it is opened.
-    assert!(
-        store
-            .thread_view_with_html(acct, "thr-old")
-            .unwrap()
-            .messages[0]
-            .translation
-            .is_none()
-    );
-    // Opening it (what GET /client/thread does) promotes, then the pass runs.
+    // The reader is told one is available, and reading it buys nothing: the
+    // client prefetches threads through this read.
+    let unopened = store.thread_view_with_html(acct, "thr-old").unwrap();
+    let t = unopened.messages[0].translation.as_ref().unwrap();
+    assert_eq!(t.status, "deferred");
+    assert!(t.subject.is_empty() && t.content.is_empty());
+    assert!(!eng.translate_pass().await, "a read is not an open");
+    assert_eq!(backend.calls(), 0);
+    // The reader displaying it asks (POST /client/thread/{id}/translate),
+    // which promotes, then the pass runs.
     assert_eq!(
         store
             .promote_deferred_translations(acct, "thr-old", Utc::now())

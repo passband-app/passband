@@ -196,8 +196,10 @@ struct ThreadViewer: View {
     /// Seconds between refetches while a translation is pending; then stop.
     private static let translationBackoff: [Int] = [3, 6, 12, 24]
 
+    /// Pending, or deferred (archive mail this reader asks for on open, see
+    /// `requestDeferredTranslations`): either way the English is on its way.
     private var translationPending: Bool {
-        messages.contains { $0.translation?.status == .pending }
+        messages.contains { $0.translation?.awaiting == true }
     }
 
     private struct MeasurePass: Equatable {
@@ -394,11 +396,13 @@ struct ThreadViewer: View {
             // Only once the thread is HERE: the hand-off names a message, and
             // whether it is in this thread is not knowable until it has loaded.
             consumePendingReply()
+            await requestDeferredTranslations()
             await refreshOpens()
         }
         .task(id: newestSender) { await refreshUnsub() }
         // A TRANSLATION STILL BEING WRITTEN. The daemon translates on arrival
-        // (and on open, for archived mail), so a thread can land with a message
+        // (and, for archived mail, when this reader asks on open), so a thread
+        // can land with a message
         // whose English is seconds away. Refetched in place on a backoff that
         // gives up: a translation that has not landed in about 45 seconds is
         // one the next open or poll will bring, and a reader that kept asking
@@ -2883,6 +2887,29 @@ struct ThreadViewer: View {
             self.error = errText(error, "thread load failed")
         }
         loading = false
+    }
+
+    /// ARCHIVE MAIL IN ANOTHER LANGUAGE is translated only when somebody is
+    /// looking at it: the daemon serves its translation as `deferred` and buys
+    /// nothing on a read, because `ThreadPrefetch` reads threads nobody opened
+    /// (search results, hovers, the sitrep's preload) through the same GET.
+    /// This reader is the one party that knows the thread is on screen, so it
+    /// asks, once per open, and only here. It runs off the loaded thread
+    /// whichever way it arrived, cache included: a warmed thread opens without
+    /// a request, and that is exactly the one the daemon would never hear of.
+    ///
+    /// The translation poll above then refetches until the English lands
+    /// (deferred and pending both count as on the way). A failed ask is left
+    /// alone: the original is on screen, and the next open asks again.
+    private func requestDeferredTranslations() async {
+        guard messages.contains(where: { $0.translation?.status == .deferred }) else { return }
+        let epoch = store.epoch
+        let id = threadId
+        do { try await APIClient.shared.translateThread(id) } catch { return }
+        guard store.isCurrent(epoch), !Task.isCancelled else { return }
+        // The cached copy still says `deferred`; this refetch replaces it with
+        // `pending`, so a reopen in the next minute does not read stale.
+        await refreshInPlace()
     }
 
     /// Take a loaded thread and derive its reader state. `opening` is true only

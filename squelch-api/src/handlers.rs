@@ -593,18 +593,13 @@ pub async fn get_thread(
     // Sealed and nonexistent threads are the SAME NotFound. Each message carries
     // its server-sanitized `html`, null for plain-text-only mail.
     //
-    // OPENING AN ARCHIVE THREAD BUYS ITS TRANSLATION (docs/TRANSLATION.md):
-    // the thread's `deferred` rows become `pending` BEFORE the view is read,
-    // so this very response already says "translating", and the refine lane
-    // is poked to start on them now rather than at its next interval.
-    let poke = state.archive_surfacing.poke.clone();
+    // READING A THREAD BUYS NOTHING (docs/TRANSLATION.md): an archive thread's
+    // `deferred` translations are served AS `deferred`, with no text, and stay
+    // parked. The client prefetches threads through this very GET (search
+    // results, list hovers, the sitrep), so promoting here would spend on
+    // archive mail nobody opened. The reader that DISPLAYS the thread asks
+    // for them over `POST /client/thread/{id}/translate` instead.
     query(&state, move |store, account_id| {
-        let promoted = store.promote_deferred_translations(account_id, &thread_id, Utc::now())?;
-        if promoted > 0
-            && let Some(poke) = &poke
-        {
-            poke.poke();
-        }
         let view = store.thread_view_with_html(account_id, &thread_id)?;
         // Memoized per distinct sender: a thread is usually two addresses
         // repeated, and each miss is a round trip to `contacts`. The store
@@ -673,6 +668,37 @@ pub async fn mark_thread_opened(
     })
     .await?;
     Ok(Json(json!({ "opened": opened })))
+}
+
+// --- POST /client/thread/{thread_id}/translate ------------------------------
+
+/// "I am showing this thread: translate it." Promotes the thread's `deferred`
+/// (archive-tier) translations to `pending` and wakes the refine lane, so the
+/// work starts now rather than at the lane's next interval.
+///
+/// A ROUTE OF ITS OWN for `mark_thread_opened`'s reason: the GET is also how
+/// the client warms threads it has not shown, and archive mail spends nothing
+/// unprompted (`messages.is_archive` in schema.sql). Only the reader
+/// displaying the thread knows a person is looking at it.
+///
+/// IDEMPOTENT: only `deferred` rows move, so a second call promotes nothing
+/// and pokes nothing. `promoted` says how many moved. Sealed mail may move
+/// too and is still never claimed by the pass, so this spends nothing on it.
+pub async fn translate_thread(
+    State(state): State<ApiState>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let poke = state.archive_surfacing.poke.clone();
+    let promoted = store_call(&state, move |store, account_id| {
+        store.promote_deferred_translations(account_id, &thread_id, Utc::now())
+    })
+    .await?;
+    if promoted > 0
+        && let Some(poke) = &poke
+    {
+        poke.poke();
+    }
+    Ok(Json(json!({ "promoted": promoted })))
 }
 
 // --- GET /client/attachments/{id} -------------------------------------------

@@ -328,7 +328,8 @@ pub struct TriagedMessage {
 /// Where a message's translation stands (`message_translations.status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranslationStatus {
-    /// Archive tier: nothing is spent until the thread is opened.
+    /// Archive tier: nothing is spent until the reader displaying the thread
+    /// asks (`POST /client/thread/{id}/translate`).
     Deferred,
     /// Waiting for (or claimed by) the translate pass.
     Pending,
@@ -3313,8 +3314,10 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<()>;
 
-    /// Promote a thread's `deferred` rows to `pending`, which is what opening
-    /// an archive thread does. Returns how many moved.
+    /// Promote a thread's `deferred` rows to `pending`, which is what the
+    /// reader DISPLAYING an archive thread asks for (`POST
+    /// /client/thread/{id}/translate`; a plain read never does, because the
+    /// client prefetches through it). Returns how many moved.
     fn promote_deferred_translations(
         &self,
         account_id: AccountId,

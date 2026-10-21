@@ -15348,10 +15348,10 @@ async fn json_gzips_when_asked_and_the_event_stream_never_does() {
     );
 }
 
-// --- GET /client/thread/{id}: opening an archive thread buys its translation --
+// --- GET /client/thread/{id} buys nothing; POST .../translate buys it -------
 
 #[tokio::test]
-async fn opening_a_thread_promotes_its_deferred_translations_and_pokes_the_lane() {
+async fn reading_a_thread_never_promotes_and_the_translate_post_does() {
     let (state, store, acct) = common::state_with(|store, acct| {
         let id = store
             .upsert_message(&msg(acct, "g-fr", "t-fr", "Votre facture", "Bonjour"))
@@ -15369,7 +15369,7 @@ async fn opening_a_thread_promotes_its_deferred_translations_and_pokes_the_lane(
                 None,
             )
             .unwrap();
-        // An archive row: parked until somebody opens the thread.
+        // An archive row: parked until somebody displays the thread.
         store
             .queue_translation(acct, id, "fr", true, chrono::Utc::now())
             .unwrap();
@@ -15380,32 +15380,104 @@ async fn opening_a_thread_promotes_its_deferred_translations_and_pokes_the_lane(
     });
     let poke = squelch_core::store::archive_surface::RefinePoke::new();
     let app = router(state.with_refine_poke(poke.clone()));
+    let status_of = |store: &squelch_core::store::SqliteStore, id: i64| {
+        store.message_translations(acct, &[id]).unwrap()[0].status
+    };
 
+    // THE GET IS A READ, and the client prefetches through it: the row is
+    // served as `deferred` (a translation is available) and stays parked.
     let resp = app
+        .clone()
         .oneshot(authed("GET", "/client/thread/t-fr"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let msgs = json["messages"].as_array().unwrap();
-    // `deferred` reads as `pending` now that the open has promoted it.
-    assert_eq!(msgs[0]["translation"]["status"], "pending");
+    assert_eq!(msgs[0]["translation"]["status"], "deferred");
     assert_eq!(msgs[0]["translation"]["source_lang"], "fr");
     assert_eq!(msgs[0]["translation"]["source_language"], "French");
     assert_eq!(msgs[0]["translation"]["content"], "");
+    assert_eq!(msgs[0]["translation"]["subject"], "");
     assert!(
         msgs[1].get("translation").is_none(),
         "English mail has no key"
     );
-    // The lane was poked to start on it now.
+    let id = msgs[0]["id"].as_i64().unwrap();
+    assert_eq!(
+        status_of(&store, id),
+        squelch_core::store::TranslationStatus::Deferred,
+        "reading spent nothing"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), poke.poked())
+            .await
+            .is_err(),
+        "a read does not wake the lane"
+    );
+
+    // THE POST is the reader displaying it: promoted, and the lane poked.
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 1);
     tokio::time::timeout(std::time::Duration::from_millis(100), poke.poked())
         .await
         .expect("the refine lane was poked");
-    let rows = store
-        .message_translations(acct, &[msgs[0]["id"].as_i64().unwrap()])
-        .unwrap();
     assert_eq!(
-        rows[0].status,
+        status_of(&store, id),
         squelch_core::store::TranslationStatus::Pending
     );
+
+    // Now the GET says translating.
+    let json = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/thread/t-fr"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["messages"][0]["translation"]["status"], "pending");
+
+    // IDEMPOTENT: a second POST moves nothing and pokes nothing.
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), poke.poked())
+            .await
+            .is_err(),
+        "nothing moved, nothing poked"
+    );
+
+    // An unknown thread is a no-op, not an error.
+    let resp = app
+        .oneshot(authed("POST", "/client/thread/t-nope/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+}
+
+#[tokio::test]
+async fn the_translate_post_needs_the_human_door_token() {
+    let (state, _store, _acct) = common::state_with(|_, _| {});
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/client/thread/t-fr/translate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

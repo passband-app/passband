@@ -354,8 +354,8 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     var attachmentList: [Attachment] { attachments ?? [] }
 
     /// The translation the reader may show INSTEAD of the original: one that
-    /// has finished and actually carries a body. A pending one shows the
-    /// original under a "translating" note, so it is not this.
+    /// has finished and actually carries a body. A pending or deferred one
+    /// shows the original under a "translating" note, so it is not this.
     var readyTranslation: ClientTranslation? {
         guard let translation, translation.ready else { return nil }
         return translation
@@ -408,9 +408,15 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
 /// LENIENTLY, field by field: a missing or mistyped field takes its empty
 /// value rather than failing the message it rides on, because a thread that
 /// will not decode is a thread that will not open, and the translation is the
-/// optional half of it. An unknown status reads as `done`.
+/// optional half of it. An unknown status reads as `done`, which shows only
+/// when it carries a body (`ready`).
 struct ClientTranslation: Codable, Sendable, Hashable {
     enum Status: String, LenientRawEnum {
+        /// ARCHIVE MAIL: a translation is available and nothing has been
+        /// spent on it. Reading the thread does not buy it (the prefetch reads
+        /// threads nobody opened); the reader DISPLAYING the thread asks, over
+        /// `APIClient.translateThread`, and then it is `pending`.
+        case deferred
         case pending, done, incomplete
         static var unknownFallback: Status { .done }
     }
@@ -470,8 +476,14 @@ struct ClientTranslation: Codable, Sendable, Hashable {
     /// Finished, and with something to show. A `done` that arrived with no
     /// body at all is treated as no translation rather than a blank message.
     var ready: Bool {
-        status != .pending && (!(html ?? "").isEmpty || !content.isEmpty)
+        (status == .done || status == .incomplete)
+            && (!(html ?? "").isEmpty || !content.isEmpty)
     }
+
+    /// Not here yet, and coming: the reader shows the original and says it is
+    /// translating. A deferred one is drawn the same way, because the reader
+    /// that shows it is the one that asks for it.
+    var awaiting: Bool { status == .pending || status == .deferred }
 }
 
 /// core::types::ClientThreadView (GET /client/thread/{id}).

@@ -56,9 +56,14 @@ fn language_name(code: &str) -> String {
 
 /// The human door's translation off a thread row whose columns from `at` are
 /// `source_lang, status, subject, body, body_html, missing_facts`. The join
-/// admits `pending`, `done` and `incomplete` only; a `pending` one carries no
-/// text (the reader shows the original and says it is translating), and
-/// `missing_facts` rides only on `incomplete`.
+/// admits `deferred`, `pending`, `done` and `incomplete` only; `deferred` and
+/// `pending` carry no text (the reader shows the original and says it is
+/// translating), and `missing_facts` rides only on `incomplete`.
+///
+/// `deferred` IS SERVED AS ITSELF, never as `pending`: reading a thread buys
+/// nothing (the client prefetches through this read), so a deferred row tells
+/// the reader a translation is available, and only the reader DISPLAYING the
+/// thread asks for it, over `POST /client/thread/{id}/translate`.
 fn client_translation(
     r: &rusqlite::Row<'_>,
     at: usize,
@@ -67,7 +72,7 @@ fn client_translation(
         return Ok(None);
     };
     let status: String = r.get(at + 1)?;
-    let ready = status != "pending";
+    let ready = status == "done" || status == "incomplete";
     let text = |i: usize| -> rusqlite::Result<String> {
         Ok(if ready {
             r.get::<_, Option<String>>(i)?.unwrap_or_default()
@@ -846,7 +851,7 @@ impl SqliteStore {
              LEFT JOIN accounts a ON a.id = m.account_id
              LEFT JOIN message_translations tr
                ON tr.message_id = m.id AND tr.account_id = m.account_id
-              AND tr.status IN ('pending','done','incomplete')
+              AND tr.status IN ('deferred','pending','done','incomplete')
              WHERE m.account_id=?1 AND m.thread_id=?2
              ORDER BY m.received_at ASC",
         )?;

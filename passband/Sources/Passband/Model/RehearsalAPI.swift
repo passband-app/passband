@@ -72,17 +72,33 @@ actor RehearsalAPI {
         /// THREADS IN ANOTHER LANGUAGE, which the lesson does not have: each
         /// is a run of versions served one per fetch, the last one sticking, so
         /// a pending translation can be seen to land the way a daemon's does.
-        /// See `TranslationFixture`.
+        /// A version carrying a `deferred` translation is the daemon's archive
+        /// row: it STAYS at the front however often it is read, and only the
+        /// reader's `POST .../translate` moves past it, so a prefetch can never
+        /// look like an ask. See `TranslationFixture`.
         private var stagedThreads: [String: [ClientThreadView]] = [:]
         func stage(thread versions: [ClientThreadView]) {
             guard let id = versions.first?.thread_id else { return }
             stagedThreads[id] = versions
         }
+        private static func isDeferred(_ view: ClientThreadView) -> Bool {
+            view.messages.contains { $0.translation?.status == .deferred }
+        }
         private func stagedThread(_ id: String) -> ClientThreadView? {
             guard var versions = stagedThreads[id], let next = versions.first else { return nil }
-            if versions.count > 1 { versions.removeFirst() }
+            if versions.count > 1, !Self.isDeferred(next) { versions.removeFirst() }
             stagedThreads[id] = versions
             return next
+        }
+        /// The daemon's promote: the deferred version gives way to the next.
+        /// How many it moved, as the daemon's `promoted` would count them.
+        private func translateStaged(_ id: String) -> Int {
+            guard var versions = stagedThreads[id], let next = versions.first,
+                versions.count > 1, Self.isDeferred(next)
+            else { return 0 }
+            versions.removeFirst()
+            stagedThreads[id] = versions
+            return next.messages.filter { $0.translation?.status == .deferred }.count
         }
 
         private var stagedSent: [SentItem] = []
@@ -117,6 +133,16 @@ actor RehearsalAPI {
             {
                 return (
                     try encode(staged),
+                    HTTPURLResponse(
+                        url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"])!
+                )
+            }
+            if method == "POST", components.count == 4, components[1] == "thread",
+                components[3] == "translate", stagedThreads[components[2]] != nil
+            {
+                return (
+                    try json(["promoted": translateStaged(components[2])]),
                     HTTPURLResponse(
                         url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                         headerFields: ["Content-Type": "application/json"])!
@@ -317,6 +343,9 @@ actor RehearsalAPI {
             } else if components.count == 4, components[1] == "thread", components[3] == "opened", method == "POST" {
                 for message in mailbox.messages where threadID(message.id) == components[2] { mailbox.open(message.id) }
                 data = try json(["ok": true])
+            } else if components.count == 4, components[1] == "thread", components[3] == "translate", method == "POST" {
+                // The practice inbox is English: nothing is deferred, nothing moves.
+                data = try json(["promoted": 0])
             } else if components.count == 4, components[1] == "updates", let id = Int(components[2]), has(id) {
                 if components[3] == "status", method == "POST", let raw = body["status"] as? String, let status = AttentionStatus(rawValue: raw) {
                     setStatus(id, status)
@@ -710,6 +739,11 @@ actor RehearsalAPI {
                 case incomplete
                 /// One plain message still being translated, which stays pending.
                 case pending
+                /// ARCHIVE MAIL: one plain message whose translation is
+                /// deferred until the reader asks. It stays deferred under any
+                /// number of reads; the reader's ask makes it pending, and the
+                /// next refetch after that lands it.
+                case deferred
                 /// All three in one thread, oldest first, where the pending one
                 /// lands as done on the third fetch (the reader's third refetch).
                 case all
@@ -823,13 +857,15 @@ actor RehearsalAPI {
                         missing: ["FR-7730-XQ"]))
             }
 
-            static func pending(landed: Bool = false) -> ClientMessage {
+            static func pending(landed: Bool = false, waiting: ClientTranslation.Status = .pending)
+                -> ClientMessage
+            {
                 message(
                     id: 9103, name: "Camille Durand", addr: "camille@exemple.example",
                     minutesAgo: 2, subject: "Samedi au marché ?", content: pendingPlain,
                     translation: landed
                         ? translation(.done, subject: "Saturday at the market?", content: pendingEnglish)
-                        : translation(.pending, subject: "", content: ""))
+                        : translation(waiting, subject: "", content: ""))
             }
 
             /// The versions to stage for `scene` under `threadId`, first fetch
@@ -844,6 +880,13 @@ actor RehearsalAPI {
                 case .done: return [view("Votre réservation est confirmée", [done()])]
                 case .incomplete: return [view("Votre relevé de septembre", [incomplete()])]
                 case .pending: return [view("Samedi au marché ?", [pending()])]
+                case .deferred:
+                    let subject = "Samedi au marché ?"
+                    return [
+                        view(subject, [pending(waiting: .deferred)]),
+                        view(subject, [pending()]),
+                        view(subject, [pending(landed: true)]),
+                    ]
                 case .all:
                     let subject = "Votre réservation est confirmée"
                     return [

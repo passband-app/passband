@@ -87,7 +87,9 @@
             // reader's translation strip. `translated` is an HTML message
             // shown in English, `translated-incomplete` one whose fact check
             // failed, `translated-pending` one still being written (it stays
-            // pending, so the reader's backoff runs out), and
+            // pending, so the reader's backoff runs out), `translated-deferred`
+            // archive mail the reader asks to translate on open (it stays
+            // deferred under any read until the ask), and
             // `translated-all` the three in one thread, where the pending one
             // lands on the reader's third refetch.
             case let scene where scene.hasPrefix("translated"):
@@ -95,6 +97,7 @@
                     switch scene {
                     case "translated-incomplete": .incomplete
                     case "translated-pending": .pending
+                    case "translated-deferred": .deferred
                     case "translated-all": .all
                     default: .done
                     }

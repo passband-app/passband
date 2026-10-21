@@ -22,7 +22,7 @@ struct TranslationStrip: View {
     var body: some View {
         // A finished translation with nothing in it is no translation: the
         // card shows the original, and the strip has nothing true to say.
-        if let translation, translation.status == .pending || translation.ready {
+        if let translation, translation.awaiting || translation.ready {
             HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
                 Image(systemName: "translate")
                     .font(Typo.ui(10, weight: .medium))
@@ -46,18 +46,18 @@ struct TranslationStrip: View {
     /// What the strip says. Pure, so the copy can be checked without a view.
     static func label(_ t: ClientTranslation, showingOriginal: Bool) -> String {
         let language = t.languageName
-        if t.status == .pending { return "translating from \(language)…" }
+        if t.awaiting { return "translating from \(language)…" }
         if showingOriginal { return "the original, in \(language)" }
         switch t.status {
         case .incomplete:
             return "translated from \(language), but it may have missed something. Check the original"
-        case .done, .pending:
+        case .done, .pending, .deferred:
             return "translated from \(language)"
         }
     }
 
     static func help(_ t: ClientTranslation) -> String {
-        if t.status == .pending {
+        if t.awaiting {
             return "Passband is translating this message to English. The original is shown until it is ready."
         }
         if t.status == .incomplete {

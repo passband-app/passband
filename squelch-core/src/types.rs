@@ -284,9 +284,11 @@ pub struct ExternalTranslation {
 
 /// The reader's view of one message's translation (GET /client/thread/{id}).
 /// WIRE CONTRACT (docs/TRANSLATION.md, "Wire"): `source_lang` is the ISO code,
-/// `source_language` its English name; `status` is `pending`, `done` or
-/// `incomplete`. A `pending` translation carries empty `subject`/`content`,
-/// and the client shows the original while it waits. `failed` and
+/// `source_language` its English name; `status` is `deferred`, `pending`,
+/// `done` or `incomplete`. A `deferred` or `pending` translation carries empty
+/// `subject`/`content`, and the client shows the original while it waits.
+/// `deferred` (archive tier) is translated only once the reader displaying the
+/// thread calls `POST /client/thread/{id}/translate`. `failed` and
 /// `not_needed` translations are never on the wire at all.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClientTranslation {

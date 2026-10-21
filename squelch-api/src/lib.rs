@@ -142,6 +142,13 @@ fn client_router(state: ApiState) -> Router {
             "/client/thread/{thread_id}/opened",
             post(handlers::mark_thread_opened),
         )
+        // "Translate what I am showing." The GET serves an archive thread's
+        // translations as `deferred` and buys nothing, for the same prefetch
+        // reason; the reader displaying the thread asks here. HUMAN DOOR ONLY.
+        .route(
+            "/client/thread/{thread_id}/translate",
+            post(handlers::translate_thread),
+        )
         .route("/client/attachments/{id}", get(handlers::get_attachment))
         // FILES ON THEIR WAY OUT (see the handlers' header). The upload carries
         // its own body limit: the router's default is 2 MB, sized for JSON, and

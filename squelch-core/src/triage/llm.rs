@@ -73,6 +73,10 @@ pub struct LlmRequest<'a> {
     /// the deliberate lane behind it IS its retry, so a second attempt there
     /// buys nothing and costs the whole window.
     pub max_tries: u32,
+    /// The output ceiling for this one call. `None` is [`MAX_TOKENS`], which
+    /// every classifier uses; a caller whose answer grows with its input (the
+    /// translator, whose output is as long as the mail) sizes its own.
+    pub max_tokens: Option<u32>,
 }
 
 /// The outcome of a single LLM call, generic over the verdict `T`. Every stage
@@ -433,7 +437,7 @@ async fn classify_anthropic(
     req: &LlmRequest<'_>,
     tool_submission: bool,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
-    let max_tokens = MAX_TOKENS;
+    let max_tokens = req.max_tokens.unwrap_or(MAX_TOKENS);
 
     let body = MessagesRequest {
         model: req.model,
@@ -552,7 +556,7 @@ async fn classify_openai(
     api_key: &str,
     req: &LlmRequest<'_>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
-    let max_completion_tokens = MAX_TOKENS;
+    let max_completion_tokens = req.max_tokens.unwrap_or(MAX_TOKENS);
 
     let body = OpenAiRequest {
         model: req.model,
@@ -858,6 +862,7 @@ mod tests {
                 schema,
                 effort: Some("low"),
                 max_tries: 1,
+                max_tokens: None,
             };
             let result = classify_agent_step(
                 &reqwest::Client::new(),
@@ -981,6 +986,7 @@ mod tests {
                 schema: serde_json::json!({}),
                 effort: None,
                 max_tries: 1,
+                max_tokens: None,
             };
             let result = classify_into(
                 &reqwest::Client::new(),

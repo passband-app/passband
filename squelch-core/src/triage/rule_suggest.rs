@@ -364,6 +364,7 @@ where
         // One attempt: a suggestion is optional, and a retry ladder would only
         // land after the owner has started typing.
         max_tries: 1,
+        max_tokens: None,
     };
     llm::classify_into(
         &client.http,

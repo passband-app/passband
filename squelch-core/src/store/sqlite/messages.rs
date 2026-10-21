@@ -1380,6 +1380,28 @@ impl SqliteStore {
             &triaged.attachments,
             !archive,
         )?;
+        // 7b. TRANSLATION: a message detected as not English is queued in this
+        //     same transaction (docs/TRANSLATION.md), `deferred` on the archive
+        //     tier, which spends nothing until its thread is opened. Never for
+        //     spam or sent mail, whatever the caller carried. A re-ingest keeps
+        //     the row it has; a heal replaced the text the row was translated
+        //     from, so it starts over.
+        if heal.is_some() {
+            super::translations::drop_translation_conn(&tx, id)?;
+        }
+        if let Some(lang) = triaged.translate_lang
+            && !triaged.message.is_spam
+            && !triaged.message.is_sent
+        {
+            super::translations::queue_translation_conn(
+                &tx,
+                triaged.message.account_id,
+                id,
+                lang.code(),
+                archive,
+                Utc::now(),
+            )?;
+        }
         // 8. THE AGENT'S BOOKKEEPING, last, over the row as it now stands: it
         //    re-reads the message, and a changed content snapshot is what
         //    advances the revision and queues the work. The trigger names the

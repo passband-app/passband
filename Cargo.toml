@@ -99,3 +99,6 @@ k8s-openapi = { version = "0.28", features = ["v1_33"] }
 # `mem::trim` (glibc targets only, see `squelch-core/src/mem.rs`) and the termios
 # calls that turn terminal echo off at squelchd's `auth --import` prompt.
 libc = "0.2"
+# Local language detection for auto-translate (`squelch-core::translate`): a
+# pure trigram classifier, no model download and no network.
+whatlang = "0.16"

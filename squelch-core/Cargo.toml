@@ -57,6 +57,7 @@ fastembed = { workspace = true }
 hf-hub = { version = "0.5", default-features = false }
 sqlite-vec = { workspace = true }
 zerocopy = { workspace = true }
+whatlang = { workspace = true }
 
 # Two uses. `malloc_trim` behind `mem::trim`, which is how a dropped embedding
 # session's heap actually leaves the process (see `mem.rs` for the

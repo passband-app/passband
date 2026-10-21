@@ -208,6 +208,7 @@ mod specialists;
 #[cfg(test)]
 mod tests;
 mod tracking;
+mod translations;
 mod triage_stages;
 mod zones;
 
@@ -1960,5 +1961,51 @@ impl Store for SqliteStore {
     /// embedder, including one attached late in the background.
     fn embedder(&self) -> Option<std::sync::Arc<dyn crate::embed::Embedder>> {
         SqliteStore::embedder(self)
+    }
+
+    fn queue_translation(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        source_lang: &str,
+        deferred: bool,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.queue_translation(account_id, message_id, source_lang, deferred, now)
+    }
+
+    fn claim_translations(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::store::TranslationJob>> {
+        self.claim_translations(account_id, now, limit)
+    }
+
+    fn record_translation(
+        &self,
+        message_id: i64,
+        write: &crate::store::TranslationWrite<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.record_translation(message_id, write, now)
+    }
+
+    fn promote_deferred_translations(
+        &self,
+        account_id: AccountId,
+        thread_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        self.promote_deferred_translations(account_id, thread_id, now)
+    }
+
+    fn message_translations(
+        &self,
+        account_id: AccountId,
+        message_ids: &[i64],
+    ) -> Result<Vec<crate::store::MessageTranslation>> {
+        self.message_translations(account_id, message_ids)
     }
 }

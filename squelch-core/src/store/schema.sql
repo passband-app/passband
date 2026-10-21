@@ -2052,3 +2052,29 @@ CREATE TABLE IF NOT EXISTS archive_walk (
     updated_at TEXT NOT NULL,
     covered_to TEXT
 );
+
+-- Auto-translate (docs/TRANSLATION.md): the English version of mail written in
+-- another language, BESIDE the message. `messages.subject`/`body`/`body_html`
+-- are never rewritten, and nothing here is part of the agent's content
+-- snapshot. Ingest inserts `pending` (live) or `deferred` (archive tier) for a
+-- non-English message; spam and sent mail never get a row. Timestamps are
+-- unix seconds. `missing_facts` is a JSON array, set when `incomplete`.
+CREATE TABLE IF NOT EXISTS message_translations (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL,
+    source_lang TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed')),
+    subject TEXT,
+    body TEXT,
+    body_html TEXT,
+    snippet TEXT,
+    missing_facts TEXT,
+    model TEXT,
+    prompt_version INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+-- The translate pass's claim: one account's rows by status.
+CREATE INDEX IF NOT EXISTS idx_message_translations_claim
+    ON message_translations(account_id, status, updated_at);

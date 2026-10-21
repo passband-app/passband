@@ -45,6 +45,7 @@ pub async fn run_access(
         schema: json!({"type":"object","properties":{"restricted":{"type":"boolean"},"reason":{"type":"string"}},"required":["restricted","reason"],"additionalProperties":false}),
         effort: connection.effort,
         max_tries: 1,
+        max_tokens: None,
     };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(config.fast_timeout_secs.max(1)),

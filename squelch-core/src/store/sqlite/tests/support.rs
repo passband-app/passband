@@ -55,6 +55,8 @@ pub(super) struct TriagedBuilder {
     /// Only `ingest` carries them: `upsert` writes the message row alone.
     date_offset_minutes: Option<i32>,
     invite_zone: Option<crate::timezone::InviteZone>,
+    /// The detected non-English language, as ingest carries it.
+    translate_lang: Option<crate::translate::Lang>,
 }
 
 /// A plain inbound message with a neutral triage shape — the base every other
@@ -97,6 +99,7 @@ pub(super) fn triaged(account_id: AccountId, gmail: &str, thread: &str) -> Triag
         category: None,
         date_offset_minutes: None,
         invite_zone: None,
+        translate_lang: None,
     }
 }
 
@@ -230,6 +233,12 @@ impl TriagedBuilder {
         self.date_offset_minutes = minutes;
         self
     }
+    /// Detected as written in `code` (ISO 639-1), as ingest would carry it.
+    pub(super) fn lang(mut self, code: &str) -> Self {
+        self.translate_lang = crate::translate::Lang::from_code(code);
+        assert!(self.translate_lang.is_some(), "unknown language {code}");
+        self
+    }
     /// An invitation organized by `organizer` in `zone` (ingest only).
     pub(super) fn invite(mut self, organizer: &str, zone: &str) -> Self {
         self.invite_zone = Some(crate::timezone::InviteZone {
@@ -280,6 +289,7 @@ impl TriagedBuilder {
             notify_eligible_at: None,
             date_offset_minutes: self.date_offset_minutes,
             invite_zone: self.invite_zone.clone(),
+            translate_lang: self.translate_lang,
         }
     }
 

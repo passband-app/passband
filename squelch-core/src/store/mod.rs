@@ -317,6 +317,93 @@ pub struct TriagedMessage {
     /// The first calendar invitation in the message that named a real zone,
     /// credited to its ORGANIZER (not the From). See [`crate::timezone`].
     pub invite_zone: Option<crate::timezone::InviteZone>,
+    /// The language ingest detected, when it is NOT English
+    /// ([`crate::translate::detect`]). `Some` queues a `message_translations`
+    /// row in the ingest transaction: `pending` for live mail, `deferred` for
+    /// the archive tier. Ingest leaves it `None` for spam and sent mail, and
+    /// the store refuses both again.
+    pub translate_lang: Option<crate::translate::Lang>,
+}
+
+/// Where a message's translation stands (`message_translations.status`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationStatus {
+    /// Archive tier: nothing is spent until the thread is opened.
+    Deferred,
+    /// Waiting for (or claimed by) the translate pass.
+    Pending,
+    Done,
+    /// Translated, but the fact check still found source facts missing.
+    Incomplete,
+    /// Nothing usable came back; retried with backoff, a bounded number of
+    /// times.
+    Failed,
+}
+
+impl TranslationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deferred => "deferred",
+            Self::Pending => "pending",
+            Self::Done => "done",
+            Self::Incomplete => "incomplete",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "deferred" => Self::Deferred,
+            "pending" => Self::Pending,
+            "done" => Self::Done,
+            "incomplete" => Self::Incomplete,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// One claimed translation: the message's ORIGINAL fields, as stored.
+#[derive(Debug, Clone)]
+pub struct TranslationJob {
+    pub message_id: i64,
+    pub account_id: AccountId,
+    /// ISO 639-1, as detection wrote it.
+    pub source_lang: String,
+    pub subject: String,
+    pub body: String,
+    pub body_html: Option<String>,
+    /// Attempts including this one.
+    pub attempts: i64,
+}
+
+/// What the translate pass writes back for a claimed row.
+#[derive(Debug, Clone, Copy)]
+pub enum TranslationWrite<'a> {
+    /// `done`, or `incomplete` when `missing_facts` is not empty.
+    Translated {
+        translated: &'a crate::translate::Translated,
+        model: &'a str,
+        prompt_version: i64,
+    },
+    /// `failed`: retried after a backoff until the attempts run out.
+    Failed { model: &'a str },
+}
+
+/// A stored translation row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageTranslation {
+    pub message_id: i64,
+    pub source_lang: String,
+    pub status: TranslationStatus,
+    pub subject: Option<String>,
+    pub body: Option<String>,
+    pub body_html: Option<String>,
+    pub snippet: Option<String>,
+    pub missing_facts: Vec<String>,
+    pub model: Option<String>,
+    pub prompt_version: Option<i64>,
+    pub attempts: i64,
 }
 
 /// The full body of one sealed message. HUMAN-DOOR-ONLY: returned solely by
@@ -3179,4 +3266,56 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     fn embedder(&self) -> Option<std::sync::Arc<dyn crate::embed::Embedder>> {
         None
     }
+
+    // ---- auto-translate (docs/TRANSLATION.md) ------------------------------
+
+    /// Queue one message for translation from `source_lang` (ISO 639-1),
+    /// `deferred` for the archive tier. A row that exists is left alone.
+    /// Ingest queues its own rows inside its transaction; this is for
+    /// everything else.
+    fn queue_translation(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        source_lang: &str,
+        deferred: bool,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Claim up to `limit` rows due for translation, newest mail first:
+    /// `pending` ones, and `failed` ones whose backoff has passed. Each claim
+    /// counts an attempt and holds a lease, and a row out of attempts is
+    /// never claimed again. Spam and sent mail are never claimed.
+    fn claim_translations(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<TranslationJob>>;
+
+    /// Write a claimed row's result. A row no longer `pending` (dropped and
+    /// re-queued by a heal meanwhile) is left as it is.
+    fn record_translation(
+        &self,
+        message_id: i64,
+        write: &TranslationWrite<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Promote a thread's `deferred` rows to `pending`, which is what opening
+    /// an archive thread does. Returns how many moved.
+    fn promote_deferred_translations(
+        &self,
+        account_id: AccountId,
+        thread_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<usize>;
+
+    /// The translation rows for `message_ids`, in any status, ordered by id.
+    /// The caller decides what a status means to its door.
+    fn message_translations(
+        &self,
+        account_id: AccountId,
+        message_ids: &[i64],
+    ) -> Result<Vec<MessageTranslation>>;
 }

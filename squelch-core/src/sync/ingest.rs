@@ -92,7 +92,7 @@ pub fn html_to_text(html: &str) -> String {
 /// (ZWNJ/ZWJ/ZWSP/soft hyphen/BOM) decode to NOTHING — they are invisible
 /// layout hacks (preheader padding), and as literal text they would pollute
 /// FTS tokens and the LLM/embed input.
-fn decode_entities(s: &str) -> String {
+pub(crate) fn decode_entities(s: &str) -> String {
     fn named(name: &str) -> Option<&'static str> {
         Some(match name {
             "nbsp" => " ",
@@ -932,6 +932,17 @@ fn normalize_content_id(raw: Option<&str>) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
+/// A header's first text value, `None` when it is absent or empty.
+fn header_text(value: &mail_parser::HeaderValue<'_>) -> Option<String> {
+    let s = match value {
+        mail_parser::HeaderValue::Text(t) => t.to_string(),
+        mail_parser::HeaderValue::TextList(list) => list.first()?.to_string(),
+        _ => return None,
+    };
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 /// Turn raw fetched bytes into a fully-triaged, store-ready message.
 ///
 /// `known_contact_lookup` is called ONLY for non-sealed mail, with the parsed
@@ -1202,6 +1213,22 @@ pub fn ingest(
         .and_then(crate::timezone::invite_zone)
         .filter(|i| i.organizer != self_addr);
 
+    // THE LANGUAGE, judged locally on the original text (docs/TRANSLATION.md,
+    // "Detection"). Never for spam, which reaches no model, nor for sent mail,
+    // which the user wrote. `Content-Language` is only a tiebreaker; the
+    // message's own header first, then its text part's.
+    let translate_lang = if fetched.is_sent || fetched.is_spam {
+        None
+    } else {
+        let header = parsed.as_ref().and_then(|m| {
+            header_text(m.content_language()).or_else(|| {
+                m.text_part(0)
+                    .and_then(|p| header_text(p.content_language()))
+            })
+        });
+        crate::translate::detect(&subject, &text, header.as_deref())
+    };
+
     let message = NewMessage {
         account_id: fetched.account_id,
         gmail_msg_id,
@@ -1248,6 +1275,7 @@ pub fn ingest(
         notify_eligible_at: None,
         date_offset_minutes,
         invite_zone,
+        translate_lang,
     }
 }
 

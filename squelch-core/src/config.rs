@@ -464,6 +464,33 @@ impl Default for NotifyConfig {
     }
 }
 
+/// Auto-translate (docs/TRANSLATION.md): mail in another language is
+/// translated to English in the refine lane. ON by default and file-only: the
+/// feature takes hold when the daemon version rolls, so there is deliberately
+/// no env var and no warden knob behind any of this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateConfig {
+    /// Whether the translate pass runs at all. Detection at ingest is local and
+    /// free, so this gates only the model spend. Default `true`.
+    pub enabled: bool,
+    /// The model that translates. Qualified with the gateway's provider prefix
+    /// at call time, never here (see
+    /// [`crate::triage::llm::qualify_gateway_model`]). Default
+    /// `claude-sonnet-5`, which every tenant's Bifrost allow-list already
+    /// carries.
+    pub model: String,
+}
+
+impl Default for TranslateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "claude-sonnet-5".to_string(),
+        }
+    }
+}
+
 /// Scheduled re-evaluation tunables. The serde-facing shape of
 /// [`crate::triage::revisit::RevisitConfig`], in plain numbers rather than
 /// `chrono::Duration`s, so it round-trips through TOML and env vars.
@@ -1848,6 +1875,8 @@ pub struct Config {
     /// BYOK carrier APIs. No credentials anywhere means no carrier is ever
     /// polled, which is the default.
     pub carriers: CarriersConfig,
+    /// Auto-translate. Defaults only; read from the `[translate]` table.
+    pub translate: TranslateConfig,
 }
 
 impl Default for Config {
@@ -1873,6 +1902,7 @@ impl Default for Config {
             metrics: MetricsConfig::default(),
             console: ConsoleConfig::default(),
             carriers: CarriersConfig::default(),
+            translate: TranslateConfig::default(),
         }
     }
 }

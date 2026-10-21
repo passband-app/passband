@@ -13208,10 +13208,22 @@ async fn the_worker_sends_a_due_row_with_its_minted_message_id() {
                 .unwrap()
         }
     };
+    let poked =
+        || tokio::time::timeout(std::time::Duration::ZERO, state.scheduled_wake().notified());
+    assert!(poked().await.is_err(), "a fresh state holds no permit");
     let due = schedule(60, serde_json::json!([file])).await;
+    assert!(
+        poked().await.is_ok(),
+        "scheduling a row wakes the worker, which may be asleep until a later one"
+    );
     let not_due = schedule(120, serde_json::json!([])).await;
+    assert!(poked().await.is_ok());
     let (status, _) = outbox(&app, "POST", &format!("/client/scheduled/{due}/now"), None).await;
     assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(
+        poked().await.is_ok(),
+        "pulling a row forward wakes the worker for it"
+    );
     let msgid = store
         .scheduled_send_by_id(acct, due)
         .unwrap()

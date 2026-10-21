@@ -35,6 +35,7 @@ use squelch_core::store::{
     ScheduledSendState, SearchClock, TOO_MANY_SCHEDULED,
 };
 use squelch_core::types::GroupMode;
+use std::time::Duration;
 
 use crate::error::ApiError;
 use crate::gmail_write::{GmailWriteClient, SCAN_SLACK, SentRef, WriteError, send_budget};
@@ -102,7 +103,7 @@ pub(crate) const RECOVERY_GIVE_UP: chrono::Duration = chrono::Duration::minutes(
 /// mailbox, a pre-fire search that could not be made) come back this far out.
 const NOT_NOW_RETRY: chrono::Duration = chrono::Duration::minutes(2);
 
-/// Claims one pass makes before it yields to the next tick, so a backlog (a
+/// Claims one pass makes before it yields to the next round, so a backlog (a
 /// laptop that slept through a morning of scheduled mail) drains in steps a
 /// shutdown can interrupt, not one unbounded burst.
 pub(crate) const MAX_PER_PASS: usize = 20;
@@ -204,7 +205,7 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
 
     // 2. When. A PAST DATE IS A CLIENT BUG, not a mail to send at once: the
     // palette re-pins a pick that has gone by, so a past `send_at` is a
-    // timezone mistake, and firing it on the next tick would send something
+    // timezone mistake, and firing it at once would send something
     // the user believed was hours away. Same rule as reminders.
     let now = Utc::now();
     let send_at = match parse_send_at(send_at.as_deref(), now) {
@@ -363,7 +364,9 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
         }
     };
 
-    // 10. Ids only. `send_at` through serde, as the listing spells it (`Z`).
+    // 10. The worker may be asleep until a later row: this one is sooner.
+    state.scheduled_wake.notify_one();
+    // 11. Ids only. `send_at` through serde, as the listing spells it (`Z`).
     audit_action(state, AUDIT_SCHEDULE, target, &format!("ok:{}", row.id)).await;
     Ok((
         StatusCode::CREATED,
@@ -586,8 +589,9 @@ fn in_gmails_hands() -> ApiError {
 
 // --- POST /client/scheduled/{id}/now -----------------------------------------
 
-/// `POST /client/scheduled/{id}/now` — send a `scheduled` or `failed` row on
-/// the next tick. `202 {"status": "queued", "id"}`: queued, not sent; the
+/// `POST /client/scheduled/{id}/now` — send a `scheduled` or `failed` row
+/// now: the worker is woken for it. `202 {"status": "queued", "id"}`: queued,
+/// not sent; the
 /// listing shows it go. A `failed` row gets a fresh retry budget (the store's
 /// rule). `409` for a `sending` row (the same answer a cancel gets: it is
 /// already going), `404` for anything else. Audited, ids only.
@@ -615,6 +619,8 @@ pub async fn send_scheduled_now(
         audit_action(&state, AUDIT_NOW, target, "failed:not_found").await;
         return Err(ApiError::not_found());
     }
+    // Due now: the worker is asleep until a row that was due later.
+    state.scheduled_wake.notify_one();
     audit_action(&state, AUDIT_NOW, target, "ok").await;
     Ok((
         StatusCode::ACCEPTED,
@@ -661,7 +667,8 @@ fn stopping(state: &ApiState) -> bool {
 
 /// One pass of the outbox (docs/SCHEDULED-SEND.md §4): RECOVER lapsed leases,
 /// CLAIM and send due rows (at most [`MAX_PER_PASS`]), SWEEP old ones. The
-/// daemon's timer calls it every tick; the tick is the clock, so a restart
+/// worker ([`scheduled_send_worker`]) runs it on its maintenance clock and
+/// the claim half when a row comes due; the store is the clock, so a restart
 /// costs punctuality and never a mail.
 ///
 /// Exported for the daemon because it needs the WRITE credential, which the
@@ -679,27 +686,13 @@ fn stopping(state: &ApiState) -> bool {
 pub async fn run_scheduled_send_pass(state: &ApiState) -> ScheduledPassReport {
     let mut report = ScheduledPassReport::default();
     recover(state, &mut report).await;
+    claim_and_fire_due(state, &mut report).await;
+    sweep(state, &mut report).await;
+    report
+}
 
-    let mut claims = 0;
-    while claims < MAX_PER_PASS && !stopping(state) {
-        let now = clock(state);
-        let claimed = store_call(state, move |store, account_id| {
-            store.claim_due_scheduled_send_with(account_id, now, lease_for)
-        })
-        .await;
-        match claimed {
-            Ok(Some(row)) => {
-                claims += 1;
-                fire(state, row, &mut report).await;
-            }
-            Ok(None) => break,
-            Err(_) => {
-                eprintln!("squelch-api: scheduled send claim failed; retrying next pass");
-                break;
-            }
-        }
-    }
-
+/// Step 4: drop rows past their keep, and the staged files nobody claims.
+async fn sweep(state: &ApiState, report: &mut ScheduledPassReport) {
     let now = clock(state);
     match store_call(state, move |store, account_id| {
         store.sweep_scheduled_sends(account_id, now)
@@ -709,7 +702,209 @@ pub async fn run_scheduled_send_pass(state: &ApiState) -> ScheduledPassReport {
         Ok(n) => report.swept = n,
         Err(_) => eprintln!("squelch-api: scheduled send sweep failed"),
     }
-    report
+}
+
+/// The CLAIM half of a pass (contract §4 step 2): due rows, at most
+/// [`MAX_PER_PASS`], each claimed under its lease and fired. The worker runs
+/// this alone between its maintenance passes, when a row has come due.
+/// Returns why it stopped, which is what the worker's next wait keys on.
+async fn claim_and_fire_due(state: &ApiState, report: &mut ScheduledPassReport) -> ClaimOutcome {
+    let mut claims = 0;
+    while claims < MAX_PER_PASS {
+        if stopping(state) {
+            return ClaimOutcome::Stopping;
+        }
+        let now = clock(state);
+        let claimed = store_call(state, move |store, account_id| {
+            store.claim_due_scheduled_send_with(account_id, now, lease_for)
+        })
+        .await;
+        match claimed {
+            Ok(Some(row)) => {
+                claims += 1;
+                fire(state, row, report).await;
+            }
+            Ok(None) => return ClaimOutcome::Drained,
+            Err(_) => {
+                eprintln!("squelch-api: scheduled send claim failed; retrying next pass");
+                return ClaimOutcome::Failed;
+            }
+        }
+    }
+    ClaimOutcome::Capped
+}
+
+/// Why [`claim_and_fire_due`] stopped claiming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimOutcome {
+    /// The claim answered "nothing due": the outbox is drained to `now`.
+    Drained,
+    /// [`MAX_PER_PASS`] rows claimed; more may be due right now.
+    Capped,
+    /// The claim itself failed (a store error): nothing is known.
+    Failed,
+    /// The daemon is stopping; the worker returns on its next look.
+    Stopping,
+}
+
+/// The scheduled-send worker's clocks: its first look after startup, how
+/// often it runs the whole pass (recovery and the sweep) over an outbox
+/// with nothing due, and the least it waits after a round whose claim
+/// failed or whose due read could not be made.
+#[derive(Debug, Clone, Default)]
+pub struct ScheduledWorkerTiming {
+    /// The first look, a few seconds in: past the bind and the first sync
+    /// burst.
+    pub first_look: Duration,
+    /// How long after a maintenance pass ENDS the next one runs, when nothing
+    /// is due in between. Measured from the end, so a recovery deferral the
+    /// pass stamped ([`RECOVERY_RETRY`] out from inside it) has come by the
+    /// next pass rather than a moment after it. Recovery has a five-minute
+    /// grace of its own ([`RECOVERY_GRACE`]) and the sweep drops week-old
+    /// rows, so a minute between passes loses nothing; a lapsed lease is
+    /// recovered within a minute of its grace where the tick took ten
+    /// seconds.
+    pub maintenance: Duration,
+    /// The least the worker waits when it cannot tell what is due (the claim
+    /// failed, the due read failed): the old tick, so such a row is never
+    /// later than it was and the worker never spins on a store error.
+    pub floor: Duration,
+    /// TEST HOOK: counted up once per round, so a test can pin how often an
+    /// idle outbox is looked at. `None` in the daemon.
+    pub round_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+impl ScheduledWorkerTiming {
+    /// The daemon's clocks: a first look at five seconds, maintenance every
+    /// minute, a ten-second floor.
+    pub fn daemon() -> Self {
+        Self {
+            first_look: Duration::from_secs(5),
+            maintenance: Duration::from_secs(60),
+            floor: Duration::from_secs(10),
+            round_counter: None,
+        }
+    }
+}
+
+/// THE SCHEDULED-SEND WORKER (docs/SCHEDULED-SEND.md §4), owning its own
+/// clock. It used to be a ten-second tick in the daemon: six wakeups a minute,
+/// each a recovery read, a `BEGIN IMMEDIATE` claim and a sweep transaction,
+/// against an outbox that is empty almost all of the time. Now a round runs
+/// the claim half when a row is due and the whole pass
+/// [`ScheduledWorkerTiming::maintenance`] after the last one ended, then
+/// reads when the next row is due (`next_scheduled_send_at`, a walk of the
+/// due index that stops at the first row) and sleeps until then, or until
+/// maintenance, or until a handler pokes `ApiState::scheduled_wake` for a
+/// row just scheduled or pulled forward. A due send fires at its time rather
+/// than up to a tick late; an idle outbox costs one pass a minute.
+///
+/// Honours `shutdown` between rounds, as the pass does between rows: a send
+/// in hand settles and nothing new is claimed.
+pub async fn scheduled_send_worker(
+    state: ApiState,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    timing: ScheduledWorkerTiming,
+) {
+    let mut wait = timing.first_look;
+    let mut maintenance_ended: Option<std::time::Instant> = None;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = state.scheduled_wake.notified() => {}
+            res = shutdown.changed() => {
+                if res.is_err() || *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+        if *shutdown.borrow() {
+            return;
+        }
+        let maintenance_due = maintenance_ended.is_none_or(|at| at.elapsed() >= timing.maintenance);
+        let mut report = ScheduledPassReport::default();
+        let outcome = if maintenance_due {
+            recover(&state, &mut report).await;
+            let outcome = claim_and_fire_due(&state, &mut report).await;
+            sweep(&state, &mut report).await;
+            maintenance_ended = Some(std::time::Instant::now());
+            outcome
+        } else {
+            claim_and_fire_due(&state, &mut report).await
+        };
+        if let Some(counter) = &timing.round_counter {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if !report.is_idle() {
+            // Counts only; the pass logged its own ids.
+            eprintln!("squelch-api: scheduled-send pass {report:?}");
+        }
+        let next_due = match store_call(&state, |store, account_id| {
+            store.next_scheduled_send_at(account_id)
+        })
+        .await
+        {
+            Ok(Some(at)) => NextDue::At(at),
+            Ok(None) => NextDue::Nothing,
+            Err(_) => {
+                eprintln!("squelch-api: scheduled send due read failed");
+                NextDue::Unknown
+            }
+        };
+        let until_maintenance = timing
+            .maintenance
+            .saturating_sub(maintenance_ended.map_or(Duration::ZERO, |at| at.elapsed()));
+        wait = scheduled_send_wait(
+            next_due,
+            clock(&state),
+            outcome,
+            until_maintenance,
+            timing.floor,
+        );
+    }
+}
+
+/// What the due read said after a round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextDue {
+    /// Nothing scheduled with attempts left.
+    Nothing,
+    /// The earliest `send_at` with attempts left.
+    At(DateTime<Utc>),
+    /// The read failed: nothing is known.
+    Unknown,
+}
+
+/// HOW LONG THE WORKER SLEEPS after a round: until the next row is due, or
+/// until maintenance, whichever is sooner; nothing at all when a row is
+/// already due and the round's claim left it there without failing (the
+/// round was capped, or the row came due between the claim's clock and this
+/// one), so it is claimed at once; and `floor` when the round could not
+/// tell what is due (the claim failed, the due read failed), so a store
+/// error is retried on the old tick and never spun on. Pure, so the ladder
+/// is testable without a clock.
+fn scheduled_send_wait(
+    next_due: NextDue,
+    now: DateTime<Utc>,
+    outcome: ClaimOutcome,
+    until_maintenance: Duration,
+    floor: Duration,
+) -> Duration {
+    let floor = floor.min(until_maintenance);
+    match next_due {
+        NextDue::Unknown => floor,
+        NextDue::Nothing => until_maintenance,
+        NextDue::At(at) => {
+            let due = (at - now).to_std().unwrap_or(Duration::ZERO);
+            if !due.is_zero() {
+                due.min(until_maintenance)
+            } else if outcome == ClaimOutcome::Failed {
+                floor
+            } else {
+                Duration::ZERO
+            }
+        }
+    }
 }
 
 /// The claim lease for one row: [`SCHEDULED_LEASE_BASE`] plus the send's own
@@ -792,7 +987,7 @@ fn scan_window(row: &ScheduledSend, asking: Asking) -> (DateTime<Utc>, DateTime<
 /// Step 1: every `sending` row whose lease lapsed at least [`RECOVERY_GRACE`]
 /// ago (a worker that died mid-send) is asked of Gmail by its minted
 /// Message-ID and, failing that, its `X-Passband-Outbox` token (§4). At most [`MAX_PER_PASS`] rows a pass, like the claims: a
-/// backlog of lapsed rows (a long outage) is asked about over ticks, not in
+/// backlog of lapsed rows (a long outage) is asked about over passes, not in
 /// one burst of searches a shutdown has to wait out.
 async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
     let now = clock(state);
@@ -1396,6 +1591,262 @@ async fn discard_scheduled_files(state: &ApiState, id: i64, ids: Vec<i64>) {
 mod tests {
     use super::*;
     use squelch_core::store::ScheduledSendState;
+
+    /// IDLE COST OF THE SCHEDULED-SEND WORKER, ignored by default: sixty
+    /// passes over an empty outbox on a FILE-backed store, which is what ten
+    /// minutes of the daemon's ten-second tick cost before this change,
+    /// printing the wall time per pass. Run the test binary under
+    /// `strace -f -c -e trace=fcntl,pwrite64,fsync,fdatasync` to count the
+    /// locks and writes those passes asked the kernel for;
+    /// `SQUELCH_BENCH_SKIP=1` runs the setup alone so the two counts can be
+    /// subtracted.
+    ///
+    /// ```text
+    /// cargo test -p squelch-api --lib scheduled_send::tests::idle_pass_cost -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn idle_pass_cost() {
+        let dir = std::env::temp_dir().join(format!("squelch-sched-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = std::sync::Arc::new(
+            squelch_core::store::SqliteStore::open(dir.join("store.sqlite3")).unwrap(),
+        );
+        let acct = store.ensure_account("me@example.com").unwrap();
+        let state = ApiState::new(store, acct, "probe-token");
+        if std::env::var_os("SQUELCH_BENCH_SKIP").is_some() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        const PASSES: u32 = 60;
+        let start = std::time::Instant::now();
+        for _ in 0..PASSES {
+            let report = run_scheduled_send_pass(&state).await;
+            assert!(report.is_idle());
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "BENCH scheduled_idle: {PASSES} passes in {elapsed:?} ({:?} per pass)",
+            elapsed / PASSES
+        );
+        // What the same ten idle minutes cost the worker now: a maintenance
+        // round a minute, each the pass plus the next-due read.
+        const ROUNDS: u32 = 10;
+        let start = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            let report = run_scheduled_send_pass(&state).await;
+            assert!(report.is_idle());
+            let next = store_call(&state, |store, account_id| {
+                store.next_scheduled_send_at(account_id)
+            })
+            .await
+            .unwrap();
+            assert!(next.is_none());
+        }
+        eprintln!(
+            "BENCH scheduled_idle_rounds: {ROUNDS} maintenance rounds in {:?}",
+            start.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE WORKER'S SLEEP, as a table: to the next row, to maintenance,
+    /// whichever is sooner; nothing when a row is already due and the claim
+    /// did not fail (capped, or the row came due since the claim looked);
+    /// the floor when the round could not tell what is due.
+    #[test]
+    fn the_worker_sleeps_to_the_next_send_or_maintenance_and_never_spins() {
+        use ClaimOutcome::*;
+        let s = Duration::from_secs;
+        let now = Utc::now();
+        let at = |secs: i64| NextDue::At(now + chrono::Duration::seconds(secs));
+        for (next_due, outcome, until_maintenance, expected, why) in [
+            (
+                NextDue::Nothing,
+                Drained,
+                s(45),
+                s(45),
+                "nothing scheduled: maintenance",
+            ),
+            (
+                at(30),
+                Drained,
+                s(45),
+                s(30),
+                "a row ahead: until it is due",
+            ),
+            (
+                at(90),
+                Drained,
+                s(45),
+                s(45),
+                "a row past maintenance: maintenance first",
+            ),
+            (
+                at(-5),
+                Capped,
+                s(45),
+                s(0),
+                "capped with more due: again at once",
+            ),
+            (
+                at(0),
+                Drained,
+                s(45),
+                s(0),
+                "due since the claim looked: at once",
+            ),
+            (
+                at(-5),
+                Failed,
+                s(45),
+                s(10),
+                "due and the claim failed: the floor",
+            ),
+            (at(-5), Failed, s(4), s(4), "unless maintenance is sooner"),
+            (
+                NextDue::Unknown,
+                Drained,
+                s(45),
+                s(10),
+                "due read failed: the floor",
+            ),
+            (
+                NextDue::Unknown,
+                Drained,
+                s(3),
+                s(3),
+                "or maintenance, if sooner",
+            ),
+        ] {
+            assert_eq!(
+                scheduled_send_wait(next_due, now, outcome, until_maintenance, s(10)),
+                expected,
+                "{why}"
+            );
+        }
+    }
+
+    /// A state over an in-memory store, with nothing wired in: no write
+    /// credential, so a claimed row settles as a retry, which is the
+    /// observable a claim leaves (`attempts` counts it).
+    fn idle_state() -> (
+        ApiState,
+        std::sync::Arc<squelch_core::store::SqliteStore>,
+        i64,
+    ) {
+        let store =
+            std::sync::Arc::new(squelch_core::store::SqliteStore::open_in_memory().unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        (ApiState::new(store.clone(), acct, "tok"), store, acct)
+    }
+
+    fn schedule_row(
+        store: &squelch_core::store::SqliteStore,
+        acct: i64,
+        send_at: DateTime<Utc>,
+    ) -> i64 {
+        let request =
+            json!({"to": "alice@example.com", "subject": "s", "body": "b", "confirm": true});
+        store
+            .schedule_send(
+                acct,
+                &request.to_string(),
+                send_at,
+                &format!("<{}@squelch.test>", send_at.timestamp_nanos_opt().unwrap()),
+                &[],
+                None,
+                Utc::now(),
+            )
+            .unwrap()
+            .id
+    }
+
+    /// THE WORKER CLAIMS A ROW AT ITS TIME, not at the next tick: a row due
+    /// in three seconds is untouched after one and a half and claimed by
+    /// four and a half (the old ten-second tick could be nine seconds late).
+    /// And A POKE WAKES IT: with nothing due for minutes, a row scheduled a
+    /// second out and poked for is claimed within two and a half.
+    #[tokio::test]
+    async fn the_worker_claims_a_send_at_its_time_and_wakes_on_a_poke() {
+        let (state, store, acct) = idle_state();
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let timing = ScheduledWorkerTiming {
+            first_look: Duration::ZERO,
+            maintenance: Duration::from_secs(3600),
+            floor: Duration::from_secs(10),
+            round_counter: None,
+        };
+        let worker = tokio::spawn(scheduled_send_worker(state.clone(), shutdown, timing));
+        let attempts = |id: i64| {
+            store
+                .scheduled_send_by_id(acct, id)
+                .unwrap()
+                .unwrap()
+                .attempts
+        };
+
+        // Let the first look pass over an empty outbox, then schedule.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let first = schedule_row(&store, acct, Utc::now() + chrono::Duration::seconds(3));
+        state.scheduled_wake.notify_one();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(attempts(first), 0, "not due yet, not claimed");
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+        assert_eq!(attempts(first), 1, "claimed at its time");
+        assert_eq!(
+            store
+                .scheduled_send_by_id(acct, first)
+                .unwrap()
+                .unwrap()
+                .state,
+            ScheduledSendState::Scheduled,
+            "and, with no write credential, put back for a retry minutes out"
+        );
+
+        // The worker is asleep until that retry: a poke brings it to the
+        // sooner row.
+        let second = schedule_row(&store, acct, Utc::now() + chrono::Duration::seconds(1));
+        state.scheduled_wake.notify_one();
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert_eq!(attempts(second), 1, "woken for the sooner row");
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("the worker stops on shutdown")
+            .unwrap();
+    }
+
+    /// AN IDLE OUTBOX IS LOOKED AT ONCE PER MAINTENANCE: with maintenance at
+    /// two seconds, five seconds of nothing scheduled are about three rounds
+    /// (0, 2 and 4 s), where a one-second floor spun on would be five or
+    /// more and the old ten-second tick none at all.
+    #[tokio::test]
+    async fn an_idle_outbox_wakes_the_worker_only_for_maintenance() {
+        let (state, _store, _acct) = idle_state();
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let rounds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let timing = ScheduledWorkerTiming {
+            first_look: Duration::ZERO,
+            maintenance: Duration::from_secs(2),
+            floor: Duration::from_secs(1),
+            round_counter: Some(rounds.clone()),
+        };
+        let worker = tokio::spawn(scheduled_send_worker(state.clone(), shutdown, timing));
+        tokio::time::sleep(Duration::from_millis(5000)).await;
+        let rounds = rounds.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            (2..=4).contains(&rounds),
+            "rounds at 0, 2 and 4 s, give or take a loaded runner: {rounds}"
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("the worker stops on shutdown")
+            .unwrap();
+    }
 
     #[test]
     fn backoff_is_two_to_the_attempts_in_minutes() {

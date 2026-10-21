@@ -2357,10 +2357,16 @@ fn cmd_serve(
     // keeps the startup line and the console truthful about the same result.
     let agent_door = squelch_mcp::AgentDoorAuth::from_env().for_account(&email);
 
+    // The human door counts its open event streams here and the sync engine
+    // reads the count: a client with the app open keeps the poll at its
+    // interval whatever `sync.idle_poll_secs` says.
+    let event_listeners = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine_listeners = event_listeners.clone();
     let api_state = squelch_api::ApiState::from_config(store.clone(), &email, &config, cap_sources)
         .map_err(|e| other_err(format!("{e}")))?
         .with_agent_door(agent_door_status(&agent_door))
         .with_refresh(refresh.clone())
+        .with_event_listeners(event_listeners)
         .with_spam_refresh(spam_refresh.clone())
         .with_refine_poke(refine_poke.clone())
         // THE SAME registry the sync engine writes, so `/client/stats` answers
@@ -2541,6 +2547,7 @@ fn cmd_serve(
                 let _sync_running = sync_running;
                 mailbox_engine(store, creds, account_id, email, config, &sync_budget)
                     .with_refresh(refresh)
+                    .with_event_listeners(engine_listeners)
                     .with_spam_refresh(spam_refresh)
                     .with_refine_poke(refine_poke)
                     .with_metrics(sync_metrics)

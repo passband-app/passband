@@ -519,6 +519,32 @@ struct HistoryMessageAdded {
     message: MessageRef,
 }
 
+/// One label's `history.list` walk, as [`SyncEngine::history_walk_label`]
+/// returns it.
+struct LabelWalk {
+    /// The deduped `messageAdded` ids.
+    ids: Vec<String>,
+    /// The max historyId observed: the start, every record, the page ids.
+    cursor: u64,
+    /// The mailbox's current historyId as the last page reported it, `None`
+    /// if the page carried none. Current for the WHOLE mailbox, whatever the
+    /// walk's label: equal to the start cursor, it says nothing anywhere has
+    /// changed.
+    current: Option<u64>,
+}
+
+/// HOW LONG THE POLL LANE WAITS after a tick: `interval` after a tick that
+/// found the mailbox changed and after the first idle tick (one quiet poll is
+/// not an idle mailbox), then doubling per idle tick to `idle_cap`, whatever
+/// the cap. With the cap at or under the interval (the default,
+/// `idle_poll_secs` unset) every wait is the interval. Pure, so the ladder is
+/// testable without a clock.
+fn poll_wait(idle_rounds: u32, interval: Duration, idle_cap: Duration) -> Duration {
+    interval
+        .saturating_mul(2u32.saturating_pow(idle_rounds.saturating_sub(1)))
+        .min(idle_cap.max(interval))
+}
+
 /// Parse a decimal string historyId; malformed input yields 0 (treated as
 /// "unknown", forcing a full catch-up rather than a panic).
 fn parse_history_id(s: &str) -> u64 {
@@ -701,6 +727,15 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// Coalescing is intentional — several pokes during one in-flight poll
     /// collapse into a single extra tick.
     refresh: Arc<tokio::sync::Notify>,
+    /// HOW MANY CLIENTS ARE LISTENING: the open `GET /client/events` streams,
+    /// counted by the human door and shared through
+    /// [`SyncEngine::with_event_listeners`]. The poll lane's idle ladder
+    /// (`sync.idle_poll_secs`) stays on its first rung while this is nonzero:
+    /// an app that is open is a person waiting on their mail. Counted at the
+    /// door rather than read off the store's event notifier, whose receivers
+    /// include the daemon's own APNs pusher for the life of the process.
+    /// Without the handle (`squelchd run`, tests) nobody is ever listening.
+    event_listeners: Arc<std::sync::atomic::AtomicUsize>,
     /// POLL LANE -> REFINE LANE: poked once per poll tick that actually ingested
     /// something, so new mail starts through Stage-1 the moment it lands instead
     /// of waiting out whatever the refine lane is in the middle of.
@@ -771,6 +806,15 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// (revoked scope, Gmail outage) says so ONCE instead of once per poll. The
     /// next success re-arms it.
     unread_warned: AtomicBool,
+    /// THE UNREAD COUNT IS OWED: fetch it on the next tick whether or not the
+    /// walk moved. Set at boot (the stored pair may be a day old), by a manual
+    /// refresh (somebody is looking), and by a fetch that failed (so the retry
+    /// is per tick, as it was when every tick fetched). Otherwise the count is
+    /// fetched only after a walk that found the mailbox changed: an idle
+    /// mailbox cannot change its unread count, so asking Gmail every five
+    /// seconds for a number that cannot have moved was a third of the idle
+    /// request rate.
+    unread_stale: AtomicBool,
     /// Unix seconds before which the Google profile (name and photo) is not
     /// re-fetched. Zero at start, so the first poll tick of a process tries.
     /// In memory on purpose: a restart costs one extra pair of small requests,
@@ -940,6 +984,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             embedder: None,
             embedder_gate: None,
             refresh: Arc::new(tokio::sync::Notify::new()),
+            event_listeners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             refine_wake: tokio::sync::Notify::new(),
             notify_wake: tokio::sync::Notify::new(),
             spam_refresh: Arc::new(tokio::sync::Notify::new()),
@@ -947,6 +992,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             warn_days: Arc::new(std::sync::Mutex::new(WarnDays::default())),
             notify_lane: std::sync::OnceLock::new(),
             unread_warned: AtomicBool::new(false),
+            unread_stale: AtomicBool::new(true),
             profile_due: AtomicI64::new(0),
             profile_warned: AtomicBool::new(false),
             // Nothing has polled yet, so nothing may spend yet.
@@ -1003,6 +1049,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// still polls on its own interval, just never early.
     pub fn with_refresh(mut self, refresh: Arc<tokio::sync::Notify>) -> Self {
         self.refresh = refresh;
+        self
+    }
+
+    /// Share the human door's count of open event streams
+    /// (`ApiState::with_event_listeners` in `squelch-api`), so the poll lane's
+    /// idle ladder stays at its interval while a client has the app open.
+    /// Create ONE at daemon startup and hand a clone to each side.
+    pub fn with_event_listeners(mut self, listeners: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.event_listeners = listeners;
         self
     }
 
@@ -2155,61 +2210,36 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// `refine_wake` the moment this lane ingests anything.
     async fn poll_lane(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> Result<()> {
         let interval = Duration::from_secs(self.config.sync.poll_secs);
+        let idle_cap = Duration::from_secs(self.config.sync.idle_poll_secs);
+        let mut idle_rounds = 0u32;
         loop {
             if *shutdown.borrow() {
                 return Ok(());
             }
-            // BEFORE the walk, not after: the walk is what can return Err and
-            // bounce the whole lifecycle, and a mailbox stuck in that retry loop
-            // should still have a fresh unread count for the human door.
-            self.refresh_inbox_unread().await;
-            // The account's Google name and photo. Due once a day, so nearly
-            // every tick this is a single atomic load; it sits here because a
-            // mailbox whose walk keeps failing should still have a face.
-            self.refresh_profile().await;
-            // BEFORE the walk too, and for the same reason: the sweep is purely
-            // local — one indexed UPDATE, no Gmail, no model spend — so hanging
-            // it off a call that can Err would let a bad credential or a Gmail
-            // outage starve it for as long as the outage lasts.
-            self.reminder_pass();
-            self.poll_once().await?;
-            // GMAIL ANSWERED, so the refine lane may spend again. Set AFTER the
-            // walk and before anything else, because this is the only proof in
-            // the process that the credential works; `fetch_raw_and_ingest` has
-            // already poked `refine_wake` from inside that call if it ingested
-            // anything, and `Notify` holds the permit, so the lane wakes on the
-            // poke and reads a flag that is true by the time it does. See the
-            // field's own doc for what this is protecting.
-            self.poll_healthy.store(true, Ordering::Relaxed);
-            self.polled_ok.store(true, Ordering::Relaxed);
-            // WHEN, for the archive walk's forward pass: every arrival up to
-            // this instant has been through the live path, so mail older than
-            // this (less a day) that the store does not hold was never going
-            // to be. See [`Self::archive_forward_chunk`].
-            self.archive
-                .last_poll_ok_unix
-                .store(Utc::now().timestamp(), Ordering::Relaxed);
-            // THE freshness stamp for a healthy daemon: `run()` only records one
-            // on its way out, and a mailbox that polls happily for a month never
-            // goes there — staleness alerts would fire on the boot timestamp.
-            //
-            // IT STAYS IN THIS LANE, deliberately. Sync freshness measures
-            // POLLING, not refinement: that is what the staleness alert was
-            // always meant to mean, and stamping it from the refine lane would
-            // let a wedged Gmail credential keep looking healthy for as long as
-            // there were queued rows left to classify.
-            //
-            // `note_poll_ok` also ends the failure streak and clears the last
-            // error, so the client stops reporting an outage that is over.
-            self.metrics.note_poll_ok();
+            let moved = self.poll_tick().await?;
+            // THE IDLE LADDER (off unless `sync.idle_poll_secs` says
+            // otherwise): a tick that found the mailbox unchanged lengthens the
+            // next wait, a tick that found a change, or a client with the app
+            // open (an event stream connected), puts it back to the interval.
+            let listening = self.event_listeners.load(Ordering::Relaxed) > 0;
+            idle_rounds = if moved || listening {
+                0
+            } else {
+                idle_rounds.saturating_add(1)
+            };
+            let wait = poll_wait(idle_rounds, interval, idle_cap);
 
             // A refresh poke that arrives mid-poll is not lost: `Notify` stores
             // one permit, so the next `notified()` returns at once and the loop
             // runs one more immediate tick.
             tokio::select! {
-                _ = tokio::time::sleep(interval) => {}
+                _ = tokio::time::sleep(wait) => {}
                 _ = self.refresh.notified() => {
                     eprintln!("squelch: manual refresh — polling now");
+                    // Somebody asked: the next tick is at the fast interval and
+                    // fetches the unread count whether or not the walk moves.
+                    idle_rounds = 0;
+                    self.unread_stale.store(true, Ordering::Relaxed);
                 }
                 // THE SPAM PAGE ASKED. Run the window sync right here and then
                 // fall through to an ordinary tick, so one click costs one spam
@@ -2224,6 +2254,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     if let Err(e) = self.sync_spam_window().await {
                         eprintln!("squelch: spam sync failed ({e})");
                     }
+                    // Somebody is looking at the spam page: the same signal
+                    // as a refresh for the ladder, if not for the unread count.
+                    idle_rounds = 0;
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return Ok(()); }
@@ -2388,23 +2421,96 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         Ok(n)
     }
 
-    /// A single poll tick: consult the cursor, either run the incremental
-    /// history walk or (on absent/expired cursor) a fresh catch-up.
-    async fn poll_once(&self) -> Result<()> {
+    /// ONE TICK OF THE POLL LANE, everything between two sleeps: the daily
+    /// profile, the reminder sweep, the walk, the stamps a successful walk
+    /// leaves, and the unread count when it is owed. Returns whether the walk
+    /// found the mailbox changed, which is what the lane's idle ladder and
+    /// the unread fetch both key on. Its own function so a test can run a
+    /// tick without the lane's clock.
+    async fn poll_tick(&self) -> Result<bool> {
+        // The account's Google name and photo. Due once a day, so nearly
+        // every tick this is a single atomic load; it sits before the walk
+        // because a mailbox whose walk keeps failing should still have a face.
+        self.refresh_profile().await;
+        // BEFORE the walk, for the same reason: the sweep is purely local —
+        // one indexed UPDATE, no Gmail, no model spend — so hanging it off a
+        // call that can Err would let a bad credential or a Gmail outage
+        // starve it for as long as the outage lasts.
+        self.reminder_pass();
+        // THE UNREAD COUNT WHEN IT IS OWED (see `unread_stale`), BEFORE the
+        // walk as every tick's fetch used to be: the walk is what can return
+        // Err and bounce the whole lifecycle, and a mailbox stuck in that
+        // retry loop still gets the count it is owed.
+        let owed = self.unread_stale.load(Ordering::Relaxed);
+        if owed {
+            self.refresh_inbox_unread().await;
+        }
+        let moved = self.poll_once().await?;
+        // AND AFTER A WALK THAT FOUND THE MAILBOX CHANGED, which is the only
+        // time an unread count can have moved: an idle mailbox is not asked,
+        // and a tick that already fetched above is not asked twice (Gmail's
+        // count already reflected the mail the walk went on to find). Before
+        // the stamps below, as the fetch always was: it is cosmetic, and its
+        // failure must not be the "last error" a poll that just succeeded
+        // reports.
+        if moved && !owed {
+            self.refresh_inbox_unread().await;
+        }
+        // GMAIL ANSWERED, so the refine lane may spend again. Set AFTER the
+        // walk and before anything else, because this is the only proof in
+        // the process that the credential works; `fetch_raw_and_ingest` has
+        // already poked `refine_wake` from inside that call if it ingested
+        // anything, and `Notify` holds the permit, so the lane wakes on the
+        // poke and reads a flag that is true by the time it does. See the
+        // field's own doc for what this is protecting.
+        self.poll_healthy.store(true, Ordering::Relaxed);
+        self.polled_ok.store(true, Ordering::Relaxed);
+        // WHEN, for the archive walk's forward pass: every arrival up to
+        // this instant has been through the live path, so mail older than
+        // this (less a day) that the store does not hold was never going
+        // to be. See [`Self::archive_forward_chunk`].
+        self.archive
+            .last_poll_ok_unix
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
+        // THE freshness stamp for a healthy daemon: `run()` only records one
+        // on its way out, and a mailbox that polls happily for a month never
+        // goes there — staleness alerts would fire on the boot timestamp.
+        //
+        // IT STAYS IN THIS LANE, deliberately. Sync freshness measures
+        // POLLING, not refinement: that is what the staleness alert was
+        // always meant to mean, and stamping it from the refine lane would
+        // let a wedged Gmail credential keep looking healthy for as long as
+        // there were queued rows left to classify.
+        //
+        // `note_poll_ok` also ends the failure streak and clears the last
+        // error, so the client stops reporting an outage that is over.
+        self.metrics.note_poll_ok();
+        Ok(moved)
+    }
+
+    /// A single poll: consult the cursor, either run the incremental history
+    /// walk or (on absent/expired cursor) a fresh catch-up. `Ok(false)` is a
+    /// walk that found the mailbox exactly where it left it; a catch-up
+    /// always counts as a change, since it re-establishes the cursor.
+    async fn poll_once(&self) -> Result<bool> {
         let cursor = self.load_history_cursor()?;
         match history_poll_decision(cursor, false) {
             HistoryDecision::Incremental(start) => {
                 match self.history_walk(start).await {
-                    Ok(()) => Ok(()),
+                    Ok(moved) => Ok(moved),
                     // Expired historyId (404): fall back to a fresh catch-up.
                     Err(CoreError::NotFound) => {
                         eprintln!("squelch: historyId expired; falling back to catch-up");
-                        self.catch_up().await
+                        self.catch_up().await?;
+                        Ok(true)
                     }
                     Err(e) => Err(e),
                 }
             }
-            HistoryDecision::FullCatchUp => self.catch_up().await,
+            HistoryDecision::FullCatchUp => {
+                self.catch_up().await?;
+                Ok(true)
+            }
         }
     }
 
@@ -2426,12 +2532,27 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// depend on that clause holding. INBOX therefore runs FIRST and its ids are
     /// subtracted from both later batches, making the visible copy authoritative.
     ///
+    /// AN IDLE MAILBOX COSTS ONE REQUEST. Every `history.list` answer carries
+    /// the mailbox's CURRENT historyId whatever label it was filtered by, so
+    /// when the INBOX walk returns no record and that id is exactly the
+    /// cursor, nothing in the mailbox has changed since the last poll: no
+    /// sent mail, no spam, no read state. The SENT walk would answer the
+    /// same and the cursor write would store the value already stored, so
+    /// both are skipped and the walk reports `false`. Anything else (a record
+    /// in either walk, or an id past the cursor with no record, which is
+    /// mail outside INBOX or a change of read state) runs the SENT walk as
+    /// before and reports `true`.
+    ///
     /// Propagates [`CoreError::NotFound`] on an expired historyId so the caller
     /// can fall back to a catch-up.
-    async fn history_walk(&self, start_history_id: u64) -> Result<()> {
-        let (inbox_ids, inbox_cursor) = self
+    async fn history_walk(&self, start_history_id: u64) -> Result<bool> {
+        let inbox = self
             .history_walk_label(start_history_id, LABEL_INBOX)
             .await?;
+        if inbox.ids.is_empty() && inbox.current == Some(start_history_id) {
+            return Ok(false);
+        }
+        let (inbox_ids, inbox_cursor) = (inbox.ids, inbox.cursor);
         if !inbox_ids.is_empty() {
             let n = self
                 .fetch_raw_and_ingest(
@@ -2460,13 +2581,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // re-walk costs one indexed probe per message and still changes nothing.
         let (sent_ids, sent_cursor) =
             match self.history_walk_label(start_history_id, LABEL_SENT).await {
-                Ok(v) => v,
+                Ok(walk) => (walk.ids, walk.cursor),
                 // An expired historyId is not a SENT-specific failure: the cursor
                 // itself is gone and only a catch-up can recover it.
                 Err(CoreError::NotFound) => return Err(CoreError::NotFound),
                 Err(e) => {
                     eprintln!("squelch: sent history walk failed ({e}); holding the cursor");
-                    return Ok(());
+                    return Ok(true);
                 }
             };
 
@@ -2491,7 +2612,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 Ok(n) => eprintln!("squelch: ingested {n} new SENT messages"),
                 Err(e) => {
                     eprintln!("squelch: sent ingest failed ({e}); holding the cursor");
-                    return Ok(());
+                    return Ok(true);
                 }
             }
         }
@@ -2505,19 +2626,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             start_history_id,
             [inbox_cursor, sent_cursor],
         ))?;
-        Ok(())
+        Ok(true)
     }
 
     /// Walk `history.list` from `start_history_id` under ONE label filter,
-    /// returning the deduped `messageAdded` ids and the max historyId observed.
+    /// returning the deduped `messageAdded` ids, the max historyId observed,
+    /// and the mailbox's current historyId as the last page reported it.
     /// Persists nothing: the caller owns the single cursor commit that covers
     /// every label. Propagates [`CoreError::NotFound`] on an expired historyId.
-    async fn history_walk_label(
-        &self,
-        start_history_id: u64,
-        label: &str,
-    ) -> Result<(Vec<String>, u64)> {
+    async fn history_walk_label(&self, start_history_id: u64, label: &str) -> Result<LabelWalk> {
         let mut cursor = start_history_id;
+        let mut current;
         let mut page_token: Option<String> = None;
         let mut new_ids: Vec<String> = Vec::new();
 
@@ -2531,6 +2650,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 url.push_str(&format!("&pageToken={tok}"));
             }
             let page: HistoryListResp = self.get_json(&url).await?;
+            current = page.history_id.as_deref().map(parse_history_id);
 
             // Advance the cursor from every observed historyId (records + the
             // page-level newest id).
@@ -2557,7 +2677,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // dedup at the store keys on (account_id, gmail_msg_id).
         new_ids.sort_unstable();
         new_ids.dedup();
-        Ok((new_ids, cursor))
+        Ok(LabelWalk {
+            ids: new_ids,
+            cursor,
+            current,
+        })
     }
 
     /// Fresh catch-up: re-run the backfill-window INBOX fetch, then the SENT
@@ -3731,11 +3855,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             Err(e) => Err(format!("inbox unread count fetch failed ({e})")),
         };
         match outcome {
-            // Re-armed only by a whole cycle that worked, fetch and write both.
-            Ok(()) => self.unread_warned.store(false, Ordering::Relaxed),
+            // Re-armed only by a whole cycle that worked, fetch and write both;
+            // and the count is no longer owed.
+            Ok(()) => {
+                self.unread_warned.store(false, Ordering::Relaxed);
+                self.unread_stale.store(false, Ordering::Relaxed);
+            }
             // `swap` is the arm-and-test: only the transition into failure
-            // prints. Error strings from this crate carry no secrets.
+            // prints. Error strings from this crate carry no secrets. The
+            // count stays owed, so the next tick tries again.
             Err(why) => {
+                self.unread_stale.store(true, Ordering::Relaxed);
                 if !self.unread_warned.swap(true, Ordering::Relaxed) {
                     eprintln!("squelch: {why}; keeping the last known counts");
                 }
@@ -5804,6 +5934,318 @@ mod tests {
         assert_eq!(g.calls("get:a"), 1);
     }
 
+    /// AN IDLE TICK IS ONE REQUEST AND NO WRITE. The INBOX walk's answer
+    /// carries the mailbox's current historyId; at the cursor with no record,
+    /// nothing anywhere has changed, so the SENT walk, the cursor write and
+    /// the unread fetch are all skipped. The first tick fetches the unread
+    /// count once because it is owed at boot.
+    #[tokio::test]
+    async fn an_idle_tick_costs_one_request_and_writes_nothing() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.label(LABEL_INBOX, Some((3, 2)));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+
+        assert!(!eng.poll_tick().await.unwrap(), "nothing changed");
+        assert_eq!(g.calls("history:INBOX"), 1);
+        assert_eq!(g.calls("history:SENT"), 0, "it would answer the same");
+        assert_eq!(g.calls("label:INBOX"), 1, "owed at boot, fetched once");
+        let first = store.inbox_unread(acct).unwrap().expect("stored");
+        assert_eq!((first.messages, first.threads), (3, 2));
+
+        for _ in 0..19 {
+            assert!(!eng.poll_tick().await.unwrap());
+        }
+        assert_eq!(g.calls("history:INBOX"), 20, "one request per tick");
+        assert_eq!(g.calls("history:SENT"), 0);
+        assert_eq!(g.calls("label:INBOX"), 1);
+        assert_eq!(cursor_of(&store, acct), Some(100), "not rewritten");
+        assert_eq!(
+            store.inbox_unread(acct).unwrap().unwrap().fetched_at,
+            first.fetched_at,
+            "the count was not re-stored"
+        );
+    }
+
+    /// A CHANGED MAILBOX IS THE OLD TICK: a current historyId past the cursor
+    /// with no INBOX record (mail outside INBOX, or read state) walks SENT,
+    /// commits the cursor and fetches the unread count after the walk; the
+    /// next idle tick leaves all three alone.
+    #[tokio::test]
+    async fn a_changed_mailbox_walks_sent_commits_the_cursor_and_refreshes_the_count() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(120));
+        g.history(LABEL_SENT, LabelHistory::quiet(120));
+        g.label(LABEL_INBOX, Some((3, 2)));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+
+        assert!(eng.poll_tick().await.unwrap(), "the mailbox moved");
+        assert_eq!(g.calls("history:SENT"), 1);
+        assert_eq!(cursor_of(&store, acct), Some(120));
+        assert_eq!(
+            g.calls("label:INBOX"),
+            1,
+            "owed at boot and fetched once, not again for the move: {:?}",
+            g.seen()
+        );
+
+        // Somebody reads mail in Gmail: the id moves, the count changes.
+        g.label(LABEL_INBOX, Some((1, 1)));
+        g.history(LABEL_INBOX, LabelHistory::quiet(130));
+        g.history(LABEL_SENT, LabelHistory::quiet(130));
+        assert!(eng.poll_tick().await.unwrap());
+        assert_eq!(store.inbox_unread(acct).unwrap().unwrap().messages, 1);
+        assert_eq!(cursor_of(&store, acct), Some(130));
+        assert_eq!(
+            g.seen().last().map(String::as_str),
+            Some("label:INBOX"),
+            "the count is fetched after the walk: {:?}",
+            g.seen()
+        );
+
+        assert!(!eng.poll_tick().await.unwrap(), "and then nothing");
+        assert_eq!(g.calls("history:SENT"), 2);
+        assert_eq!(g.calls("label:INBOX"), 2);
+    }
+
+    /// A FAILED UNREAD FETCH STAYS OWED: the next tick tries again whether
+    /// or not the mailbox moved, as every tick did before; once it succeeds
+    /// an idle tick stops asking.
+    #[tokio::test]
+    async fn a_failed_unread_fetch_is_retried_on_the_next_idle_tick() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        // No label scripted: `labels.get` answers 500.
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+
+        assert!(!eng.poll_tick().await.unwrap());
+        assert!(!eng.poll_tick().await.unwrap());
+        assert_eq!(g.calls("label:INBOX"), 2, "owed until it succeeds");
+        assert!(store.inbox_unread(acct).unwrap().is_none());
+        g.label(LABEL_INBOX, Some((4, 4)));
+        assert!(!eng.poll_tick().await.unwrap());
+        assert_eq!(store.inbox_unread(acct).unwrap().unwrap().messages, 4);
+        assert!(!eng.poll_tick().await.unwrap());
+        assert_eq!(g.calls("label:INBOX"), 3, "paid, and not asked again idle");
+    }
+
+    /// THE POLL LANE'S WAIT, as a table: the interval while the cap is the
+    /// interval (the default), doubling to the cap otherwise, back to the
+    /// interval after a tick that found a change.
+    #[test]
+    fn the_poll_wait_is_the_interval_unless_a_cap_lets_it_back_off() {
+        let s = Duration::from_secs;
+        for (idle_rounds, interval, cap, expected, why) in [
+            (0, s(5), s(5), s(5), "the interval"),
+            (3, s(5), s(5), s(5), "no backoff without a cap above it"),
+            (
+                2,
+                s(5),
+                s(3),
+                s(5),
+                "a cap under the interval is the interval",
+            ),
+            (0, s(5), s(60), s(5), "a tick that found a change"),
+            (
+                1,
+                s(5),
+                s(60),
+                s(5),
+                "and the first idle tick keep the interval",
+            ),
+            (2, s(5), s(60), s(10), "the second doubles"),
+            (4, s(5), s(60), s(40), "and keeps doubling"),
+            (5, s(5), s(60), s(60), "to the cap"),
+            (9, s(5), s(60), s(60), "which more ticks cannot pass"),
+            (
+                8,
+                s(5),
+                s(600),
+                s(600),
+                "whatever the cap: the ladder reaches it",
+            ),
+            (40, s(5), s(600), s(600), "and does not overflow on the way"),
+        ] {
+            assert_eq!(
+                poll_wait(idle_rounds, interval, cap),
+                expected,
+                "{why}: idle_rounds={idle_rounds} interval={interval:?} cap={cap:?}"
+            );
+        }
+    }
+
+    /// THE LADDER IN THE LANE: with `idle_poll_secs` set, an idle mailbox is
+    /// polled at 0, 1, 3 and 7 s (interval 1 s, cap 4 s: the waits are 1, 2,
+    /// 4, 4...) where the fixed interval would poll six times in the same
+    /// five and a half seconds; a manual refresh polls at once and starts
+    /// the ladder over.
+    #[tokio::test]
+    async fn an_idle_mailbox_backs_the_poll_off_and_a_refresh_starts_it_over() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.label(LABEL_INBOX, Some((0, 0)));
+        let base = serve_mock(g.clone()).await;
+        let mut config = Config::default();
+        config.sync.poll_secs = 1;
+        config.sync.idle_poll_secs = 4;
+        let eng = Arc::new(engine_with_config(store.clone(), acct, &base, config));
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+        let (stop, mut rx) = tokio::sync::watch::channel(false);
+        let lane = {
+            let eng = eng.clone();
+            tokio::spawn(async move { eng.poll_lane(&mut rx).await })
+        };
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+        assert_eq!(
+            g.calls("history:INBOX"),
+            3,
+            "ticks at 0, 1 and 3 s; the next is at 7: {:?}",
+            g.seen()
+        );
+        eng.refresh.notify_one();
+        wait_for(2, "the refresh tick", || g.calls("history:INBOX") == 4).await;
+        assert_eq!(
+            g.calls("label:INBOX"),
+            2,
+            "a refresh fetches the unread count whether or not the walk moved"
+        );
+        // The ladder restarted: the next tick is one interval on (1 s), not
+        // the cap's four.
+        wait_for(3, "the tick after the refresh, one interval on", || {
+            g.calls("history:INBOX") == 5
+        })
+        .await;
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lane)
+            .await
+            .expect("the lane stops on shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A CONNECTED EVENT STREAM KEEPS THE POLL AT ITS INTERVAL: the human
+    /// door's count of open streams is a client with the app open, and the
+    /// ladder never leaves its first rung while it is nonzero.
+    #[tokio::test]
+    async fn a_connected_event_stream_keeps_the_poll_at_its_interval() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let listeners = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.label(LABEL_INBOX, Some((0, 0)));
+        let base = serve_mock(g.clone()).await;
+        let mut config = Config::default();
+        config.sync.poll_secs = 1;
+        config.sync.idle_poll_secs = 4;
+        let eng = Arc::new(
+            engine_with_config(store.clone(), acct, &base, config)
+                .with_event_listeners(listeners.clone()),
+        );
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+        let (stop, mut rx) = tokio::sync::watch::channel(false);
+        let lane = {
+            let eng = eng.clone();
+            tokio::spawn(async move { eng.poll_lane(&mut rx).await })
+        };
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        assert!(
+            g.calls("history:INBOX") >= 4,
+            "ticks at 0, 1, 2, 3 and 4 s where the ladder would have made three: {:?}",
+            g.seen()
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lane)
+            .await
+            .expect("the lane stops on shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// IDLE COST OF THE POLL LANE, ignored by default: twenty ticks of the
+    /// lane's body over a mailbox where nothing changes, on a FILE-backed
+    /// store against the mock Gmail, printing the requests per tick by
+    /// endpoint and the process CPU. Run it under
+    /// `strace -f -c -e trace=fsync,fdatasync,pwrite64` on the test binary to
+    /// count what those ticks wrote; `SQUELCH_BENCH_SKIP=1` runs the setup
+    /// alone so the two counts can be subtracted.
+    ///
+    /// ```text
+    /// cargo test -p squelch-core --lib sync::tests::poll_lane_idle_cost -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn poll_lane_idle_cost() {
+        let dir = std::env::temp_dir().join(format!("squelch-poll-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(SqliteStore::open(dir.join("store.sqlite3")).unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        store
+            .set_sync_state(
+                acct,
+                HISTORY_KEY,
+                &SyncState {
+                    uidvalidity: 0,
+                    last_uid: 100,
+                },
+            )
+            .unwrap();
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.label(LABEL_INBOX, Some((3, 2)));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        // The daily profile refresh is not the idle tick's cost: park it.
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+        if std::env::var_os("SQUELCH_BENCH_SKIP").is_some() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // CPU consumed by the whole process so far, user and system.
+        let process_cpu = || {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            // SAFETY: `usage` is a valid, writable rusage for the call's duration.
+            let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+            assert_eq!(rc, 0, "getrusage(RUSAGE_SELF)");
+            let secs = |tv: libc::timeval| {
+                Duration::from_secs(tv.tv_sec as u64) + Duration::from_micros(tv.tv_usec as u64)
+            };
+            secs(usage.ru_utime) + secs(usage.ru_stime)
+        };
+        const TICKS: usize = 20;
+        let cpu_start = process_cpu();
+        let start = std::time::Instant::now();
+        for _ in 0..TICKS {
+            eng.poll_tick().await.unwrap();
+        }
+        let elapsed = start.elapsed();
+        let cpu = process_cpu() - cpu_start;
+        let mut by_key: std::collections::BTreeMap<String, usize> = Default::default();
+        for call in g.seen() {
+            *by_key.entry(call).or_default() += 1;
+        }
+        eprintln!(
+            "BENCH poll_lane_idle: {TICKS} ticks in {elapsed:?}, {cpu:?} process cpu; requests per tick {:.2}; by endpoint {by_key:?}",
+            g.seen().len() as f64 / TICKS as f64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// THE POKE REACHES THE LANE. Idle for a hundred-odd seconds of paused
     /// time, the notification lane has backed off to its five-second sleep,
     /// four seconds of which remain. An arrival's `notification` job is then
@@ -6101,8 +6543,10 @@ mod tests {
     async fn a_poll_tick_never_touches_the_spam_label() {
         let (store, acct) = store_at_cursor(Some(100));
         let g = MockGmail::default();
-        g.history(LABEL_INBOX, LabelHistory::quiet(100));
-        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        // The mailbox's id has moved (the spam arrival moved it), so the
+        // walk runs in full rather than stopping at the idle check.
+        g.history(LABEL_INBOX, LabelHistory::quiet(140));
+        g.history(LABEL_SENT, LabelHistory::quiet(140));
         // Scripted so a walk WOULD find something, which is what makes the
         // absence of the call meaningful.
         g.history(LABEL_SPAM, LabelHistory::added(140, &[(140, "g-spam")]));
@@ -6264,7 +6708,10 @@ mod tests {
         let now = Utc::now();
 
         let g = MockGmail::default();
-        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        // The mailbox's current historyId is at least the SENT record's: an
+        // INBOX walk that reports it still at the cursor would say nothing
+        // anywhere changed, and the SENT walk would rightly be skipped.
+        g.history(LABEL_INBOX, LabelHistory::quiet(140));
         g.history(LABEL_SENT, LabelHistory::added(140, &[(140, "g-phone")]));
         g.body(
             "g-phone",
@@ -6964,7 +7411,8 @@ mod tests {
         );
 
         let g = MockGmail::default();
-        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        // Current historyId at the SENT record's, as a real mailbox reports it.
+        g.history(LABEL_INBOX, LabelHistory::quiet(170));
         g.history(
             LABEL_SENT,
             LabelHistory::added(170, &[(170, "g-sealed-out")]),
@@ -7544,7 +7992,8 @@ mod tests {
         .expect("the echo commits a row");
 
         let g = MockGmail::default();
-        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        // Current historyId at the SENT record's, as a real mailbox reports it.
+        g.history(LABEL_INBOX, LabelHistory::quiet(160));
         g.history(LABEL_SENT, LabelHistory::added(160, &[(160, "g-echo")]));
         g.body("g-echo", eml);
         let base = serve_mock(g.clone()).await;

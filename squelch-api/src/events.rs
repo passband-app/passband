@@ -30,6 +30,7 @@ use serde::Deserialize;
 use squelch_core::store::{SqliteStore, Store};
 use squelch_core::types::{AccountId, Event};
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::ApiError;
@@ -268,6 +269,10 @@ pub async fn events_stream(
     // Subscribed for the life of the connection, and dropped with it: the
     // receiver count IS the number of Macs listening.
     let opens = (q.opens.as_deref() == Some("1")).then(|| state.draft_opens.subscribe());
+    // ONE MORE CLIENT LISTENING, for the life of the response body: the
+    // guard rides inside the stream below, so a dropped connection is a
+    // decrement the moment the body goes, not when the pump next notices.
+    let listening = Listening::start(&state);
 
     let (tx, rx) = mpsc::channel::<Result<SseEvent, Infallible>>(CHANNEL_BUFFER);
     let shutdown = state.shutdown.clone();
@@ -281,7 +286,36 @@ pub async fn events_stream(
         }
     });
 
-    Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::new().interval(KEEPALIVE)))
+    let body = ReceiverStream::new(rx).map(move |frame| {
+        let _listening = &listening;
+        frame
+    });
+    Ok(Sse::new(body).keep_alive(KeepAlive::new().interval(KEEPALIVE)))
+}
+
+/// One open event stream, counted in [`ApiState::event_listeners`] from the
+/// moment the connection is accepted until its body is dropped. The poll
+/// lane keys its idle ladder on the count (a client with the app open is a
+/// person waiting on their mail), and THE FIRST STREAM TO OPEN ALSO POLLS
+/// NOW: an app opened against a lane that had backed off sees fresh mail at
+/// once rather than at the end of the current wait.
+struct Listening(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Listening {
+    fn start(state: &ApiState) -> Self {
+        let counter = state.event_listeners.clone();
+        let before = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let (0, Some(refresh)) = (before, &state.refresh) {
+            refresh.notify_one();
+        }
+        Self(counter)
+    }
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// `GET /client/events/{id}` — one event as JSON, scoped to the account. An

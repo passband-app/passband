@@ -319,10 +319,13 @@ fn css_decls(body: &str) -> Vec<String> {
 /// selector is one class (`.x`, or `div.x`), at the top level. A class any
 /// `@media` (or other at-rule) block also names is left out: a responsive
 /// mail hides the desktop or the mobile version, and the reader may be
-/// either. So is a class any COMPLEX top-level selector names (`p .x`,
-/// `.a > .x`, `.x:hover`, `.x + p`): whether it applies depends on where
-/// the element sits, which this does not resolve, and text a rule may show
-/// is never treated as hidden.
+/// either. So is a class a COMPLEX top-level selector names (`p .x`,
+/// `.a > .x`, `.x:hover`, `.x + p`) in a rule that shows what it selects
+/// (`display:block`, `visibility:visible`, a non-zero `font-size` or
+/// `opacity`): whether it applies depends on where the element sits, which
+/// this does not resolve, and text a rule may show is never treated as
+/// hidden. A complex rule that only styles (`.zz .x{color:red}`) changes
+/// nothing.
 fn hidden_classes(html: &str) -> HiddenClasses {
     let mut css = String::new();
     let mut at = 0;
@@ -394,6 +397,16 @@ fn hidden_classes(html: &str) -> HiddenClasses {
                     hiding_props(&raw)
                 };
                 let props = hiding_props(&decls);
+                // Whether the rule sets a hiding property to a showing value.
+                let shows = [
+                    HideProp::Display,
+                    HideProp::Visibility,
+                    HideProp::FontSize,
+                    HideProp::Opacity,
+                    HideProp::Height,
+                ]
+                .into_iter()
+                .any(|p| unhides(p, &decls));
                 for sel in selector.split(',') {
                     if let Some(class) = simple_class(sel) {
                         if in_at > 0 {
@@ -404,9 +417,13 @@ fn hidden_classes(html: &str) -> HiddenClasses {
                                 entry.push((*p, important.contains(p)));
                             }
                         }
-                    } else {
-                        // Any class a complex selector names, at the top
-                        // level or inside an at-rule.
+                    } else if in_at > 0 || shows {
+                        // Any class a complex selector names inside an
+                        // at-rule, or at the top level when the rule shows
+                        // what it selects (`.wrapper .h{display:block}`):
+                        // whether it applies depends on where the element
+                        // sits. A complex rule that shows nothing
+                        // (`.zz .h{color:red}`) leaves the class hidden.
                         for part in sel.split(|c: char| {
                             !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
                         }) {
@@ -1861,7 +1878,9 @@ mod tests {
              <p><span class=\"i\" style=\"display:inline\">Texte cache deux</span></p>\
              <p><span class=\"f\" style=\"display:inline\">Texte cache trois</span></p>\
              <p><span class=\"g\">Texte visible quatre</span></p>\
-             <p><span class=\"k\">Texte visible cinq</span></p>",
+             <p><span class=\"k\">Texte visible cinq</span></p>\
+             <style>.m{display:none} .zz .m{color:red}</style>\
+             <p><span class=\"m\">Texte cache six</span></p>",
         );
         assert_eq!(
             segment_html(&html).segments(),

@@ -33,6 +33,12 @@ enum Answer {
     /// French for the first `n` calls, then every call times out: the
     /// gateway goes down entirely.
     DownAfter(usize),
+    /// French as [`Answer::French`], except that a batch carrying this text
+    /// draws a 400 (a request its content makes invalid).
+    BadRequestOn(&'static str),
+    /// Every call draws a 400 about the model itself (a gateway that cannot
+    /// resolve a provider for the translate model).
+    ModelBadRequest,
 }
 
 struct Scripted {
@@ -116,6 +122,12 @@ impl crate::translate::TranslateBackend for Scripted {
                 usage(),
             ),
             Answer::Rejected => LlmOutcome::Failed("http_402:payment_required".into(), usage()),
+            Answer::ModelBadRequest => {
+                LlmOutcome::Failed("http_400:invalid_request_error".into(), None)
+            }
+            Answer::BadRequestOn(marker) if user.contains(marker) => {
+                LlmOutcome::Failed("http_400:invalid_request_error".into(), None)
+            }
             Answer::Outage => {
                 return Err(ClassifyError {
                     kind: "http_529".into(),
@@ -140,16 +152,17 @@ impl crate::translate::TranslateBackend for Scripted {
                     retryable: true,
                 });
             }
-            Answer::TimesOutOn(_) | Answer::RateLimitedOn(_) | Answer::DownAfter(_) => {
-                LlmOutcome::Ok(
-                    serde_json::json!({
-                        "source_language": "fr",
-                        "translations": segments.iter().map(|s| english(s)).collect::<Vec<_>>(),
-                    })
-                    .to_string(),
-                    usage(),
-                )
-            }
+            Answer::TimesOutOn(_)
+            | Answer::RateLimitedOn(_)
+            | Answer::DownAfter(_)
+            | Answer::BadRequestOn(_) => LlmOutcome::Ok(
+                serde_json::json!({
+                    "source_language": "fr",
+                    "translations": segments.iter().map(|s| english(s)).collect::<Vec<_>>(),
+                })
+                .to_string(),
+                usage(),
+            ),
         })
     }
     fn model(&self) -> &str {
@@ -599,6 +612,69 @@ async fn a_lone_timing_out_row_is_charged_once_triage_succeeds() {
     eng.translate_retry_after.store(0, Ordering::Relaxed);
     assert!(eng.translate_pass().await);
     assert_eq!(status(&store, lone), Some(("failed".into(), 1)));
+}
+
+#[tokio::test]
+async fn a_model_400_beside_triage_successes_spends_no_attempts() {
+    // Six hours of the translate model drawing a 400 on every call (a
+    // gateway that cannot resolve a provider for it) while agent triage
+    // keeps succeeding on the same gateway: the 400 is about the model, so
+    // nothing is charged.
+    let backend = Scripted::new(Answer::ModelBadRequest);
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let rows: Vec<i64> = (0..6)
+        .map(|i| land(&eng, acct, &format!("fr{i}"), false, false))
+        .collect();
+    let rounds = 6 * 3600 / OUTAGE_COOLDOWN_SECS;
+    for _ in 0..rounds {
+        eng.note_gateway_answer();
+        eng.translate_retry_after.store(0, Ordering::Relaxed);
+        assert!(eng.translate_pass().await);
+    }
+    for id in rows {
+        assert_eq!(status(&store, id), Some(("pending".into(), 0)));
+    }
+}
+
+#[tokio::test]
+async fn a_400_only_one_row_draws_is_charged_after_the_cap() {
+    let backend = Scripted::new(Answer::BadRequestOn("Rappel"));
+    let (eng, store, acct) = engine(Some(backend.clone()));
+    let bad = land_as(
+        &eng,
+        acct,
+        "fr0",
+        "Rappel",
+        IngestOrigin::Incremental,
+        false,
+        false,
+    );
+    // Alone, with triage succeeding all along: triage says nothing about a
+    // 400 on the translate model, so it is released.
+    for round in 0..4 {
+        eng.note_gateway_answer();
+        eng.translate_retry_after.store(0, Ordering::Relaxed);
+        assert!(eng.translate_pass().await);
+        assert_eq!(
+            status(&store, bad),
+            Some(("pending".into(), 0)),
+            "round {round}"
+        );
+    }
+    // Other translations land in a round of their own (the four newest).
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let good: Vec<i64> = (1..=4)
+        .map(|i| land(&eng, acct, &format!("fr{i}"), false, false))
+        .collect();
+    eng.translate_retry_after.store(0, Ordering::Relaxed);
+    assert!(eng.translate_pass().await);
+    for id in good {
+        assert_eq!(status(&store, id).unwrap().0, "done");
+    }
+    // The translate model answers others and still refuses this one.
+    eng.translate_retry_after.store(0, Ordering::Relaxed);
+    assert!(eng.translate_pass().await);
+    assert_eq!(status(&store, bad), Some(("failed".into(), 1)));
 }
 
 #[tokio::test]

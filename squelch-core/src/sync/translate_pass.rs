@@ -28,10 +28,14 @@
 //! content draws. When another row of the same round got an answer, the
 //! gateway is fine and such a failure is charged to it as an ordinary
 //! failure. And a row released `MAX_CONSECUTIVE_RELEASES` times in a row is
-//! charged on the next one by the store, but only if the gateway has
-//! answered since that row's first release (`translate_last_answer_ms`,
-//! stamped by any translation verdict and by every successful agent triage
-//! run, [`SyncEngine::note_gateway_answer`]): in a total outage nothing answers, so every
+//! charged on the next one by the store, but only if something has answered
+//! since that row's first release. For a timeout, any answer from the
+//! gateway counts (`gateway_answer_ms`: a translation verdict, or a
+//! successful agent triage run, [`SyncEngine::note_gateway_answer`]). For a
+//! 400 only the TRANSLATE MODEL's own answers count (`translate_answer_ms`):
+//! a 400 can be about the model (a gateway that cannot resolve a provider
+//! for it, a parameter it refuses), and triage succeeding on another model
+//! says nothing about that. In a total outage nothing answers, so every
 //! row stays pending with its attempts untouched, however long it lasts.
 //! A CAPACITY failure (429, 529, 503, any 5xx) and a key, budget or model
 //! failure (401, 402, 403, 404) is never the message's: partial 429s beside
@@ -196,7 +200,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // Stamped before the rows are recorded, so a row released in
             // this same round (its first release later than this) is not
             // charged by the cap on the strength of it.
-            self.note_gateway_answer();
+            self.note_translate_answer();
         }
         for (job, run) in charged.iter().zip(runs) {
             self.finish_translation(job, run, &model, &day, any_answer)
@@ -375,18 +379,32 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// zero-token call), while a true outage, where nothing answers, spends
     /// nothing.
     pub(super) fn note_gateway_answer(&self) {
-        self.translate_last_answer_ms
+        self.gateway_answer_ms
             .fetch_max(Utc::now().timestamp_millis(), Ordering::Relaxed);
     }
 
-    /// Hand a claim back. Only a message-shaped failure carries the pass's
-    /// last answer, so only it can be charged by the release cap, and only
-    /// once the gateway has answered something since the row's first
-    /// release. A capacity, key, budget or model failure never is.
+    /// THE TRANSLATE MODEL ANSWERED: a translation call reached a verdict.
+    /// Also a gateway answer.
+    fn note_translate_answer(&self) {
+        self.translate_answer_ms
+            .fetch_max(Utc::now().timestamp_millis(), Ordering::Relaxed);
+        self.note_gateway_answer();
+    }
+
+    /// Hand a claim back. Only a message-shaped failure carries a last
+    /// answer, so only it can be charged by the release cap: a timeout the
+    /// gateway's last answer (triage included), a 400 the translate model's
+    /// own. A capacity, key, budget or model failure never is.
     fn translate_release(&self, kind: &str) -> TranslationWrite<'static> {
-        let last = self.translate_last_answer_ms.load(Ordering::Relaxed);
+        let last = if kind == "transport" {
+            self.gateway_answer_ms.load(Ordering::Relaxed)
+        } else if failure_is_message_shaped(kind) {
+            self.translate_answer_ms.load(Ordering::Relaxed)
+        } else {
+            0
+        };
         TranslationWrite::Released {
-            last_answer_ms: (failure_is_message_shaped(kind) && last > 0).then_some(last),
+            last_answer_ms: (last > 0).then_some(last),
         }
     }
 

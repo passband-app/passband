@@ -218,12 +218,16 @@ message_translations(
   gateway works, and such a row is charged an ordinary `failed` with backoff
   (no cooldown). And a row released twice in a row (`releases`, reset by any
   verdict) is charged on its third (`failed`, the attempt spent, backoff
-  from now), but ONLY if the gateway has answered the account since the
-  row's first release (the engine's in-memory `translate_last_answer_ms`
-  against the row's `first_released_at`). The gateway counts as answering
-  when any translation call reaches an outcome that is not a configuration
-  failure or an outage, or when an agent triage run or access assessment
-  succeeds (the translator uses the same `[stage2]` gateway and key).
+  from now), but ONLY if something has answered the account since the
+  row's first release (`first_released_at`), as two in-memory stamps
+  decide. A TIMEOUT needs `gateway_answer_ms`: any translation call that
+  reached an outcome other than a configuration failure or an outage, or a
+  successful agent triage run or access assessment (the translator uses the
+  same `[stage2]` gateway and key). A 400 needs `translate_answer_ms`: only
+  the translate model's own answers count, because a 400 can be about the
+  model (Bifrost unable to resolve a provider for it, a parameter it
+  refuses), and triage succeeding on another model says nothing about
+  that; a sustained model 400 beside a healthy triage spends no attempts.
   Otherwise the row keeps being released with no attempt spent. So a
   message whose batch times out every time on a healthy gateway runs out
   of its five attempts, even when it is the only translation queued,
@@ -368,8 +372,10 @@ message_translations(
   written: hidden text (`display:none`, `visibility:hidden`, `font-size:0`,
   `opacity:0`, `mso-hide:all`, `max-height:0` or `height:0` with
   `overflow:hidden`, inline or from a one-class rule at the top level of the
-  document's `<style>`; a class an `@media` block or any complex top-level
-  selector (`p .x`, `.a > .x`, `.x:hover`) also names stays visible, and so
+  document's `<style>`; a class an `@media` block names stays visible, as
+  does one a complex top-level selector (`p .x`, `.a > .x`, `.x:hover`)
+  names in a rule that shows it (`display:block`, `visibility:visible`, a
+  non-zero `font-size` or `opacity`; `.zz .x{color:red}` changes nothing), and so
   does an element whose inline style shows it again on every property the
   class hides it with, unless the class rule was `!important` and the
   inline one is not), and quoted history: `<blockquote>`, Outlook's reply

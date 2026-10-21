@@ -2747,18 +2747,17 @@ fn cmd_serve(
                 // where in this block the sync engine took the original.
                 let mut shutdown_rx = shutdown_tx.subscribe();
                 Some(tokio::spawn(async move {
-                    axum::serve(listener, app)
-                        .with_graceful_shutdown(async move {
-                            loop {
-                                if *shutdown_rx.borrow() {
-                                    return;
-                                }
-                                if shutdown_rx.changed().await.is_err() {
-                                    return;
-                                }
+                    squelch_api::serve(listener, app, async move {
+                        loop {
+                            if *shutdown_rx.borrow() {
+                                return;
                             }
-                        })
-                        .await
+                            if shutdown_rx.changed().await.is_err() {
+                                return;
+                            }
+                        }
+                    })
+                    .await
                 }))
             }
             None => None,
@@ -2832,9 +2831,10 @@ fn cmd_serve(
             }
         };
 
-        let serve_result = axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal)
-            .await;
+        // `squelch_api::serve` rather than `axum::serve`: the same loop with
+        // a live hyper timer, so a connection that never finishes its request
+        // head is closed rather than held forever.
+        let serve_result = squelch_api::serve(listener, app, shutdown_signal).await;
 
         // Tell sync to stop even if the server exited for another reason, then
         // wait for it to flush.

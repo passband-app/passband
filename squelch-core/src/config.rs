@@ -1344,7 +1344,8 @@ pub struct Stage2Config {
     pub anthropic_base_url: Option<String>,
     /// Model id, written verbatim into the request's `model` field and stored as
     /// `model_used` on applied rows. Defaults to the SAME model as Stage-1:
-    /// escalation buys more context and more thinking, not a bigger brain.
+    /// escalation buys more context (and, for a new account's watched jobs,
+    /// more thinking), not a bigger brain.
     pub model: String,
     /// Reasoning depth, sent as `output_config.effort`. This is the triage
     /// agent's effort too. `low` since October 2026: replaying 393 of the
@@ -1353,16 +1354,34 @@ pub struct Stage2Config {
     /// it showed (and showed 14 it did not), halved latency and cut cost 37%,
     /// because output tokens were two thirds of the bill
     /// (`evals/results/2026-10-triage-model-comparison.md`). This is the
-    /// STEADY-STATE effort: a new account runs at [`Self::onboarding_effort`]
-    /// for its first [`Self::onboarding_days`]. Env: `SQUELCH_STAGE2_EFFORT`.
+    /// STEADY-STATE effort: the jobs a new account's user is waiting on run
+    /// at [`Self::onboarding_effort`] for its first [`Self::onboarding_days`],
+    /// everything else at this from day one. Env: `SQUELCH_STAGE2_EFFORT`.
     pub effort: Option<String>,
-    /// Effort for the triage agent while the account is new, in place of
-    /// [`Self::effort`]. `xhigh`: the first days are the first impression, the
-    /// backfill and the first week of arrivals are what a new user judges the
-    /// product on, and the eval's few disagreements (4 FYE items `low` buried)
-    /// are the kind of miss that costs trust before it has been earned. After
-    /// the window the account drops to `effort` and the cost saving.
-    /// Env: `SQUELCH_STAGE2_ONBOARDING_EFFORT` (`none`/`off` clears it).
+    /// Effort for the triage agent's WATCHED jobs while the account is new,
+    /// in place of [`Self::effort`]: the store's foreground lane
+    /// (`AgentJob::foreground`: an arrival's first classification, a heal
+    /// of an arrival not yet classified, a person's one-message request),
+    /// the mail somebody is waiting on. `xhigh`: the first days are the first
+    /// impression, and the eval's few disagreements (4 FYE items `low`
+    /// buried) are the kind of miss that costs trust before it has been
+    /// earned. After the window the account drops to `effort`.
+    ///
+    /// Everything else runs at `effort` from day one: the history a new
+    /// account backfills (`backfill` jobs, or `migration` jobs for an
+    /// account the agent cut over), revisits, the heals and refreshes of
+    /// mail already classified, and a person's WINDOW re-triage (`manual:`
+    /// over days of mail, which the lane keeps off the arrival reserve for
+    /// the same reason: one click is hundreds of jobs). That is a deliberate
+    /// trade: the backfill is what a new account's first lists are made of,
+    /// and the eval found `low` placing it the same for 37% less a run and
+    /// half the latency, with its 4-of-93 buried FYE items the price. It is
+    /// also the 200-a-day background budget for the whole window, so the old
+    /// rule's cost was a new tenant's first thousand runs at 1.6x. Access
+    /// checks are not here: they run on the notify lane's model and effort.
+    /// Env: `SQUELCH_STAGE2_ONBOARDING_EFFORT` (`none`/`off` clears it,
+    /// which is `effort` for the window too; `SQUELCH_STAGE2_ONBOARDING_DAYS=0`
+    /// is the other way to say that).
     pub onboarding_effort: Option<String>,
     /// Length of the onboarding window in days, counted from the account's
     /// `created_at`. 0 disables it. Env: `SQUELCH_STAGE2_ONBOARDING_DAYS`.
@@ -1407,7 +1426,8 @@ impl Default for Stage2Config {
             stage2_provider: None,
             anthropic_base_url: None,
             // Stage-2 is the ESCALATION pass: same model as Stage-1, more
-            // context and more thinking. This is also the agent's model
+            // context (more thinking only for a new account's watched
+            // jobs). This is also the agent's model
             // (`SQUELCH_MODEL`), and Opus 5.5 is the current Opus at $4/$20
             // against Opus 5's $5/$25 with cache reads at a quarter of the
             // price. Effort stays explicit rather than leaning on Opus 5.5's
@@ -1472,12 +1492,17 @@ pub struct ResolvedAssistant {
 }
 
 impl Stage2Config {
-    /// The triage agent's effort for an account created at `created_at`, as
-    /// of `now`: [`Self::onboarding_effort`] inside the first
-    /// [`Self::onboarding_days`], [`Self::effort`] after. An unknown creation
-    /// time gets the steady-state effort, so a missing row can never pin an
-    /// account at the expensive setting.
-    pub fn effort_for_account(
+    /// The triage agent's effort for a WATCHED job of an account created
+    /// at `created_at`, as of `now`: [`Self::onboarding_effort`] inside the
+    /// first [`Self::onboarding_days`], [`Self::effort`] after. An unknown
+    /// creation time gets the steady-state effort, so a missing row can
+    /// never pin an account at the expensive setting, and a cleared
+    /// `onboarding_effort` is the steady-state effort inside the window too,
+    /// never an omitted field (which would be the provider's default, above
+    /// `low`). Private: the per-job choice is [`Self::effort_for_job`], and
+    /// a caller that asked this for a background job would be the bug it
+    /// replaced.
+    fn effort_for_account(
         &self,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         now: chrono::DateTime<chrono::Utc>,
@@ -1487,7 +1512,32 @@ impl Stage2Config {
                 < chrono::Duration::days(i64::from(self.onboarding_days))
         });
         if onboarding {
-            self.onboarding_effort.as_deref()
+            self.onboarding_effort.as_deref().or(self.effort.as_deref())
+        } else {
+            self.effort.as_deref()
+        }
+    }
+
+    /// The triage agent's effort for one job: the onboarding window's for a
+    /// job somebody is waiting on (`watched`, see
+    /// [`Self::onboarding_effort`]), the steady-state [`Self::effort`] for
+    /// everything else, however new the account. The creation time is asked
+    /// for only when the answer depends on it: never for a background job,
+    /// and never when there is no window (no days, no effort of its own, or
+    /// no steady-state effort at all) for it to fall inside.
+    pub fn effort_for_job(
+        &self,
+        watched: bool,
+        created_at: impl FnOnce() -> Option<chrono::DateTime<chrono::Utc>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<&str> {
+        // No steady-state effort means a model with no effort support
+        // (`SQUELCH_STAGE2_EFFORT=none`), which the onboarding one would
+        // 400 against on every call.
+        let window =
+            self.onboarding_days > 0 && self.onboarding_effort.is_some() && self.effort.is_some();
+        if watched && window {
+            self.effort_for_account(created_at(), now)
         } else {
             self.effort.as_deref()
         }
@@ -3304,6 +3354,60 @@ archive_access_daily_cap = 9
             ..Stage2Config::default()
         };
         assert_eq!(off.effort_for_account(days(0), now), Some("low"));
+    }
+
+    /// The onboarding effort is for the jobs somebody is waiting on; a
+    /// background job runs at the steady-state effort from the first day,
+    /// and never asks for the creation time.
+    #[test]
+    fn only_watched_jobs_take_the_onboarding_effort() {
+        let c = Stage2Config::default();
+        let now = chrono::Utc::now();
+        let new = || Some(now - chrono::Duration::days(1));
+        let old = || Some(now - chrono::Duration::days(40));
+        assert_eq!(c.effort_for_job(true, new, now), Some("xhigh"));
+        assert_eq!(c.effort_for_job(false, new, now), Some("low"));
+        assert_eq!(c.effort_for_job(true, old, now), Some("low"));
+        assert_eq!(c.effort_for_job(false, old, now), Some("low"));
+        let not_asked = || -> Option<chrono::DateTime<chrono::Utc>> {
+            panic!("the creation time was asked for when the answer could not depend on it")
+        };
+        assert_eq!(c.effort_for_job(false, not_asked, now), Some("low"));
+        // No window to fall inside: a watched job does not ask either.
+        let no_days = Stage2Config {
+            onboarding_days: 0,
+            ..Stage2Config::default()
+        };
+        assert_eq!(no_days.effort_for_job(true, not_asked, now), Some("low"));
+        let no_effort = Stage2Config {
+            onboarding_effort: None,
+            ..Stage2Config::default()
+        };
+        assert_eq!(no_effort.effort_for_job(true, not_asked, now), Some("low"));
+        // A model with no effort support (`SQUELCH_STAGE2_EFFORT=none`) is
+        // never sent the onboarding effort either, new account or not.
+        let unsupported = Stage2Config {
+            effort: None,
+            ..Stage2Config::default()
+        };
+        assert_eq!(unsupported.effort_for_job(true, not_asked, now), None);
+    }
+
+    /// `SQUELCH_STAGE2_ONBOARDING_EFFORT=none` inside the window is the
+    /// steady-state effort, not an omitted field: the provider's default is
+    /// above `low`, and clearing the window must not raise the spend it
+    /// exists to raise deliberately.
+    #[test]
+    fn a_cleared_onboarding_effort_falls_back_to_the_steady_state_inside_the_window() {
+        let c = Stage2Config {
+            onboarding_effort: None,
+            ..Stage2Config::default()
+        };
+        let now = chrono::Utc::now();
+        assert_eq!(
+            c.effort_for_account(Some(now - chrono::Duration::days(1)), now),
+            Some("low")
+        );
     }
 
     /// An operator repointing a stage at a model with no effort support must be

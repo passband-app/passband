@@ -416,14 +416,20 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
         }
         let input = snapshot(&context, &job, config.context.initial_thread_messages);
-        // A new account triages at the onboarding effort for its first days;
-        // a store error reads as "not new" and takes the cheaper setting.
-        let created_at = self
-            .store
-            .account_created_at(self.account_id)
-            .ok()
-            .flatten();
-        let effort = self.config.stage2.effort_for_account(created_at, now);
+        // A new account triages the jobs somebody is waiting on at the
+        // onboarding effort for its first days (`Stage2Config::effort_for_job`):
+        // the store's foreground lane, and nothing else. A person's
+        // one-message request is on it already; their WINDOW re-triage (a
+        // `manual:` trigger over days of mail) is not, by the store's own
+        // design, since one click is hundreds of jobs the lane keeps off the
+        // arrival reserve, and the effort follows the lane for the same
+        // reason. The backfill and the rest of the background work run at
+        // the steady-state effort from day one. A creation time the store
+        // could not give reads as "not new" and takes the cheaper setting.
+        let effort =
+            self.config
+                .stage2
+                .effort_for_job(job.foreground, || self.account_created_at(), now);
         let connection = AgentConnection {
             http: &self.http,
             url: &llm.url,

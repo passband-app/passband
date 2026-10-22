@@ -806,6 +806,13 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// (revoked scope, Gmail outage) says so ONCE instead of once per poll. The
     /// next success re-arms it.
     unread_warned: AtomicBool,
+    /// The account's creation time, read from the store once and kept: it
+    /// is stamped by `ensure_account` and never changes, and every triage
+    /// job used to re-read it under the store mutex to learn "not new".
+    /// Only a FOUND stamp is kept; a read that failed or found no row is
+    /// asked again next time, so a store hiccup on the first job cannot pin
+    /// a new account at the steady-state effort for its window.
+    account_created: std::sync::OnceLock<DateTime<Utc>>,
     /// THE UNREAD COUNT IS OWED: fetch it on the next tick whether or not the
     /// walk moved. Set at boot (the stored pair may be a day old), by a manual
     /// refresh (somebody is looking), and by a fetch that failed (so the retry
@@ -992,6 +999,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             warn_days: Arc::new(std::sync::Mutex::new(WarnDays::default())),
             notify_lane: std::sync::OnceLock::new(),
             unread_warned: AtomicBool::new(false),
+            account_created: std::sync::OnceLock::new(),
             unread_stale: AtomicBool::new(true),
             profile_due: AtomicI64::new(0),
             profile_warned: AtomicBool::new(false),
@@ -3646,6 +3654,24 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             embed_text,
             notify_eligible: triaged.notify_eligible_at.is_some(),
         }))
+    }
+
+    /// When the account was created, from the store the first time and from
+    /// [`SyncEngine::account_created`] after. `None` when the store could not
+    /// say, which reads as "not new" wherever it is asked.
+    fn account_created_at(&self) -> Option<DateTime<Utc>> {
+        if let Some(created) = self.account_created.get() {
+            return Some(*created);
+        }
+        let found = self
+            .store
+            .account_created_at(self.account_id)
+            .ok()
+            .flatten();
+        if let Some(created) = found {
+            let _ = self.account_created.set(created);
+        }
+        found
     }
 
     /// The fast lane, built on first use. See the [`SyncEngine::notify_lane`]
@@ -10836,6 +10862,168 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    /// The onboarding effort goes to the jobs on the foreground lane, from
+    /// the account's first day: an arrival (the incremental origin) and a
+    /// person's one-message request. The history a new account backfills
+    /// (the backfill origin), the `migration` jobs the cutover queues for an
+    /// account that predates the agent, and a person's window re-triage (a
+    /// `manual:` trigger the store keeps off the lane) go out at the
+    /// steady-state effort. Driven through the real ingest origins and
+    /// `process_agent_job`, with the effort read off the request the mock
+    /// model received for each.
+    #[tokio::test]
+    async fn only_the_jobs_somebody_waits_on_go_out_at_the_onboarding_effort() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        let now = Utc::now();
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        assert_eq!(
+            engine.config.stage2.onboarding_effort.as_deref(),
+            Some("xhigh"),
+            "the default onboarding effort is what this test measures against"
+        );
+        // Five messages in five threads: the claim hands out one job per
+        // thread at a time, and a job it has already handed out stays leased.
+        let raw = |msgid: &str| {
+            let mut raw = fixture(
+                account,
+                msgid,
+                "From: alice@example.com\r\nSubject: A note\r\n\r\nHello",
+                false,
+            );
+            raw.gmail_thread_id = Some(format!("thread-{msgid}"));
+            raw
+        };
+        let stored = |msgid: &str| {
+            let parsed =
+                ingest_with_rules(&raw(msgid), &Stage1Config::default(), now, &[], |_| false);
+            store.upsert_message(&parsed.message).unwrap()
+        };
+        // A row that predates the agent (no state row), which the cutover
+        // queues as `migration`; then the two origins; then a person's
+        // window re-triage (one row of it, enqueued as `retriage_reset`
+        // enqueues a window: off the lane) and a person's one-message
+        // request (through `retriage_reset` itself, which puts it on the
+        // lane) on a backfilled row.
+        stored("old");
+        store
+            .initialize_agent_cutover(account, now - ChronoDuration::days(30))
+            .unwrap();
+        engine
+            .ingest_one(&raw("history"), &[], now, IngestOrigin::Backfill)
+            .unwrap();
+        engine
+            .ingest_one(&raw("arrival"), &[], now, IngestOrigin::Incremental)
+            .unwrap();
+        let window = stored("window");
+        store
+            .enqueue_agent_triage(account, window, "manual:window", false)
+            .unwrap();
+        let asked = engine
+            .ingest_one(&raw("asked"), &[], now, IngestOrigin::Backfill)
+            .unwrap()
+            .expect("ingested")
+            .id;
+        assert_eq!(store.retriage_reset(account, Some(asked), 7).unwrap(), 1);
+
+        let efforts: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let seen = efforts.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move |Json(body): Json<serde_json::Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock()
+                        .unwrap()
+                        .push(body["output_config"]["effort"].clone());
+                    // Nothing a step can use: the job retries, the request
+                    // is what this test is about.
+                    Json(json!({}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            // The effort rides the Anthropic wire (`output_config.effort`).
+            provider: Stage2Provider::Anthropic,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let day = now.format("%Y-%m-%d").to_string();
+        let mut sent = std::collections::BTreeMap::new();
+        // One job per claim, in the claim's own order; a failed step's retry
+        // is scheduled past this claim time, so each is seen exactly once.
+        // A job makes several requests (every step the agent retries before
+        // giving the job up), all at the one effort.
+        for _ in 0..5 {
+            let job = store
+                .claim_agent_job(
+                    account,
+                    "investigation",
+                    Utc::now() + ChronoDuration::seconds(1),
+                    120,
+                )
+                .unwrap()
+                .expect("a job to run");
+            // A one-message request's trigger carries its timestamp; the
+            // lane is what tells it from the window.
+            let trigger = match (job.trigger.as_str(), job.foreground) {
+                (t, true) if t.starts_with("manual:") => "manual (one message)".to_string(),
+                (t, false) if t.starts_with("manual:") => "manual (window)".to_string(),
+                (t, _) => t.to_string(),
+            };
+            let before = efforts.lock().unwrap().len();
+            engine.process_agent_job(job, &llm, &day).await;
+            // An empty answer is the job's failure, not a provider outage:
+            // nothing here may put the account on a cooldown that would
+            // keep the next job from making its request.
+            assert_eq!(engine.agent_retry_after.load(Ordering::Relaxed), 0);
+            let requests = efforts.lock().unwrap();
+            let made = &requests[before..];
+            let effort = made
+                .first()
+                .cloned()
+                .unwrap_or_else(|| panic!("{trigger} made no request"));
+            assert!(
+                made.iter().all(|e| *e == effort),
+                "{trigger} changed effort between steps: {made:?}"
+            );
+            sent.insert(trigger, effort);
+        }
+        assert_eq!(
+            sent,
+            std::collections::BTreeMap::from([
+                ("backfill".to_string(), json!("low")),
+                ("ingest".to_string(), json!("xhigh")),
+                ("manual (one message)".to_string(), json!("xhigh")),
+                ("manual (window)".to_string(), json!("low")),
+                ("migration".to_string(), json!("low")),
+            ])
+        );
+        server.abort();
+    }
+
+    /// The engine keeps the account's creation time once it has one, and
+    /// keeps asking while it has none: a store that could not say on the
+    /// first job must not pin a new account at the steady-state effort for
+    /// its window.
+    #[tokio::test]
+    async fn the_creation_time_is_kept_only_once_found() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        // The engine is built for the account the store is about to hold,
+        // before it holds it: the first ask finds nothing.
+        let engine = engine(store.clone(), 1, "http://127.0.0.1:1");
+        assert_eq!(engine.account_created_at(), None);
+        let account = store.ensure_account("me@example.com").unwrap();
+        assert_eq!(account, 1);
+        let created = engine.account_created_at().expect("found now");
+        // Kept: the store's answer no longer matters, even once it has none.
+        store.test_set_account_created_at(account, "not a stamp");
+        assert_eq!(store.account_created_at(account).unwrap(), None);
+        assert_eq!(engine.account_created_at(), Some(created));
     }
 
     #[tokio::test]

@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
 // is waiting on the answer, so it must not queue behind a cutover. ONLY WHILE
 // IT HAS NEVER BEEN PUSHED BACK: `last_error` is written by every deferral and
 // retry and cleared by neither a claim nor the passing of time, so a check
-// parked on a spent budget comes back at midnight as ordinary background work
-// instead of at the head of the queue, ahead of the owner's own sent mail.
+// parked on a spent budget comes back at midnight (or on a grant within its
+// sub-cap's room) as ordinary work on the access lane instead of at the head
+// of the queue, ahead of the owner's own sent mail.
 const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arrival_eligible,j.kind,COALESCE(lane.foreground,0),j.last_error
              FROM agent_triage_jobs j INDEXED BY idx_agent_jobs_pending_claim JOIN messages candidate ON candidate.account_id=j.account_id AND candidate.id=j.message_id
              LEFT JOIN agent_job_lanes lane ON lane.job_id=j.id
@@ -51,7 +52,8 @@ const MESSAGE_COLUMNS: &str = concat!(
     t.notify_eligible_at, COALESCE((SELECT
              revision FROM agent_thread_attention a WHERE a.account_id=m.account_id AND
              a.thread_id=m.thread_id),0),COALESCE((SELECT group_concat(field || value_json || revision)
-             FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),'')"
+             FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),''),
+    m.is_sent"
 );
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     let mut message = AgentMessage {
@@ -69,6 +71,7 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
         received_at: row.get(5)?,
         is_sent: row.get(6)?,
         is_spam: row.get(7)?,
+        labelled_sent: row.get(14)?,
         status: row.get(8)?,
         opened_at: row.get(9)?,
         remind_at: row.get(10)?,
@@ -2324,9 +2327,9 @@ pub const ARCHIVE_SURFACE_CAP: usize = 10;
 /// that outlives the day it was made in.
 pub const ARCHIVE_ACCESS_OUTSTANDING_MAX: u32 = 20;
 /// The daily sub-cap's key in `wake_budget`, charged by the worker for every
-/// `archive_access` job on top of the global and background budgets.
+/// `archive_access` job on top of the global and access-lane budgets.
 pub const ARCHIVE_ACCESS_BUDGET_KEY: &str = "__agent_archive_access__";
-pub use crate::triage::agent_config::BACKGROUND_BUDGET_KEY;
+pub use crate::triage::agent_config::{ACCESS_BUDGET_KEY, BACKGROUND_BUDGET_KEY};
 /// A failed access check on an archive row may be asked for again this long
 /// after it was last scheduled, so a row is not pending for good.
 const ARCHIVE_ACCESS_RETRY_HOURS: i64 = 24;
@@ -2336,15 +2339,19 @@ const ARCHIVE_ACCESS_RETRY_HOURS: i64 = 24;
 pub struct ArchiveAccessCaps {
     /// `triage.agent.archive_access_daily_cap`.
     pub daily: u32,
-    /// The effective background cap; once today's is spent nothing is queued.
-    pub background_daily: u32,
+    /// The effective access-lane cap; once today's is spent nothing is
+    /// queued, since every check would park.
+    pub access_daily: u32,
+    /// `triage.agent.daily_run_cap`, the same way.
+    pub total_daily: u32,
 }
 
 impl From<&crate::triage::agent_config::AgentConfig> for ArchiveAccessCaps {
     fn from(config: &crate::triage::agent_config::AgentConfig) -> Self {
         Self {
             daily: config.archive_access_daily_cap,
-            background_daily: config.effective_background_daily_run_cap(),
+            access_daily: config.effective_access_daily_run_cap(),
+            total_daily: config.daily_run_cap,
         }
     }
 }
@@ -2450,7 +2457,7 @@ fn revive_failed_archive_access(
 /// at most `limit` (never over [`ARCHIVE_SURFACE_CAP`]) per call; never more
 /// than [`ARCHIVE_ACCESS_OUTSTANDING_MAX`] outstanding for the account; never
 /// more than today's `caps.daily` can still pay for, counting what is already
-/// outstanding. And nothing at all once today's background budget is spent,
+/// outstanding. And nothing at all once today's access budget, or the total, is spent,
 /// because every one of these would park.
 pub(super) fn request_archive_access_conn(
     conn: &Connection,
@@ -2461,15 +2468,20 @@ pub(super) fn request_archive_access_conn(
     now: DateTime<Utc>,
 ) -> Result<Vec<i64>> {
     let day = now.format("%Y-%m-%d").to_string();
-    let used = |key: &str| -> Result<u32> {
-        Ok(conn.query_row(
-            "SELECT COALESCE((SELECT model_calls FROM wake_budget
-                 WHERE account_id=?1 AND thread_id=?2 AND day=?3),0)",
-            params![account, key, day],
-            |row| row.get(0),
-        )?)
+    // Nothing is queued once a cap every one of these checks would park on
+    // is spent, the lane's or the total's, as the worker will reserve
+    // against (the budget module's own rule, today's grant included): a
+    // `squelchd triage grant` on either reopens surfacing too.
+    let spent = |key: &str, configured: u32| -> Result<bool> {
+        Ok(super::agent_budget::runs(conn, account, key, &day)?
+            >= super::agent_budget::cap(conn, account, key, configured, &day)?)
     };
-    if used(BACKGROUND_BUDGET_KEY)? >= caps.background_daily {
+    if spent(ACCESS_BUDGET_KEY, caps.access_daily)?
+        || spent(
+            crate::triage::agent_config::TOTAL_BUDGET_KEY,
+            caps.total_daily,
+        )?
+    {
         return Ok(Vec::new());
     }
     let outstanding: u32 = conn.query_row(
@@ -2483,7 +2495,12 @@ pub(super) fn request_archive_access_conn(
         .min(ARCHIVE_ACCESS_OUTSTANDING_MAX.saturating_sub(outstanding) as usize)
         .min(
             caps.daily
-                .saturating_sub(used(ARCHIVE_ACCESS_BUDGET_KEY)?)
+                .saturating_sub(super::agent_budget::runs(
+                    conn,
+                    account,
+                    ARCHIVE_ACCESS_BUDGET_KEY,
+                    &day,
+                )?)
                 .saturating_sub(outstanding) as usize,
         );
     let mut queued = Vec::new();

@@ -6685,7 +6685,10 @@ async fn triage_config_get_default_shape() {
     assert_eq!(json["global_daily_cap"], 120);
     assert_eq!(json["agent"]["effective_daily_run_cap"], 10_000);
     assert_eq!(json["agent"]["effective_background_daily_run_cap"], 200);
-    assert_eq!(json["agent"]["reserved_arrival_runs"], 9_800);
+    assert_eq!(json["agent"]["access_daily_run_cap"], 500);
+    assert_eq!(json["agent"]["effective_access_daily_run_cap"], 500);
+    // What is left after both lanes.
+    assert_eq!(json["agent"]["reserved_arrival_runs"], 9_300);
     assert_eq!(
         json["agent"]["legacy_stage_caps_are_active_ceilings"],
         false

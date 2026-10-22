@@ -1892,7 +1892,7 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         e.family(
             "squelchd_triage_daily_runs",
             MetricKind::Gauge,
-            "Investigation runs spent this UTC day. Background runs also count toward the total.",
+            "Investigation runs spent this UTC day. Background and access runs also count toward the total.",
         );
         e.sample(
             "squelchd_triage_daily_runs",
@@ -1903,6 +1903,11 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
             "squelchd_triage_daily_runs",
             &[("scope", "background")],
             budget.background_used as f64,
+        );
+        e.sample(
+            "squelchd_triage_daily_runs",
+            &[("scope", "access")],
+            budget.access_used as f64,
         );
         e.family("squelchd_triage_daily_run_cap", MetricKind::Gauge,
             "The cap squelchd_triage_daily_runs is held to today: the configured cap plus any one-day grant from `squelchd triage grant`.");
@@ -1916,8 +1921,13 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
             &[("scope", "background")],
             budget.background_cap as f64,
         );
+        e.sample(
+            "squelchd_triage_daily_run_cap",
+            &[("scope", "access")],
+            budget.access_cap as f64,
+        );
         e.family("squelchd_triage_jobs_held", MetricKind::Gauge,
-            "Jobs parked until the next UTC day by a daily cap. scope=arrival is newly arrived mail going untriaged; scope=background is backlog draining at the background cap; scope=revisit is autonomous revisits, which also answer to [revisit].daily_cap.");
+            "Jobs parked until the next UTC day by a daily cap. scope=arrival is newly arrived mail going untriaged; scope=background is backlog draining at the background cap; scope=access is access checks (the owner's sent mail, spam, archive rows a caller asked to read) waiting on a daily cap, an archive check's own sub-cap included; scope=revisit is autonomous revisits, which also answer to [revisit].daily_cap.");
         e.sample(
             "squelchd_triage_jobs_held",
             &[("scope", "arrival")],
@@ -1927,6 +1937,11 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
             "squelchd_triage_jobs_held",
             &[("scope", "background")],
             budget.held_background as f64,
+        );
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "access")],
+            budget.held_access as f64,
         );
         e.sample(
             "squelchd_triage_jobs_held",
@@ -2517,8 +2532,11 @@ mod tests {
                 total_cap: 1500,
                 background_used: 200,
                 background_cap: 200,
+                access_used: 30,
+                access_cap: 500,
                 held_arrival: 4,
                 held_background: 642,
+                held_access: 9,
                 held_revisit: 12,
             },
             retriage: crate::types::RetriageProgress {
@@ -2541,6 +2559,9 @@ mod tests {
         assert!(text.contains("squelchd_triage_daily_run_cap{scope=\"background\"} 200\n"));
         assert!(text.contains("squelchd_triage_jobs_held{scope=\"arrival\"} 4\n"));
         assert!(text.contains("squelchd_triage_jobs_held{scope=\"background\"} 642\n"));
+        assert!(text.contains("squelchd_triage_daily_runs{scope=\"access\"} 30\n"));
+        assert!(text.contains("squelchd_triage_daily_run_cap{scope=\"access\"} 500\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"access\"} 9\n"));
         assert!(text.contains("squelchd_triage_jobs_held{scope=\"revisit\"} 12\n"));
         assert!(text.contains("squelchd_retriage_messages_total 7\n"));
         assert!(text.contains("squelchd_retriage_messages_done 3\n"));

@@ -51,6 +51,14 @@ pub struct AgentMessage {
     /// column: it is also true of the user's own mail that landed in the inbox.
     pub is_sent: bool,
     pub is_spam: bool,
+    /// The store's `is_sent` column: Gmail's SENT label on a sighting that
+    /// is not also INBOX, so mail the owner copied to themselves reads as
+    /// received. Narrower than `is_sent` above, which also takes the owner's
+    /// mail that landed in the inbox without an authentication verdict,
+    /// which anyone can send. Not part of the model's view or the content
+    /// snapshot.
+    #[serde(skip)]
+    pub labelled_sent: bool,
     pub status: String,
     pub notify_eligible_at: Option<String>,
     pub opened_at: Option<String>,

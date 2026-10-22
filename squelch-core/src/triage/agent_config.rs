@@ -6,6 +6,17 @@ use serde::{Deserialize, Serialize};
 pub const TOTAL_BUDGET_KEY: &str = "__global__";
 /// `wake_budget.thread_id` for the background share of the daily runs.
 pub const BACKGROUND_BUDGET_KEY: &str = "__agent_background__";
+/// The access lane's own daily budget key in `wake_budget`: every `access`
+/// job is charged here and NOT to the background budget, so a day of spam
+/// and sent mail (every piece of either gets an access check) cannot spend
+/// the budget the migration backfill and thread refreshes run on, nor they
+/// its.
+pub const ACCESS_BUDGET_KEY: &str = "__agent_access__";
+/// Bytes of an access check's input that are not the body: sender, subject,
+/// the JSON around them and the cut's two fields. What `max_context_bytes`
+/// must hold beyond six bytes a character of `access_body_chars` (a control
+/// character is written as `\u00XX`).
+pub const ACCESS_INPUT_SLACK_BYTES: usize = 4_096;
 
 /// Where one account stands against its daily investigation caps.
 ///
@@ -17,12 +28,19 @@ pub struct DailyBudgetStatus {
     pub total_cap: u32,
     pub background_used: u32,
     pub background_cap: u32,
+    pub access_used: u32,
+    pub access_cap: u32,
     /// Jobs for newly arrived mail parked until tomorrow by the total cap.
     /// Nonzero means new mail is going untriaged today.
     pub held_arrival: u64,
-    /// Background jobs (backfill, refreshes, access) parked until tomorrow.
-    /// A backlog draining at the background cap sits here by design.
+    /// Background jobs (backfill, refreshes) parked until tomorrow. A
+    /// backlog draining at the background cap sits here by design.
     pub held_background: u64,
+    /// Access checks (the owner's sent mail, spam, archive rows a caller
+    /// asked to read) parked until tomorrow by a daily cap. A grant releases
+    /// an archive check only within its own sub-cap's room; the client's
+    /// budget-parked count leaves archive checks out.
+    pub held_access: u64,
     /// Autonomous revisits parked until tomorrow. They also answer to
     /// `[revisit].daily_cap`, which a grant does not raise, so a grant never
     /// releases them.
@@ -64,11 +82,23 @@ pub struct AgentConfig {
     /// Background investigations share the total cap but cannot consume the
     /// foreground reserve. Zero pauses background work; notification is separate.
     pub background_daily_run_cap: u32,
+    /// Access checks per UTC day (kind `access`: the owner's sent mail, spam,
+    /// an archive row a caller asked to read), on a key of their own rather
+    /// than the background budget's. Measured before this knob: every piece
+    /// of spam and sent mail gets an access check, so a spammy day spent the
+    /// 200-run background budget on access checks and deferred the migration
+    /// backfill to tomorrow, or the backfill spent it and deferred the
+    /// owner's sent mail. Zero pauses access checks; the mail stays readable
+    /// by the human. Held with the background cap under the total minus one
+    /// ([`Self::lane_caps`]): a lowered total cuts this lane first, or splits
+    /// the room with background when that cap alone reaches it.
+    pub access_daily_run_cap: u32,
     /// Access checks an external caller's search may buy for archive mail per
     /// UTC day (trigger `archive_access`). Charged IN ADDITION to the total and
-    /// background caps, so surfacing old mail can never spend the budget the
-    /// owner's own sent mail and thread refreshes are assessed from. Zero
-    /// stops surfacing; the mail stays searchable by the human.
+    /// access caps: a sub-cap on the share of the access lane a day of
+    /// searches may take, so they cannot crowd out the owner's own sent mail,
+    /// which is assessed from the same lane. Zero stops surfacing; the mail
+    /// stays searchable by the human.
     pub archive_access_daily_cap: u32,
     /// Failed investigations remain inspectable and can be explicitly retried.
     pub max_attempts: u32,
@@ -91,6 +121,7 @@ impl Default for AgentConfig {
             worker_poll_secs: 1,
             daily_run_cap: 10_000,
             background_daily_run_cap: 200,
+            access_daily_run_cap: 500,
             archive_access_daily_cap: 50,
             max_attempts: 6,
             outage_retry_secs: 300,
@@ -127,11 +158,45 @@ impl AgentConfig {
             .min(MAX_TIMEOUT_SECS)
     }
 
-    /// Always reserve at least one run for first classification when operators
-    /// lower only the total cap. Both effective values are exposed by the API.
+    /// The two lanes' caps as enforced: each at most the total minus one, and
+    /// together at most that, so a day that spends both still leaves a run for
+    /// first classification. The background lane keeps its cap and the access
+    /// lane gets what is left; only when that would pause an access lane the
+    /// operator set (the background cap alone reaches the total) is the room
+    /// shared instead, the access lane held to half of it and the background
+    /// lane to what that leaves, so neither is paused by a total it was never
+    /// set against and neither is cut more than the total requires. Both are
+    /// exposed by the API, and the loader notes at boot when they differ from
+    /// what was set.
+    pub fn lane_caps(&self) -> (u32, u32) {
+        let room = self.daily_run_cap.saturating_sub(1);
+        let background = self.background_daily_run_cap.min(room);
+        let access = self.access_daily_run_cap.min(room - background);
+        if access > 0 || self.access_daily_run_cap == 0 || room < 2 {
+            return (background, access);
+        }
+        let access = self.access_daily_run_cap.min(room / 2);
+        let background = self.background_daily_run_cap.min(room - access);
+        (background, self.access_daily_run_cap.min(room - background))
+    }
+
+    /// The background lane's cap in force ([`Self::lane_caps`]).
     pub fn effective_background_daily_run_cap(&self) -> u32 {
-        self.background_daily_run_cap
-            .min(self.daily_run_cap.saturating_sub(1))
+        self.lane_caps().0
+    }
+
+    /// The access lane's cap in force ([`Self::lane_caps`]).
+    pub fn effective_access_daily_run_cap(&self) -> u32 {
+        self.lane_caps().1
+    }
+
+    /// Runs the two lanes leave the day's new mail: the total less both caps
+    /// in force, at least one.
+    pub fn reserved_arrival_runs(&self) -> u32 {
+        let (background, access) = self.lane_caps();
+        self.daily_run_cap
+            .saturating_sub(background)
+            .saturating_sub(access)
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +222,17 @@ pub struct ContextConfig {
     /// of all uncached input. The retired stages capped bodies at 6k and 12k
     /// characters; 16k keeps every ordinary message whole.
     pub full_body_chars: usize,
+    /// The most of a body the access check reads, in characters, long links
+    /// shortened first and quoted text kept (the caller the check is for
+    /// reads the whole stored body, quotes included). Past it the body is
+    /// cut and the check is told so. Measured before this knob: the check
+    /// sent the raw body up to `max_context_bytes` (120 KB) and refused
+    /// anything larger, so a 55k-character newsletter cost about 16k input
+    /// tokens to be told it holds no credentials, and a larger one was never
+    /// assessed at all. The retired stages capped bodies at 6k and 12k; 8k
+    /// keeps every ordinary message whole, and a message states its codes
+    /// and links near the top.
+    pub access_body_chars: usize,
     pub max_related_messages: usize,
     pub max_context_bytes: usize,
     pub max_tool_result_bytes: usize,
@@ -168,6 +244,7 @@ impl Default for ContextConfig {
             full_sibling_bodies: 2,
             sibling_excerpt_chars: 400,
             full_body_chars: 16_000,
+            access_body_chars: 8_000,
             max_related_messages: 20,
             max_context_bytes: 120_000,
             max_tool_result_bytes: 24_000,
@@ -212,6 +289,7 @@ impl AgentTriageConfig {
             || self.context.max_context_bytes == 0
             || self.context.max_tool_result_bytes == 0
             || self.context.full_body_chars == 0
+            || self.context.access_body_chars == 0
         {
             return Err("triage budgets must be positive".into());
         }

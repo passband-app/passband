@@ -23,6 +23,43 @@ const MAX_URL_CHARS: usize = 96;
 /// reader "this is a fedex.com link" versus "this is a mailer redirect".
 const URL_KEEP_CHARS: usize = 48;
 
+/// How much of a link a reading keeps: one longer than `over` characters is
+/// shown as its first `keep` and an ellipsis, which is only a shortening
+/// while `keep` is under `over`; with `path_only`, its query and fragment
+/// go first, so the path (what says what a link is for) survives a long
+/// host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Links {
+    pub over: usize,
+    pub keep: usize,
+    pub path_only: bool,
+}
+
+impl Links {
+    /// The triage context's: a mailer redirect to its origin.
+    pub const TRIAGE: Links = Links {
+        over: MAX_URL_CHARS,
+        keep: URL_KEEP_CHARS,
+        path_only: false,
+    };
+    /// The access check's: a link over 192 characters is shown up to its
+    /// query, at most its first 128 characters, host and path, which is what
+    /// tells a reset or sign-in link from a newsletter's tracking link, with
+    /// room for a long host; a shorter link is shown whole, token and all
+    /// (the check is told not to quote one).
+    pub const ACCESS: Links = Links {
+        over: 192,
+        keep: 128,
+        path_only: true,
+    };
+    /// No link shortened: a body read raw.
+    pub const RAW: Links = Links {
+        over: usize::MAX,
+        keep: 0,
+        path_only: false,
+    };
+}
+
 /// Stands in for a removed quoted tail, so the model knows text was there.
 pub const QUOTE_MARKER: &str = "[earlier quoted messages removed]";
 
@@ -44,7 +81,18 @@ const ATTRIBUTION_WINDOW: usize = 240;
 /// or one the detector cannot place) is returned with only its URLs shortened,
 /// and so is a forward: there the "quoted" part IS the message.
 pub fn condense_body(body: &str) -> String {
-    condense(body, quote_cut(body), usize::MAX).0
+    condense(body, quote_cut(body), usize::MAX, Links::TRIAGE).0
+}
+
+/// Long links shortened as `links` says, quoted text kept, cut to at most
+/// `cap` characters, with the stored offset where the text left out begins
+/// (`None` when nothing was): the access check's reading of a body, where a
+/// quoted tail is evidence too, because the caller the check is for reads
+/// the whole stored body, and a link's path (what tells a reset link from a
+/// newsletter's) is worth more of it than the triage context keeps. The
+/// walk is [`StoredBody::condense_within`]'s without the quote cut.
+pub fn shorten_links_within(body: &str, cap: usize, links: Links) -> (String, Option<usize>) {
+    condense(body, None, cap, links)
 }
 
 /// A stored body scanned once for its quote cut, to be condensed more than
@@ -85,12 +133,14 @@ impl StoredBody {
     /// The walk reads the kept text and little more: the cap bounds how far
     /// it looks for a link.
     pub fn condense_within(&self, cap: usize) -> (String, Option<usize>) {
-        condense(&self.text, self.quote, cap)
+        condense(&self.text, self.quote, cap, Links::TRIAGE)
     }
 }
 
-/// The walk behind [`StoredBody::condense_within`], the quote cut found.
-fn condense(body: &str, quote: Option<usize>, cap: usize) -> (String, Option<usize>) {
+/// The walk behind [`StoredBody::condense_within`], the quote cut found and
+/// the links' shortening chosen.
+fn condense(body: &str, quote: Option<usize>, cap: usize, links: Links) -> (String, Option<usize>) {
+    debug_assert!(links.keep < links.over, "a head no shorter than its link");
     let text = quote.map_or(body, |at| &body[..at]);
     let content = text.trim_end();
     let mut out = Condensed {
@@ -128,8 +178,13 @@ fn condense(body: &str, quote: Option<usize>, cap: usize) -> (String, Option<usi
             .map_or(rest.len(), |e| start + e);
         let url = &rest[start..end];
         let stands_for = url.chars().count();
-        let left_out = if stands_for > MAX_URL_CHARS {
-            let mut head = crate::text::truncate_chars(url, URL_KEEP_CHARS);
+        let left_out = if stands_for > links.over {
+            let shown = if links.path_only {
+                url.find(['?', '#']).map_or(url, |at| &url[..at])
+            } else {
+                url
+            };
+            let mut head = crate::text::truncate_chars(shown, links.keep);
             head.push('…');
             out.whole(&head, stands_for)
         } else {
@@ -229,7 +284,7 @@ fn quote_cut(body: &str) -> Option<usize> {
 /// `…` stands for the quote too. The walk reads only the kept text; the
 /// quote scan still reads the body.
 pub fn excerpt(body: &str, chars: usize) -> (String, bool) {
-    let (mut kept, resume) = condense(body, quote_cut(body), chars);
+    let (mut kept, resume) = condense(body, quote_cut(body), chars, Links::TRIAGE);
     if resume.is_none() {
         if kept.chars().count() <= chars {
             return (kept, false);
@@ -545,5 +600,43 @@ mod tests {
         // Nothing kept: resume at the start. Nothing stored: nothing to cut.
         assert_eq!(within("abc", 0), (String::new(), Some(0)));
         assert_eq!(within("", 0), (String::new(), None));
+    }
+
+    /// The access check's reading: links shortened, the quote kept whole,
+    /// the cut (when there is one) placed exactly as the condenser's.
+    #[test]
+    fn links_shortened_and_quotes_kept_for_the_access_check() {
+        let reply = format!(
+            "Your code is 482913. {TRACKER}\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> earlier"
+        );
+        let (kept, cut) = shorten_links_within(&reply, 400, Links::TRIAGE);
+        assert!(cut.is_none());
+        assert!(
+            kept.starts_with(
+                "Your code is 482913. https://click.mailer.example.com/ls/click?upn=u0…"
+            )
+        );
+        assert!(kept.ends_with("wrote:\n> earlier"), "{kept}");
+        assert!(!kept.contains(QUOTE_MARKER));
+        assert_eq!(
+            shorten_links_within(&reply, 12, Links::TRIAGE),
+            ("Your code is".into(), Some(12))
+        );
+        // The access reading keeps the path that says what the link is for
+        // and drops the query, so a long host does not push the path out; a
+        // link under the threshold is shown whole, never lengthened.
+        let generous = Links::ACCESS;
+        let reset = "https://notifications.accounts.someservice.example.com/password/reset?token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(reset.chars().count() > 192);
+        assert_eq!(
+            shorten_links_within(reset, 400, generous).0,
+            "https://notifications.accounts.someservice.example.com/password/reset…"
+        );
+        let long_host = "https://email-notifications.identity.security-verification.someverylongcompanyname-accounts.example.com/auth/signin?token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let (kept, _) = shorten_links_within(long_host, 400, generous);
+        assert!(kept.ends_with("example.com/auth/signin…"), "{kept}");
+        let short = &reset[..120];
+        assert_eq!(shorten_links_within(short, 400, generous).0, short);
+        assert_eq!(shorten_links_within(reset, 400, Links::RAW).0, reset);
     }
 }

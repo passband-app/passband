@@ -10,7 +10,7 @@ pub mod html;
 pub mod ingest;
 pub mod notify_lane;
 mod profile;
-mod triage_worker;
+pub(crate) mod triage_worker;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};

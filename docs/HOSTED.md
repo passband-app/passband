@@ -213,11 +213,12 @@ it is the only thing that touches Kubernetes, and it renders no YAML at all
 (every tenant object is a typed `k8s-openapi` struct, so a tenant label can only
 ever land in a validated field).
 
-**A tenant is seven objects in one namespace**, all named from the label: two
-Secrets (age identity, sealed credential), a PersistentVolumeClaim, a
-NetworkPolicy, a Service, a Deployment and an Ingress. `DELETE` removes the
-bottom four and keeps the top three, which is what "cancel my account, do not
-destroy my mail" means.
+**A tenant is up to nine objects in one namespace**, all named from the label:
+two Secrets (age identity, sealed credential), a PersistentVolumeClaim, two
+more Secrets while the control plane keeps them minted (the LLM gateway key,
+the share token), a NetworkPolicy, a Service, a Deployment and an Ingress.
+`DELETE` removes the bottom six and keeps the top three, which is what
+"cancel my account, do not destroy my mail" means.
 
 **Two calls, and the reason is the key.** The control plane cannot seal a
 credential until it knows the tenant's recipient, and the recipient does not

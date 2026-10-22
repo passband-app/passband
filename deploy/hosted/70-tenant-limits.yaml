@@ -1,7 +1,13 @@
 # What one tenant may take, and what all tenants together may take.
 #
-# SIZE THESE TO YOUR BOX BEFORE APPLYING. The numbers below assume the floor in
-# SETUP.md (2 vCPU, 4 GB) and are deliberately conservative; see "Sizing" there.
+# THESE ARE THE NUMBERS `carrier` IS MEANT TO RUN: thirty tenants on 4 vCPU / 16
+# GB (deploy/hosted/PRODUCTION.md, "How many tenants fit"). This file is the
+# record of that box's quota: `kubectl diff -f` says whether the box matches it
+# right now, and `kubectl apply -f` makes it so, so a change to the quota is a
+# change to this file, merged, then applied. SIZE THESE TO YOUR BOX BEFORE
+# APPLYING THEM ANYWHERE ELSE: the arithmetic is in the ResourceQuota below,
+# worked for this box and for the 2 vCPU / 4 GB floor in SETUP.md (five
+# tenants), and a quota bigger than the box is a quota that refuses nobody.
 #
 # The warden already puts requests and limits on both containers of every tenant
 # pod, so nothing here is what bounds a tenant the warden created. These two
@@ -23,10 +29,6 @@
 # warden's log. That is the signal to add capacity or raise these numbers, in
 # that order. The Grafana "tenants quota near full" alert is meant to say so
 # before a signup finds out (deploy/monitoring/README.md).
-#
-# HOSTED PASSBAND DOES NOT RUN THESE NUMBERS. `carrier` is patched to thirty
-# tenants on top of this file; applying it there drops the cap back to five.
-# See deploy/hosted/PRODUCTION.md, "How many tenants fit".
 apiVersion: v1
 kind: LimitRange
 metadata:
@@ -80,47 +82,110 @@ spec:
     # 2026-08-19 in one line: this said 5Gi on a 4 GB box, four tenants were
     # enough, and two squelchd processes died.
     #
-    # The NODE budget, on the 4 GB floor (3814 MiB of it is real):
+    # The NODE budget, on `carrier` (16 GB, of which 15985 MiB is real):
     #
-    #     3814  the whole machine, all of which is offered to pods today
+    #    15985  the whole machine, all of which is offered to pods today
     #    -1200  k3s, containerd, journald, litestream: outside every pod
-    #     -372  the pods that are not tenants - CoreDNS 70, metrics-server 70,
-    #           kube-state-metrics 48, node-exporter 24, the Prometheus agent
-    #           128, the warden itself 32
-    #    ~2242  about 2.2 GiB left for tenant pods
+    #     -400  the pods that are not tenants - CoreDNS, metrics-server,
+    #           kube-state-metrics, node-exporter, the Prometheus agent, the
+    #           warden, the roller's job while a roll runs
+    #   ~14385  about 14 GiB left for tenant pods
     #
-    # At the shipped 100m/384Mi that is FIVE tenants: 5 x 384Mi is 1920Mi and
-    # fits, 6 x 384Mi is 2304Mi and does not. Five is the honest count until the
-    # daemon-side memory work (idle embedder unload, smaller embed batches) has
-    # landed AND been measured for a week; raise this off a week of
-    # container_memory_working_set_bytes, not off wanting a sixth tenant.
+    # At the warden's 100m/384Mi (`15-warden-config.yaml`) that is THIRTY
+    # tenants: 30 x 384Mi is 11520Mi, which deliberately leaves room under the
+    # ~36 the division allows, because 384Mi is the p50 of a tenant at rest and
+    # not its peak (tenant pods read 300-500 MB with the ONNX session
+    # resident). Raise it off a week of container_memory_working_set_bytes,
+    # not off wanting a thirty-first tenant.
+    #
+    # The same sum on the 2 vCPU / 4 GB floor (3814 MiB real): 3814 - 1200 -
+    # 372 leaves about 2.2 GiB, which is FIVE tenants (5 x 384Mi = 1920Mi
+    # fits, 6 x 384Mi = 2304Mi does not). The rest of that file, by the rules
+    # on the lines below: `requests.cpu: "2"`, `requests.ephemeral-storage:
+    # 5Gi`, `limits.cpu: "8"`, `limits.memory: 7680Mi`,
+    # `limits.ephemeral-storage: 20Gi`, `pods` and `persistentvolumeclaims:
+    # "10"`, `requests.storage: 92Gi`, `count/secrets: "60"`. The storage line
+    # follows the claims line by the rule below; on a disk where the claim is
+    # honest, size the claims line to the disk first (SETUP.md, "Tenant data
+    # on a block volume"). Divide YOUR box the same way before applying this
+    # file to it.
     #
     # And this quota is the ONLY refusal on this box today. k3s reserves nothing
-    # for itself by default, so the scheduler still believes all 3814 MiB is
+    # for itself by default, so the scheduler still believes all 15985 MiB is
     # available to pods: the 1200 above is a fact about the machine, not
-    # something the scheduler knows, and left to itself it would admit a sixth
-    # tenant and a seventh. SETUP.md §2b (kubelet `systemReserved`, allocatable
-    # drops to ~2.4 GiB) is what makes the scheduler a second gate; it is
+    # something the scheduler knows, and left to itself it would admit a
+    # thirty-first tenant and a fortieth. SETUP.md §2b (kubelet
+    # `systemReserved`) is what makes the scheduler a second gate; it is
     # written but not applied here, so do not size this line as if it were.
     #
-    # CPU never binds first - at 100m the same 2 vCPU carries twenty - so memory
-    # is the number to redo when you resize the box.
-    requests.cpu: "2"
-    requests.memory: 1920Mi
-    requests.ephemeral-storage: 5Gi
+    # Every line below admits MORE than the thirty memory allows (twenty-nine
+    # while the model seed pod is up, which takes its 32Mi off this line and
+    # its bit off every other), so memory is what binds and a full quota
+    # always means the box is full, not that one ceiling was raised without
+    # the others. The cpu lines are forty
+    # tenants' worth (the patch had them at exactly thirty, a tie memory lost
+    # to any pod asking for more cpu per memory than a tenant, which the seed
+    # pod and a debug pod both do); CPU is compressible, the node's 4 vCPU is
+    # the scheduler's gate, and these lines only have to stay out of the way.
+    # That a line was raised without the others has happened twice:
+    # 2026-09-28, memory alone was raised and cpu, ephemeral storage, pods and
+    # PVCs all bound first; and the patch that fixed it set `limits.cpu` to 12
+    # and left `requests.storage` at 200Gi, which would have refused the
+    # thirteenth and the twentieth tenant (see those lines). A test in the
+    # warden (`the_committed_quota_lets_memory_bind_before_any_count_line`)
+    # now divides every line here by what the warden's ConfigMap asks for a
+    # tenant and fails CI when any admits fewer than the memory line.
+    requests.cpu: "4"
+    requests.memory: 11520Mi
+    requests.ephemeral-storage: 8Gi
     # Limits may oversubscribe, because tenants are idle most of the time and a
-    # sync burst is short. Do not raise this ratio much past 4x on one node,
-    # which is what 7680Mi against 1920Mi of requests is.
-    limits.cpu: "8"
-    limits.memory: 7680Mi
-    limits.ephemeral-storage: 20Gi
-    # The mail. Local-path storage is the box's disk, and a claim that cannot
-    # bind is a tenant that never comes up.
-    requests.storage: 200Gi
-    persistentvolumeclaims: "25"
-    # A blunt ceiling on how much can exist here at all. One tenant is one pod,
-    # so this is a tenant count too, but it is not the one that binds: on the
-    # 4 GB floor `requests.memory` above refuses the sixth signup long before
-    # this refuses the twenty-sixth. Raise the memory line, not this one.
-    pods: "25"
-    count/secrets: "60"
+    # sync burst is short. Memory limits not much past 4x requests on one node,
+    # which is what 46080Mi against 11520Mi is. CPU limits are a different
+    # thing: the kernel throttles a pod at its limit and kills nothing, so the
+    # sum against 4 vCPU is no promise, and the line only has to admit more
+    # than thirty tenants at the warden's 1000m limit each (the 12 the patch
+    # before this file carried would have refused the thirteenth signup).
+    limits.cpu: "40"
+    limits.memory: 46080Mi
+    limits.ephemeral-storage: 32Gi
+    # The mail: a claim at the warden's 10Gi (`SQUELCH_WARDEN_STORAGE_SIZE`)
+    # for every one of the forty claim slots below but the model seed's, plus
+    # the seed's 2Gi: 39 x 10Gi + 2Gi.
+    # A claim's size is nominal on local-path, which enforces nothing, and the
+    # volume behind it is 50 GB (PRODUCTION.md), so this line is a ceiling on
+    # claims, not disk; the disk is the volume, watched by the "carrier disk
+    # high" alert and grown online when it says so (SETUP.md). It is sized to
+    # the claims line and not to the thirty memory
+    # admits because a cancelled tenant keeps its claim: a claim that cannot
+    # bind is a tenant that never comes up, and at 200Gi, the patch's value,
+    # this would have refused the twentieth.
+    requests.storage: 392Gi
+    persistentvolumeclaims: "40"
+    # Blunt ceilings on how much can exist here at all. One tenant is one pod
+    # and one claim (its Deployment recreates, so never two pods at once), and
+    # `60-models.yaml`'s seed takes one claim for good and one pod while it
+    # runs; so these are tenant counts too, but not the ones that bind:
+    # `requests.memory` above refuses the thirty-first signup long before these
+    # refuse the fortieth. The room between thirty and forty is what a
+    # cancelled tenant's kept claim and two kept Secrets live in (DELETE keeps
+    # the mail: squelch-warden/src/objects.rs). Raise the memory line, not
+    # these.
+    pods: "40"
+    # One tenant is FOUR Secrets (identity, credential, LLM key, share token:
+    # `SECRETS_PER_TENANT` in squelch-warden/src/objects.rs), on top of the
+    # namespace's own, which the warden's quota test counts: the ones the
+    # warden's config carries a name for (set in its ConfigMap or defaulted in
+    # config.rs: the wildcard certificate, the OAuth client, the APNs relay,
+    # the Browserbase key and a pull secret if set), a successor beside each
+    # of the three that rotate under a new name, and the private key
+    # cert-manager keeps beside the certificate while renewing (eight on
+    # carrier, all at once). So this is at least four times `pods`, plus two
+    # for every claim slot beyond the pod slots (a cancelled tenant keeps
+    # two), plus those, or it is the line that binds; the slack above that is
+    # what a pending signup's identity Secret, held up to a day with no pod,
+    # lives in. At 100, the patch's value, it would have refused the
+    # twenty-fourth tenant, or the certificate's renewal, whichever asked
+    # next, while memory
+    # still had room for thirty. The warden's test holds this file to that
+    # arithmetic.
+    count/secrets: "200"

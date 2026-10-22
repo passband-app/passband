@@ -3,7 +3,7 @@
 //!
 //! It becomes a DNS label, a URL path segment on the warden's API, and on the
 //! far side the name of a Deployment, a Service, an Ingress host, a
-//! NetworkPolicy, a PVC, and two Secrets. Every one of those has its own way of
+//! NetworkPolicy, a PVC, and four Secrets. Every one of those has its own way of
 //! being escaped out of, so validation is a strict ALLOWLIST applied once, here,
 //! before the label reaches any of them: lowercase ASCII letters, digits, and
 //! interior hyphens, and nothing else, ever. (That set is a subset of DNS-1123,

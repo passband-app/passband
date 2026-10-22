@@ -1556,8 +1556,8 @@ async fn a_vector_only_neighbour_never_queues_an_access_check() {
 
 /// B3. THE THREE CEILINGS on what a search may queue.
 #[test]
-fn surfacing_stops_at_the_outstanding_ceiling_the_daily_cap_and_a_spent_background_budget() {
-    use crate::store::{ARCHIVE_ACCESS_BUDGET_KEY, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY};
+fn surfacing_stops_at_the_outstanding_ceiling_the_daily_cap_and_a_spent_access_budget() {
+    use crate::store::{ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ArchiveAccessCaps};
     let now = Utc::now();
     let day = now.format("%Y-%m-%d").to_string();
     let caps = ArchiveAccessCaps::default();
@@ -1637,13 +1637,13 @@ fn surfacing_stops_at_the_outstanding_ceiling_the_daily_cap_and_a_spent_backgrou
         "a zero cap turns surfacing off"
     );
 
-    // A spent background budget: every check would park, so none is queued.
+    // A spent access budget: every check would park, so none is queued.
     let tight = ArchiveAccessCaps {
-        background_daily: 2,
+        access_daily: 2,
         ..caps
     };
-    let background = vec![(BACKGROUND_BUDGET_KEY.to_string(), 2)];
-    assert!(store.reserve_agent_budget(acct, &day, &background).unwrap());
+    let access = vec![(ACCESS_BUDGET_KEY.to_string(), 2)];
+    assert!(store.reserve_agent_budget(acct, &day, &access).unwrap());
     assert_eq!(
         store
             .request_archive_access(acct, &old[..1], tight, now)
@@ -1651,7 +1651,7 @@ fn surfacing_stops_at_the_outstanding_ceiling_the_daily_cap_and_a_spent_backgrou
             .len(),
         1
     );
-    assert!(store.reserve_agent_budget(acct, &day, &background).unwrap());
+    assert!(store.reserve_agent_budget(acct, &day, &access).unwrap());
     assert!(
         store
             .request_archive_access(acct, &old[1..], tight, now)
@@ -1659,6 +1659,52 @@ fn surfacing_stops_at_the_outstanding_ceiling_the_daily_cap_and_a_spent_backgrou
             .is_empty()
     );
     assert_eq!(jobs(&store, old[1]), 0);
+    // A grant on the access lane reopens surfacing for the rest of the day.
+    store
+        .grant_daily_runs(
+            acct,
+            ACCESS_BUDGET_KEY,
+            1,
+            &crate::triage::agent_config::AgentConfig::default(),
+            now,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .request_archive_access(acct, &old[1..2], tight, now)
+            .unwrap()
+            .len(),
+        1
+    );
+    // The total spent: every check would park on it, so none is queued; a
+    // grant on the total reopens surfacing like the lane's.
+    use crate::triage::agent_config::{AgentConfig, TOTAL_BUDGET_KEY};
+    let (store, acct) = fresh();
+    let old = heron_archive(&store, acct, 2);
+    let total = ArchiveAccessCaps {
+        total_daily: 3,
+        ..caps
+    };
+    let runs = vec![(TOTAL_BUDGET_KEY.to_string(), 3)];
+    for _ in 0..3 {
+        assert!(store.reserve_agent_budget(acct, &day, &runs).unwrap());
+    }
+    assert!(
+        store
+            .request_archive_access(acct, &old, total, now)
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .grant_daily_runs(acct, TOTAL_BUDGET_KEY, 1, &AgentConfig::default(), now)
+        .unwrap();
+    assert_eq!(
+        store
+            .request_archive_access(acct, &old[..1], total, now)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// B3. Tier 1 is for a check nobody has pushed back. Parked on the budget
@@ -1833,8 +1879,8 @@ fn triggers(store: &SqliteStore, ids: &[i64]) -> Vec<(String, String)> {
 #[test]
 fn a_thread_open_queues_archive_siblings_inside_every_surfacing_ceiling() {
     use crate::store::{
-        ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX, ArchiveAccessCaps,
-        BACKGROUND_BUDGET_KEY,
+        ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX,
+        ArchiveAccessCaps,
     };
     let caps = ArchiveAccessCaps::default();
     let day = Utc::now().format("%Y-%m-%d").to_string();
@@ -1921,12 +1967,12 @@ fn a_thread_open_queues_archive_siblings_inside_every_surfacing_ceiling() {
     assert_eq!(open_all(&store, acct, 3, small), 3);
     assert_eq!(triggers(&store, &ids).len(), 3);
 
-    // A spent background budget: every check would park, so none is queued.
+    // A spent access budget: every check would park, so none is queued.
     let (store, acct) = fresh();
     let ids = thread_rows(&store, acct, 30, 20);
-    let background = vec![(BACKGROUND_BUDGET_KEY.to_string(), caps.background_daily)];
-    for _ in 0..caps.background_daily {
-        assert!(store.reserve_agent_budget(acct, &day, &background).unwrap());
+    let access = vec![(ACCESS_BUDGET_KEY.to_string(), caps.access_daily)];
+    for _ in 0..caps.access_daily {
+        assert!(store.reserve_agent_budget(acct, &day, &access).unwrap());
     }
     assert_eq!(open_all(&store, acct, 30, caps), 0);
     for t in 0..30 {
@@ -1983,6 +2029,13 @@ fn only_a_check_in_flight_makes_an_archive_row_evidence() {
     store
         .request_archive_access(acct, &[old], Default::default(), Utc::now())
         .unwrap();
+    // The job is stamped by the store's own clock to the nanosecond and read
+    // against SQLite's `'now'`, which is truncated to the millisecond, so a
+    // request and a read inside one millisecond compare the job as not yet
+    // due. Harmless in the daemon (due a millisecond later); here, step the
+    // row a second into the past so "due" does not hinge on which
+    // millisecond the two clocks land in.
+    reschedule(Utc::now() - chrono::Duration::seconds(1), None);
     assert!(readable(), "queued, due, never pushed back");
 
     reschedule(Utc::now() + chrono::Duration::hours(20), None);

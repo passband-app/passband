@@ -6685,7 +6685,10 @@ async fn triage_config_get_default_shape() {
     assert_eq!(json["global_daily_cap"], 120);
     assert_eq!(json["agent"]["effective_daily_run_cap"], 10_000);
     assert_eq!(json["agent"]["effective_background_daily_run_cap"], 200);
-    assert_eq!(json["agent"]["reserved_arrival_runs"], 9_800);
+    assert_eq!(json["agent"]["access_daily_run_cap"], 500);
+    assert_eq!(json["agent"]["effective_access_daily_run_cap"], 500);
+    // What is left after both lanes.
+    assert_eq!(json["agent"]["reserved_arrival_runs"], 9_300);
     assert_eq!(
         json["agent"]["legacy_stage_caps_are_active_ceilings"],
         false
@@ -13208,10 +13211,22 @@ async fn the_worker_sends_a_due_row_with_its_minted_message_id() {
                 .unwrap()
         }
     };
+    let poked =
+        || tokio::time::timeout(std::time::Duration::ZERO, state.scheduled_wake().notified());
+    assert!(poked().await.is_err(), "a fresh state holds no permit");
     let due = schedule(60, serde_json::json!([file])).await;
+    assert!(
+        poked().await.is_ok(),
+        "scheduling a row wakes the worker, which may be asleep until a later one"
+    );
     let not_due = schedule(120, serde_json::json!([])).await;
+    assert!(poked().await.is_ok());
     let (status, _) = outbox(&app, "POST", &format!("/client/scheduled/{due}/now"), None).await;
     assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(
+        poked().await.is_ok(),
+        "pulling a row forward wakes the worker for it"
+    );
     let msgid = store
         .scheduled_send_by_id(acct, due)
         .unwrap()

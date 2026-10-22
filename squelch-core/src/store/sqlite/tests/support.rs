@@ -14,6 +14,18 @@ pub(super) fn store() -> (SqliteStore, AccountId) {
     (store, acct)
 }
 
+/// A FILE-backed store in a fresh directory of its own, plus the standard
+/// test account, for a test that needs the journal, the fsyncs or a reopen
+/// (`:memory:` has none of them). The directory is the caller's to remove.
+pub(super) fn file_store(tag: &str) -> (SqliteStore, AccountId, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("squelch-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = SqliteStore::open(dir.join("store.sqlite3")).unwrap();
+    let acct = store.ensure_account("me@example.com").unwrap();
+    (store, acct, dir)
+}
+
 /// Same, with a semantic embedder attached at open (the vector-search tests).
 pub(super) fn store_with_embedder(embedder: Arc<dyn Embedder>) -> (SqliteStore, AccountId) {
     let store = SqliteStore::open_in_memory()

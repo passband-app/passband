@@ -11,8 +11,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v9";
-const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
+pub const PROMPT_VERSION: &str = "agent-triage-v10";
+/// The prompt text, with one figure to fill in: the `read_message` page
+/// size, defined beside the request it answers
+/// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
+/// evidence reader, so the prompt cannot drift from it.
+const SYSTEM_TEMPLATE: &str = include_str!("prompts/agent-v1.txt");
+static SYSTEM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    SYSTEM_TEMPLATE.replacen(
+        "{read_message_page_chars}",
+        &super::context::READ_MESSAGE_PAGE_CHARS.to_string(),
+        1,
+    )
+});
 
 /// The one sentence of the prompt that offers the review step, and what it
 /// says when there is no reviewer to offer. `system_prompt` swaps them, and a
@@ -32,7 +43,7 @@ fn system_prompt(with_review: bool) -> &'static str {
     static WITHOUT_REVIEW: std::sync::LazyLock<String> =
         std::sync::LazyLock::new(|| SYSTEM.replacen(REVIEW_OFFER, NO_REVIEW_OFFER, 1));
     if with_review {
-        SYSTEM
+        SYSTEM.as_str()
     } else {
         WITHOUT_REVIEW.as_str()
     }
@@ -60,6 +71,11 @@ pub struct AgentConnection<'a> {
     pub model: &'a str,
     pub effort: Option<&'a str>,
 }
+/// The failure kind of a run cut by a deadline, its own turn's or the whole
+/// run's. The worker's "two in a row and the job is failed" rule matches on
+/// it, so it is spelled once.
+pub const AGENT_TIMEOUT: &str = "agent_timeout";
+
 /// Failed investigations still report usage for completed provider responses.
 /// A timed-out in-flight request may be billed without returning provider usage.
 #[derive(Debug)]
@@ -68,6 +84,9 @@ pub struct AgentFailure {
     pub usage: Vec<Usage>,
     /// Number of attempted turns; a rejected first call may be refunded safely.
     pub model_calls: usize,
+    /// When the provider said to come back, on a 429, a 529 or any 5xx
+    /// (see [`llm::ClassifyError::retry_after`]); the worker's cooldown.
+    pub retry_after: Option<std::time::Duration>,
 }
 impl std::fmt::Display for AgentFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,37 +105,56 @@ pub async fn run_agent(
         kind,
         usage: Vec::new(),
         model_calls: 0,
+        retry_after: None,
     })?;
-    condense_initial_context(&mut context.initial, &config.context);
-    // Reserve half the context window for investigation results. Truncation is
-    // visible in the payload and never silently drops a message's identity.
-    bound_evidence_text(&mut context.initial, config.context.max_context_bytes / 2);
-    let mut usage = Vec::new();
-    let mut model_calls = 0;
+    {
+        // The stored bodies serve the bound and go: a run holds the
+        // condensed text, not the stored.
+        let stored = condense_initial_context(&mut context.initial, &config.context);
+        // Reserve half the context window for investigation results.
+        // Truncation is visible in the payload and never silently drops a
+        // message's identity.
+        bound_evidence_text(
+            &mut context.initial,
+            config.context.max_context_bytes / 2,
+            &stored,
+        );
+    }
+    let mut progress = RunProgress::default();
+    // Each turn has `timeout_secs` of its own (inside `run_bounded`); this is
+    // the ceiling on the whole run, every turn and every evidence read, so
+    // nothing here can outlive the job's lease.
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(config.agent.timeout_secs),
-        run_bounded(
-            connection,
-            config,
-            context,
-            reader,
-            &mut usage,
-            &mut model_calls,
-        ),
+        std::time::Duration::from_secs(config.agent.run_deadline_secs()),
+        run_bounded(connection, config, context, reader, &mut progress),
     )
     .await;
     match outcome {
         Ok(Ok(run)) => Ok(run),
-        Ok(Err(kind)) => Err(AgentFailure {
+        Ok(Err(kind)) => Err(progress.failure(kind)),
+        // A `retry_after` is set only on the way out of `run_bounded`, which
+        // is the arm above; a dropped run has none.
+        Err(_) => Err(progress.failure(AGENT_TIMEOUT.into())),
+    }
+}
+
+/// What a run has spent and learned so far, kept outside the run's future
+/// so a deadline that drops the future still reports the usage and the
+/// calls it made, and the provider's `retry-after` if one came back.
+#[derive(Default)]
+struct RunProgress {
+    usage: Vec<Usage>,
+    model_calls: usize,
+    retry_after: Option<std::time::Duration>,
+}
+impl RunProgress {
+    fn failure(self, kind: String) -> AgentFailure {
+        AgentFailure {
             kind,
-            usage,
-            model_calls,
-        }),
-        Err(_) => Err(AgentFailure {
-            kind: "agent_timeout".into(),
-            usage,
-            model_calls,
-        }),
+            usage: self.usage,
+            model_calls: self.model_calls,
+            retry_after: self.retry_after,
+        }
     }
 }
 
@@ -125,8 +163,7 @@ async fn run_bounded(
     config: &AgentTriageConfig,
     context: ContextSnapshot,
     reader: &dyn EvidenceReader,
-    usage: &mut Vec<Usage>,
-    model_calls: &mut usize,
+    progress: &mut RunProgress,
 ) -> Result<AgentRun, String> {
     let mut sources: BTreeSet<i64> = context.source_message_ids.iter().copied().collect();
     let mut revisions = context.thread_revisions.clone();
@@ -162,21 +199,40 @@ async fn run_bounded(
         };
         // Retain provider usage before decoding either JSON syntax or step
         // structure. A malformed paid answer still belongs in the spend ledger.
-        *model_calls += 1;
-        let response = llm::classify_agent_step(
-            connection.http,
-            connection.url,
-            connection.api_key,
-            connection.provider,
-            &request,
+        progress.model_calls += 1;
+        // ONE TURN'S deadline. A turn that overruns it is the run's
+        // `agent_timeout`, billed for the request in flight; the turns before
+        // it are not what overran. The request's own timeout sits behind the
+        // deadline, so the shared client's (sized for a Gmail fetch) cannot
+        // cut a longer turn first as a transport failure.
+        let deadline = std::time::Duration::from_secs(config.agent.timeout_secs);
+        let step = tokio::time::timeout(
+            deadline,
+            llm::classify_agent_step(
+                connection.http,
+                connection.url,
+                connection.api_key,
+                connection.provider,
+                &request,
+                deadline.saturating_add(std::time::Duration::from_secs(
+                    crate::triage::agent_config::DEADLINE_SLACK_SECS,
+                )),
+            ),
         )
-        .await
-        .map_err(|error| error.kind)?;
+        .await;
+        let response = match step {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                progress.retry_after = error.retry_after;
+                return Err(error.kind);
+            }
+            Err(_elapsed) => return Err(AGENT_TIMEOUT.into()),
+        };
         // A review request grants one stronger-model call. Follow-up tool
         // investigation returns to the base model unless another review is
         // explicitly requested within the remaining review budget.
         model = config.agent.model.as_deref().unwrap_or(connection.model);
-        usage.extend(response.usage());
+        progress.usage.extend(response.usage());
         let step = match response {
             LlmOutcome::Ok(value, _) => match serde_json::from_str::<WireStep>(&value) {
                 Ok(wire) => wire.result,
@@ -212,7 +268,7 @@ async fn run_bounded(
                             decision,
                             source_message_ids: sources.into_iter().collect(),
                             thread_revisions: revisions,
-                            usage: usage.clone(),
+                            usage: progress.usage.clone(),
                             model_turns: turn + 1,
                             tool_calls,
                         });
@@ -232,11 +288,14 @@ async fn run_bounded(
                     tool_calls += 1;
                     match reader.read(&request) {
                         Ok(mut result) => {
-                            condense_evidence(&mut result.data);
-                            bound_evidence_text(
-                                &mut result.data,
-                                config.context.max_tool_result_bytes,
-                            );
+                            {
+                                let stored = condense_evidence(&mut result.data);
+                                bound_evidence_text(
+                                    &mut result.data,
+                                    config.context.max_tool_result_bytes,
+                                    &stored,
+                                );
+                            }
                             let encoded =
                                 serde_json::to_vec(&result.data).map_err(|_| "tool_encode")?;
                             if encoded.len() > config.context.max_tool_result_bytes {
@@ -280,109 +339,237 @@ async fn run_bounded(
     Err("agent_turn_budget_exhausted".into())
 }
 
+/// The stored bodies behind a context's condensed ones, by message id, moved
+/// out as they are condensed and kept until [`bound_evidence_text`] has had
+/// the last word on what is visible: a body the bound shrinks is condensed
+/// again from its stored text, exactly ([`shrink_body`]).
+type StoredBodies = BTreeMap<i64, super::condense::StoredBody>;
+
 /// Condense the bodies of the initial snapshot: the target and the newest
-/// `full_sibling_bodies` siblings lose quoted tails and long URLs
-/// ([`super::condense::condense_body`]); older siblings shrink to an excerpt
-/// and say so. Runs BEFORE [`bound_evidence_text`], so the byte budget is
-/// spent on text that can still decide something.
-fn condense_initial_context(initial: &mut Value, config: &super::agent_config::ContextConfig) {
-    if let Some(Value::String(body)) = initial.pointer_mut("/message/body") {
-        *body = super::condense::condense_body(body);
+/// `full_sibling_bodies` siblings lose quoted tails and long URLs and are cut
+/// at `full_body_chars` ([`condense_message_body`]); older siblings shrink to
+/// an excerpt and say so. Runs BEFORE [`bound_evidence_text`], so the byte
+/// budget is spent on text that can still decide something.
+fn condense_initial_context(
+    initial: &mut Value,
+    config: &super::agent_config::ContextConfig,
+) -> StoredBodies {
+    let mut stored = StoredBodies::new();
+    if let Some(Value::Object(message)) = initial.get_mut("message") {
+        condense_message_body(message, config.full_body_chars, &mut stored);
     }
     let Some(Value::Array(siblings)) = initial.get_mut("thread") else {
-        return;
+        return stored;
     };
     for (index, sibling) in siblings.iter_mut().enumerate() {
         let Some(fields) = sibling.as_object_mut() else {
             continue;
         };
+        if index < config.full_sibling_bodies {
+            condense_message_body(fields, config.full_body_chars, &mut stored);
+            continue;
+        }
         let Some(Value::String(body)) = fields.get_mut("body") else {
             continue;
         };
-        if index < config.full_sibling_bodies {
-            *body = super::condense::condense_body(body);
-            continue;
-        }
         let (excerpt, cut) = super::condense::excerpt(body, config.sibling_excerpt_chars);
         *body = excerpt;
         if cut {
             fields.insert("body_excerpted".into(), Value::Bool(true));
         }
     }
+    stored
 }
 
-/// Condense the bodies in a tool result: every `messages[]` entry and a
-/// top-level `message`. A `read_message` page (it carries `body_offset`) is
-/// left raw, because its offsets index the stored text and the prompt promises
-/// the model that pages are unmodified.
-fn condense_evidence(data: &mut Value) {
-    fn condense_message(value: &mut Value) {
+/// A message's body, condensed and cut to `cap` characters. A 55k-character
+/// newsletter used to ride nearly whole into every turn of its run (about 14k
+/// input tokens a turn, re-sent each turn); siblings were excerpted, the
+/// target never. The cut is announced the way a `read_message` page announces
+/// its end (`body_truncated: true`, `next_offset`), so the existing pager
+/// fetches the tail from the stored text when the model decides the tail
+/// could change the decision. Nothing is cut when the condensed body fits,
+/// and nothing says so.
+///
+/// `next_offset` indexes the STORED body, which condensing shortened (a
+/// 300-character tracking URL became 49), so the count of kept characters
+/// is not the offset: [`StoredBody::condense_within`] tracks the stored
+/// position as it condenses, and the offset is exact. The stored body moves
+/// into `stored` for the context bound to resume from, should it cut further.
+///
+/// [`StoredBody::condense_within`]: super::condense::StoredBody::condense_within
+fn condense_message_body(
+    message: &mut serde_json::Map<String, Value>,
+    cap: usize,
+    stored: &mut StoredBodies,
+) {
+    let Some(Value::String(body)) = message.get_mut("body") else {
+        return;
+    };
+    let whole = super::condense::StoredBody::new(std::mem::take(body));
+    let (kept, resume) = whole.condense_within(cap);
+    *body = kept;
+    if let Some(next) = resume {
+        message.insert("next_offset".into(), json!(next));
+        message.insert("body_truncated".into(), Value::Bool(true));
+    }
+    if let Some(id) = message.get("id").and_then(Value::as_i64) {
+        stored.insert(id, whole);
+    }
+}
+
+/// Condense the bodies in a tool result, whole: every `messages[]` entry and
+/// a top-level `message` (the tool result budget bounds them, and says where
+/// to resume where it does). A `read_message` page (it carries `body_offset`)
+/// is left raw, because its offsets index the stored text and the prompt
+/// promises the model that pages are unmodified.
+fn condense_evidence(data: &mut Value) -> StoredBodies {
+    let mut stored = StoredBodies::new();
+    let mut condense = |value: &mut Value| {
         let Some(fields) = value.as_object_mut() else {
             return;
         };
-        if fields.contains_key("body_offset") {
+        if page_offset(fields).is_some() {
             return;
         }
-        if let Some(Value::String(body)) = fields.get_mut("body") {
-            *body = super::condense::condense_body(body);
-        }
-    }
+        condense_message_body(fields, usize::MAX, &mut stored);
+    };
     if let Some(message) = data.get_mut("message") {
-        condense_message(message);
+        condense(message);
     }
     if let Some(Value::Array(messages)) = data.get_mut("messages") {
-        messages.iter_mut().for_each(condense_message);
+        for message in messages {
+            condense(message);
+        }
     }
+    stored
+}
+
+/// The character offset a `read_message` page starts at, when the object is
+/// one: the one definition of a page, for the condenser (which leaves pages
+/// raw) and the bound (which resumes a cut page at its offset plus what is
+/// visible).
+fn page_offset(fields: &serde_json::Map<String, Value>) -> Option<u64> {
+    fields.get("body_offset").and_then(Value::as_u64)
+}
+
+/// Where a shrunk body's stored text resumes, as [`shrink_body`] learns it.
+enum Resume {
+    /// At this character offset of the stored body.
+    At(u64),
+    /// Unknown: the stored text was not at hand.
+    Unknown,
+    /// Nothing to say: only trailing whitespace went, or the body is an
+    /// excerpt (`body_excerpted`), cut shorter and still ending in `…`.
+    Unsaid,
+}
+
+/// Shrink an object's `body` to at most `limit` bytes, saying so and where
+/// the stored text resumes. A page (`body_offset`) is cut at the byte limit
+/// and resumes at its offset plus what is visible, not its original page
+/// end, which would skip unseen evidence. A condensed body whose stored text
+/// is in `stored` (by id, and only when the body is that text's condensed
+/// prefix, so a stranger under the same id is never swapped for it; nothing
+/// kept tells nothing, and resumes at 0 by id) is condensed again to the
+/// characters the limit holds, the same walk that capped it, so the cut
+/// lands as the cap's would (never inside a stand-in or the quote marker)
+/// and the offset is exact, in place of the cap's; a shrink that only
+/// dropped trailing whitespace is not a cut and says nothing. An excerpt is
+/// cut at the byte limit, ending in `…` as before, and says nothing more:
+/// `body_excerpted` already says it is partial. Any other body is cut at
+/// the byte limit and says so without an offset, a stale one removed rather
+/// than left pointing past unseen text.
+fn shrink_body(fields: &mut serde_json::Map<String, Value>, limit: usize, stored: &StoredBodies) {
+    let Some(Value::String(body)) = fields.get("body") else {
+        return;
+    };
+    if body.len() <= limit {
+        return;
+    }
+    let end = body.floor_char_boundary(limit);
+    let visible = body[..end].chars().count();
+    let page = page_offset(fields);
+    let condensed = match page {
+        Some(_) => None,
+        None => fields
+            .get("id")
+            .and_then(Value::as_i64)
+            .and_then(|id| stored.get(&id))
+            .map(|whole| whole.condense_within(visible))
+            .filter(|(kept, _)| kept.is_empty() || body.starts_with(kept.as_str())),
+    };
+    let (kept, resume) = match (page, condensed) {
+        (Some(offset), _) => (
+            body[..end].to_owned(),
+            Resume::At(offset.saturating_add(visible as u64)),
+        ),
+        (None, Some((kept, next))) => (
+            kept,
+            next.map_or(Resume::Unsaid, |next| Resume::At(next as u64)),
+        ),
+        (None, None) if fields.contains_key("body_excerpted") => {
+            // Still ending in `…`, still within the limit (the `…` is three
+            // bytes; the character it replaces may be one).
+            let mut kept = crate::text::truncate_ellipsis(&format!("{}…", &body[..end]), visible);
+            while kept.len() > limit {
+                let fewer = kept.chars().count().saturating_sub(1);
+                kept = crate::text::truncate_ellipsis(&kept, fewer);
+            }
+            (kept, Resume::Unsaid)
+        }
+        (None, None) => (body[..end].to_owned(), Resume::Unknown),
+    };
+    if kept == *body {
+        return;
+    }
+    fields.insert("body".into(), Value::String(kept));
+    match resume {
+        Resume::At(next) => {
+            fields.insert("next_offset".into(), json!(next));
+        }
+        Resume::Unknown => {
+            fields.remove("next_offset");
+        }
+        Resume::Unsaid => return,
+    }
+    fields.insert("body_truncated".into(), Value::Bool(true));
 }
 
 /// Bound large textual evidence without truncating JSON, identifiers, user
-/// preferences, or timestamps. Each shortened field gets a visible indicator.
-fn bound_evidence_text(value: &mut Value, budget: usize) {
+/// preferences, or timestamps. Each shortened field gets a visible indicator,
+/// and a shortened body says where the stored text resumes ([`shrink_body`]),
+/// on the candidate that is measured, so the payload the model gets is the
+/// one that fit.
+fn bound_evidence_text(value: &mut Value, budget: usize, stored: &StoredBodies) {
     if serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= budget) {
         return;
     }
-    fn trim(value: &mut Value, limit: usize) {
+    fn trim(value: &mut Value, limit: usize, stored: &StoredBodies) {
         match value {
             Value::Object(fields) => {
                 let mut indicators = Vec::new();
                 for (key, value) in fields.iter_mut() {
-                    if key == "source" {
+                    if key == "source" || (key == "body" && value.is_string()) {
                         continue;
                     }
-                    if matches!(key.as_str(), "body" | "content" | "text" | "snippet")
+                    if matches!(key.as_str(), "content" | "text" | "snippet")
                         && let Value::String(text) = value
                     {
                         if text.len() > limit {
-                            let mut end = limit;
-                            while !text.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            text.truncate(end);
+                            text.truncate(text.floor_char_boundary(limit));
                             indicators.push(format!("{key}_truncated"));
                         }
                         continue;
                     }
-                    trim(value, limit);
+                    trim(value, limit, stored);
                 }
                 for key in indicators {
-                    // If a paged body is shortened again by the overall
-                    // context bound, resume at the visible boundary, not the
-                    // original page end (which would skip unseen evidence).
-                    if key == "body_truncated"
-                        && let (Some(offset), Some(body)) = (
-                            fields.get("body_offset").and_then(Value::as_u64),
-                            fields.get("body").and_then(Value::as_str),
-                        )
-                    {
-                        let next = offset.saturating_add(body.chars().count() as u64);
-                        fields.insert("next_offset".into(), json!(next));
-                    }
                     fields.insert(key, Value::Bool(true));
                 }
+                shrink_body(fields, limit, stored);
             }
             Value::Array(values) => {
                 for value in values {
-                    trim(value, limit);
+                    trim(value, limit, stored);
                 }
             }
             _ => {}
@@ -399,25 +586,13 @@ fn bound_evidence_text(value: &mut Value, budget: usize) {
             .get_mut("message")
             .and_then(Value::as_object_mut)
             .and_then(|message| message.remove("body"));
-        trim(&mut candidate, other_limit);
+        trim(&mut candidate, other_limit, stored);
         if let Some(body) = primary {
-            let mut message = json!({"body":body});
-            trim(&mut message, target_limit);
             let fields = candidate["message"]
                 .as_object_mut()
                 .expect("message object");
-            fields.insert("body".into(), message["body"].clone());
-            if message.get("body_truncated").is_some() {
-                fields.insert("body_truncated".into(), true.into());
-                if let Some(offset) = fields.get("body_offset").and_then(Value::as_u64) {
-                    fields.insert(
-                        "next_offset".into(),
-                        json!(offset.saturating_add(
-                            message["body"].as_str().unwrap().chars().count() as u64
-                        )),
-                    );
-                }
-            }
+            fields.insert("body".into(), body);
+            shrink_body(fields, target_limit, stored);
         }
         candidate
     };
@@ -1176,21 +1351,270 @@ mod tests {
         // Already under the excerpt budget: unchanged and unflagged.
         assert_eq!(initial["thread"][3]["body"], "short");
         assert!(initial["thread"][3].get("body_excerpted").is_none());
+        // The target was under its cap: no cut, nothing said.
+        assert!(initial["message"].get("body_truncated").is_none());
+        assert!(initial["message"].get("next_offset").is_none());
     }
 
-    /// Tool results condense too, except a raw page from read_message.
+    /// A newsletter the size of the ones the ledger measured: 135 stories,
+    /// each with a 300-character tracking link.
+    fn newsletter() -> String {
+        (0..135)
+            .map(|i| {
+                format!(
+                    "Story {i:03}: the quick brown fox number {i} jumps over the lazy dog, \
+                     again and again, until the editors run out of column inches. \
+                     https://click.mailer.example/t?u={}{i}\n\n",
+                    "x".repeat(300)
+                )
+            })
+            .collect()
+    }
+
+    /// The newsletter's body is condensed (the links shortened) and then cut
+    /// at the cap, flagged like a page, with a resume offset that lands
+    /// exactly where the kept text ends in the STORED body: condensing the
+    /// stored text up to there gives back the kept text, and one character
+    /// more gives more. The numbers printed are the PR's measurement.
+    #[test]
+    fn the_target_body_is_capped_and_says_where_the_stored_text_resumes() {
+        let stored = newsletter();
+        let config = super::super::agent_config::ContextConfig::default();
+        let mut initial = json!({"message": {"id": 9, "body": stored}});
+        let before = serde_json::to_vec(&initial).unwrap().len();
+        let condensed = super::super::condense::condense_body(&stored);
+        condense_initial_context(&mut initial, &config);
+        let after = serde_json::to_vec(&initial).unwrap().len();
+        let body = initial["message"]["body"].as_str().unwrap();
+        eprintln!(
+            "target body: stored {} chars, condensed {} chars, in context {} chars; \
+             initial JSON {before} -> {after} bytes; about {} -> {} input tokens a turn",
+            stored.chars().count(),
+            condensed.chars().count(),
+            body.chars().count(),
+            before / 4,
+            after / 4,
+        );
+        assert!(condensed.chars().count() > config.full_body_chars);
+        // At most a left-out link short of the cap.
+        assert!(body.chars().count() <= config.full_body_chars);
+        assert!(body.chars().count() > config.full_body_chars - 50);
+        assert_eq!(initial["message"]["body_truncated"], true);
+        assert!(condensed.starts_with(body));
+        // The resume offset is in the stored text's characters, past the
+        // kept length (links were shortened before the cut), and exactly at
+        // the end of the stored text the kept text stands for.
+        let next = initial["message"]["next_offset"].as_u64().unwrap() as usize;
+        assert!(next > body.chars().count(), "{next}");
+        assert!(next < stored.chars().count());
+        assert_resumes_exactly(&stored, body, next);
+    }
+
+    /// The newest siblings ride under the same cap and say where to resume;
+    /// older ones are excerpts and say that instead.
+    #[test]
+    fn a_long_sibling_is_capped_like_the_target() {
+        let config = super::super::agent_config::ContextConfig::default();
+        let mut initial = json!({
+            "message": {"id": 3, "body": "Thanks, forwarding."},
+            "thread": [
+                {"id": 2, "body": newsletter()},
+                {"id": 1, "body": newsletter()},
+                {"id": 0, "body": newsletter()},
+            ],
+        });
+        condense_initial_context(&mut initial, &config);
+        for index in 0..config.full_sibling_bodies {
+            let sibling = &initial["thread"][index];
+            assert_eq!(sibling["body_truncated"], true);
+            assert!(sibling["next_offset"].as_u64().unwrap() > config.full_body_chars as u64);
+            assert!(sibling["body"].as_str().unwrap().chars().count() <= config.full_body_chars);
+            assert!(sibling.get("body_excerpted").is_none());
+        }
+        let oldest = &initial["thread"][config.full_sibling_bodies];
+        assert_eq!(oldest["body_excerpted"], true);
+        assert!(oldest.get("body_truncated").is_none());
+        assert!(oldest.get("next_offset").is_none());
+        assert!(initial["message"].get("body_truncated").is_none());
+    }
+
+    /// The overall context bound, cutting a capped body further, gives it a
+    /// resume offset computed from the stored text for what is finally
+    /// visible: exact, like the cap's own, neither the cap's (past text the
+    /// model never saw) nor the visible length (before text it did see), and
+    /// measured, so the payload still fits the budget.
+    #[test]
+    fn a_body_the_bound_cuts_further_resumes_exactly_where_the_visible_text_ends() {
+        let stored = newsletter();
+        let config = super::super::agent_config::ContextConfig::default();
+        let mut initial = json!({"message": {"id": 9, "body": stored}});
+        let kept = condense_initial_context(&mut initial, &config);
+        assert_eq!(kept[&9].text(), stored);
+        let capped_next = initial["message"]["next_offset"].as_u64().unwrap() as usize;
+        bound_evidence_text(&mut initial, 6_000, &kept);
+        assert!(serde_json::to_vec(&initial).unwrap().len() <= 6_000);
+        let body = initial["message"]["body"].as_str().unwrap().to_owned();
+        let visible = body.chars().count();
+        assert!(visible < config.full_body_chars);
+        assert_eq!(initial["message"]["body_truncated"], true);
+        let next = initial["message"]["next_offset"].as_u64().unwrap() as usize;
+        assert!(next < capped_next);
+        assert!(next > visible);
+        assert_resumes_exactly(&stored, &body, next);
+    }
+
+    /// The visible text is exactly the condensed stored text up to the
+    /// offset, and one stored character more condenses to more: the page
+    /// from the offset repeats nothing and skips nothing. The prefix is
+    /// condensed with a line of plain text after it, so a `>`-quoted block
+    /// it happens to end in is not taken for a quoted tail the whole body
+    /// does not have.
+    fn assert_resumes_exactly(stored: &str, visible: &str, next: usize) {
+        let condensed_prefix = |chars: usize| {
+            let prefix: String = stored.chars().take(chars).collect();
+            super::super::condense::condense_body(&format!("{prefix}\nend."))
+        };
+        assert_eq!(condensed_prefix(next), format!("{visible}\nend."));
+        assert_ne!(condensed_prefix(next + 1), format!("{visible}\nend."));
+    }
+
+    /// A reply the bound cuts inside its new text loses the quote marker
+    /// (the cut is before it) and resumes in the new text, at an offset
+    /// that is exact; the bound never leaves part of the marker showing.
+    #[test]
+    fn a_reply_the_bound_cuts_resumes_in_its_new_text_without_the_marker() {
+        let config = super::super::agent_config::ContextConfig::default();
+        let prose: String = (0..200).map(|i| format!("Point {i}: agreed. ")).collect();
+        let quote = "\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> earlier";
+        let stored = format!("{prose}{quote}");
+        let mut initial = json!({"message": {"id": 5, "body": stored}});
+        let kept = condense_initial_context(&mut initial, &config);
+        let marker = super::super::condense::QUOTE_MARKER;
+        assert_eq!(
+            initial["message"]["body"],
+            format!("{}\n{marker}", prose.trim_end())
+        );
+        assert!(initial["message"].get("body_truncated").is_none());
+        bound_evidence_text(&mut initial, 1_000, &kept);
+        assert!(serde_json::to_vec(&initial).unwrap().len() <= 1_000);
+        let body = initial["message"]["body"].as_str().unwrap();
+        assert!(!body.contains('['), "{body}");
+        assert!(prose.starts_with(body));
+        assert_eq!(initial["message"]["body_truncated"], true);
+        let next = initial["message"]["next_offset"].as_u64().unwrap() as usize;
+        assert_eq!(next, body.chars().count());
+    }
+
+    /// A tool result the bound cuts (two newsletters from read_thread) comes
+    /// out within its budget, offsets included, each cut body saying exactly
+    /// where its stored text resumes. (The offsets were once added after the
+    /// bound had fitted the result, which pushed it over the budget the size
+    /// check then enforced: `result_too_large` for exactly the threads the
+    /// bound exists to admit.)
+    #[test]
+    fn a_tool_result_the_bound_cuts_fits_its_budget_and_resumes_exactly() {
+        let config = super::super::agent_config::ContextConfig::default();
+        let newsletter = newsletter();
+        let mut data = json!({"messages": [
+            {"id": 1, "body": newsletter},
+            {"id": 2, "body": newsletter},
+        ]});
+        let stored = condense_evidence(&mut data);
+        assert_eq!(stored.len(), 2);
+        bound_evidence_text(&mut data, config.max_tool_result_bytes, &stored);
+        let encoded = serde_json::to_vec(&data).unwrap().len();
+        assert!(encoded <= config.max_tool_result_bytes, "{encoded}");
+        assert!(encoded > config.max_tool_result_bytes - 500, "{encoded}");
+        for message in data["messages"].as_array().unwrap() {
+            assert_eq!(message["body_truncated"], true);
+            let body = message["body"].as_str().unwrap();
+            let next = message["next_offset"].as_u64().unwrap() as usize;
+            assert!(next > body.chars().count());
+            assert_resumes_exactly(&newsletter, body, next);
+        }
+    }
+
+    /// A capped body the bound cuts without its stored text at hand (no id
+    /// to find it by) keeps the flag and loses the cap's offset, which
+    /// would point past text the model never saw.
+    #[test]
+    fn a_body_cut_without_its_stored_text_loses_a_stale_offset() {
+        let mut value = json!({"message": {
+            "body": "a".repeat(4000),
+            "body_truncated": true,
+            "next_offset": 9000,
+        }});
+        bound_evidence_text(&mut value, 1_000, &StoredBodies::new());
+        assert!(value["message"]["body"].as_str().unwrap().chars().count() < 1_000);
+        assert_eq!(value["message"]["body_truncated"], true);
+        assert!(value["message"].get("next_offset").is_none());
+        // A stranger under a stored body's id is cut the same way, never
+        // swapped for that body's text.
+        let stored = condense_initial_context(
+            &mut json!({"message": {"id": 1, "body": newsletter()}}),
+            &super::super::agent_config::ContextConfig::default(),
+        );
+        let mut value = json!({"message": {"id": 1, "body": "b".repeat(4000)}});
+        bound_evidence_text(&mut value, 1_000, &stored);
+        let body = value["message"]["body"].as_str().unwrap();
+        assert!(body.starts_with("bbbb") && body.chars().count() < 1_000);
+        assert!(value["message"].get("next_offset").is_none());
+        assert_eq!(value["message"]["body_truncated"], true);
+    }
+
+    /// An excerpt the bound cuts further is a shorter excerpt: the flag it
+    /// carries already says it is partial, and no offset is owed.
+    #[test]
+    fn an_excerpt_the_bound_cuts_stays_an_excerpt() {
+        let mut value = json!({"thread": [
+            {"id": 3, "body": format!("{}…", "x".repeat(399)), "body_excerpted": true},
+        ]});
+        bound_evidence_text(&mut value, 200, &StoredBodies::new());
+        let sibling = &value["thread"][0];
+        let body = sibling["body"].as_str().unwrap();
+        assert!(body.chars().count() < 200);
+        assert!(body.ends_with("x…"), "{body}");
+        assert_eq!(sibling["body_excerpted"], true);
+        assert!(sibling.get("body_truncated").is_none());
+        assert!(sibling.get("next_offset").is_none());
+    }
+
+    #[test]
+    fn a_zero_body_cap_is_refused() {
+        let mut config = super::super::agent_config::AgentTriageConfig::default();
+        assert!(config.validate().is_ok());
+        config.context.full_body_chars = 0;
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "triage budgets must be positive"
+        );
+    }
+
+    /// Tool results condense too, whole, except a raw page from read_message;
+    /// the stored bodies come back by id for the bound to resume from.
     #[test]
     fn tool_results_condense_except_raw_pages() {
         let quote = "\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> earlier";
-        let mut thread = json!({"messages": [{"id": 1, "body": format!("Hi.{quote}")}]});
-        condense_evidence(&mut thread);
+        let mut thread = json!({"messages": [
+            {"id": 1, "body": format!("Hi.{quote}")},
+            {"id": 2, "body": newsletter()},
+        ]});
+        let stored = condense_evidence(&mut thread);
         assert_eq!(
             thread["messages"][0]["body"],
             format!("Hi.\n{}", super::super::condense::QUOTE_MARKER)
         );
+        assert_eq!(stored[&1].text(), format!("Hi.{quote}"));
+        assert_eq!(stored[&2].text(), newsletter());
+        assert_eq!(
+            thread["messages"][1]["body"],
+            super::super::condense::condense_body(&newsletter())
+        );
+        assert!(thread["messages"][1].get("body_truncated").is_none());
         let raw = format!("Hi.{quote}");
         let mut page = json!({"message": {"id": 1, "body": raw, "body_offset": 0}});
-        condense_evidence(&mut page);
+        let stored = condense_evidence(&mut page);
+        assert!(stored.is_empty());
         assert_eq!(page["message"]["body"], raw);
     }
 
@@ -1202,7 +1626,7 @@ mod tests {
             "thread": (2..10).map(|id| json!({"id": id, "body": "é".repeat(6000)})).collect::<Vec<_>>()
         });
         let before = serde_json::to_vec(&value).unwrap().len();
-        bound_evidence_text(&mut value, 30_000);
+        bound_evidence_text(&mut value, 30_000, &StoredBodies::new());
         assert_eq!(value["message"]["body"], body);
         assert_eq!(value["thread"].as_array().unwrap().len(), 8);
         let after = serde_json::to_vec(&value).unwrap().len();
@@ -1223,6 +1647,24 @@ mod tests {
         assert!(SYSTEM.contains("invite, referral, promo, or waitlist code"));
         assert!(SYSTEM.contains("invite or referral or promo codes"));
         assert!(!SYSTEM.contains('\u{2014}'), "em dash in the agent prompt");
+        // The one runtime figure in the prompt is the reader's page size.
+        assert!(SYSTEM.contains(&format!(
+            "{} characters a page",
+            super::super::context::READ_MESSAGE_PAGE_CHARS
+        )));
+        assert!(
+            !SYSTEM.contains('{'),
+            "an unfilled figure in the agent prompt"
+        );
+        // The figure is prompt text: a change to it is a prompt change, so
+        // the version moves with it (and this pin).
+        assert_eq!(
+            (
+                super::super::context::READ_MESSAGE_PAGE_CHARS,
+                PROMPT_VERSION
+            ),
+            (2_000, "agent-triage-v10")
+        );
     }
     #[test]
     fn credentials_are_not_inferred_from_auth_category() {
@@ -1402,7 +1844,7 @@ mod tests {
         );
         let with = system_prompt(true);
         let without = system_prompt(false);
-        assert_eq!(with, SYSTEM);
+        assert_eq!(with, SYSTEM.as_str());
         assert!(without.contains(NO_REVIEW_OFFER));
         assert!(
             !without.contains(REVIEW_OFFER) && !without.contains("stronger review"),
@@ -1463,6 +1905,121 @@ mod tests {
             run.model_turns, 2,
             "the refusal costs one turn, then it finishes"
         );
+        server.abort();
+    }
+
+    /// [`mock_provider`] that takes 5 s over every answer.
+    async fn slow_provider(
+        state: axum::extract::State<
+            std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Value>>>,
+        >,
+        request: axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+        mock_provider(state, request).await
+    }
+
+    /// The deadline is per TURN: two turns that each fit inside it make a
+    /// run that would not have fit inside the old single ceiling over the
+    /// whole run, and the run finishes. The client's own timeout, shorter
+    /// than a turn here as the engine's shared client's would be for a
+    /// turn the operator allowed past 180 s, does not cut it either. The
+    /// turns are 5 s under an 8 s deadline: the property needs two turns
+    /// to outrun one deadline, and 3 s is the margin a loaded runner gets.
+    #[tokio::test]
+    async fn each_turn_has_the_deadline_to_itself() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let responses = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            // A step of no known shape costs a repair turn...
+            json!({"result": {"step": "ponder"}}),
+            // ...and the second turn finishes.
+            json!({"result": {"step": "finish", "decision": valid()}}),
+        ])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/", post(slow_provider))
+            .with_state(responses);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let connection = AgentConnection {
+            http: &http,
+            url: &url,
+            api_key: "test",
+            provider: Stage2Provider::OpenAI,
+            model: "test",
+            effort: None,
+        };
+        let context = ContextSnapshot {
+            thread_id: "thread".into(),
+            initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+            source_message_ids: vec![7],
+            ..Default::default()
+        };
+        let mut config = AgentTriageConfig::default();
+        config.agent.timeout_secs = 8;
+        let started = std::time::Instant::now();
+        let run = run_agent(connection, &config, context, &NoEvidence)
+            .await
+            .expect("two turns, each inside its own deadline");
+        assert_eq!(run.model_turns, 2);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(9500),
+            "{:?}: the run took longer than one turn's deadline",
+            started.elapsed()
+        );
+        server.abort();
+    }
+
+    /// One turn past its deadline is the run's `agent_timeout`, billed for
+    /// that one request, cut at the deadline rather than at the run's.
+    #[tokio::test]
+    async fn a_turn_past_its_deadline_is_the_runs_timeout() {
+        use axum::{Router, routing::post};
+        let app = Router::new().route(
+            "/",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                axum::Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = reqwest::Client::new();
+        let connection = AgentConnection {
+            http: &http,
+            url: &url,
+            api_key: "test",
+            provider: Stage2Provider::OpenAI,
+            model: "test",
+            effort: None,
+        };
+        let context = ContextSnapshot {
+            thread_id: "thread".into(),
+            initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+            source_message_ids: vec![7],
+            ..Default::default()
+        };
+        let mut config = AgentTriageConfig::default();
+        config.agent.timeout_secs = 1;
+        let started = std::time::Instant::now();
+        let failure = match run_agent(connection, &config, context, &NoEvidence).await {
+            Err(failure) => failure,
+            Ok(_) => panic!("the turn overran"),
+        };
+        assert_eq!(failure.kind, "agent_timeout");
+        assert_eq!(failure.model_calls, 1);
+        assert!(failure.retry_after.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
         server.abort();
     }
 
@@ -1610,7 +2167,7 @@ mod tests {
         );
         let mut value = json!({"message":{"id":1,"body":body},
             "thread":(2..10).map(|id|json!({"id":id,"body":"y".repeat(16_000)})).collect::<Vec<_>>()});
-        bound_evidence_text(&mut value, 40_000);
+        bound_evidence_text(&mut value, 40_000, &StoredBodies::new());
         assert!(
             value["message"]["body"]
                 .as_str()
@@ -1630,7 +2187,7 @@ mod tests {
     #[test]
     fn text_limits_are_visible_and_preserve_utf8_and_identity() {
         let mut value = json!({"message_id": 7, "body": "é".repeat(10000)});
-        bound_evidence_text(&mut value, 1000);
+        bound_evidence_text(&mut value, 1000, &StoredBodies::new());
         assert_eq!(value["message_id"], 7);
         assert_eq!(value["body_truncated"], true);
         let bytes = serde_json::to_vec(&value).unwrap().len();
@@ -1729,10 +2286,27 @@ mod tests {
         assert_eq!(failure.usage[0].input_tokens, 12);
         server.abort();
     }
+    /// The reader's own shape, a page under `message`, through the bound's
+    /// target path: the page rule holds there too.
+    #[test]
+    fn a_page_under_message_resumes_at_its_offset_plus_what_is_visible() {
+        let mut value = json!({"message": {
+            "id": 1,
+            "body": "é".repeat(10000),
+            "body_offset": 50,
+            "next_offset": null,
+        }});
+        bound_evidence_text(&mut value, 1000, &StoredBodies::new());
+        let visible = value["message"]["body"].as_str().unwrap().chars().count();
+        assert!(visible < 10000);
+        assert_eq!(value["message"]["next_offset"], json!(50 + visible));
+        assert_eq!(value["message"]["body_truncated"], true);
+    }
+
     #[test]
     fn shortened_pages_resume_at_visible_unicode_boundary() {
         let mut value = json!({"body": "é".repeat(10000), "body_offset": 50, "next_offset": 10050});
-        bound_evidence_text(&mut value, 1000);
+        bound_evidence_text(&mut value, 1000, &StoredBodies::new());
         let visible = value["body"].as_str().unwrap().chars().count();
         assert_eq!(value["next_offset"], json!(50 + visible));
     }

@@ -38,6 +38,15 @@ impl MemoryContextProvider for EmptyMemoryContext {
     }
 }
 // A future MemoryEditor is a separate capability. No write tool is registered.
+
+/// Characters of the stored body a `read_message` page carries
+/// ([`EvidenceRequest::ReadMessage`]). The evidence reader pages by it and
+/// the agent prompt states it, so the model can budget its tool calls
+/// against a cut body's `next_offset`. A change here changes the prompt:
+/// bump `agent::PROMPT_VERSION` with it, so stored diagnostics tell the
+/// runs apart.
+pub const READ_MESSAGE_PAGE_CHARS: usize = 2_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum EvidenceRequest {

@@ -33,6 +33,7 @@ Config comes from `~/.config/squelch/config.toml` (override with `--config`) plu
 | `SQUELCH_BIND` | bind address for `serve` | `127.0.0.1:8848` |
 | `SQUELCH_DB_PATH` | SQLite path | `~/.local/share/squelch/squelch.db` |
 | `SQUELCH_POLL_SECS` | Gmail poll interval | `45` |
+| `SQUELCH_IDLE_POLL_SECS` | cap on the poll wait while the mailbox is idle: the wait doubles from `SQUELCH_POLL_SECS` up to this after quiet polls, and drops back on a change, a manual refresh, or a connected client. `0` is no backoff. Lengthening it trades idle Gmail requests for how late new mail can be noticed when no client is connected | `0` |
 | `SQUELCH_FETCH_CONCURRENCY` | `messages.get` calls in flight while a window of mail is fetched (first backfill, catch-up, history walk); each is a raw body in memory, and the Gmail budget caps the gain past 2 | `2` |
 | `SQUELCH_MCP_ALLOWED_HOSTS` | extra Host values when fronted by a proxy | — |
 | `SQUELCH_MCP_OAUTH_ISSUER` | OAuth issuer for the agent door; set together with the next one | unset (agent door open) |

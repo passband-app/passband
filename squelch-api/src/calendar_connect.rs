@@ -210,12 +210,12 @@ impl CalendarConsent {
                     .port();
                 let (tx, rx) = tokio::sync::oneshot::channel::<()>();
                 let app = listener_router(ctx.clone());
+                // The daemon's own accept loop (a live header timer, the
+                // peer address on every request), so a connection to this
+                // port that never sends its request is closed like any
+                // other.
                 let task = tokio::spawn(async move {
-                    let _ = axum::serve(
-                        listener,
-                        app.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(async move {
+                    let _ = crate::serve::serve(listener, app, async move {
                         let _ = rx.await;
                     })
                     .await;

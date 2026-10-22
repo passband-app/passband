@@ -251,7 +251,8 @@ data:
   # comfortable number. With it, the tenant that will not fit is refused at
   # signup instead of a running mailbox being killed for it, and on this box
   # the thing doing the refusing is the quota in 70-tenant-limits.yaml, which
-  # is sized to five tenants at this request. Change one and redo the other.
+  # is sized to thirty tenants at this request on `carrier` (five on the 4 GB
+  # floor). Change one and redo the other.
   #
   # Revisit once the daemon unloads its embedder when idle; the constant in
   # squelch-warden/src/config.rs carries the measurements.

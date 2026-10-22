@@ -87,32 +87,56 @@ Security Admission at `restricted`), `cert-manager`. Manifests applied from
 
 ## How many tenants fit
 
-**Thirty, and this box's quota is NOT the file in the repo.** Since the
-2026-09-28 resize the `tenants` ResourceQuota on `carrier` is a live patch over
-`70-tenant-limits.yaml`, which stays sized to the 4 GB floor because it is also
-the self-host template. So:
-
-> **Re-applying `70-tenant-limits.yaml` here puts the cap back at FIVE.** Eight
-> tenants were already running when it was raised, so the next signup would be
-> refused exactly the way `ethan`'s was. Re-run the patch below after any apply
-> of that file. The "tenants quota near full" alert fires within 15 minutes if
-> you forget (see `deploy/monitoring/README.md`).
-
-What is live, every dimension sized to thirty tenants at the warden's
-100m / 384Mi / 256Mi-ephemeral request (`15-warden-config.yaml`):
+**Thirty, and this box's quota is meant to be the file in the repo.**
+`70-tenant-limits.yaml` is the record of the `tenants` ResourceQuota on
+`carrier`, every line sized to admit at least thirty tenants at what
+`15-warden-config.yaml` makes a tenant ask for (100m / 384Mi / 256Mi
+ephemeral requested, 1000m / 1Gi / 1Gi allowed, a 10Gi claim, four Secrets).
+The box matches the record after the apply that follows a merge, and only
+`kubectl diff` says whether it does right now; a change to the quota is a
+change to that file, merged, then applied:
 
 ```sh
-kubectl -n tenants patch resourcequota tenants --type merge -p '{"spec":{"hard":{
-  "requests.memory":"11520Mi","limits.memory":"46080Mi",
-  "requests.cpu":"3","limits.cpu":"12",
-  "requests.ephemeral-storage":"8Gi","limits.ephemeral-storage":"32Gi",
-  "pods":"40","persistentvolumeclaims":"40","count/secrets":"100"}}}'
+kubectl diff -f deploy/hosted/70-tenant-limits.yaml   # exit 1: it differs
+kubectl apply -f deploy/hosted/70-tenant-limits.yaml
 ```
 
-ALL of them, not just memory. At 16 GB the template's other lines bind first:
-`requests.cpu: "2"` is twenty tenants at 100m, `requests.ephemeral-storage: 5Gi`
-is twenty at 256Mi, and `pods`/`persistentvolumeclaims: 25` are twenty-five.
-Raising memory alone moves the wall from five to twenty and nothing else.
+A line the diff shows that the file's history does not explain was changed on
+the box outside this record: reconcile it (into the file, or by the apply)
+knowingly rather than overwrite it blind. Between a merge and its apply the
+box runs the previous version, and the diff shows exactly the merged change.
+
+> **Pending: the first apply of this file to `carrier`.** Until an operator
+> runs the two commands above, the box is expected to run the patch described
+> next, this record's last word on it, under which the thirteenth signup would
+> be refused on `limits.cpu`; the diff is what says so. Delete this paragraph
+> once the diff comes back empty.
+
+Before this file was first applied, the live quota was, from the 2026-09-28
+resize, a `kubectl patch` over a file still sized to the 4 GB floor, so an
+apply of the file put the cap back at five with eight tenants running, and the
+patch itself had three lines that would have bound before memory: `limits.cpu:
+"12"` at the warden's 1000m limit a pod is twelve tenants, `requests.storage:
+200Gi` at a 10Gi claim plus the model seed's 2Gi is nineteen, and
+`count/secrets: "100"` less the eight the namespace can hold of its own, at
+four a tenant, is twenty-three. None had refused anyone yet; the thirteenth
+signup would have been the first. The file carries 40, 392Gi and 200, and takes
+`requests.cpu` from 3 to 4 so that cpu, which the patch had tied with memory at
+exactly thirty, stays out of the way of any pod shaped unlike a tenant; so the
+first diff is expected to show those four lines plus the `last-applied-
+configuration` annotation that carries the file, and anything else in it was
+changed on the box since the patch was recorded and is the thing to reconcile
+first. A unit test in the warden
+(`the_committed_quota_lets_memory_bind_before_any_count_line`) divides every
+line of the committed file by what the committed ConfigMap makes a tenant ask
+for and fails CI when any admits fewer than the memory line does, so a raise
+that moves one line and not the others fails there instead of at a signup.
+
+ALL the lines move together, not just memory. At 16 GB the old floor-sized
+file's other lines bound first: its `requests.cpu: "2"` was twenty tenants at
+100m, its `requests.ephemeral-storage: 5Gi` twenty at 256Mi, and its `pods` /
+`persistentvolumeclaims: 25` twenty-five. Raising memory alone moved the wall
+from five to twenty and nothing else.
 
 **Memory arithmetic.** 15985 MiB of machine, less about 1200 for k3s,
 containerd, journald and litestream, less about 400 for the pods that are not
@@ -244,20 +268,24 @@ unblocks a tenant, but it rotates the key and starts the ledger from zero, so
 keep it for a key that is actually wrong.
 
 **A tenant that hits its daily triage cap** is a different limit: a count of
-model jobs per UTC day (10,000 in total, 200 of them for background work), held
-by the daemon rather than the gateway. The total is a runaway breaker set far
-above any real mailbox, so the limit a tenant actually meets is the background
-one. The dashboard's "Triage held by the daily cap" panel shows it. A `new mail`
-line means today's arrivals are going untriaged, which should not happen short
-of a runaway and is worth a look before you lift it; a `background` line is a
-backlog draining at 200 a day, which is the design; `revisits` wait on
-`[revisit].daily_cap`, which no grant raises. To lift a cap for the rest of the
-day:
+model jobs per UTC day (10,000 in total, 200 of them for background work and
+500 for access checks), held by the daemon rather than the gateway. The total
+is a runaway breaker set far above any real mailbox, so the limit a tenant
+actually meets is a lane's. The dashboard's "Triage held by the daily cap"
+panel shows it. A `new mail` line means today's arrivals are going untriaged,
+which should not happen short of a runaway and is worth a look before you lift
+it; a `background` line is a backlog draining at 200 a day, which is the
+design; an `access` line is access checks (the owner's sent mail, spam, archive
+rows an agent asked to read) waiting on the access lane's cap of 500 a day, a
+spammy day's worth, or for an archive check its own sub-cap, which no grant
+raises; `revisits` wait on `[revisit].daily_cap`, which no grant raises either.
+To lift a cap for the rest of the day:
 
 ```sh
 kubectl -n tenants exec deploy/<label> -- squelchd triage status
 kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500
 kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500 --background
+kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500 --access
 ```
 
 No restart: the worker reads the grant on its next job, and the grant lapses at

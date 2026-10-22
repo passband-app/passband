@@ -340,8 +340,8 @@ pub async fn decision(
 ) -> Result<impl IntoResponse, ApiError> {
     let view = store_call(&state, move |store, account| {
         let context = store.load_agent_context(&squelch_core::store::agent_triage::AgentJob {
-            id: 0, account_id: account, message_id, kind: "triage".into(), trigger: "inspect".into(),
-            lease_token: String::new(), attempts: 0, arrival_eligible: false, foreground: false,
+            account_id: account, message_id, kind: "triage".into(), trigger: "inspect".into(),
+            ..Default::default()
         })?;
         let diagnostics = store.agent_diagnostics(account, message_id)?;
         let fast_notification = store.latest_notification_assessment(account, message_id,

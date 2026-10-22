@@ -557,12 +557,13 @@ struct ConsoleSession {
 /// takes the store mutex the whole daemon shares.
 async fn console_session(state: &ApiState, headers: &HeaderMap) -> Option<ConsoleSession> {
     let presented = cookie_token(headers)?;
-    let _permit = state.device_auth_slots().acquire().await.ok()?;
     let store = state.store.clone();
-    let verified = tokio::task::spawn_blocking(move || store.verify_device_token(&presented))
-        .await
-        .ok()?
-        .ok()??;
+    let verified = crate::handlers::blocking_on(&state.device_auth_slots, move || {
+        store.verify_device_token(&presented)
+    })
+    .await
+    .ok()?
+    .ok()??;
     // Account scoping, even here: this daemon serves one account, and a token
     // belonging to any other is not a session on this console.
     (verified.account_id == state.account_id).then_some(ConsoleSession {
@@ -772,14 +773,12 @@ async fn claim_and_land(
     }
     // The claim is a store write reachable with no credential, so it queues on
     // the same bounded slots `/client/pair` does rather than racing them.
-    let Ok(_permit) = state.pair_slots().acquire().await else {
-        return refused_sign_in(state, site);
-    };
     let store = state.store.clone();
     let code = code.to_string();
-    let issued =
-        tokio::task::spawn_blocking(move || store.claim_pairing_code(&code, CONSOLE_DEVICE_NAME))
-            .await;
+    let issued = crate::handlers::blocking_on(&state.pair_slots, move || {
+        store.claim_pairing_code(&code, CONSOLE_DEVICE_NAME)
+    })
+    .await;
 
     match issued {
         Ok(Ok(issued)) => with_cookie(

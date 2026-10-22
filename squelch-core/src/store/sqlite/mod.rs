@@ -212,8 +212,8 @@ mod triage_stages;
 mod zones;
 
 pub use self::agent_triage::{
-    ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX, ARCHIVE_SURFACE_CAP, AccessProgress,
-    ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
+    ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX,
+    ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
 };
 use self::migrate::migrate;
 pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
@@ -344,6 +344,18 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// Overwrite the account's creation stamp with `raw`, for a test that
+    /// wants the store to stop answering [`Store::account_created_at`].
+    #[cfg(test)]
+    pub(crate) fn test_set_account_created_at(&self, account_id: AccountId, raw: &str) {
+        let conn = self.lock().unwrap();
+        conn.execute(
+            "UPDATE accounts SET created_at = ?2 WHERE id = ?1",
+            params![account_id, raw],
+        )
+        .unwrap();
+    }
+
     /// Open (or create) a store at `path`, applying the schema.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         register_vec_extension();
@@ -1950,6 +1962,10 @@ impl Store for SqliteStore {
         embedding: &[f32],
     ) -> Result<()> {
         self.upsert_message_vector(account_id, message_id, embedding)
+    }
+
+    fn upsert_message_vectors(&self, account_id: AccountId, items: &[(i64, &[f32])]) -> Result<()> {
+        self.upsert_message_vectors(account_id, items)
     }
 
     fn messages_missing_vectors(

@@ -43,14 +43,16 @@ door, both inside the ceilings below. `source_access` is never queued on an arch
 row. Until then external thread reads omit them rather than close the thread; see
 SECURITY.md section 4.
 
-`archive_access` is charged to the total and background budgets AND to its own
+`archive_access` is charged to the total and access-lane budgets AND to its own
 `archive_access_daily_cap` (default 50, config file only; 0 stops surfacing). A
 search queues at most ten and a thread open at most eight, never more than twenty
 outstanding per account, never more than today's sub-cap can still pay for, and nothing once
-today's background budget is spent. The job is claimed in the `manual:` tier only
-while it has never been deferred or retried (`last_error IS NULL`); after that it is
-ordinary background work. These jobs are not in the "triaging N" count, the
-budget-parked count or the queue gauge. A failed one may be asked for again after 24
+today's access budget is spent, or the total. The job is claimed in the `manual:`
+tier only while it has never been deferred or retried (`last_error IS NULL`); after
+that it waits its turn like any other job, on the access lane's budget either way,
+and a grant on the access lane releases it only within its sub-cap's room. These
+jobs are not in the "triaging N" count, the budget-parked count or the queue
+gauge; the held count includes them. A failed one may be asked for again after 24
 hours. Any other trigger that reaches a row still in the archive is also queued as
 kind `access`, never `triage`: only the owner's single-message re-triage or filing
 correction promotes the row to live mail first.
@@ -84,11 +86,13 @@ The independent notification model uses existing `[notify]` settings.
 max_model_turns = 4
 max_tool_calls = 8
 max_review_calls = 1
+# Per model turn; a whole investigation gets timeout_secs x (max_model_turns + 1).
 timeout_secs = 90
 concurrency = 2
 worker_poll_secs = 1
 daily_run_cap = 10000
 background_daily_run_cap = 200
+access_daily_run_cap = 500
 archive_access_daily_cap = 50
 max_attempts = 6
 outage_retry_secs = 300
@@ -96,6 +100,17 @@ outage_retry_secs = 300
 [triage.context]
 initial_thread_messages = 8
 max_related_messages = 20
+# The newest thread siblings ride with a whole (capped) body; the rest carry
+# an excerpt of this many characters, flagged body_excerpted.
+full_sibling_bodies = 2
+sibling_excerpt_chars = 400
+# The most of a condensed body (the target's, the newest siblings') that rides
+# whole into the initial context, in characters; past it the model pages the
+# stored text with read_message (body_truncated, next_offset).
+full_body_chars = 16000
+# The most of a body the access check reads, links shortened and quotes kept;
+# past it the body is cut and the check told so (body_truncated).
+access_body_chars = 8000
 max_context_bytes = 120000
 max_tool_result_bytes = 24000
 
@@ -114,7 +129,7 @@ Environment overrides: `SQUELCH_TRIAGE_MODEL`, `SQUELCH_TRIAGE_REVIEW_MODEL`,
 `SQUELCH_TRIAGE_MAX_TURNS`, `SQUELCH_TRIAGE_MAX_TOOL_CALLS`,
 `SQUELCH_TRIAGE_TIMEOUT_SECS`, `SQUELCH_TRIAGE_CONCURRENCY`,
 `SQUELCH_TRIAGE_DAILY_RUN_CAP`, `SQUELCH_TRIAGE_BACKGROUND_DAILY_RUN_CAP`,
-`SQUELCH_TRIAGE_MAX_ATTEMPTS`, and
+`SQUELCH_TRIAGE_ACCESS_DAILY_RUN_CAP`, `SQUELCH_TRIAGE_MAX_ATTEMPTS`, and
 `SQUELCH_TRIAGE_OUTAGE_RETRY_SECS`. Other agent levers are configured in TOML. Scores order only agent-selected FYE threads;
 no weight or importance threshold can add a thread to FYE. Recency uses relevant
 message activity, never the time a background job ran.
@@ -127,14 +142,23 @@ The account total is `triage.agent.daily_run_cap` (default 10000). It is a
 runaway breaker, not a working budget: new mail should never be left untriaged
 by it, so it sits far above what any real mailbox receives in a day. Background
 work also consumes `background_daily_run_cap` (default 200), within that total.
-That is the cap that bounds ordinary spend, and background cannot consume the
-9800 runs left for new inbound mail.
+Together with the access lane's cap below, that bounds ordinary spend; the two
+lanes leave 9300 runs for new inbound mail.
 Unused arrival capacity is not loaned to background work. Setting the background
-cap to zero pauses background jobs. If only the total is lowered, the effective
-background cap is clamped to at most total minus one, retaining a reserve.
+cap to zero pauses background jobs. If only the total is lowered, the two lanes
+are cut to fit under it, as the next paragraph says, retaining a reserve.
+Access checks (kind `access`: the owner's sent mail, spam, and archive rows a
+caller asked to read) are charged to their own `access_daily_run_cap` (default
+500) rather than the background cap, so a spammy day cannot defer the backfill
+to tomorrow, nor the backfill the owner's sent mail. The two lanes fit under the
+total minus one together: a lowered total cuts the access lane first, or splits
+the room between the two when the background cap alone reaches it, the daemon
+notes the caps in force on stderr at boot, and `/client/triage-config` reports
+them and what they leave for new mail.
 
-Migration/backfill, sent-mail access, external-demand access, thread refreshes,
-and autonomous revisits are background work. First classification from incremental
+Migration/backfill, thread refreshes, and autonomous revisits are background
+work; sent-mail access and external-demand access are access work, on the
+access lane's budget. First classification from incremental
 sync uses arrival capacity independently of the sender's Date header and push
 eligibility. The sync origin is persisted explicitly; an initial mailbox import
 cannot pretend to be new arrivals merely because its messages are newly stored.
@@ -144,8 +168,8 @@ no longer gate agent triage. Their compatibility fields remain exposed but the
 agent config explicitly reports `legacy_stage_caps_are_active_ceilings: false`.
 Configure agent ceilings through the TOML/environment controls above; moving the
 usage-page and warden controls to a dollar budget is [follow-up #216](https://github.com/passband-app/passband/issues/216).
-`/client/triage-config` reports the configured/effective background cap, total cap,
-and protected arrival capacity. When the true total is exhausted, mail stays
+`/client/triage-config` reports the configured/effective background and access
+caps, the total cap, and the arrival capacity the two lanes leave. When the true total is exhausted, mail stays
 human-readable and visibly pending until the next UTC day.
 
 To see where a mailbox stands and to lift a cap for the rest of the day:
@@ -154,19 +178,21 @@ To see where a mailbox stands and to lift a cap for the rest of the day:
 squelchd triage status
 squelchd triage grant 500                # 500 more runs today, for new mail
 squelchd triage grant 500 --background   # 500 more background runs today
+squelchd triage grant 500 --access       # 500 more access checks today
 squelchd triage grant 0                  # take the grant back
 ```
 
 A grant works on a running daemon, lasts until midnight UTC, and replaces any
 earlier grant for the day. It releases as many held jobs as the caps now have
-room for, new mail first; the rest stay parked rather than running only to be
-turned away again. Background runs still count toward the total, so a
-background grant only helps while the total has room. Autonomous revisits also
+room for, new mail first, then background work, then access checks; the rest
+stay parked rather than running only to be turned away again. Background and
+access runs still count toward the total, so a lane's grant only helps while
+the total has room. Autonomous revisits also
 answer to `[revisit].daily_cap`, which a grant does not raise, so a grant never
 releases them. Each run is a model job, so a grant is spend. The scrape exports
 the same numbers as `squelchd_triage_daily_runs`,
 `squelchd_triage_daily_run_cap` and `squelchd_triage_jobs_held` (scopes
-`arrival`, `background` and `revisit`).
+`arrival`, `background`, `access` and `revisit`).
 
 A sender rule applies to mail that arrives after it is written. Creating,
 editing, or deleting one re-triages nothing already stored: every re-triage is a
@@ -192,15 +218,39 @@ Invalid output and stale commits retry with exponential delay, then remain faile
 for inspection and manual re-triage. Observable output constraints get repair
 turns within the same investigation before consuming a new attempt. Provider
 configuration failures, transport failures, rate limits, and server errors
-instead leave work pending and retry after the shared outage cooldown;
-they do not consume the terminal-attempt allowance. After the cooldown, one
-investigation probes recovery; a successful response restores normal admission,
-and another outage extends the cooldown. Empty refine polling backs off up to
-30 seconds and an ingest wake resets the delay. A first-call configuration
-rejection refunds its budget reservation. Earlier paid calls remain charged.
-Whole-investigation and access-call deadlines are job-local failures: they consume
-retry attempts without pausing the account, and their uncertain spend is not
-refunded. Daily budget exhaustion defers work to the next UTC day. Investigations for the
+instead leave work pending and retry after a shared cooldown; they do not
+consume the terminal-attempt allowance. A configuration failure (a rejected
+key, an unknown model) stands the account off for `outage_retry_secs`, less up
+to 15 seconds of jitter so a fleet rejected together does not probe together.
+A rate limit, a server error or a transport failure (a connection refused, the
+client's own timeout) stands it off for the `retry-after` the provider sent
+when it sent one (a second to `outage_retry_secs`, with up to 15 seconds of
+jitter riding under that ceiling: the ceiling is the longest wait), otherwise
+15 to 30 seconds; every probe that fails in turn doubles that wait, up to
+`outage_retry_secs`, and a `retry-after` shorter than the rung reached no
+longer shortens it, so a throttle that is not lifting is probed as the outage
+it is. After the cooldown, one investigation probes recovery; a successful
+response restores normal admission (and the first rung), and another outage
+extends the cooldown. Empty refine
+polling backs off up to 30 seconds and an ingest wake resets the delay. A
+first-call configuration rejection refunds its budget reservation. Earlier
+paid calls remain charged. Deadlines are job-local failures that never pause
+the account: each model turn has `timeout_secs`, the investigation
+`timeout_secs` for every turn it may take and one turn more, and an attempt
+that overruns is retried; a second timeout in a row fails the job for
+inspection when the provider has answered since the first (an earlier turn of
+the same run, or another investigation: the message is what is slow, and every
+timed-out attempt is a billed request that re-sends the same context), while a
+provider answering nothing, or a process that has not yet seen it answer,
+leaves the job to its ordinary attempts, pending rather than failed. An access-call deadline
+consumes retry attempts in the usual way. Their uncertain spend is not refunded. A run dropped at
+shutdown hands its job back at once, due after the retry ladder's wait for the
+attempt it took and keeping that attempt (a job dropped on its last allowed
+attempt is failed instead); a process
+that dies outright, or a run
+whose last write the store refused, holds the lease (the run's deadline and
+30 s for an investigation, the access deadline and 30 s for an access check)
+until it lapses. Daily budget exhaustion defers work to the next UTC day. Investigations for the
 same thread are serialized, including related-source assessment jobs. Immediate
 requests coalesce by message/content revision, independent of trigger text.
 Changes during a lease accumulate at most one follow-up. Retry absorbs that

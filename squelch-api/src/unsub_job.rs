@@ -214,20 +214,38 @@ impl Default for UnsubJobs {
     }
 }
 
+/// A claimed sender, released when this is dropped: by the spawned job once
+/// it has settled, by `start` when the `running` row could not be written,
+/// or by the request being cut at its ceiling (`limits`) between the claim
+/// and the spawn. A claim that outlived its job would make every later
+/// unsubscribe for the sender report a job that is not running, until
+/// restart.
+struct Claim {
+    running: Arc<Mutex<HashSet<String>>>,
+    sender: String,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.running.lock() {
+            set.remove(&self.sender);
+        }
+    }
+}
+
 impl UnsubJobs {
-    /// Claim `sender`. `false` when a job for them is already running, in which
+    /// Claim `sender`. `None` when a job for them is already running, in which
     /// case the caller reports that one instead of starting a second.
-    fn claim(&self, sender: &str) -> bool {
-        self.running
+    fn claim(&self, sender: &str) -> Option<Claim> {
+        let claimed = self
+            .running
             .lock()
             .map(|mut set| set.insert(sender.to_string()))
-            .unwrap_or(false)
-    }
-
-    fn release(&self, sender: &str) {
-        if let Ok(mut set) = self.running.lock() {
-            set.remove(sender);
-        }
+            .unwrap_or(false);
+        claimed.then(|| Claim {
+            running: self.running.clone(),
+            sender: sender.to_string(),
+        })
     }
 
     pub fn live(&self) -> Vec<String> {
@@ -251,20 +269,20 @@ pub(crate) async fn start(
     plan: Plan,
     email: String,
 ) -> Result<(), crate::error::ApiError> {
-    if !state.unsub.claim(&sender) {
+    let Some(claim) = state.unsub.claim(&sender) else {
         return Ok(());
-    }
+    };
     let (s, url) = (sender.clone(), plan.url().to_string());
-    if let Err(e) = store_call(state, move |store, account_id| {
+    // An error here, or the request being cut before the spawn below, drops
+    // `claim` and with it the sender's place in `running`.
+    store_call(state, move |store, account_id| {
         store.begin_unsubscribe_job(account_id, &s, Some(message_id), &url, Utc::now())
     })
-    .await
-    {
-        state.unsub.release(&sender);
-        return Err(e);
-    }
+    .await?;
     let state = state.clone();
     tokio::spawn(async move {
+        // Held until the job has settled, whatever it did.
+        let _claim = claim;
         // The budget covers the wait for a slot too: a queued job that never
         // got one in time goes to the user rather than spinning forever.
         //
@@ -292,7 +310,6 @@ pub(crate) async fn start(
         });
         let outcome = work.await.unwrap_or(Outcome::NeedsYou(NeedsYou::Unclear));
         settle(&state, &sender, outcome).await;
-        state.unsub.release(&sender);
     });
     Ok(())
 }

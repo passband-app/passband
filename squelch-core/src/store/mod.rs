@@ -14,8 +14,9 @@ pub use search_query::{
     FtsQuery, SearchDiagnostics, SearchFilter, SearchSort, TermDf, parse_search_query,
 };
 pub use sqlite::{
-    ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX, ARCHIVE_SURFACE_CAP, AccessProgress,
-    ArchiveAccessCaps, BACKGROUND_BUDGET_KEY, EXTERNAL_RECALL_MAX, ExternalSearchMode, SqliteStore,
+    ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX,
+    ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
+    EXTERNAL_RECALL_MAX, ExternalSearchMode, SqliteStore,
 };
 
 use crate::error::Result;
@@ -3195,6 +3196,17 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         message_id: i64,
         embedding: &[f32],
     ) -> Result<()>;
+
+    /// [`Store::upsert_message_vector`] for a batch, which a store may write
+    /// under one commit (the SQLite store does; the backfill drain hands it
+    /// eight at a time). The default is the one-at-a-time loop, so a store
+    /// that has no cheaper shape is still correct. Same contract per item.
+    fn upsert_message_vectors(&self, account_id: AccountId, items: &[(i64, &[f32])]) -> Result<()> {
+        for (message_id, embedding) in items {
+            self.upsert_message_vector(account_id, *message_id, embedding)?;
+        }
+        Ok(())
+    }
 
     /// Up to `limit` NON-SEALED messages with no vector yet, newest-first, for
     /// the startup backfill pass. Sealed rows are excluded in SQL.

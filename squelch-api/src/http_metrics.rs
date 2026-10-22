@@ -36,10 +36,7 @@ pub const ROUTE_CLASSES: &[(&str, &str, RouteClass)] = &[
 /// Anything not in the table, an unmatched path included, is the daemon's own
 /// time.
 fn route_class(method: &str, route: &str) -> RouteClass {
-    ROUTE_CLASSES
-        .iter()
-        .find(|(m, r, _)| *m == method && *r == route)
-        .map_or(RouteClass::Local, |(_, _, class)| *class)
+    crate::limits::route_lookup(ROUTE_CLASSES, method, route, RouteClass::Local)
 }
 
 pub async fn record_http_metrics(

@@ -288,6 +288,17 @@ pub struct SyncConfig {
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
     pub poll_secs: u64,
+    /// THE POLL INTERVAL THE LANE BACKS OFF TO while the mailbox is idle, in
+    /// seconds: after a tick that found nothing changed the wait doubles from
+    /// `poll_secs` up to this, and a tick that found a change, a manual
+    /// refresh, or a connected event stream (a client with the app open)
+    /// resets it to `poll_secs`. 0, the default, is no backoff: every tick
+    /// waits `poll_secs`, as it always has. Off by default because the poll
+    /// is how new mail is noticed, so the backoff is a trade of idle Gmail
+    /// requests for arrival latency up to this many seconds when no client
+    /// is connected, and that trade is the operator's to make.
+    /// Env: SQUELCH_IDLE_POLL_SECS.
+    pub idle_poll_secs: u64,
     /// HOW MANY `messages.get` CALLS ARE IN FLIGHT AT ONCE while a window of
     /// mail is fetched (the first backfill, a catch-up, a history walk).
     ///
@@ -334,6 +345,7 @@ impl Default for SyncConfig {
             archive_min_free_mb: 2048,
             archive_max_db_mb: 4096,
             poll_secs: 5,
+            idle_poll_secs: 0,
             fetch_concurrency: 2,
             spam_max: 200,
         }
@@ -440,6 +452,17 @@ pub struct NotifyConfig {
     pub price_out_per_mtok: f64,
 }
 
+impl NotifyConfig {
+    /// The fast lane's deadline, bounded like every triage wait: at least a
+    /// second, at most a day (`agent_config::MAX_TIMEOUT_SECS`), so the
+    /// access call, its lease and the notification lease read one number
+    /// and an absurd setting cannot size a lease past what the arithmetic
+    /// on it assumes.
+    pub fn fast_deadline_secs(&self) -> u64 {
+        self.fast_timeout_secs
+            .clamp(1, crate::triage::agent_config::MAX_TIMEOUT_SECS)
+    }
+}
 impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
@@ -1332,7 +1355,8 @@ pub struct Stage2Config {
     pub anthropic_base_url: Option<String>,
     /// Model id, written verbatim into the request's `model` field and stored as
     /// `model_used` on applied rows. Defaults to the SAME model as Stage-1:
-    /// escalation buys more context and more thinking, not a bigger brain.
+    /// escalation buys more context (and, for a new account's watched jobs,
+    /// more thinking), not a bigger brain.
     pub model: String,
     /// Reasoning depth, sent as `output_config.effort`. This is the triage
     /// agent's effort too. `low` since October 2026: replaying 393 of the
@@ -1341,16 +1365,34 @@ pub struct Stage2Config {
     /// it showed (and showed 14 it did not), halved latency and cut cost 37%,
     /// because output tokens were two thirds of the bill
     /// (`evals/results/2026-10-triage-model-comparison.md`). This is the
-    /// STEADY-STATE effort: a new account runs at [`Self::onboarding_effort`]
-    /// for its first [`Self::onboarding_days`]. Env: `SQUELCH_STAGE2_EFFORT`.
+    /// STEADY-STATE effort: the jobs a new account's user is waiting on run
+    /// at [`Self::onboarding_effort`] for its first [`Self::onboarding_days`],
+    /// everything else at this from day one. Env: `SQUELCH_STAGE2_EFFORT`.
     pub effort: Option<String>,
-    /// Effort for the triage agent while the account is new, in place of
-    /// [`Self::effort`]. `xhigh`: the first days are the first impression, the
-    /// backfill and the first week of arrivals are what a new user judges the
-    /// product on, and the eval's few disagreements (4 FYE items `low` buried)
-    /// are the kind of miss that costs trust before it has been earned. After
-    /// the window the account drops to `effort` and the cost saving.
-    /// Env: `SQUELCH_STAGE2_ONBOARDING_EFFORT` (`none`/`off` clears it).
+    /// Effort for the triage agent's WATCHED jobs while the account is new,
+    /// in place of [`Self::effort`]: the store's foreground lane
+    /// (`AgentJob::foreground`: an arrival's first classification, a heal
+    /// of an arrival not yet classified, a person's one-message request),
+    /// the mail somebody is waiting on. `xhigh`: the first days are the first
+    /// impression, and the eval's few disagreements (4 FYE items `low`
+    /// buried) are the kind of miss that costs trust before it has been
+    /// earned. After the window the account drops to `effort`.
+    ///
+    /// Everything else runs at `effort` from day one: the history a new
+    /// account backfills (`backfill` jobs, or `migration` jobs for an
+    /// account the agent cut over), revisits, the heals and refreshes of
+    /// mail already classified, and a person's WINDOW re-triage (`manual:`
+    /// over days of mail, which the lane keeps off the arrival reserve for
+    /// the same reason: one click is hundreds of jobs). That is a deliberate
+    /// trade: the backfill is what a new account's first lists are made of,
+    /// and the eval found `low` placing it the same for 37% less a run and
+    /// half the latency, with its 4-of-93 buried FYE items the price. It is
+    /// also the 200-a-day background budget for the whole window, so the old
+    /// rule's cost was a new tenant's first thousand runs at 1.6x. Access
+    /// checks are not here: they run on the notify lane's model and effort.
+    /// Env: `SQUELCH_STAGE2_ONBOARDING_EFFORT` (`none`/`off` clears it,
+    /// which is `effort` for the window too; `SQUELCH_STAGE2_ONBOARDING_DAYS=0`
+    /// is the other way to say that).
     pub onboarding_effort: Option<String>,
     /// Length of the onboarding window in days, counted from the account's
     /// `created_at`. 0 disables it. Env: `SQUELCH_STAGE2_ONBOARDING_DAYS`.
@@ -1395,7 +1437,8 @@ impl Default for Stage2Config {
             stage2_provider: None,
             anthropic_base_url: None,
             // Stage-2 is the ESCALATION pass: same model as Stage-1, more
-            // context and more thinking. This is also the agent's model
+            // context (more thinking only for a new account's watched
+            // jobs). This is also the agent's model
             // (`SQUELCH_MODEL`), and Opus 5.5 is the current Opus at $4/$20
             // against Opus 5's $5/$25 with cache reads at a quarter of the
             // price. Effort stays explicit rather than leaning on Opus 5.5's
@@ -1460,12 +1503,17 @@ pub struct ResolvedAssistant {
 }
 
 impl Stage2Config {
-    /// The triage agent's effort for an account created at `created_at`, as
-    /// of `now`: [`Self::onboarding_effort`] inside the first
-    /// [`Self::onboarding_days`], [`Self::effort`] after. An unknown creation
-    /// time gets the steady-state effort, so a missing row can never pin an
-    /// account at the expensive setting.
-    pub fn effort_for_account(
+    /// The triage agent's effort for a WATCHED job of an account created
+    /// at `created_at`, as of `now`: [`Self::onboarding_effort`] inside the
+    /// first [`Self::onboarding_days`], [`Self::effort`] after. An unknown
+    /// creation time gets the steady-state effort, so a missing row can
+    /// never pin an account at the expensive setting, and a cleared
+    /// `onboarding_effort` is the steady-state effort inside the window too,
+    /// never an omitted field (which would be the provider's default, above
+    /// `low`). Private: the per-job choice is [`Self::effort_for_job`], and
+    /// a caller that asked this for a background job would be the bug it
+    /// replaced.
+    fn effort_for_account(
         &self,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         now: chrono::DateTime<chrono::Utc>,
@@ -1475,7 +1523,32 @@ impl Stage2Config {
                 < chrono::Duration::days(i64::from(self.onboarding_days))
         });
         if onboarding {
-            self.onboarding_effort.as_deref()
+            self.onboarding_effort.as_deref().or(self.effort.as_deref())
+        } else {
+            self.effort.as_deref()
+        }
+    }
+
+    /// The triage agent's effort for one job: the onboarding window's for a
+    /// job somebody is waiting on (`watched`, see
+    /// [`Self::onboarding_effort`]), the steady-state [`Self::effort`] for
+    /// everything else, however new the account. The creation time is asked
+    /// for only when the answer depends on it: never for a background job,
+    /// and never when there is no window (no days, no effort of its own, or
+    /// no steady-state effort at all) for it to fall inside.
+    pub fn effort_for_job(
+        &self,
+        watched: bool,
+        created_at: impl FnOnce() -> Option<chrono::DateTime<chrono::Utc>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<&str> {
+        // No steady-state effort means a model with no effort support
+        // (`SQUELCH_STAGE2_EFFORT=none`), which the onboarding one would
+        // 400 against on every call.
+        let window =
+            self.onboarding_days > 0 && self.onboarding_effort.is_some() && self.effort.is_some();
+        if watched && window {
+            self.effort_for_account(created_at(), now)
         } else {
             self.effort.as_deref()
         }
@@ -1958,6 +2031,10 @@ impl Config {
             &mut self.triage.agent.background_daily_run_cap,
         );
         env_override(
+            "SQUELCH_TRIAGE_ACCESS_DAILY_RUN_CAP",
+            &mut self.triage.agent.access_daily_run_cap,
+        );
+        env_override(
             "SQUELCH_TRIAGE_MAX_ATTEMPTS",
             &mut self.triage.agent.max_attempts,
         );
@@ -1981,6 +2058,67 @@ impl Config {
             "SQUELCH_TRIAGE_TIMEOUT_SECS",
             &mut self.triage.agent.timeout_secs,
         );
+        // Bounded like the caps below, and said: the outage interval is the
+        // throttle ladder's ceiling, so it cannot be shorter than the
+        // ladder's first wait, and neither it nor a model turn may be longer
+        // than a day, which every lease and deadline built on them assumes.
+        // A value out of range used to be accepted and silently exceeded (a
+        // 20 s interval got 15 to 30 s throttle waits), and an operator who
+        // set one must not meet a boot panic on upgrade.
+        {
+            use crate::triage::agent_config::{MAX_TIMEOUT_SECS, MIN_OUTAGE_RETRY_SECS};
+            let outage = &mut self.triage.agent.outage_retry_secs;
+            if !(MIN_OUTAGE_RETRY_SECS..=MAX_TIMEOUT_SECS).contains(outage) {
+                let clamped = (*outage).clamp(MIN_OUTAGE_RETRY_SECS, MAX_TIMEOUT_SECS);
+                eprintln!(
+                    "squelch: config triage.agent.outage_retry_secs={outage} is out of range \
+                     ({MIN_OUTAGE_RETRY_SECS}..={MAX_TIMEOUT_SECS}); clamping to {clamped}"
+                );
+                *outage = clamped;
+            }
+            let timeout = &mut self.triage.agent.timeout_secs;
+            if *timeout > MAX_TIMEOUT_SECS {
+                eprintln!(
+                    "squelch: config triage.agent.timeout_secs={timeout} is past the day \
+                     limit; clamping to {MAX_TIMEOUT_SECS}"
+                );
+                *timeout = MAX_TIMEOUT_SECS;
+            }
+            // The background and access lanes fit under the total together
+            // (`lane_caps`): a lowered total cuts what was set, which is said
+            // once here rather than refused.
+            let agent = &self.triage.agent;
+            let (background, access) = agent.lane_caps();
+            if (background, access) != (agent.background_daily_run_cap, agent.access_daily_run_cap)
+            {
+                eprintln!(
+                    "squelch: config triage.agent caps background={} access={} do not fit \
+                     daily_run_cap={} together; in force: background {background}, access {access}",
+                    agent.background_daily_run_cap, agent.access_daily_run_cap, agent.daily_run_cap
+                );
+            }
+            // The access check's cap is in characters, its size limit in
+            // bytes: six bytes a character at most (a control character is
+            // written as `\u00XX`), plus the rest of the input, must fit, or
+            // a body read to the cap is refused on every attempt and the job
+            // fails for good. Never clamped to nothing (validation refuses a
+            // zero cap, and the daemon should boot); a limit too small for a
+            // sender and a subject fails every access check loudly instead.
+            let context = &mut self.triage.context;
+            let most = (context
+                .max_context_bytes
+                .saturating_sub(crate::triage::agent_config::ACCESS_INPUT_SLACK_BYTES)
+                / 6)
+            .max(1);
+            if context.access_body_chars > most {
+                eprintln!(
+                    "squelch: config triage.context.access_body_chars={} cannot fit \
+                     max_context_bytes={}; clamping to {most}",
+                    context.access_body_chars, context.max_context_bytes
+                );
+                context.access_body_chars = most;
+            }
+        }
         env_override(
             "SQUELCH_TRIAGE_CONCURRENCY",
             &mut self.triage.agent.concurrency,
@@ -2002,6 +2140,7 @@ impl Config {
             self.sync.archive_days = ARCHIVE_DAYS_MAX;
         }
         env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
+        env_override("SQUELCH_IDLE_POLL_SECS", &mut self.sync.idle_poll_secs);
         env_override(
             "SQUELCH_FETCH_CONCURRENCY",
             &mut self.sync.fetch_concurrency,
@@ -2538,6 +2677,7 @@ mod tests {
             "SQUELCH_TRIAGE_MAX_ATTEMPTS",
             "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
             "SQUELCH_TRIAGE_BACKGROUND_DAILY_RUN_CAP",
+            "SQUELCH_TRIAGE_ACCESS_DAILY_RUN_CAP",
         ];
         let previous = names.map(std::env::var_os);
         // SAFETY: every environment-mutating config test holds ENV_LOCK.
@@ -2546,6 +2686,7 @@ mod tests {
             std::env::set_var(names[1], "4");
             std::env::set_var(names[2], "600");
             std::env::set_var(names[3], "5");
+            std::env::set_var(names[4], "7");
         }
         let mut config = Config::default();
         config.apply_env_overrides();
@@ -2560,8 +2701,64 @@ mod tests {
         }
         assert_eq!(config.triage.agent.daily_run_cap, 17);
         assert_eq!(config.triage.agent.background_daily_run_cap, 5);
+        assert_eq!(config.triage.agent.access_daily_run_cap, 7);
         assert_eq!(config.triage.agent.max_attempts, 4);
         assert_eq!(config.triage.agent.outage_retry_secs, 600);
+    }
+
+    /// The access check's cap cannot exceed what its byte limit holds: the
+    /// operator who raises it for the old reach gets the most the limit
+    /// fits, not a check that is refused on every attempt.
+    #[test]
+    fn access_body_cap_is_clamped_to_what_the_size_limit_holds() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.triage.context.access_body_chars = 1_000_000;
+        config.apply_env_overrides();
+        assert_eq!(
+            config.triage.context.access_body_chars,
+            (120_000 - crate::triage::agent_config::ACCESS_INPUT_SLACK_BYTES) / 6
+        );
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.triage.context.access_body_chars, 8_000);
+        // An absurd limit leaves a cap of one, not of nothing (which
+        // validation would refuse).
+        let mut config = Config::default();
+        config.triage.context.max_context_bytes = 100;
+        config.apply_env_overrides();
+        assert_eq!(config.triage.context.access_body_chars, 1);
+    }
+
+    /// The outage interval and the turn deadline are clamped, not refused:
+    /// an operator's old setting must not become a boot panic.
+    #[test]
+    fn triage_intervals_out_of_range_are_clamped_not_refused() {
+        use crate::triage::agent_config::{MAX_TIMEOUT_SECS, MIN_OUTAGE_RETRY_SECS};
+        let _guard = ENV_LOCK.lock().unwrap();
+        let names = [
+            "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
+            "SQUELCH_TRIAGE_TIMEOUT_SECS",
+        ];
+        let previous: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
+        unsafe {
+            std::env::set_var(names[0], "20");
+            std::env::set_var(names[1], "100000");
+        }
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        unsafe {
+            for (name, value) in names.into_iter().zip(previous) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+        assert_eq!(config.triage.agent.outage_retry_secs, MIN_OUTAGE_RETRY_SECS);
+        assert_eq!(config.triage.agent.timeout_secs, MAX_TIMEOUT_SECS);
+        assert!(config.triage.validate().is_ok());
     }
 
     #[test]
@@ -2572,6 +2769,7 @@ mod tests {
         assert_eq!(c.sync.archive_min_free_mb, 2048);
         assert_eq!(c.sync.archive_max_db_mb, 4096);
         assert_eq!(c.sync.poll_secs, 5);
+        assert_eq!(c.sync.idle_poll_secs, 0, "no idle backoff unless asked for");
         assert_eq!(c.sync.fetch_concurrency, 2);
         assert!(c.client_id.is_none());
     }
@@ -3290,6 +3488,60 @@ archive_access_daily_cap = 9
             ..Stage2Config::default()
         };
         assert_eq!(off.effort_for_account(days(0), now), Some("low"));
+    }
+
+    /// The onboarding effort is for the jobs somebody is waiting on; a
+    /// background job runs at the steady-state effort from the first day,
+    /// and never asks for the creation time.
+    #[test]
+    fn only_watched_jobs_take_the_onboarding_effort() {
+        let c = Stage2Config::default();
+        let now = chrono::Utc::now();
+        let new = || Some(now - chrono::Duration::days(1));
+        let old = || Some(now - chrono::Duration::days(40));
+        assert_eq!(c.effort_for_job(true, new, now), Some("xhigh"));
+        assert_eq!(c.effort_for_job(false, new, now), Some("low"));
+        assert_eq!(c.effort_for_job(true, old, now), Some("low"));
+        assert_eq!(c.effort_for_job(false, old, now), Some("low"));
+        let not_asked = || -> Option<chrono::DateTime<chrono::Utc>> {
+            panic!("the creation time was asked for when the answer could not depend on it")
+        };
+        assert_eq!(c.effort_for_job(false, not_asked, now), Some("low"));
+        // No window to fall inside: a watched job does not ask either.
+        let no_days = Stage2Config {
+            onboarding_days: 0,
+            ..Stage2Config::default()
+        };
+        assert_eq!(no_days.effort_for_job(true, not_asked, now), Some("low"));
+        let no_effort = Stage2Config {
+            onboarding_effort: None,
+            ..Stage2Config::default()
+        };
+        assert_eq!(no_effort.effort_for_job(true, not_asked, now), Some("low"));
+        // A model with no effort support (`SQUELCH_STAGE2_EFFORT=none`) is
+        // never sent the onboarding effort either, new account or not.
+        let unsupported = Stage2Config {
+            effort: None,
+            ..Stage2Config::default()
+        };
+        assert_eq!(unsupported.effort_for_job(true, not_asked, now), None);
+    }
+
+    /// `SQUELCH_STAGE2_ONBOARDING_EFFORT=none` inside the window is the
+    /// steady-state effort, not an omitted field: the provider's default is
+    /// above `low`, and clearing the window must not raise the spend it
+    /// exists to raise deliberately.
+    #[test]
+    fn a_cleared_onboarding_effort_falls_back_to_the_steady_state_inside_the_window() {
+        let c = Stage2Config {
+            onboarding_effort: None,
+            ..Stage2Config::default()
+        };
+        let now = chrono::Utc::now();
+        assert_eq!(
+            c.effort_for_account(Some(now - chrono::Duration::days(1)), now),
+            Some("low")
+        );
     }
 
     /// An operator repointing a stage at a model with no effort support must be

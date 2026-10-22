@@ -985,7 +985,7 @@ final class AppStore {
     }
     /// Bumped when a message NEWER than the one the reader holds lands in the
     /// thread on screen — from the live event feed the instant triage emits it,
-    /// or from the 10s poll behind it. The viewer watches it and refetches
+    /// or from the poll behind it. The viewer watches it and refetches
     /// without moving the reading position. See `noteThreadArrival`.
     ///
     /// A token rather than the mail itself: neither reporter carries the
@@ -2747,13 +2747,15 @@ final class AppStore {
         // `sender` on one of those rows is the user's own address. The reader
         // keeps its receipts fresh on its own schedule.
         guard event.kind != .opened else { return }
+        // A poll slowed down because nobody is looking catches up now.
+        SitrepPoller.shared.noteLiveEvent()
         noteThreadArrival(
             thread: event.thread_id, message: event.message_id, sender: event.sender)
     }
 
     /// NEW MAIL IN THE THREAD SOMEBODY IS READING — the one door, and both
     /// reporters come through it: the event feed the moment triage emits, and
-    /// the 10s poll that is the only one to see an arrival the feed missed or
+    /// the poll that is the only one to see an arrival the feed missed or
     /// never carried.
     ///
     /// Two things follow and they are decided separately (see ThreadArrivals).
@@ -2917,7 +2919,8 @@ final class AppStore {
 
     /// How long a zone refresh stays good: long enough that flipping between views
     /// is free, short enough that a dashboard left open still tracks the mail (the
-    /// 10s sitrep poll drives the bands, which change minute to minute).
+    /// sitrep poll, every 10s while frontmost, drives the bands, which change
+    /// minute to minute).
     private static let zoneTTL: TimeInterval = 45
 
     /// Dismiss one shipment from the Shipments zone.
@@ -6470,7 +6473,7 @@ final class AppStore {
             if !rewound && entry.kind != .skip { pushToast("undone: \(entry.label)", .info) }
             Analytics.capture("undo_fired", ["kind": String(describing: entry.kind)])
             // The bands dropped the row optimistically and the next poll is up
-            // to 10s out — pull now, or the undo reads as broken on the sitrep.
+            // to a tick out — pull now, or the undo reads as broken on the sitrep.
             if entry.kind.touchesSitrep { await SitrepPoller.shared.pull() }
         } catch {
             guard e == epoch else { return }
@@ -6527,8 +6530,8 @@ final class AppStore {
     // MARK: - band mutation (optimistic)
 
     /// Ids resolved during this session. The bands in `sitrep` update in place,
-    /// but a list holding its own snapshot (EmailsView reloads only on the 10s
-    /// `lastRefresh`) would keep showing a resolved row for up to a full poll —
+    /// but a list holding its own snapshot (EmailsView reloads only on the
+    /// `lastRefresh` poll) would keep showing a resolved row for up to a full poll —
     /// which reads as the action not working. This is the shared record such a
     /// list filters against; the poll still supplies the truth.
     private(set) var resolvedIds: Set<Int> = [] {

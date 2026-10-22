@@ -159,6 +159,38 @@ enum SyncStatus: Equatable, Sendable {
         }
     }
 
+    /// The instants after `now` at which this status's words change by the
+    /// clock alone. The retry or resume time its detail names reads as "now"
+    /// from just inside 30 s before it (`when`), and each midnight on the way there moves
+    /// "on Oct 25" to "tomorrow" to "at". Empty when only new stats can change
+    /// the words.
+    func redrawTimes(after now: Date, calendar: Calendar = .current) -> [Date] {
+        let named: Date?
+        switch self {
+        case .throttled(let next, _, _), .gmailError(_, _, let next, _): named = next
+        case .coolingDown(let until, _), .budgetPaused(let until, _): named = until
+        default: named = nil
+        }
+        guard let named else { return [] }
+        // The first instant `when` reads "now": it asks for strictly under
+        // 30 s, so a millisecond past the 30 s mark.
+        let flip = named.addingTimeInterval(-30 + 0.001)
+        guard flip > now else { return [] }
+        var times: [Date] = []
+        var day = calendar.startOfDay(for: now)
+        for _ in 0..<7 {
+            // Each midnight from the day itself, not by adding a day to the
+            // last one: a midnight a DST change skips must not move the rest.
+            guard let later = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            let next = calendar.startOfDay(for: later)
+            guard next < flip else { break }
+            times.append(next)
+            day = next
+        }
+        times.append(flip)
+        return times
+    }
+
     /// The banner's second line, with real numbers and times.
     func detail(now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current)
         -> String

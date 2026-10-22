@@ -71,7 +71,7 @@ enum Actions {
     /// the user wanted. So the row drops off the spam page and that is that.
     ///
     /// The row is evicted from the cached pages the same way `done` evicts it,
-    /// for the same reason: the poll is ten seconds behind, and a rescued
+    /// for the same reason: the poll is a tick behind, and a rescued
     /// message sitting visibly in the spam list until then reads as a failure.
     static func notSpam(_ u: AttentionUpdate, via: Via, on surface: Surface) async {
         let restore = store.removeFromBands(u.id)

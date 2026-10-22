@@ -178,12 +178,18 @@ struct SyncStatusBanner: View {
                 Text(status.headline)
                     .font(Typo.zoneTitle)
                     .foregroundStyle(Palette.ink)
-                // Re-rendered by the poller every 10s, so "Next try at 12:05"
-                // flips to "Trying again now" without a timer of its own.
-                Text(status.detail())
-                    .font(Typo.rowSub)
-                    .foregroundStyle(Palette.inkDim)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Re-drawn when its words change by the clock (the flip to
+                // "Trying again now", a midnight on the way there), however
+                // slowly the poll runs, and by every other re-render with the
+                // time it is then.
+                TimelineView(.explicit(status.redrawTimes(after: Date()))) { context in
+                    // The entry's own date when the timeline fired it (SwiftUI
+                    // may render a hair early), the clock's on any other render.
+                    Text(status.detail(now: max(context.date, Date())))
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if prefs.developerMode, let raw = status.rawReason {
                     Text(verbatim: raw)
                         .font(Typo.mono(10.5, weight: .medium))

@@ -241,8 +241,8 @@ private struct LoadingGate: View {
 ///
 /// `onChange(of:)` reads the value it watches, so watching from MainShell's own
 /// body made that body a reader of `lastRefresh` — a fresh `Date` written by
-/// every poll, on a ten-second clock. The whole shell was then rebuilt every
-/// ten seconds: the rail, the routed page, the reader's wrapper chain, the
+/// every poll, every ten seconds while frontmost. The whole shell was then
+/// rebuilt on every poll: the rail, the routed page, the reader's wrapper chain, the
 /// global key bindings. Nothing about it had changed; the app had merely
 /// checked its mail. Down here the same watchers invalidate a zero-sized
 /// nothing at the same rate, and every action is unchanged.

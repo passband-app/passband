@@ -971,7 +971,7 @@ private struct DashHero: View {
 #endif
 
 /// Re-warms the board's threads on every poll heartbeat. A LEAF of its own
-/// so that reading `lastRefresh` — which changes every ten seconds — costs a
+/// so that reading `lastRefresh` — which changes on every poll — costs a
 /// zero-size view's body and not the board's.
 private struct BoardWarmKeeper: View {
     @Environment(AppStore.self) private var store

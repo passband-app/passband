@@ -18,6 +18,7 @@ use serde::Deserialize;
 use squelch_core::agent_write::{AgentCompose, AgentMailer, AgentWriteAccess, AgentWriteError};
 use squelch_core::config::ShipmentListPolicy;
 use squelch_core::error::CoreError;
+use squelch_core::owner_clock::OwnerClock;
 use squelch_core::store::agent_triage::AgentTriageStore;
 use squelch_core::store::archive_surface::{
     ArchiveHorizon, ArchiveSurfacing, KeywordMatch, SurfaceWait, await_thread_access,
@@ -166,7 +167,13 @@ pub struct DeadlineHit {
     pub source: String,
 }
 
-fn due_in_window(due: &SupportedTime, now: DateTime<Utc>, days: Option<u32>) -> Option<bool> {
+/// Whether `due` falls inside the window, and if so whether it has passed.
+///
+/// A date-only due date is a day on the OWNER's calendar, so it is compared
+/// with the owner's today (#526): read against UTC's date, a bill due today
+/// turns past-due at 5pm Pacific.
+fn due_in_window(due: &SupportedTime, clock: &OwnerClock, days: Option<u32>) -> Option<bool> {
+    let now = clock.now;
     let cutoff =
         days.and_then(|days| now.checked_add_signed(chrono::Duration::days(i64::from(days))));
     if let Ok(at) = DateTime::parse_from_rfc3339(&due.value) {
@@ -174,8 +181,8 @@ fn due_in_window(due: &SupportedTime, now: DateTime<Utc>, days: Option<u32>) -> 
     }
     let date = NaiveDate::parse_from_str(&due.value, "%Y-%m-%d").ok()?;
     cutoff
-        .is_none_or(|cutoff| date <= cutoff.date_naive())
-        .then_some(date < now.date_naive())
+        .is_none_or(|cutoff| date <= cutoff.with_timezone(&clock.zone).date_naive())
+        .then_some(date < clock.today())
 }
 
 /// Parameters for `get_shipments`.
@@ -866,7 +873,10 @@ impl SquelchServer {
         &self,
         Parameters(params): Parameters<GetDeadlinesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let now = Utc::now();
+        let now = OwnerClock::new(
+            Utc::now(),
+            self.store.owner_zone(self.account_id).unwrap_or_default(),
+        );
         let records = self
             .store
             .external_agent_records_with_query(
@@ -888,7 +898,7 @@ impl SquelchServer {
                     due: Some(due),
                     ..
                 } = record
-                    && let Some(past_due) = due_in_window(&due, now, params.within_days)
+                    && let Some(past_due) = due_in_window(&due, &now, params.within_days)
                 {
                     out.push(DeadlineHit {
                         id: item.message_id,
@@ -908,7 +918,7 @@ impl SquelchServer {
         }
         let attention = self
             .store
-            .external_agent_fye(self.account_id, usize::MAX, &self.ranking_config, now)
+            .external_agent_fye(self.account_id, usize::MAX, &self.ranking_config, now.now)
             .map_err(Self::map_err)?;
         for item in attention {
             let mut times: Vec<(&SupportedTime, &str)> = item
@@ -935,7 +945,7 @@ impl SquelchServer {
                 {
                     continue;
                 }
-                if let Some(past_due) = due_in_window(due, now, params.within_days) {
+                if let Some(past_due) = due_in_window(due, &now, params.within_days) {
                     out.push(DeadlineHit {
                         id: item.message_id,
                         account_id: self.account_id,
@@ -1513,6 +1523,45 @@ mod tests {
     use squelch_core::agent_write::{AgentDraftCreated, AgentDraftOpened, AgentSent};
     use squelch_core::store::Store;
     use squelch_core::store::archive_surface::RefinePoke;
+
+    /// A bill due "today" is not past-due at 5pm Pacific just because UTC has
+    /// moved on to tomorrow (#526).
+    #[test]
+    fn a_date_only_deadline_is_past_due_on_the_owners_calendar() {
+        use chrono::TimeZone;
+        use squelch_core::owner_clock::{OwnerZone, OwnerZoneSource};
+
+        let due = |value: &str| SupportedTime {
+            value: value.into(),
+            timezone: None,
+            source_message_id: 1,
+            interpreted_relative: false,
+        };
+        // 8pm Pacific on the 19th is 03:00 UTC on the 20th.
+        let evening = Utc.with_ymd_and_hms(2026, 10, 20, 3, 0, 0).unwrap();
+        let pacific = OwnerClock::new(
+            evening,
+            OwnerZone {
+                zone: squelch_core::owner_clock::device_zone("America/Los_Angeles").unwrap(),
+                source: OwnerZoneSource::Client,
+            },
+        );
+        let utc = OwnerClock::new(evening, OwnerZone::UTC);
+        assert_eq!(
+            due_in_window(&due("2026-10-19"), &pacific, None),
+            Some(false)
+        );
+        assert_eq!(due_in_window(&due("2026-10-19"), &utc, None), Some(true));
+        assert_eq!(
+            due_in_window(&due("2026-10-18"), &pacific, None),
+            Some(true)
+        );
+        // An instant is an instant in any zone.
+        assert_eq!(
+            due_in_window(&due("2026-10-20T02:00:00Z"), &pacific, None),
+            Some(true)
+        );
+    }
 
     /// A mailer that records what it was asked and answers from a script, so
     /// these tests pin THIS crate's half: which tools are offered, what the

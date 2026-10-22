@@ -265,6 +265,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // When that app last wrote something. NULL on every pre-existing row and
     // NOT backfilled: nothing recorded which app made a past write.
     add_column_if_missing(conn, "device_tokens", "client_action_at", "TEXT")?;
+    // The device zone that app last reported (#526). NULL on every
+    // pre-existing row and NOT backfilled: only the device knows where it is,
+    // and it says so on its first request after it updates.
+    add_column_if_missing(conn, "device_tokens", "client_timezone", "TEXT")?;
     // Per-property triage reasons (JSON object). NULL on pre-existing rows.
     add_column_if_missing(conn, "triage", "field_reasons", "TEXT")?;
 

@@ -27,6 +27,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use squelch_core::owner_clock::ZONE_HEADER;
 use squelch_core::store::{CLIENT_HEADER, ClientTag};
 use squelch_httpauth::{ct_eq, parse_bearer};
 
@@ -110,7 +111,11 @@ pub async fn require_bearer(
         .headers()
         .get(CLIENT_HEADER)
         .and_then(|h| h.to_str().ok())
-        .and_then(ClientTag::parse);
+        .and_then(ClientTag::parse)
+        // The device zone rides on the tag: recorded only for a request that
+        // named its app, so the notification extension (which names nothing)
+        // can never move it.
+        .map(|tag| tag.with_zone(req.headers().get(ZONE_HEADER).and_then(|h| h.to_str().ok())));
 
     // Decided now, while the request is still here to ask; acted on only once
     // the response says the write happened.
@@ -308,6 +313,60 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].platform.as_str(), "macos");
         assert_eq!(seen[0].version, "0.0.12");
+    }
+
+    /// The device zone is stored with the app's tag, and never without one:
+    /// the notification extension sends a token and no tag, and must not be
+    /// able to move the zone the agents read.
+    #[tokio::test]
+    async fn the_device_zone_is_recorded_only_with_a_named_client() {
+        use squelch_core::owner_clock::OwnerZoneSource;
+
+        let (store, acct, state) = fixture("");
+        let send = async |token: &str, client: Option<&str>, zone: &str| {
+            let mut req = Request::builder()
+                .uri("/gated")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(ZONE_HEADER, zone);
+            if let Some(client) = client {
+                req = req.header(CLIENT_HEADER, client);
+            }
+            app_with(state.clone())
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        };
+
+        let extension = store.issue_device_token(acct, "phone").unwrap();
+        assert_eq!(
+            send(&extension.token, None, "Asia/Tokyo").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            store.owner_zone(acct).unwrap().source,
+            OwnerZoneSource::Default
+        );
+
+        let mac = store.issue_device_token(acct, "laptop").unwrap();
+        // A zone that is not one is dropped; the tag is still recorded.
+        assert_eq!(
+            send(&mac.token, Some("macos/0.0.15"), "Mars/Olympus").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            store.owner_zone(acct).unwrap().source,
+            OwnerZoneSource::Default
+        );
+
+        let other = store.issue_device_token(acct, "desk").unwrap();
+        assert_eq!(
+            send(&other.token, Some("macos/0.0.15"), "America/Los_Angeles").await,
+            StatusCode::OK
+        );
+        let zone = store.owner_zone(acct).unwrap();
+        assert_eq!(zone.source, OwnerZoneSource::Client);
+        assert_eq!(zone.zone.name(), "America/Los_Angeles");
     }
 
     /// A stamp per platform, and only for what a person did: a write that

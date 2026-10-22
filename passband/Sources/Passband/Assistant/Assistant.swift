@@ -1368,7 +1368,11 @@ final class AssistantSession {
     /// part of it too, but it arrives as the RUN's copy rather than off the
     /// live property — the pin may move between requests, the question may not.
     private func system(_ pin: PinnedContext) -> String {
-        let today = Date().formatted(.dateTime.month(.wide).day().year())
+        // The weekday, the time and the zone too, not just the date: "tonight",
+        // "this Friday" and "in 3 hours" need all three, and they match what
+        // the daemon's agents are told (#526).
+        let today = Date().formatted(.dateTime.weekday(.wide).month(.wide).day().year().hour().minute())
+            + " (\(TimeZone.current.identifier))"
         let year = Calendar.current.component(.year, from: Date())
         // The search lane's prompt lives in a pure file so its two properties
         // that cannot be seen on screen — no dash the house style forbids, and

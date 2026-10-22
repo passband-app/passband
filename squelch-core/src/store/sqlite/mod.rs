@@ -1279,6 +1279,10 @@ impl Store for SqliteStore {
         self.inbox_unread(account_id)
     }
 
+    fn owner_zone(&self, account_id: AccountId) -> Result<crate::owner_clock::OwnerZone> {
+        self.owner_zone(account_id)
+    }
+
     fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
         let conn = self.lock()?;
         let stamp: Option<String> = conn

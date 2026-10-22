@@ -13,6 +13,10 @@
 // same token every time a push lands, with no app open, and "last connected"
 // is meant to be the app.
 //
+// The device's time zone goes with it (`X-Passband-Timezone: America/Los_Angeles`).
+// The daemon's agents read "now" in the zone of the app that was used last, so
+// "due tomorrow" means the user's tomorrow and travel needs no setting.
+//
 // Foundation-only so a test suite can compile it alone.
 
 import Foundation
@@ -20,6 +24,13 @@ import Foundation
 enum ClientIdentity {
     /// The daemon's name for it is `store::CLIENT_HEADER` in squelch-core.
     static let headerField = "X-Passband-Client"
+
+    /// The daemon's name for it is `owner_clock::ZONE_HEADER` in squelch-core.
+    static let zoneHeaderField = "X-Passband-Timezone"
+
+    /// The device's IANA zone, read per request so a phone that changed zones
+    /// says so on its next request rather than on its next launch.
+    static var zone: String { TimeZone.current.identifier }
 
     /// One of the daemon's closed set (`store::ClientPlatform`). A value it
     /// does not know is not an error there; the request is just not recorded.
@@ -56,5 +67,8 @@ extension URLRequest {
     mutating func identifyClient() {
         guard let value = ClientIdentity.current else { return }
         setValue(value, forHTTPHeaderField: ClientIdentity.headerField)
+        // Only with the tag: the daemon records a zone only for a request that
+        // named its app.
+        setValue(ClientIdentity.zone, forHTTPHeaderField: ClientIdentity.zoneHeaderField)
     }
 }

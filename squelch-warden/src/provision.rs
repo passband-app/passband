@@ -1,4 +1,4 @@
-//! Provisioning: two phases, seven objects, and no state of our own.
+//! Provisioning: two phases, up to nine objects, and no state of our own.
 //!
 //! The v1 warden was an orchestrator. It allocated ports, wrote files, drove
 //! systemd, kept a JSON state file, and unwound every one of those on any
@@ -1841,8 +1841,8 @@ impl Warden {
                 .await
                 .map_err(|e| fail(name.as_str(), reason, &e))?;
         }
-        // The LLM key goes too, and it is the one Secret this path deletes: it
-        // is a live credential to a shared gateway, not tenant data. The
+        // The LLM key goes too, the first of the two Secrets this path deletes:
+        // it is a live credential to a shared gateway, not tenant data. The
         // control plane revokes the key when it cancels the account, so a kept
         // Secret would hold a dead token at best; a re-opened account gets a
         // freshly minted one through `set_llm_key`.

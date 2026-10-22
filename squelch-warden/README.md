@@ -119,23 +119,27 @@ in this pod's log.
 
 ## What a tenant is
 
-Seven objects in namespace `tenants`, all named from the label:
+Up to nine objects in namespace `tenants`, all named from the label:
 
 | Object | Name | Survives DELETE |
 |---|---|---|
 | Secret (age identity, recipient, address) | `<label>-identity` | yes |
 | Secret (sealed credentials) | `<label>-credential` | yes |
 | PersistentVolumeClaim | `<label>-data` | yes |
+| Secret (LLM gateway key, while one is minted) | `<label>-llm` | no |
+| Secret (share token, while one is minted) | `<label>-control` | no |
 | NetworkPolicy | `<label>` | no |
 | Service | `<label>` | no |
 | Deployment | `<label>` | no |
 | Ingress | `<label>` | no |
 
-Phase two applies them in that order bottom-up from the credential: volume
-first, policy before the pod it polices, Ingress last so a hostname only starts
-answering once something is behind it. `DELETE` removes them Ingress first and
-NetworkPolicy last, so a terminating pod stays policed for the whole of its
-termination.
+Phase two applies the provisioned five in that order bottom-up from the
+credential: volume first, policy before the pod it polices, Ingress last so a
+hostname only starts answering once something is behind it. The two Secrets
+between them arrive later, when the control plane mints the key and the share
+token. `DELETE` removes the workload Ingress first and NetworkPolicy last, so a
+terminating pod stays policed for the whole of its termination, and then the
+two minted Secrets.
 
 ### The pod
 

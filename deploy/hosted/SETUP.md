@@ -201,11 +201,20 @@ Either way this only affects **new** claims. A PV already bound keeps the path i
 was created with, which is the other reason to do this before there are any.
 
 Last, make the quota agree with the disk. In `70-tenant-limits.yaml`,
-`requests.storage` is the aggregate ceiling on PVCs in the namespace and should be
-sized to **this volume**, not to the root disk and not to optimism: local-path
-does not enforce a claim's size, so the quota is the only thing standing between
-fifty tenants and a full filesystem. Divide the volume by the per-tenant claim
-size and you have your tenant count.
+`requests.storage` is the aggregate ceiling on PVCs in the namespace and should
+be sized to **this volume**, not to the root disk and not to optimism: local-
+path does not enforce a claim's size, so the quota is the only thing standing
+between fifty tenants and a full filesystem. Take the model seed's 2Gi off the
+volume, divide the rest by the per-tenant claim size and you have your tenant
+claims; plus one for the seed's, that is `persistentvolumeclaims`, and
+`requests.storage` follows from it (a claim for every slot but the seed's, plus
+the seed's 2Gi), which is the rule the warden's test holds the file to. If that
+count comes out below what the memory line admits (§7), the claim is too big for
+the box: shrink `SQUELCH_WARDEN_STORAGE_SIZE` (new signups only) or grow the
+volume, rather than let the claims line refuse a signup before memory does,
+which the same test refuses to pass. That holds where the claim is honest; §7
+has the other reading, the one `carrier` runs, where the claim is nominal, the
+slots are the tenant count plus room, and the disk is watched.
 
 Growing it later is online and in that order: expand the volume in the console,
 then `resize2fs /dev/disk/by-id/<device>` on the box (no unmount, no downtime),
@@ -635,7 +644,8 @@ one. **Divide allocatable by the tenant request and you get six, and six is
 wrong**: that arithmetic hands the monitoring stack's memory to a tenant twice.
 
 Two gates enforce the five, and they are not the same gate. The ResourceQuota on
-`tenants` (§7: 1920Mi, five times the 384Mi request) is the API server refusing
+`tenants` (§7's file, sized to the floor as its comment works it: 1920Mi, five
+times the 384Mi request) is the API server refusing
 to create the pod, and it is the readable failure. The scheduler is the second
 gate, and until this section is applied it is the broken one: it believes in
 3.72 GiB and would place a sixth tenant that the quota had already decided
@@ -1042,16 +1052,21 @@ The failure modes recover differently, and none is gentle:
 
 ## 7. Tenant limits
 
+`deploy/hosted/70-tenant-limits.yaml` is a LimitRange and a ResourceQuota on
+`tenants`. **Size them to your box before you apply them, and do not apply
+them as shipped to a box that is not `carrier`**: the shipped numbers are
+`carrier`'s, thirty tenants on 4 vCPU / 16 GB (`PRODUCTION.md`), and applied
+to the 2 vCPU / 4 GB floor above they would admit thirty tenants onto a box
+that can run five, which is the 2026-08-19 failure below with a different
+number on it. The file's comment works the same arithmetic for the floor
+(five). Your box here means what §2b left spendable once the node's own memory
+is reserved, not the RAM on the invoice: this quota is the API server's gate
+and the node's allocatable is the scheduler's, and the two agree on the same
+tenant count only after §2b is applied. Edit the file to your numbers, then:
+
 ```sh
 kubectl apply -f deploy/hosted/70-tenant-limits.yaml
 ```
-
-A LimitRange and a ResourceQuota on `tenants`. **Size them to your box before
-you apply them**; the shipped numbers assume the 2 vCPU / 4 GB floor above and
-are deliberately conservative. Your box here means what §2b left spendable once
-the node's own memory is reserved, not the RAM on the invoice: this quota is the
-API server's gate and the node's allocatable is the scheduler's, and the two
-agree on the same tenant count only after §2b is applied.
 
 The warden already puts requests and limits on both containers of every tenant
 pod (`SQUELCH_WARDEN_CPU_REQUEST` and friends in `15-warden-config.yaml`,
@@ -1089,11 +1104,42 @@ Sizing, in the order that matters:
 - **Limits may oversubscribe.** Tenants are idle most of the time and a sync
   burst is seconds long. 4x requests is comfortable on one node; much past that
   and a few simultaneous backfills evict each other.
-- **`requests.storage` is disk you actually have.** local-path is a real
-  filesystem — the root disk, or the block volume if you repointed it above — and
-  it does not enforce a claim's size, so this quota is the only thing standing
-  between N tenants and a full disk. Size it to whichever filesystem local-path
-  is writing to, and a claim that cannot bind is a tenant that never comes up.
+- **`requests.storage` follows `persistentvolumeclaims`:** a claim for every
+  slot but the model seed's, plus the seed's 2Gi (the claims line, not the
+  tenant count, because a cancelled tenant keeps its claim). What sizes the
+  slots is the question. local-path is a real filesystem — the root disk, or
+  the block volume if you repointed it above — and it does not enforce a
+  claim's size. Where the claim is honest, the slots are the disk divided by
+  the claim (§2), and the storage line is then the only thing standing
+  between N tenants and a full disk. Where the claim is nominal (`carrier`:
+  10Gi claims, indexes far smaller, a 50 GB volume grown online when the
+  "carrier disk high" alert says so), the slots are the tenant count plus
+  room for cancellations, and the disk is watched, not quota'd. Either way a
+  claim that cannot bind is a tenant that never comes up.
+- **No other line may bind before memory does.** `limits.cpu` is one core a
+  tenant (the warden's limit; the kernel throttles at a CPU limit and kills
+  nothing, so the sum against the box is no promise and the line only has to
+  admit the count), `limits.memory` and `limits.ephemeral-storage` 1Gi each.
+  `pods`, `persistentvolumeclaims` and `count/secrets` are blunt ceilings: one
+  pod and one claim a tenant plus the model seed's (`60-models.yaml`), and
+  four Secrets a tenant (identity, credential, LLM key, share token) plus the
+  namespace's own (counted by the warden's quota test from the names the
+  warden's config carries, set in its ConfigMap or defaulted: the wildcard
+  certificate, the OAuth client, the APNs relay, the Browserbase key and a
+  pull secret if set, plus a successor beside each of the three that rotate
+  under a new name and cert-manager's renewal key; eight on `carrier`, all
+  at once, with a pending signup's identity Secret living in the slack
+  above). Size each to admit at least
+  the tenants the memory line does, `count/secrets` to at least four times
+  `pods`, plus two for every claim slot beyond the pod slots (a cancelled
+  tenant keeps two), plus those, or a full quota stops meaning a full box:
+  the patch `carrier` ran before
+  this file (`PRODUCTION.md`) had `limits.cpu: "12"`, `requests.storage:
+  200Gi` and `count/secrets: "100"`, which would have refused the thirteenth,
+  twentieth and twenty-fourth tenant while memory had room for thirty. A unit
+  test in the warden divides every line of the committed file by what the
+  committed ConfigMap makes a tenant ask for and holds each to the memory
+  line, and holds the ConfigMap inside the LimitRange.
 - Raising a per-tenant limit without raising the quota simply means fewer
   tenants. That is the correct trade to make consciously rather than discover.
 

@@ -1,8 +1,8 @@
 # The alerts. Every one of them is something that happened, or that
 # deploy/monitoring/README.md said we should be told about and nothing told us.
 #
-# WHY NoData IS OK ON THE FIRST THREE: when carrier stops reporting, every
-# query here goes empty at once, and three alerts saying "I cannot see" is
+# WHY NoData IS OK ON EVERY RULE BUT THE LAST: when carrier stops reporting,
+# every query here goes empty at once, and six alerts saying "I cannot see" is
 # noise around the one that matters. `carrier-metrics-missing` is that one.
 #
 # `$labels` and `$values` are written bare, and that was checked rather than
@@ -35,7 +35,6 @@ groups:
             Signups start failing when any dimension reaches 100%: the warden applies the
             Deployment, the pod is refused, and the user sees a timeout.
             Add RAM or raise the quota (PRODUCTION.md, "How many tenants fit").
-            Re-applying 70-tenant-limits.yaml on carrier also causes this.
         data:
           - refId: A
             datasourceUid: prometheus
@@ -56,6 +55,60 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gte, params: [0.8] }
+
+      # The quota is a file in git (deploy/hosted/70-tenant-limits.yaml), and
+      # for a while after 2026-09-28 it was not: a `kubectl patch` raised it
+      # on the box, the file kept the old numbers, and an apply of the file
+      # would have put the cap back. The warden's test can hold the file to
+      # the ConfigMap; only the scrape can see the box. So: a hard line of the
+      # quota changing, or a line appearing that was not there an hour ago,
+      # or one going that was, is expected once, right after an apply of the
+      # file, and otherwise means the box has moved away from the record.
+      # All three are read per line (`max by (resource)`), so two
+      # kube-state-metrics pods during its rollout do not double anything,
+      # and a gap in the scrape contributes no points, so it is not a change.
+      # The quota being deleted outright is `carrier-metrics-missing`, which
+      # watches these very series.
+      - uid: tenants-quota-changed
+        title: Tenants quota changed on the box
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: info
+        annotations:
+          summary: 'tenants quota: {{ $labels.resource }} hard limit changed'
+          description: >-
+            A hard line of the tenants ResourceQuota changed. Expected right after
+            `kubectl apply -f deploy/hosted/70-tenant-limits.yaml`; otherwise the box was
+            patched and the file no longer records it (PRODUCTION.md, "How many tenants fit"):
+            put the change in the file, or apply the file.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                changes(max by (resource) (kube_resourcequota{namespace="tenants",type="hard"})[1h:])
+                  or label_replace(
+                    count(max by (resource) (kube_resourcequota{namespace="tenants",type="hard"})
+                      unless max by (resource) (kube_resourcequota{namespace="tenants",type="hard"} offset 1h)),
+                    "resource", "a line that was not there an hour ago", "", "")
+                  or label_replace(
+                    count(max by (resource) (kube_resourcequota{namespace="tenants",type="hard"} offset 1h)
+                      unless max by (resource) (kube_resourcequota{namespace="tenants",type="hard"})),
+                    "resource", "a line that is gone", "", "")
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
 
       # The general form of the same night: a tenant whose Deployment wants a
       # pod and has none available. Quota, scheduling, image pull, crash loop,
@@ -171,6 +224,46 @@ groups:
               refId: A
               instant: true
               expr: 1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gte, params: [0.85] }
+
+      # The disk: the tenant volume and the root disk, the two the dashboard
+      # graphs. A tenant's claim is nominal (10Gi each on a 50 GB volume,
+      # deploy/hosted/70-tenant-limits.yaml) and local-path enforces nothing,
+      # so the quota guards the number of claims and this guards the disk
+      # itself. A full volume is every tenant's SQLite failing to write at
+      # once; the volume grows online (SETUP.md, "Tenant data on a block
+      # volume"), which is what to do when this fires.
+      - uid: carrier-disk-high
+        title: carrier disk high
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'carrier {{ $labels.mountpoint }} at {{ humanizePercentage $values.A.Value }}'
+          description: >-
+            The filesystem is filling. /mnt/tenant-data is every tenant's mail index and
+            grows online (expand the volume, then resize2fs: SETUP.md); / is the root disk,
+            where k3s images and the journal live. "Disk used" on the dashboard shows the trend.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                1 - node_filesystem_avail_bytes{mountpoint=~"/|/mnt/tenant-data", fstype!~"tmpfs|ramfs"}
+                  / node_filesystem_size_bytes{mountpoint=~"/|/mnt/tenant-data", fstype!~"tmpfs|ramfs"}
           - refId: C
             datasourceUid: __expr__
             model:

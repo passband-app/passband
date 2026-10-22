@@ -469,15 +469,191 @@ impl TokenCache {
     }
 }
 
+/// Make a backend ready, or refuse it, before anything is spent on it: the
+/// store constructor and the consent commands call this ahead of a boot, a
+/// browser consent or a round of Google verifications, so a backend that
+/// cannot work here is refused in a sentence rather than after the expensive
+/// part. For `keyring` this installs the OS keyring as keyring-core's
+/// process-wide default store and looks a probe entry up in it, so a Mac
+/// with no default keychain is refused here too (`os_keyring`); a locked
+/// keychain answers lookups and is found at the first item read, which a Mac
+/// with a desktop asks to unlock. `file` needs nothing.
+pub fn ensure_backend(backend: CredentialBackend) -> Result<()> {
+    match backend {
+        CredentialBackend::Keyring => os_keyring(),
+        CredentialBackend::File => Ok(()),
+    }
+}
+
+/// The OS keyring behind the `keyring` backend, installed as keyring-core's
+/// default store on first use: the macOS keychain, and nothing else. The
+/// daemon image and every headless box run the `file` backend
+/// (`CredentialBackend::default`), and the Secret Service store the `keyring`
+/// crate's defaults linked for Linux put zbus, a second async runtime, 38
+/// crates and 53 compile units into every Linux build for a backend never
+/// selected there. Everything that touches the Apple store is in
+/// [`keychain`]; the probe it runs is written for any store and lives beside
+/// it, so it is tested through the mock on every platform.
+#[cfg(target_os = "macos")]
+fn os_keyring() -> Result<()> {
+    keychain::install()
+}
+
+/// Off macOS the `keyring` backend is the refusal, whatever store is
+/// installed.
+#[cfg(not(target_os = "macos"))]
+fn os_keyring() -> Result<()> {
+    Err(CoreError::Credential(KEYRING_UNAVAILABLE.to_string()))
+}
+
+/// Ask the store in place to look a probe entry up, as any token read would:
+/// an item that is not there is the store answering, and so is one that is;
+/// anything else is a store that cannot. Returns the store that answered,
+/// for the caller to remember. Written for any store, so the probe is tested
+/// on every platform through the mock; built where it is called.
+#[cfg(any(target_os = "macos", test))]
+fn probe_default_store()
+-> std::result::Result<std::sync::Arc<keyring_core::CredentialStore>, keyring_core::Error> {
+    let store = keyring_core::get_default_store().ok_or(keyring_core::Error::NoDefaultStore)?;
+    // Built on the store in hand rather than the default, so the store
+    // returned (and remembered) is the one that answered.
+    match store
+        .build(KEYRING_SERVICE, "probe", None)
+        .and_then(|probe| probe.get_secret())
+    {
+        Ok(_) | Err(keyring_core::Error::NoEntry) => Ok(store),
+        Err(e) => Err(e),
+    }
+}
+
+/// The macOS keychain as keyring-core's default store: installed on first
+/// use, asked to look a probe entry up, and remembered by identity.
+#[cfg(target_os = "macos")]
+mod keychain {
+    use std::sync::{Arc, Mutex, Weak};
+
+    use super::{CoreError, Result, probe_default_store};
+
+    /// Install the keychain if no store is in place (a store already
+    /// installed, a test's mock, is left there), then ask whichever store is
+    /// in place to look a probe entry up, which is how a Mac with no default
+    /// keychain is found out before a consent is spent on it (a locked
+    /// keychain answers a lookup; the first item read is what finds that,
+    /// and a desktop Mac asks to unlock). Once the store in place has
+    /// answered, later calls cost nothing, until a different store is in
+    /// place; a store this call put in place is taken out again when the
+    /// probe fails, so the next ask, preflight or lazy, installs and probes
+    /// afresh and says the same thing (a store someone else installed is
+    /// left as it is, and answers the lazy path itself).
+    pub(super) fn install() -> Result<()> {
+        if ready() {
+            return Ok(());
+        }
+        // One installer at a time, so two first callers do not both open a
+        // keychain and the second overwrite the first's store under it.
+        static INSTALL: Mutex<()> = Mutex::new(());
+        let _one_at_a_time = INSTALL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if ready() {
+            // The caller ahead of us in the queue did the work.
+            return Ok(());
+        }
+        let installed_here = if keyring_core::get_default_store().is_none() {
+            let store = apple_native_keyring_store::keychain::Store::new()
+                .map_err(|e| CoreError::Credential(format!("the macOS keychain store: {e}")))?;
+            keyring_core::set_default_store(store);
+            true
+        } else {
+            false
+        };
+        match probe_default_store() {
+            Ok(store) => {
+                remember(&store);
+                Ok(())
+            }
+            Err(e) => {
+                // Not left in place to answer a later `Entry::new` with a
+                // store that has just said it cannot: the next ask reaches
+                // this refusal again.
+                if installed_here {
+                    keyring_core::unset_default_store();
+                }
+                Err(CoreError::Credential(format!(
+                    "the macOS keychain is not available: {e}; a Mac where this process has no \
+                     login keychain (as root, or under launchd) runs with \
+                     SQUELCH_CRED_BACKEND=file"
+                )))
+            }
+        }
+    }
+
+    /// The store that answered the probe, held weakly and compared by
+    /// identity with whatever is installed now: a second preflight in the
+    /// same process (the daemon's fail-fast top and then its store
+    /// constructor) costs nothing, and a store swapped in since (the tests
+    /// do) is asked afresh, with nothing to keep in step by hand.
+    static PROBED: Mutex<Option<Weak<keyring_core::CredentialStore>>> = Mutex::new(None);
+
+    /// Whether the store in place is the one that answered the probe.
+    pub(super) fn ready() -> bool {
+        let Some(installed) = keyring_core::get_default_store() else {
+            return false;
+        };
+        PROBED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|probed| Arc::ptr_eq(&probed, &installed))
+    }
+
+    fn remember(store: &Arc<keyring_core::CredentialStore>) {
+        *PROBED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::downgrade(store));
+    }
+}
+
+/// What a platform without an OS keyring says to a `keyring` backend. A token
+/// an earlier build kept in the OS keyring (the Secret Service on Linux, the
+/// Credential Manager on Windows) is not read by this one, so the switch to
+/// `file` is a fresh consent.
+#[cfg(not(target_os = "macos"))]
+const KEYRING_UNAVAILABLE: &str = "the keyring credential backend is built for macOS only (the \
+     keychain); on this platform set SQUELCH_CRED_BACKEND=file (or, with that variable unset, \
+     credential_backend = \"file\" in the config file) and consent again, since tokens an \
+     earlier build kept in the OS keyring are not read by this one: `squelchd auth` (or \
+     `squelchd auth --write` if you had granted sending), then `squelchd auth --calendar` if \
+     you had granted calendar";
+
+/// The keyring entry for one slot, in the OS keyring: the one lookup of the
+/// default store `Entry::new` makes, and the installer only when it finds
+/// none, so a first use that skipped [`ensure_backend`] still works.
+fn keyring_entry(slot: &str) -> Result<keyring_core::Entry> {
+    let open = || keyring_core::Entry::new(KEYRING_SERVICE, slot);
+    let entry = match open() {
+        Err(keyring_core::Error::NoDefaultStore) => {
+            ensure_backend(CredentialBackend::Keyring)?;
+            open()
+        }
+        opened => opened,
+    };
+    entry.map_err(|e| CoreError::Credential(format!("opening keyring entry: {e}")))
+}
+
 /// Persist a token into the OS keyring at `(service = "squelch", slot)` where
 /// `slot` = email + kind suffix.
 pub fn store_token(account_email: &str, kind: CredentialKind, token: &StoredToken) -> Result<()> {
-    let slot = kind.slot_key(account_email);
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &slot)
-        .map_err(|e| CoreError::Credential(format!("opening keyring entry: {e}")))?;
-    entry
-        .set_password(&token.to_json()?)
-        .map_err(|e| CoreError::Credential(format!("writing keyring entry: {e}")))?;
+    let entry = keyring_entry(&kind.slot_key(account_email))?;
+    // A keychain this process cannot write is the usual way this fails, and
+    // the probe's lookup cannot see it coming, so the way out is named here.
+    entry.set_password(&token.to_json()?).map_err(|e| {
+        CoreError::Credential(format!(
+            "writing keyring entry: {e}; a Mac whose login keychain this process cannot write \
+             (locked, over SSH, or under launchd) runs with SQUELCH_CRED_BACKEND=file"
+        ))
+    })?;
     Ok(())
 }
 
@@ -488,29 +664,42 @@ pub fn store_token(account_email: &str, kind: CredentialKind, token: &StoredToke
 /// the slots it already wrote back the way it found them, and "the way it found
 /// them" is sometimes empty.
 pub fn clear_token(account_email: &str, kind: CredentialKind) -> Result<()> {
-    let slot = kind.slot_key(account_email);
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &slot)
-        .map_err(|e| CoreError::Credential(format!("opening keyring entry: {e}")))?;
+    let entry = keyring_entry(&kind.slot_key(account_email))?;
     match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
         Err(e) => Err(CoreError::Credential(format!(
             "removing keyring entry: {e}"
         ))),
     }
 }
 
+/// What an account's kind slot holds in the keyring: `None` for a slot it
+/// does not hold, `Some(Err)` for one whose bytes are not a stored token,
+/// `Some(Ok)` for a token. Only an absent slot means a consent is owed; a
+/// keyring that cannot be read (locked, on a Mac reached over SSH) is its own
+/// problem, and re-consenting into it would not help, so that is the outer
+/// error, with the slot named.
+fn read_slot(account_email: &str, kind: CredentialKind) -> Result<Option<Result<StoredToken>>> {
+    let entry = keyring_entry(&kind.slot_key(account_email))?;
+    match entry.get_password() {
+        Ok(json) => Ok(Some(StoredToken::from_json(&json))),
+        Err(keyring_core::Error::NoEntry) => Ok(None),
+        Err(e @ keyring_core::Error::BadEncoding(_)) => Ok(Some(Err(CoreError::Credential(
+            format!("the keyring entry for {account_email} ({kind:?} slot) is not a token: {e}"),
+        )))),
+        Err(e) => Err(CoreError::Credential(format!(
+            "reading the keyring entry for {account_email} ({kind:?} slot): {e}"
+        ))),
+    }
+}
+
 /// Read the raw stored token for an account's kind slot from the keyring.
 pub fn load_token(account_email: &str, kind: CredentialKind) -> Result<StoredToken> {
-    let slot = kind.slot_key(account_email);
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &slot)
-        .map_err(|e| CoreError::Credential(format!("opening keyring entry: {e}")))?;
-    let json = entry.get_password().map_err(|e| {
-        CoreError::Credential(format!(
-            "no stored credentials for {account_email} ({kind:?} slot) \
-             (run `squelchd auth` first): {e}"
-        ))
-    })?;
-    StoredToken::from_json(&json)
+    read_slot(account_email, kind)?.unwrap_or_else(|| {
+        Err(CoreError::Credential(format!(
+            "no stored credentials for {account_email} ({kind:?} slot) (run `squelchd auth` first)"
+        )))
+    })
 }
 
 /// Keyring-backed credential store with transparent refresh, bound to one
@@ -1213,7 +1402,8 @@ pub fn seal_credentials_for_recipient(recipient: &str, plaintext: &[u8]) -> Resu
 }
 
 /// File-backed credential store with transparent refresh, bound to one account
-/// and one [`CredentialKind`]. For headless hosts with no Secret Service.
+/// and one [`CredentialKind`]. The backend on every platform but macOS, where
+/// the default is the keychain.
 pub struct FileCredentialStore {
     account_id: AccountId,
     account_email: String,
@@ -1365,13 +1555,21 @@ pub fn store_tokens_backend(
             .map(|_| ())
         }
         CredentialBackend::Keyring => {
-            // What each slot held BEFORE this run, in the order they were
-            // written, so a failure can walk it back.
+            // What each slot holds BEFORE this run, read before anything is
+            // written: a keyring that cannot be read now stops the import
+            // with nothing changed, rather than reading as absent and being
+            // cleared by the rollback, which would destroy the credential
+            // that worked before the paste. A slot whose bytes are not a
+            // token is no credential to keep: it is replaced, and a rollback
+            // clears it, as an absent one is.
+            let mut priors = Vec::with_capacity(entries.len());
+            for (kind, _) in entries {
+                priors.push(read_slot(account_email, *kind)?.and_then(Result::ok));
+            }
+            // The slots written so far with what they held, in order, so a
+            // failure can walk them back.
             let mut written: Vec<(CredentialKind, Option<StoredToken>)> = Vec::new();
-            for (kind, token) in entries {
-                // An unreadable prior entry reads as absent, and rollback then
-                // clears the slot: either way nothing from this paste survives.
-                let prior = load_token(account_email, *kind).ok();
+            for ((kind, token), prior) in entries.iter().zip(priors) {
                 match store_token(account_email, *kind, token) {
                     Ok(()) => written.push((*kind, prior)),
                     Err(e) => {
@@ -1428,27 +1626,37 @@ pub fn load_token_backend(
     }
 }
 
-/// Build a Read-bound [`CredentialStore`] trait object for the configured backend.
-pub fn read_store_for_backend(
+/// Build a [`CredentialStore`] trait object bound to `kind` for the
+/// configured backend, the one place a backend becomes a store: the backend
+/// is made ready here, or refused ([`ensure_backend`]), so every process that
+/// opens a store gets the refusal before it runs against one that cannot
+/// answer, and none has to remember to ask. [`CalendarCredentials::new`],
+/// which resolves through the same backend without a store, asks the same
+/// way.
+pub fn store_for_backend(
     backend: CredentialBackend,
     account_id: AccountId,
     account_email: String,
+    kind: CredentialKind,
     credentials_path: PathBuf,
     client: OAuthClientConfig,
-) -> std::sync::Arc<dyn CredentialStore> {
-    match backend {
-        CredentialBackend::Keyring => std::sync::Arc::new(KeyringCredentialStore::new(
+) -> Result<std::sync::Arc<dyn CredentialStore>> {
+    ensure_backend(backend)?;
+    Ok(match backend {
+        CredentialBackend::Keyring => std::sync::Arc::new(KeyringCredentialStore::new_with_kind(
             account_id,
             account_email,
+            kind,
             client,
         )),
-        CredentialBackend::File => std::sync::Arc::new(FileCredentialStore::new(
+        CredentialBackend::File => std::sync::Arc::new(FileCredentialStore::new_with_kind(
             account_id,
             account_email,
+            kind,
             credentials_path,
             client,
         )),
-    }
+    })
 }
 
 // --- which token may call the Calendar API ----------------------------------
@@ -1539,14 +1747,20 @@ pub struct CalendarAccess {
 }
 
 impl CalendarCredentials {
+    /// A resolver over the configured backend, which is made ready or
+    /// refused first ([`ensure_backend`], as [`store_for_backend`] does):
+    /// every read below turns a backend error into "not granted", so a
+    /// backend this build cannot serve has to be refused here, where it is
+    /// said out loud.
     pub fn new(
         account_id: AccountId,
         account_email: String,
         backend: CredentialBackend,
         credentials_path: PathBuf,
         client: OAuthClientConfig,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        ensure_backend(backend)?;
+        Ok(Self {
             account_id,
             account_email,
             backend,
@@ -1554,7 +1768,7 @@ impl CalendarCredentials {
             client,
             granted_cache: Default::default(),
             token_cache: TokenCache::default(),
-        }
+        })
     }
 
     /// The configured mailbox this resolver reads for.
@@ -2093,7 +2307,8 @@ mod tests {
             CredentialBackend::File,
             path.clone(),
             client(),
-        );
+        )
+        .unwrap();
         let scoped = |access: &str| StoredToken {
             access_token: access.into(),
             refresh_token: Some("r".into()),
@@ -2157,6 +2372,505 @@ mod tests {
             "a moved stamp is resolved afresh"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// keyring-core's default store is one per process, so the tests that set
+    /// or clear it take this lock, and put back on every exit whatever store
+    /// they found: on a developer's Mac that may be the real keychain, which
+    /// no test here may write to.
+    static KEYRING_STORE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The keyring holds nothing in this slot: the answer is "run `squelchd
+    /// auth`", not a read that failed.
+    fn assert_slot_empty(email: &str, kind: CredentialKind) {
+        let err = load_token(email, kind).unwrap_err().to_string();
+        assert!(err.contains("no stored credentials"), "{err}");
+    }
+
+    struct StoreSwap {
+        _held: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::sync::Arc<keyring_core::CredentialStore>>,
+    }
+
+    impl StoreSwap {
+        /// Take the lock and put `store` (or nothing) in place of whatever is
+        /// installed. The preflight remembers a store by identity, so the
+        /// swap alone makes it ask the new one.
+        fn install(store: Option<std::sync::Arc<keyring_core::CredentialStore>>) -> Self {
+            let held = KEYRING_STORE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = keyring_core::unset_default_store();
+            if let Some(store) = store {
+                keyring_core::set_default_store(store);
+            }
+            StoreSwap {
+                _held: held,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for StoreSwap {
+        fn drop(&mut self) {
+            keyring_core::unset_default_store();
+            if let Some(previous) = self.previous.take() {
+                keyring_core::set_default_store(previous);
+            }
+        }
+    }
+
+    /// With no store installed, a platform without an OS keyring refuses the
+    /// backend before anything is spent on it, in a sentence that names the
+    /// setting to change and the consent to redo; the file backend is always
+    /// available.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_platform_without_a_keyring_refuses_the_backend_up_front() {
+        let _swap = StoreSwap::install(None);
+        let err = ensure_backend(CredentialBackend::Keyring)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SQUELCH_CRED_BACKEND=file"), "{err}");
+        assert!(err.contains("credential_backend = \"file\""), "{err}");
+        assert!(err.contains("`squelchd auth`"), "{err}");
+        assert!(ensure_backend(CredentialBackend::File).is_ok());
+        // The one constructor refuses before it builds a store, for either
+        // slot, and builds the file store without a word.
+        let build = |backend| {
+            store_for_backend(
+                backend,
+                1,
+                "nobody@x.com".to_string(),
+                CredentialKind::Write,
+                tmp_path("refused-backend"),
+                client(),
+            )
+        };
+        let err = build(CredentialBackend::Keyring)
+            .err()
+            .expect("the keyring is refused here")
+            .to_string();
+        assert!(err.contains("SQUELCH_CRED_BACKEND=file"), "{err}");
+        assert!(build(CredentialBackend::File).is_ok());
+        // So does the calendar resolver, which would otherwise read the
+        // refusal as "not granted".
+        let err = CalendarCredentials::new(
+            1,
+            "nobody@x.com".to_string(),
+            CredentialBackend::Keyring,
+            tmp_path("refused-backend"),
+            client(),
+        )
+        .err()
+        .expect("the keyring is refused here")
+        .to_string();
+        assert!(err.contains("SQUELCH_CRED_BACKEND=file"), "{err}");
+        // The lazy path, a token read with no preflight, says the same.
+        let err = load_token("nobody@x.com", CredentialKind::Read)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SQUELCH_CRED_BACKEND=file"), "{err}");
+    }
+
+    /// On a Mac the first use installs the keychain as the default store and
+    /// looks a probe entry up in it. `Store::new` builds the handle, the probe
+    /// looks for an item that is not there, and the guard puts back whatever
+    /// store the process had, so no keychain item is written. A box with a
+    /// default keychain ends with the keychain store installed and the
+    /// second ask free; a box without one (a test runner may be) is refused,
+    /// and the store this call installed is gone again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_keychain_is_installed_on_first_use() {
+        let _swap = StoreSwap::install(None);
+        assert!(keyring_core::get_default_store().is_none());
+        let probed = ensure_backend(CredentialBackend::Keyring);
+        let installed = keyring_core::get_default_store();
+        match probed {
+            Ok(()) => {
+                let store = installed.expect("the keychain store is installed");
+                assert!(
+                    store
+                        .as_any()
+                        .downcast_ref::<apple_native_keyring_store::keychain::Store>()
+                        .is_some(),
+                    "the installed store is the keychain"
+                );
+                assert!(keychain::ready());
+                assert!(ensure_backend(CredentialBackend::Keyring).is_ok());
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("keychain is not available"), "{e}");
+                assert!(installed.is_none(), "a refused install is taken out again");
+                assert!(!keychain::ready());
+            }
+        }
+    }
+
+    /// The lazy path: a token read with no store in place installs the
+    /// keychain itself and reads through it, or is refused as the preflight
+    /// refuses; never "no default store". A read-only lookup of an entry
+    /// that is not there.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_token_read_with_no_store_in_place_installs_the_keychain() {
+        let _swap = StoreSwap::install(None);
+        let err = load_token("nobody@x.com", CredentialKind::Read)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("No default store"), "{err}");
+        assert!(
+            err.contains("squelchd auth") || err.contains("keychain is not available"),
+            "{err}"
+        );
+    }
+
+    /// An import reads what every slot holds before it writes any, so a slot
+    /// that cannot be read now stops it with nothing changed, rather than
+    /// reading as absent and being cleared by the rollback.
+    #[test]
+    fn a_keyring_import_stops_before_writing_when_a_prior_cannot_be_read() {
+        let _swap = StoreSwap::install(Some(keyring_core::mock::Store::new().unwrap()));
+        let email = "import-prior@x.com";
+        let token = |access: &str| scoped(access, None);
+        store_token(email, CredentialKind::Read, &token("old-read")).unwrap();
+        keyring_core::Entry::new(KEYRING_SERVICE, &CredentialKind::Write.slot_key(email))
+            .unwrap()
+            .as_any()
+            .downcast_ref::<keyring_core::mock::Cred>()
+            .expect("the mock store's credential")
+            .set_error(keyring_core::Error::PlatformFailure(
+                "the write slot cannot be read once".into(),
+            ));
+        let err = store_tokens_backend(
+            CredentialBackend::Keyring,
+            Path::new("unused-for-the-keyring"),
+            email,
+            &[
+                (CredentialKind::Read, token("new-read")),
+                (CredentialKind::Write, token("new-write")),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("reading the keyring entry"), "{err}");
+        assert!(err.contains("Write slot"), "{err}");
+        // Nothing was written: the Read slot holds what it held, the Write
+        // slot nothing.
+        assert_eq!(
+            load_token(email, CredentialKind::Read)
+                .unwrap()
+                .access_token,
+            "old-read"
+        );
+        assert_slot_empty(email, CredentialKind::Write);
+    }
+
+    /// A slot whose bytes are not a token is no credential to keep, so an
+    /// import replaces it rather than stopping on it.
+    #[test]
+    fn a_keyring_import_replaces_a_slot_that_is_not_a_token() {
+        let _swap = StoreSwap::install(Some(keyring_core::mock::Store::new().unwrap()));
+        let email = "import-garbled@x.com";
+        keyring_core::Entry::new(KEYRING_SERVICE, &CredentialKind::Write.slot_key(email))
+            .unwrap()
+            .set_password("not a token")
+            .unwrap();
+        let err = load_token(email, CredentialKind::Write)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parsing stored token"), "{err}");
+        store_tokens_backend(
+            CredentialBackend::Keyring,
+            Path::new("unused-for-the-keyring"),
+            email,
+            &[(CredentialKind::Write, scoped("new-write", None))],
+        )
+        .unwrap();
+        assert_eq!(
+            load_token(email, CredentialKind::Write)
+                .unwrap()
+                .access_token,
+            "new-write"
+        );
+    }
+
+    /// The probe, through the mock: an entry that is not there and one that
+    /// is are both a store answering; a store that errors on the lookup, and
+    /// no store at all, are not.
+    #[test]
+    fn the_probe_tells_a_store_that_answers_from_one_that_cannot() {
+        let _swap = StoreSwap::install(Some(keyring_core::mock::Store::new().unwrap()));
+        let answered = probe_default_store().unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &answered,
+            &keyring_core::get_default_store().unwrap()
+        ));
+        let probe = keyring_core::Entry::new(KEYRING_SERVICE, "probe").unwrap();
+        probe.set_secret(b"left behind").unwrap();
+        assert!(probe_default_store().is_ok());
+        probe.delete_credential().unwrap();
+        probe
+            .as_any()
+            .downcast_ref::<keyring_core::mock::Cred>()
+            .expect("the mock store's credential")
+            .set_error(keyring_core::Error::PlatformFailure(
+                "the lookup fails once".into(),
+            ));
+        let err = probe_default_store().unwrap_err();
+        assert!(
+            matches!(err, keyring_core::Error::PlatformFailure(_)),
+            "{err}"
+        );
+        assert!(probe_default_store().is_ok());
+        drop(_swap);
+        let _none = StoreSwap::install(None);
+        assert!(matches!(
+            probe_default_store().unwrap_err(),
+            keyring_core::Error::NoDefaultStore
+        ));
+    }
+
+    /// A store that is the mock in every way but one: the Write slot's
+    /// credential refuses to be written, every time. The mock's own injected
+    /// error is spent by the next operation on the credential, and an import
+    /// reads a slot's prior before it writes it, so a write that fails after
+    /// a read is only reachable this way.
+    struct RefusingWrites {
+        mock: std::sync::Arc<keyring_core::CredentialStore>,
+        user: String,
+    }
+
+    struct RefusesWrites(keyring_core::Entry);
+
+    impl keyring_core::api::CredentialApi for RefusesWrites {
+        fn set_secret(&self, _secret: &[u8]) -> keyring_core::Result<()> {
+            Err(keyring_core::Error::NotSupportedByStore(
+                "the write slot refuses".to_string(),
+            ))
+        }
+        fn get_secret(&self) -> keyring_core::Result<Vec<u8>> {
+            self.0.get_secret()
+        }
+        fn delete_credential(&self) -> keyring_core::Result<()> {
+            self.0.delete_credential()
+        }
+        fn get_credential(
+            &self,
+        ) -> keyring_core::Result<Option<std::sync::Arc<keyring_core::Credential>>> {
+            // Whether the wrapped entry exists is the mock's to say; this
+            // wrapper is then the credential itself.
+            self.0.get_credential().map(|_| None)
+        }
+        fn get_specifiers(&self) -> Option<(String, String)> {
+            self.0.get_specifiers()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    impl keyring_core::api::CredentialStoreApi for RefusingWrites {
+        fn vendor(&self) -> String {
+            self.mock.vendor()
+        }
+        fn id(&self) -> String {
+            "refusing-writes".to_string()
+        }
+        fn build(
+            &self,
+            service: &str,
+            user: &str,
+            mods: Option<&std::collections::HashMap<&str, &str>>,
+        ) -> keyring_core::Result<keyring_core::Entry> {
+            let entry = self.mock.build(service, user, mods)?;
+            Ok(if user == self.user {
+                keyring_core::Entry::new_with_credential(std::sync::Arc::new(RefusesWrites(entry)))
+            } else {
+                entry
+            })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// An import whose second slot's write fails leaves the first slot as it
+    /// was: the branch of `store_tokens_backend` that rolls back, driven by a
+    /// store that refuses the Write slot's writes after letting its prior be
+    /// read.
+    #[test]
+    fn a_keyring_import_that_fails_partway_puts_the_first_slot_back() {
+        let email = "partway@x.com";
+        let _swap = StoreSwap::install(Some(std::sync::Arc::new(RefusingWrites {
+            mock: keyring_core::mock::Store::new().unwrap(),
+            user: CredentialKind::Write.slot_key(email),
+        })));
+        let token = |access: &str| scoped(access, None);
+        store_token(email, CredentialKind::Read, &token("old-read")).unwrap();
+        let err = store_tokens_backend(
+            CredentialBackend::Keyring,
+            Path::new("/unused"),
+            email,
+            &[
+                (CredentialKind::Read, token("new-read")),
+                (CredentialKind::Write, token("new-write")),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("the write slot refuses"), "{err}");
+        assert!(!err.contains("could not be rolled back"), "{err}");
+        assert_eq!(
+            load_token(email, CredentialKind::Read)
+                .unwrap()
+                .access_token,
+            "old-read"
+        );
+        assert_slot_empty(email, CredentialKind::Write);
+    }
+
+    /// An import into the keyring lands both slots through the mock store;
+    /// and the rollback behind an import that fails partway puts the slots
+    /// written back, newest first, to what each held or to nothing, naming
+    /// a slot it cannot put back. The rollback is driven directly here; the
+    /// import that triggers it is `a_keyring_import_that_fails_partway_...`.
+    #[test]
+    fn a_keyring_import_lands_whole_and_its_rollback_puts_slots_back() {
+        let _swap = StoreSwap::install(Some(keyring_core::mock::Store::new().unwrap()));
+        let email = "rollback@x.com";
+        let token = |access: &str| scoped(access, None);
+        store_token(email, CredentialKind::Read, &token("old-read")).unwrap();
+        store_tokens_backend(
+            CredentialBackend::Keyring,
+            Path::new("/unused"),
+            email,
+            &[
+                (CredentialKind::Read, token("new-read")),
+                (CredentialKind::Write, token("new-write")),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            load_token(email, CredentialKind::Read)
+                .unwrap()
+                .access_token,
+            "new-read"
+        );
+        assert_eq!(
+            load_token(email, CredentialKind::Write)
+                .unwrap()
+                .access_token,
+            "new-write"
+        );
+
+        // What the import recorded before each write, rolled back.
+        rollback_keyring(
+            email,
+            &[
+                (CredentialKind::Read, Some(token("old-read"))),
+                (CredentialKind::Write, None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            load_token(email, CredentialKind::Read)
+                .unwrap()
+                .access_token,
+            "old-read"
+        );
+        assert_slot_empty(email, CredentialKind::Write);
+
+        // A slot the rollback cannot put back is named for the caller.
+        keyring_core::Entry::new(KEYRING_SERVICE, &CredentialKind::Read.slot_key(email))
+            .unwrap()
+            .as_any()
+            .downcast_ref::<keyring_core::mock::Cred>()
+            .expect("the mock store's credential")
+            .set_error(keyring_core::Error::NotSupportedByStore(
+                "the read slot refuses once".into(),
+            ));
+        let stuck = rollback_keyring(email, &[(CredentialKind::Read, Some(token("old-read")))])
+            .unwrap_err();
+        assert_eq!(stuck, "Read");
+    }
+
+    /// The keyring backend's three operations, against keyring-core's mock
+    /// store standing in for the keychain, on every platform: a slot written
+    /// is read back, cleared, and clearing it again is not an error.
+    #[test]
+    fn the_keyring_backend_round_trips_through_the_installed_store() {
+        let _swap = StoreSwap::install(Some(keyring_core::mock::Store::new().unwrap()));
+        let email = "mock@x.com";
+        let token = StoredToken {
+            access_token: "mock-access".into(),
+            refresh_token: Some("mock-refresh".into()),
+            expires_at: None,
+            scopes: None,
+        };
+        clear_token(email, CredentialKind::Write).unwrap();
+        assert_slot_empty(email, CredentialKind::Write);
+        store_token(email, CredentialKind::Write, &token).unwrap();
+        let back = load_token(email, CredentialKind::Write).unwrap();
+        assert_eq!(back.access_token, "mock-access");
+        assert_eq!(back.refresh_token.as_deref(), Some("mock-refresh"));
+        // One slot a kind: the Read slot was never written.
+        assert_slot_empty(email, CredentialKind::Read);
+        clear_token(email, CredentialKind::Write).unwrap();
+        clear_token(email, CredentialKind::Write).unwrap();
+        assert_slot_empty(email, CredentialKind::Write);
+    }
+
+    /// The keyring-backed [`CredentialStore`] serves the token its slot holds
+    /// through the installed store: the trait object reaches the mock, honours
+    /// its binding (the other account and the other slot are refused), and the
+    /// second call is the cached copy. The stores are built directly, since
+    /// [`store_for_backend`] refuses the keyring on every platform but macOS
+    /// before it constructs one (the test above). A current-thread runtime
+    /// because `StoreSwap` holds a lock across the `.await`, like the
+    /// env-guarded tests below.
+    #[test]
+    fn the_keyring_store_serves_its_slot_through_the_installed_store() {
+        let _swap = StoreSwap::install(Some(keyring_core::mock::Store::new().unwrap()));
+        let email = "store@x.com";
+        let token = StoredToken {
+            access_token: "store-access".into(),
+            refresh_token: Some("store-refresh".into()),
+            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: None,
+        };
+        store_token(email, CredentialKind::Write, &token).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let write: std::sync::Arc<dyn CredentialStore> =
+                std::sync::Arc::new(KeyringCredentialStore::new_with_kind(
+                    7,
+                    email.to_string(),
+                    CredentialKind::Write,
+                    client(),
+                ));
+            let served = write.token(7).await.unwrap();
+            assert_eq!(served.access_token, "store-access");
+            assert_eq!(served.refresh_token.as_deref(), Some("store-refresh"));
+            // Bound to one account.
+            let other = write.token(8).await.unwrap_err().to_string();
+            assert!(other.contains("not managed by this store"), "{other}");
+            // Bound to one slot: the Read slot was never written, and the
+            // refusal names what to run.
+            let read: std::sync::Arc<dyn CredentialStore> =
+                std::sync::Arc::new(KeyringCredentialStore::new(7, email.to_string(), client()));
+            let missing = read.token(7).await.unwrap_err().to_string();
+            assert!(missing.contains("squelchd auth"), "{missing}");
+            // Served again from memory: clearing the slot underneath does not
+            // reach the second call, and `fresh_token` reads through.
+            clear_token(email, CredentialKind::Write).unwrap();
+            assert_eq!(write.token(7).await.unwrap().access_token, "store-access");
+            assert!(write.fresh_token(7).await.is_err());
+        });
     }
 
     fn tmp_path(name: &str) -> PathBuf {
@@ -3019,7 +3733,8 @@ mod tests {
                 CredentialBackend::File,
                 path.clone(),
                 client(),
-            );
+            )
+            .unwrap();
             let write = |token: StoredToken| {
                 store_token_file(&path, "you@x.com", CredentialKind::Read, &token).unwrap()
             };
@@ -3068,7 +3783,8 @@ mod tests {
                 CredentialBackend::File,
                 path.clone(),
                 client(),
-            );
+            )
+            .unwrap();
             store_token_file(
                 &path,
                 "you@x.com",
@@ -3106,7 +3822,8 @@ mod tests {
             CredentialBackend::File,
             path.clone(),
             client(),
-        );
+        )
+        .unwrap();
         assert!(!resolver.granted().await, "an empty file grants nothing");
         assert!(resolver.calendar_token(3_i64).await.unwrap().is_none());
         assert!(resolver.token(3_i64).await.is_err());

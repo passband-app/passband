@@ -19,7 +19,7 @@ use squelch_core::auth::{
 };
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
 use squelch_core::credentials::{
-    CredentialStore, FileCredentialStore, KeyringCredentialStore, load_token_backend,
+    CredentialKind, CredentialStore, ensure_backend, load_token_backend, store_for_backend,
     store_token_backend, store_tokens_backend, write_private,
 };
 use squelch_core::embed::{Embedder, LazyEmbedder, ReapOutcome};
@@ -577,23 +577,6 @@ fn mailbox_engine(
     SyncEngine::new(store, creds, account_id, email, config).with_gmail_budget(budget.clone())
 }
 
-fn make_credential_store(
-    backend: CredentialBackend,
-    account_id: AccountId,
-    email: String,
-    creds_path: PathBuf,
-    client: OAuthClientConfig,
-) -> Arc<dyn CredentialStore> {
-    match backend {
-        CredentialBackend::Keyring => {
-            Arc::new(KeyringCredentialStore::new(account_id, email, client))
-        }
-        CredentialBackend::File => Arc::new(FileCredentialStore::new(
-            account_id, email, creds_path, client,
-        )),
-    }
-}
-
 /// Build the semantic-recall embedder. `None` on failure — search then degrades
 /// to keyword-only.
 ///
@@ -855,6 +838,9 @@ fn cmd_auth(
     let client = config.oauth_client()?;
     let email = config.require_account_email()?;
     let backend = config.credential_backend;
+    // Before the browser opens: a backend this build cannot use is refused
+    // here, not after the consent it would have had nowhere to put.
+    ensure_backend(backend)?;
     let creds_path = config.resolve_credentials_path();
 
     let plan = auth_plan(args);
@@ -952,7 +938,7 @@ fn store_and_announce(
     backend: CredentialBackend,
     creds_path: &std::path::Path,
     email: &str,
-    kind: squelch_core::credentials::CredentialKind,
+    kind: CredentialKind,
     token: &squelch_core::credentials::StoredToken,
 ) -> Result<(), squelch_core::CoreError> {
     store_token_backend(backend, creds_path, email, kind, token)?;
@@ -968,7 +954,7 @@ fn announce_stored(
     backend: CredentialBackend,
     creds_path: &std::path::Path,
     email: &str,
-    kind: squelch_core::credentials::CredentialKind,
+    kind: CredentialKind,
 ) {
     match backend {
         CredentialBackend::Keyring => {
@@ -1124,6 +1110,9 @@ fn cmd_auth_import(config: &Config) -> Result<(), squelch_core::CoreError> {
     let client = config.oauth_client()?;
     let email = config.require_account_email()?;
     let backend = config.credential_backend;
+    // Before any credential is verified with Google: the same refusal as
+    // `auth`, for the same reason.
+    ensure_backend(backend)?;
     let creds_path = config.resolve_credentials_path();
 
     let transfer = decode_transfer(&read_transfer_blob()?)?;
@@ -1142,10 +1131,7 @@ fn cmd_auth_import(config: &Config) -> Result<(), squelch_core::CoreError> {
     // attacker-authored fields; an absent `expires_at` in particular reads as
     // "never expires" and would pin a bearer string of the paster's choosing on
     // every Gmail call.
-    let mut entries: Vec<(
-        squelch_core::credentials::CredentialKind,
-        squelch_core::credentials::StoredToken,
-    )> = Vec::new();
+    let mut entries: Vec<(CredentialKind, squelch_core::credentials::StoredToken)> = Vec::new();
     for cred in &transfer.credentials {
         let verified = verify_transfer_credential(&client, &email, cred.kind, &cred.token)?;
         println!(
@@ -1730,9 +1716,12 @@ async fn stop_requested() {
 
 /// Sync-only loop with graceful Ctrl-C shutdown.
 fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
-    // Fail fast on config problems before spinning up the runtime.
+    // Fail fast on config problems before spinning up the runtime. The store
+    // constructor refuses a backend this build cannot use too; asking here
+    // keeps the refusal ahead of opening the store and building the embedder.
     let email = config.require_account_email()?;
     let client = config.oauth_client()?;
+    ensure_backend(config.credential_backend)?;
 
     let mut store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
@@ -1749,13 +1738,14 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
     // Read off config before the engine takes ownership of it below.
     let idle_unload_secs = config.embed.idle_unload_secs;
 
-    let creds = make_credential_store(
+    let creds = store_for_backend(
         config.credential_backend,
         account_id,
         email.clone(),
+        CredentialKind::Read,
         config.resolve_credentials_path(),
         client,
-    );
+    )?;
 
     let runtime = build_runtime()?;
     runtime.block_on(async move {
@@ -2231,6 +2221,10 @@ fn cmd_serve(
     let metrics_bind = resolve_metrics_bind(&config)?;
     let email = config.require_account_email()?;
     let client = config.oauth_client()?;
+    // The store constructor below refuses a backend this build cannot use
+    // too; asking here keeps the refusal ahead of opening the store, its
+    // migrations, the embedder and the runtime.
+    ensure_backend(config.credential_backend)?;
 
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
@@ -2425,6 +2419,17 @@ fn cmd_serve(
         None => api_state,
     };
 
+    // READ-bound store, shared by the sync loop and the contacts harvest.
+    // Built before the runtime, so nothing has been spawned when it refuses.
+    let sync_creds = store_for_backend(
+        backend,
+        account_id,
+        email.clone(),
+        CredentialKind::Read,
+        creds_path,
+        client,
+    )?;
+
     let runtime = build_runtime()?;
     runtime.block_on(async move {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -2524,10 +2529,6 @@ fn cmd_serve(
                 None
             }
         };
-
-        // READ-bound store, shared by the sync loop and the contacts harvest.
-        let sync_creds =
-            make_credential_store(backend, account_id, email.clone(), creds_path, client);
 
         // No embedder override: the loop resolves it from the shared store each
         // tick, so it picks up the background-attached one. The gate is what
@@ -2922,7 +2923,7 @@ fn cmd_serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use squelch_core::credentials::{CredentialKind, StoredToken};
+    use squelch_core::credentials::{FileCredentialStore, StoredToken};
 
     const BROKER: &str = "https://auth.passband.email";
 

@@ -9380,7 +9380,8 @@ fn calendar_resolver(
             client_id: "id".into(),
             client_secret: "secret".into(),
         },
-    );
+    )
+    .unwrap();
     (resolver, path)
 }
 

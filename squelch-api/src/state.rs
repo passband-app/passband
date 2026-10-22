@@ -3,9 +3,7 @@
 use std::sync::Arc;
 
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
-use squelch_core::credentials::{
-    CredentialKind, CredentialStore, FileCredentialStore, KeyringCredentialStore,
-};
+use squelch_core::credentials::{CredentialKind, CredentialStore};
 use squelch_core::features::Features;
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
@@ -510,7 +508,9 @@ pub fn attach_event_channel(
 /// without `SQUELCH_API_TOKEN`; it now serves and answers 401 until a credential
 /// exists, because pairing is how the first credential arrives and pairing needs
 /// a door to talk to. What is left is resolving the account, which is still a
-/// store operation and still fallible.
+/// store operation and still fallible, and, in [`ApiState::from_config`], a
+/// credential backend this build cannot use, refused where its stores are
+/// built.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error(transparent)]
@@ -1178,31 +1178,25 @@ impl ApiState {
     }
 
     /// The ONLY place squelch-api constructs a write credential. Bound to
-    /// [`CredentialKind::Write`], so it can never yield the read token.
+    /// [`CredentialKind::Write`], so it can never yield the read token, and
+    /// built by the core's one constructor, so a backend this build cannot
+    /// serve is refused here rather than on the first action.
     pub fn with_write_credentials(
         self,
         backend: CredentialBackend,
         account_email: String,
         credentials_path: std::path::PathBuf,
         client: OAuthClientConfig,
-    ) -> Self {
-        let account_id = self.account_id;
-        let creds: Arc<dyn CredentialStore> = match backend {
-            CredentialBackend::Keyring => Arc::new(KeyringCredentialStore::new_with_kind(
-                account_id,
-                account_email,
-                CredentialKind::Write,
-                client,
-            )),
-            CredentialBackend::File => Arc::new(FileCredentialStore::new_with_kind(
-                account_id,
-                account_email,
-                CredentialKind::Write,
-                credentials_path,
-                client,
-            )),
-        };
-        self.with_write_store(creds)
+    ) -> Result<Self, StateError> {
+        let creds = squelch_core::credentials::store_for_backend(
+            backend,
+            self.account_id,
+            account_email,
+            CredentialKind::Write,
+            credentials_path,
+            client,
+        )?;
+        Ok(self.with_write_store(creds))
     }
 
     /// The WRITE-bound credential store, if action capability is enabled.
@@ -1376,13 +1370,13 @@ impl ApiState {
                         cfg.credential_backend,
                         cfg.resolve_credentials_path(),
                         client.clone(),
-                    ))
+                    )?)
                     .with_write_credentials(
                         cfg.credential_backend,
                         account_email.to_string(),
                         cfg.resolve_credentials_path(),
                         client,
-                    )
+                    )?
             }
             Err(_) => {
                 eprintln!(

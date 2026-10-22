@@ -244,20 +244,24 @@ unblocks a tenant, but it rotates the key and starts the ledger from zero, so
 keep it for a key that is actually wrong.
 
 **A tenant that hits its daily triage cap** is a different limit: a count of
-model jobs per UTC day (10,000 in total, 200 of them for background work), held
-by the daemon rather than the gateway. The total is a runaway breaker set far
-above any real mailbox, so the limit a tenant actually meets is the background
-one. The dashboard's "Triage held by the daily cap" panel shows it. A `new mail`
-line means today's arrivals are going untriaged, which should not happen short
-of a runaway and is worth a look before you lift it; a `background` line is a
-backlog draining at 200 a day, which is the design; `revisits` wait on
-`[revisit].daily_cap`, which no grant raises. To lift a cap for the rest of the
-day:
+model jobs per UTC day (10,000 in total, 200 of them for background work and
+500 for access checks), held by the daemon rather than the gateway. The total
+is a runaway breaker set far above any real mailbox, so the limit a tenant
+actually meets is a lane's. The dashboard's "Triage held by the daily cap"
+panel shows it. A `new mail` line means today's arrivals are going untriaged,
+which should not happen short of a runaway and is worth a look before you lift
+it; a `background` line is a backlog draining at 200 a day, which is the
+design; an `access` line is access checks (the owner's sent mail, spam, archive
+rows an agent asked to read) waiting on the access lane's cap of 500 a day, a
+spammy day's worth, or for an archive check its own sub-cap, which no grant
+raises; `revisits` wait on `[revisit].daily_cap`, which no grant raises either.
+To lift a cap for the rest of the day:
 
 ```sh
 kubectl -n tenants exec deploy/<label> -- squelchd triage status
 kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500
 kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500 --background
+kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500 --access
 ```
 
 No restart: the worker reads the grant on its next job, and the grant lapses at

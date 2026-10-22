@@ -774,7 +774,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             connection,
             notify,
             &message,
-            self.config.triage.context.max_context_bytes,
+            &self.config.triage.context,
         )
         .await
         {
@@ -1264,11 +1264,18 @@ fn is_provider_outage(kind: &str) -> bool {
 }
 
 /// The total limit bounds all investigations. Background work has a second
-/// ceiling, leaving capacity for genuinely new inbound mail. Historical stage
-/// escalation caps deliberately do not gate this only classification path.
-fn investigation_budget_limits(config: &Config, job: &AgentJob) -> Vec<(String, u32)> {
+/// ceiling, leaving capacity for genuinely new inbound mail, and access
+/// checks a lane of their own, whatever their trigger or lane flag, so
+/// neither can spend the other's budget. Historical stage escalation caps
+/// deliberately do not gate this only classification path.
+pub(crate) fn investigation_budget_limits(config: &Config, job: &AgentJob) -> Vec<(String, u32)> {
     let mut limits = vec![(GLOBAL_BUDGET_KEY.into(), config.triage.agent.daily_run_cap)];
-    if !job.foreground || job.kind == "access" {
+    if job.kind == "access" {
+        limits.push((
+            crate::triage::agent_config::ACCESS_BUDGET_KEY.into(),
+            config.triage.agent.effective_access_daily_run_cap(),
+        ));
+    } else if !job.foreground {
         limits.push((
             crate::triage::agent_config::BACKGROUND_BUDGET_KEY.into(),
             config.triage.agent.effective_background_daily_run_cap(),
@@ -1278,8 +1285,9 @@ fn investigation_budget_limits(config: &Config, job: &AgentJob) -> Vec<(String, 
         limits.push(("__agent_revisit__".into(), config.revisit.daily_cap));
     }
     // An external caller's search asked for this one. Its own ceiling, on top
-    // of the two above, so a day of searches cannot spend the background
-    // budget that the owner's sent mail is assessed from.
+    // of the two above: a sub-cap on the share of the access lane a day of
+    // searches may take, so they cannot crowd out the owner's sent mail,
+    // assessed from the same lane.
     if job.trigger == "archive_access" {
         limits.push((
             crate::store::ARCHIVE_ACCESS_BUDGET_KEY.into(),
@@ -1646,9 +1654,9 @@ mod budget_tests {
     }
 
     /// An archive access check is charged three times over: the total, the
-    /// background budget, and a sub-cap of its own, so a day of agent searches
-    /// runs out of ITS budget long before it touches the one the owner's sent
-    /// mail is assessed from.
+    /// access lane's budget, and a sub-cap of its own, so a day of agent
+    /// searches runs out of ITS budget long before it touches the one the
+    /// owner's sent mail is assessed from.
     #[test]
     fn an_archive_access_check_is_charged_to_its_own_daily_sub_cap_as_well() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -1665,8 +1673,8 @@ mod budget_tests {
             vec![
                 (GLOBAL_BUDGET_KEY.into(), config.triage.agent.daily_run_cap),
                 (
-                    crate::store::BACKGROUND_BUDGET_KEY.into(),
-                    config.triage.agent.effective_background_daily_run_cap()
+                    crate::store::ACCESS_BUDGET_KEY.into(),
+                    config.triage.agent.effective_access_daily_run_cap()
                 ),
                 (crate::store::ARCHIVE_ACCESS_BUDGET_KEY.into(), 3),
             ]
@@ -1682,7 +1690,7 @@ mod budget_tests {
         // The refused fourth charged nothing anywhere.
         assert_eq!(
             store
-                .stage2_budget_used(account, crate::store::BACKGROUND_BUDGET_KEY, "today")
+                .stage2_budget_used(account, crate::store::ACCESS_BUDGET_KEY, "today")
                 .unwrap(),
             3
         );
@@ -1692,21 +1700,99 @@ mod budget_tests {
     }
 
     #[test]
+    /// The two lanes fit under the total minus one together, so a day that
+    /// spends both still leaves a run for new mail: a lowered total cuts the
+    /// access lane first, splits the room when the background cap alone
+    /// reaches it, and pauses the access lane only when there is no room to
+    /// share.
     fn access_cannot_borrow_arrival_capacity_and_lowering_total_keeps_a_reserve() {
         let mut config = Config::default();
-        config.triage.agent.daily_run_cap = 2;
         let mut job = read_job(1, 1);
         job.kind = "access".into();
         job.foreground = true; // Defensive even if a malformed lane reaches us.
-        assert_eq!(
-            investigation_budget_limits(&config, &job),
-            vec![
-                (GLOBAL_BUDGET_KEY.into(), 2),
-                ("__agent_background__".into(), 1)
-            ]
+        let access = |config: &Config| investigation_budget_limits(config, &job)[1].clone();
+        // The defaults: 200 and 500 under 10,000 leave 9,300.
+        assert_eq!(access(&config), ("__agent_access__".into(), 500));
+        assert_eq!(config.triage.agent.reserved_arrival_runs(), 9_300);
+        // A total of 600: background keeps its 200, access gets 399, one left.
+        config.triage.agent.daily_run_cap = 600;
+        assert_eq!(config.triage.agent.lane_caps(), (200, 399));
+        assert_eq!(config.triage.agent.reserved_arrival_runs(), 1);
+        // A total of 300: background still keeps its 200, access gets 99.
+        config.triage.agent.daily_run_cap = 300;
+        assert_eq!(config.triage.agent.lane_caps(), (200, 99));
+        // A total the background cap alone reaches: the room is shared.
+        config.triage.agent.daily_run_cap = 200;
+        assert_eq!(config.triage.agent.lane_caps(), (100, 99));
+        assert_eq!(config.triage.agent.reserved_arrival_runs(), 1);
+        // A small access lane takes only what it needs of a tight total.
+        config.triage.agent.daily_run_cap = 151;
+        config.triage.agent.background_daily_run_cap = 150;
+        config.triage.agent.access_daily_run_cap = 10;
+        assert_eq!(config.triage.agent.lane_caps(), (140, 10));
+        config.triage.agent.background_daily_run_cap = 200;
+        config.triage.agent.access_daily_run_cap = 500;
+        // No room to share: the access lane waits for tomorrow's total.
+        config.triage.agent.daily_run_cap = 2;
+        assert_eq!(config.triage.agent.lane_caps(), (1, 0));
+        assert_eq!(access(&config).1, 0);
+        assert_eq!(config.triage.agent.reserved_arrival_runs(), 1);
+        // Paused by the operator: nothing is shared with a lane set to zero.
+        config.triage.agent.daily_run_cap = 200;
+        config.triage.agent.access_daily_run_cap = 0;
+        assert_eq!(config.triage.agent.lane_caps(), (199, 0));
+    }
+
+    /// THE MEASUREMENT behind the access lane's own key. A day of 150 access
+    /// checks (spam and sent mail) and 150 backfill investigations against
+    /// the 200-run background budget they used to share: 100 of the 300
+    /// deferred to tomorrow, whichever came second. On their own keys, none,
+    /// and each lane's own cap still holds.
+    #[test]
+    fn access_checks_and_the_backfill_no_longer_defer_each_other() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let account = store.ensure_account("lanes@example.com").unwrap();
+        let config = Config::default();
+        let agent = &config.triage.agent;
+        let mut access = read_job(account, 1);
+        access.kind = "access".into();
+        access.trigger = "source_access".into();
+        let backfill = read_job(account, 2);
+        assert!(!backfill.foreground && backfill.kind == "triage");
+        // Before: every access check charged the background key.
+        let shared = vec![
+            (GLOBAL_BUDGET_KEY.to_string(), agent.daily_run_cap),
+            (
+                crate::store::BACKGROUND_BUDGET_KEY.to_string(),
+                agent.effective_background_daily_run_cap(),
+            ),
+        ];
+        let refused = |day: &str, limits: &[(String, u32)], runs: u32| {
+            (0..runs)
+                .filter(|_| !store.reserve_agent_budget(account, day, limits).unwrap())
+                .count()
+        };
+        let before = refused("before", &shared, 300);
+        // After: each lane on its own key.
+        let access_limits = investigation_budget_limits(&config, &access);
+        let backfill_limits = investigation_budget_limits(&config, &backfill);
+        assert_eq!(access_limits[1].0, crate::store::ACCESS_BUDGET_KEY);
+        assert_eq!(backfill_limits[1].0, crate::store::BACKGROUND_BUDGET_KEY);
+        let after = refused("after", &access_limits, 150) + refused("after", &backfill_limits, 150);
+        eprintln!(
+            "a day of 150 access checks and 150 backfill runs: {before} deferred on the shared \
+             background budget, {after} on their own keys"
         );
-        config.triage.agent.background_daily_run_cap = 0;
-        assert_eq!(investigation_budget_limits(&config, &job)[1].1, 0);
+        assert_eq!((before, after), (100, 0));
+        let cap = agent.effective_access_daily_run_cap();
+        assert_eq!(cap, 500);
+        assert_eq!(refused("cap", &access_limits, cap + 10), 10);
+        assert_eq!(
+            store
+                .stage2_budget_used(account, crate::store::BACKGROUND_BUDGET_KEY, "cap")
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

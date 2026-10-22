@@ -2031,6 +2031,10 @@ impl Config {
             &mut self.triage.agent.background_daily_run_cap,
         );
         env_override(
+            "SQUELCH_TRIAGE_ACCESS_DAILY_RUN_CAP",
+            &mut self.triage.agent.access_daily_run_cap,
+        );
+        env_override(
             "SQUELCH_TRIAGE_MAX_ATTEMPTS",
             &mut self.triage.agent.max_attempts,
         );
@@ -2079,6 +2083,40 @@ impl Config {
                      limit; clamping to {MAX_TIMEOUT_SECS}"
                 );
                 *timeout = MAX_TIMEOUT_SECS;
+            }
+            // The background and access lanes fit under the total together
+            // (`lane_caps`): a lowered total cuts what was set, which is said
+            // once here rather than refused.
+            let agent = &self.triage.agent;
+            let (background, access) = agent.lane_caps();
+            if (background, access) != (agent.background_daily_run_cap, agent.access_daily_run_cap)
+            {
+                eprintln!(
+                    "squelch: config triage.agent caps background={} access={} do not fit \
+                     daily_run_cap={} together; in force: background {background}, access {access}",
+                    agent.background_daily_run_cap, agent.access_daily_run_cap, agent.daily_run_cap
+                );
+            }
+            // The access check's cap is in characters, its size limit in
+            // bytes: six bytes a character at most (a control character is
+            // written as `\u00XX`), plus the rest of the input, must fit, or
+            // a body read to the cap is refused on every attempt and the job
+            // fails for good. Never clamped to nothing (validation refuses a
+            // zero cap, and the daemon should boot); a limit too small for a
+            // sender and a subject fails every access check loudly instead.
+            let context = &mut self.triage.context;
+            let most = (context
+                .max_context_bytes
+                .saturating_sub(crate::triage::agent_config::ACCESS_INPUT_SLACK_BYTES)
+                / 6)
+            .max(1);
+            if context.access_body_chars > most {
+                eprintln!(
+                    "squelch: config triage.context.access_body_chars={} cannot fit \
+                     max_context_bytes={}; clamping to {most}",
+                    context.access_body_chars, context.max_context_bytes
+                );
+                context.access_body_chars = most;
             }
         }
         env_override(
@@ -2639,6 +2677,7 @@ mod tests {
             "SQUELCH_TRIAGE_MAX_ATTEMPTS",
             "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
             "SQUELCH_TRIAGE_BACKGROUND_DAILY_RUN_CAP",
+            "SQUELCH_TRIAGE_ACCESS_DAILY_RUN_CAP",
         ];
         let previous = names.map(std::env::var_os);
         // SAFETY: every environment-mutating config test holds ENV_LOCK.
@@ -2647,6 +2686,7 @@ mod tests {
             std::env::set_var(names[1], "4");
             std::env::set_var(names[2], "600");
             std::env::set_var(names[3], "5");
+            std::env::set_var(names[4], "7");
         }
         let mut config = Config::default();
         config.apply_env_overrides();
@@ -2661,8 +2701,33 @@ mod tests {
         }
         assert_eq!(config.triage.agent.daily_run_cap, 17);
         assert_eq!(config.triage.agent.background_daily_run_cap, 5);
+        assert_eq!(config.triage.agent.access_daily_run_cap, 7);
         assert_eq!(config.triage.agent.max_attempts, 4);
         assert_eq!(config.triage.agent.outage_retry_secs, 600);
+    }
+
+    /// The access check's cap cannot exceed what its byte limit holds: the
+    /// operator who raises it for the old reach gets the most the limit
+    /// fits, not a check that is refused on every attempt.
+    #[test]
+    fn access_body_cap_is_clamped_to_what_the_size_limit_holds() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.triage.context.access_body_chars = 1_000_000;
+        config.apply_env_overrides();
+        assert_eq!(
+            config.triage.context.access_body_chars,
+            (120_000 - crate::triage::agent_config::ACCESS_INPUT_SLACK_BYTES) / 6
+        );
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.triage.context.access_body_chars, 8_000);
+        // An absurd limit leaves a cap of one, not of nothing (which
+        // validation would refuse).
+        let mut config = Config::default();
+        config.triage.context.max_context_bytes = 100;
+        config.apply_env_overrides();
+        assert_eq!(config.triage.context.access_body_chars, 1);
     }
 
     /// The outage interval and the turn deadline are clamped, not refused:

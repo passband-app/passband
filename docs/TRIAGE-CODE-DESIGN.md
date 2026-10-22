@@ -333,6 +333,7 @@ concurrency = 2
 initial_thread_messages = 8
 max_related_messages = 20
 full_body_chars = 16000  # a body's cap in context; read_message pages the rest
+access_body_chars = 8000  # the access check's cap; links shortened, quotes kept
 # explicit byte/token and attachment limits selected with the provider adapter
 
 [notify]

@@ -14,8 +14,9 @@ pub use search_query::{
     FtsQuery, SearchDiagnostics, SearchFilter, SearchSort, TermDf, parse_search_query,
 };
 pub use sqlite::{
-    ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX, ARCHIVE_SURFACE_CAP, AccessProgress,
-    ArchiveAccessCaps, BACKGROUND_BUDGET_KEY, EXTERNAL_RECALL_MAX, ExternalSearchMode, SqliteStore,
+    ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX,
+    ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
+    EXTERNAL_RECALL_MAX, ExternalSearchMode, SqliteStore,
 };
 
 use crate::error::Result;

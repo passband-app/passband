@@ -123,6 +123,11 @@ enum TriageCommand {
         /// only helps while the total has room.
         #[arg(long)]
         background: bool,
+        /// Raise the access lane's cap (the owner's sent mail, spam, archive
+        /// rows a caller asked to read) instead of the total. Access runs
+        /// count toward the total too.
+        #[arg(long, conflicts_with = "background")]
+        access: bool,
     },
 }
 
@@ -1361,19 +1366,27 @@ fn check_transfer_usable(transfer: &CredentialTransfer) -> Result<(), squelch_co
 /// `triage status` and `triage grant`: the store directly, like `token`, so
 /// they work in a tenant pod beside the running daemon.
 fn cmd_triage(config: &Config, args: &TriageArgs) -> Result<(), squelch_core::CoreError> {
-    use squelch_core::triage::agent_config::{BACKGROUND_BUDGET_KEY, TOTAL_BUDGET_KEY};
+    use squelch_core::triage::agent_config::{
+        ACCESS_BUDGET_KEY, BACKGROUND_BUDGET_KEY, TOTAL_BUDGET_KEY,
+    };
     let (store, account_id) = open_account_store(config)?;
     let agent = &config.triage.agent;
-    if let TriageCommand::Grant { runs, background } = args.command {
-        let key = if background {
-            BACKGROUND_BUDGET_KEY
+    if let TriageCommand::Grant {
+        runs,
+        background,
+        access,
+    } = args.command
+    {
+        let (key, lane) = if background {
+            (BACKGROUND_BUDGET_KEY, "background")
+        } else if access {
+            (ACCESS_BUDGET_KEY, "access")
         } else {
-            TOTAL_BUDGET_KEY
+            (TOTAL_BUDGET_KEY, "total")
         };
         let released = store.grant_daily_runs(account_id, key, runs, agent, chrono::Utc::now())?;
         println!(
-            "granted {runs} extra {} runs until midnight UTC; released {released} held jobs",
-            if background { "background" } else { "total" }
+            "granted {runs} extra {lane} runs until midnight UTC; released {released} held jobs"
         );
     }
     let status = store.daily_budget_status(account_id, agent, chrono::Utc::now())?;
@@ -1386,21 +1399,26 @@ fn cmd_triage(config: &Config, args: &TriageArgs) -> Result<(), squelch_core::Co
         status.background_used, status.background_cap
     );
     println!(
-        "held until tomorrow: {} new mail, {} background, {} revisits",
-        status.held_arrival, status.held_background, status.held_revisit
+        "access      {} of {} runs today",
+        status.access_used, status.access_cap
+    );
+    println!(
+        "held until tomorrow: {} new mail, {} background, {} access, {} revisits",
+        status.held_arrival, status.held_background, status.held_access, status.held_revisit
     );
     if status.total_used >= status.total_cap
         && (status.held_background > 0
+            || status.held_access > 0
             || matches!(
                 args.command,
                 TriageCommand::Grant {
                     background: true,
                     ..
-                }
+                } | TriageCommand::Grant { access: true, .. }
             ))
     {
         println!(
-            "note: the total is spent, so no background grant helps until it has room: `squelchd triage grant <runs>`"
+            "note: the total is spent, so no lane grant (--background, --access) helps until it has room: `squelchd triage grant <runs>`"
         );
     }
     if status.held_revisit > 0 {
@@ -3760,10 +3778,38 @@ mod tests {
 
         match Cli::parse_from(["squelchd", "triage", "grant", "500", "--background"]).command {
             Command::Triage(TriageArgs {
-                command: TriageCommand::Grant { runs, background },
-            }) => assert_eq!((runs, background), (500, true)),
+                command:
+                    TriageCommand::Grant {
+                        runs,
+                        background,
+                        access,
+                    },
+            }) => assert_eq!((runs, background, access), (500, true, false)),
             _ => panic!("expected triage grant"),
         }
+        match Cli::parse_from(["squelchd", "triage", "grant", "50", "--access"]).command {
+            Command::Triage(TriageArgs {
+                command:
+                    TriageCommand::Grant {
+                        runs,
+                        background,
+                        access,
+                    },
+            }) => assert_eq!((runs, background, access), (50, false, true)),
+            _ => panic!("expected triage grant"),
+        }
+        // One lane at a time.
+        assert!(
+            Cli::try_parse_from([
+                "squelchd",
+                "triage",
+                "grant",
+                "5",
+                "--background",
+                "--access"
+            ])
+            .is_err()
+        );
         assert!(matches!(
             Cli::parse_from(["squelchd", "triage", "status"]).command,
             Command::Triage(TriageArgs {

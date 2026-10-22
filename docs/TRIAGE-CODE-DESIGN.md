@@ -332,6 +332,7 @@ concurrency = 2
 [triage.context]
 initial_thread_messages = 8
 max_related_messages = 20
+full_body_chars = 16000  # a body's cap in context; read_message pages the rest
 # explicit byte/token and attachment limits selected with the provider adapter
 
 [notify]

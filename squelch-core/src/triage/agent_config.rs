@@ -146,6 +146,17 @@ pub struct ContextConfig {
     /// threads of five or more messages cost 2.5x a single message's input.
     pub full_sibling_bodies: usize,
     pub sibling_excerpt_chars: usize,
+    /// The most of a condensed body that rides whole into the initial
+    /// context, in characters: the target's and the newest
+    /// `full_sibling_bodies` siblings'. Past it the body is cut and says so
+    /// the way a `read_message` page does (`body_truncated`, `next_offset`
+    /// into the stored text), so the model pages the tail when it decides
+    /// the tail could matter. Measured before this knob: a 55k-character
+    /// newsletter rode nearly whole into every turn of its run, about 14k
+    /// input tokens a turn, and the top tenth of calls by input carried half
+    /// of all uncached input. The retired stages capped bodies at 6k and 12k
+    /// characters; 16k keeps every ordinary message whole.
+    pub full_body_chars: usize,
     pub max_related_messages: usize,
     pub max_context_bytes: usize,
     pub max_tool_result_bytes: usize,
@@ -156,6 +167,7 @@ impl Default for ContextConfig {
             initial_thread_messages: 8,
             full_sibling_bodies: 2,
             sibling_excerpt_chars: 400,
+            full_body_chars: 16_000,
             max_related_messages: 20,
             max_context_bytes: 120_000,
             max_tool_result_bytes: 24_000,
@@ -199,6 +211,7 @@ impl AgentTriageConfig {
             || self.agent.outage_retry_secs == 0
             || self.context.max_context_bytes == 0
             || self.context.max_tool_result_bytes == 0
+            || self.context.full_body_chars == 0
         {
             return Err("triage budgets must be positive".into());
         }

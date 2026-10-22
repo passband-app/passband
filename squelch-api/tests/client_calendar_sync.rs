@@ -603,16 +603,19 @@ async fn world_with(
     let (state, store, acct) = state_with(|_, _| {});
     let path = cred_path(tag);
     write_grant(&path, scopes);
-    let creds = Arc::new(CalendarCredentials::new(
-        acct,
-        "me@example.com".into(),
-        CredentialBackend::File,
-        path.clone(),
-        OAuthClientConfig {
-            client_id: "id".into(),
-            client_secret: "secret".into(),
-        },
-    ));
+    let creds = Arc::new(
+        CalendarCredentials::new(
+            acct,
+            "me@example.com".into(),
+            CredentialBackend::File,
+            path.clone(),
+            OAuthClientConfig {
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+        )
+        .unwrap(),
+    );
     let google: Fake = Arc::default();
     let base = spawn_google(google.clone()).await;
     // The calendar hidden feature, ON: every test here is about a mailbox
@@ -1816,7 +1819,8 @@ async fn events_are_scoped_to_their_account() {
             client_id: "id".into(),
             client_secret: "secret".into(),
         },
-    );
+    )
+    .unwrap();
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
             .with_features(w.features.clone())
@@ -3492,7 +3496,8 @@ async fn writes_are_scoped_to_their_account() {
             client_id: "id".into(),
             client_secret: "secret".into(),
         },
-    );
+    )
+    .unwrap();
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
             .with_features(w.features.clone())
@@ -4510,7 +4515,8 @@ async fn guests_are_scoped_to_their_account() {
             client_id: "id".into(),
             client_secret: "secret".into(),
         },
-    );
+    )
+    .unwrap();
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
             .with_features(w.features.clone())

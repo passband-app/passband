@@ -45,7 +45,18 @@ rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 regex = "1"
 async-trait = "0.1"
 oauth2 = { version = "5", features = ["reqwest", "reqwest-blocking", "rustls-tls"], default-features = false }
-keyring = "4"
+# The OS keyring behind the `keyring` credential backend, which is the macOS
+# keychain and nothing else: keyring-core is the entry API, and the Apple store
+# is linked on macOS alone (squelch-core/Cargo.toml). The `keyring` crate's
+# defaults (its `v1` feature) linked the Secret Service store too, which put
+# zbus, a second async runtime, 38 crates and 53 compile units into every
+# Linux build of a daemon that runs the `file` backend there (config.rs,
+# `CredentialBackend::default`; the image sets it). `keychain` alone: the
+# `protected` store is for apps with an entitlement, which a CLI daemon is not.
+# 1.0.2 at least: before it, a delete the keychain refused was reported as
+# done, which an import's rollback would have believed.
+keyring-core = "1"
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 # age (the rage crate) for encryption-at-rest of the file credential backend on
 # HOSTED boxes: the control plane seals a tenant's token blob to this box's
 # recipient before it ever touches a disk we operate, and only the daemon — handed

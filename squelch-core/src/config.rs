@@ -149,9 +149,12 @@ pub const CALENDAR_SCOPES: &[&str] = &[CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOP
 /// echoes this one on the response, so one string serves both directions.
 pub const GOOGLE_PROFILE_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.profile";
 
-/// Which backend persists OAuth tokens: the OS secret service, or a mode-0600
-/// JSON file (the only option on a headless box with no desktop keyring).
-/// Defaults to keyring on macOS, file on Linux.
+/// Which backend persists OAuth tokens: the OS keyring, or a mode-0600 JSON
+/// file (the only option on a headless box with no desktop keyring). Defaults
+/// to keyring on macOS, file everywhere else; and the keyring is the macOS
+/// keychain alone, so elsewhere `keyring` is refused up front, at boot or
+/// before a consent (`credentials::ensure_backend`), rather than linked for a
+/// box that never selects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CredentialBackend {
@@ -161,7 +164,8 @@ pub enum CredentialBackend {
 
 impl Default for CredentialBackend {
     fn default() -> Self {
-        // Headless Linux typically has no Secret Service.
+        // The keyring is the macOS keychain; no other platform has a store in
+        // this build (`credentials::os_keyring`).
         if cfg!(target_os = "macos") {
             CredentialBackend::Keyring
         } else {
@@ -1845,9 +1849,9 @@ pub struct Config {
 
     /// Path to the SQLite store.
     pub db_path: PathBuf,
-    /// Which backend persists OAuth tokens (`keyring` or `file`). Defaults per
-    /// platform (keyring on macOS, file on Linux). Override with
-    /// `SQUELCH_CRED_BACKEND`.
+    /// Which backend persists OAuth tokens (`keyring`, the macOS keychain, on
+    /// macOS only; `file` anywhere). Defaults per platform (keyring on macOS,
+    /// file elsewhere). Override with `SQUELCH_CRED_BACKEND`.
     pub credential_backend: CredentialBackend,
     /// Path to the JSON credentials file used by the `file` backend. Defaults to
     /// `~/.config/squelch/credentials.json`. Ignored by the keyring backend.

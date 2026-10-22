@@ -2036,7 +2036,7 @@ final class AppStore {
         //     daemon's rows, and would write them into the world wiped here.
         epoch &+= 1
         SitrepPoller.shared.stop()
-        wipeAccountState()
+        wipeAccountState(landingOn: Self.pageKeptAcrossSwitch(activeView))
         wipeAccountCaches()
 
         // (8) The new credentials go live.
@@ -2213,10 +2213,46 @@ final class AppStore {
         warmZoneThreads()
     }
 
+    /// The page a switch leaves the person on: the one they were on. A switch
+    /// changes which mailbox is on screen, not where in the app they are, and
+    /// `MainView` names a page and nothing a daemon minted, so it is the one
+    /// piece of navigation that can cross. The rest of the history cannot.
+    ///
+    /// Two exceptions. Process is reached only from the all-mail peer-review
+    /// chip, so its way back is Emails. The calendar's gate is read off the
+    /// new account's stats, which have not arrived when this runs, so
+    /// `route(to:)` sends it to the sitrep like any closed gate.
+    ///
+    /// MAC ONLY. The phone maps a route onto a tab only for Sitrep and Mail,
+    /// so keeping `activeView` there jumped Quick Look and Search to whichever
+    /// of the two was visited last. It keeps its old answer, the sitrep,
+    /// until its tabs are taught to stay put on their own.
+    private static func pageKeptAcrossSwitch(_ view: MainView) -> MainView {
+        #if os(iOS)
+            return .sitrep
+        #else
+            guard !RehearsalMode.isEnabled else { return .sitrep }
+            return view == .process ? .emails : view
+        #endif
+    }
+
+    /// Bumped by every wipe, in the same pass. The routed pages are keyed on
+    /// it (RootView), so the page left standing over a new world is a new
+    /// instance: its `@State` held the last daemon's rows and ids, and its
+    /// `.task` load has to run again. NOT the live account id, which moves
+    /// at a different moment (a removal hands it to the survivor before the
+    /// survivor's preflight, and a switch only after the client is
+    /// reconfigured), leaving the old page live over the new world between.
+    private(set) var pageGeneration = 0
+
     /// Everything in this store that belongs to ONE account. Message ids are
     /// per-daemon SQLite ints, so "looks plausible" is precisely the failure
     /// mode being prevented here: A's row 412 is B's row 412.
-    private func wipeAccountState() {
+    ///
+    /// `landingOn` is the page the world comes back up on: the sitrep, except
+    /// for a switch (see `pageKeptAcrossSwitch`). The history is reset either
+    /// way, because every entry in it carries the old account's selection.
+    private func wipeAccountState(landingOn page: MainView = .sitrep) {
         boardIsSnapshot = false
         // The unsubscribe tray's rows and buttons belong to the old account:
         // "Finish on their site" would tell the NEW daemon about a job it has
@@ -2253,6 +2289,15 @@ final class AppStore {
         mailPages = [:]
         mailLoadedAt = [:]
         mailPagingState = [:]
+        // The sent page is its own cache, and it is the old daemon's rows and
+        // ids as much as the others. Kept, it repainted as the new account's
+        // Sent, and a refresh inside its TTL (or one joining its fetch) never
+        // replaced it.
+        sentRows = .loading
+        sentLoadedAt = nil
+        sentRefresh = nil
+        // A spam fetch asked of the old daemon says nothing about this one's.
+        spamSyncRequestedAt = nil
         mailKeyset = false
         mailRefreshes = [:]
         reminderRows = .loading
@@ -2329,9 +2374,12 @@ final class AppStore {
         authRings = []
         authQueue = []
         tracking = nil
-        history = [HistoryEntry(view: .sitrep, selectedId: nil)]
+        // `route(to:)` first: it is what turns a closed calendar into the
+        // sitrep, and the history has to name the page actually shown.
+        route(to: page)
+        pageGeneration &+= 1
+        history = [HistoryEntry(view: activeView, selectedId: nil)]
         historyIndex = 0
-        route(to: .sitrep)
     }
 
     /// The per-account caches that live OUTSIDE this store. Every one of them
@@ -3355,9 +3403,13 @@ final class AppStore {
     }
 
     private func performSentRefresh() async {
+        let e = epoch
         if sentRows.value == nil { sentRows.isLoading = true }
         do {
             let page = try await APIClient.shared.listSent(limit: Self.mailLimit)
+            // The rows belong to the account that asked for them; the wipe
+            // has already put the page back to loading for the one after.
+            guard e == epoch else { return }
             // THE SERVER'S ORDER IS THE ORDER (received_at DESC, id DESC): no
             // client-side sort, and no `resolvedIds` subtraction either — sent
             // mail is a record of what went out, and none of the triage verbs
@@ -3371,6 +3423,7 @@ final class AppStore {
             ThreadPrefetch.shared.warm(
                 page.items.prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
         } catch {
+            guard e == epoch else { return }
             sentRows.error = errText(error, "load failed")
         }
         if sentRows.isLoading { sentRows.isLoading = false }

@@ -721,6 +721,69 @@ pub async fn translate_thread(
     Ok(Json(json!({ "promoted": promoted })))
 }
 
+// --- GET/POST /client/translate-config ---------------------------------------
+
+/// The "Languages I read" setting: the codes the owner reads, every code they
+/// could pick (with its English name), and whether a translator is configured
+/// at all, so the card can say so instead of offering a choice that does
+/// nothing.
+#[derive(Debug, Serialize)]
+pub struct TranslateConfigView {
+    active: bool,
+    read_languages: Vec<String>,
+    available: Vec<LanguageChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LanguageChoice {
+    code: &'static str,
+    name: &'static str,
+}
+
+fn translate_config_view(active: bool, read_languages: Vec<String>) -> TranslateConfigView {
+    TranslateConfigView {
+        active,
+        read_languages,
+        available: squelch_core::translate::Lang::readable_choices()
+            .into_iter()
+            .map(|l| LanguageChoice {
+                code: l.code(),
+                name: l.english_name(),
+            })
+            .collect(),
+    }
+}
+
+pub async fn get_translate_config(
+    State(state): State<ApiState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let active = state.translate_active;
+    let codes = store_call(&state, move |store, account_id| {
+        store.read_languages(account_id)
+    })
+    .await?;
+    Ok(Json(translate_config_view(active, codes)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TranslateConfigBody {
+    read_languages: Vec<String>,
+}
+
+/// Replaces the whole set. Unknown codes and English are dropped, and the
+/// response is the set as stored.
+pub async fn set_translate_config(
+    State(state): State<ApiState>,
+    Json(body): Json<TranslateConfigBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let active = state.translate_active;
+    let codes = store_call(&state, move |store, account_id| {
+        store.set_read_languages(account_id, &body.read_languages, Utc::now())
+    })
+    .await?;
+    Ok(Json(translate_config_view(active, codes)))
+}
+
 // --- GET /client/attachments/{id} -------------------------------------------
 
 /// Render-safety whitelist for the served `Content-Type`: the stored mime is

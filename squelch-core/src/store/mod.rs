@@ -3399,6 +3399,22 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<usize>;
 
+    /// The owner's "Languages I read" (ISO 639-1, sorted): mail detected in
+    /// one of them is shown as written and never translated.
+    fn read_languages(&self, account_id: AccountId) -> Result<Vec<String>>;
+
+    /// Replace the "Languages I read" set (unknown codes and English are
+    /// dropped) and bring the queue in line: unserved rows in an added
+    /// language close `not_needed`, rows closed for a removed one come back
+    /// `deferred` (translated when opened). Served translations stay. Returns
+    /// the set as stored.
+    fn set_read_languages(
+        &self,
+        account_id: AccountId,
+        codes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>>;
+
     /// The translation rows for `message_ids`, in any status, ordered by id.
     /// The caller decides what a status means to its door.
     fn message_translations(

@@ -151,6 +151,34 @@ Decisions locked with the user (2026-10-21):
   transaction. Archive rows get `status='deferred'`, and so does a
   backfilled message while the day's translate budget is spent.
 
+## Languages I read
+
+- The owner picks languages they read in Settings > Mail. The choice is
+  stored per account in `app_settings` under `translate.read_languages` as a
+  JSON array of ISO 639-1 codes. The store drops unknown codes and `en`. A
+  value that does not parse reads as an empty list, so a bad value means
+  translating too much, never too little.
+- Mail detected in a language the owner reads still gets a row, inserted as
+  `not_needed`, which serves nothing and spends nothing. The row exists so the
+  choice can be undone.
+- A row the translator reads as English is recorded with
+  `source_lang='en'`. That keeps the two kinds of `not_needed` row
+  distinguishable: one in a real language means the owner reads that
+  language.
+- Changing the set reconciles the queue in the same transaction:
+  - Adding a language closes its unserved rows (`pending`, `failed`,
+    `deferred`) as `not_needed`. That releases any triage hold, and a result
+    still in flight writes nothing because its lease no longer matches.
+  - Removing a language brings its `not_needed` rows back as `deferred`, with
+    attempts reset, so that mail is translated when its thread is opened and
+    not before.
+  - Served translations (`done`, `incomplete`) are left alone. They are paid
+    for and still offer the original.
+- `GET /client/translate-config` returns `{active, read_languages, available:
+  [{code, name}]}`. `available` lists every language the detector knows except
+  English. `POST` with `{read_languages}` replaces the set and returns the
+  same view.
+
 ## Storage (`schema.sql`, `CREATE TABLE IF NOT EXISTS`)
 
 ```sql

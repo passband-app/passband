@@ -1494,3 +1494,133 @@ fn a_six_hour_outage_never_charges_a_released_row() {
     assert_eq!(row(&store, j.message_id).unwrap().1, "failed");
     assert_eq!(row(&store, j.message_id).unwrap().2, 1);
 }
+
+// ---- "Languages I read" ----------------------------------------------------
+
+fn langs(codes: &[&str]) -> Vec<String> {
+    codes.iter().map(|c| c.to_string()).collect()
+}
+
+#[test]
+fn the_read_set_is_stored_clean_and_garbage_reads_as_none() {
+    let (store, acct) = store();
+    let stored = store
+        .set_read_languages(acct, &langs(&["FR", "en", "xx", "fr", " de "]), Utc::now())
+        .unwrap();
+    assert_eq!(stored, langs(&["de", "fr"]));
+    assert_eq!(store.read_languages(acct).unwrap(), stored);
+    store
+        .set_app_setting(
+            acct,
+            super::super::translations::READ_LANGUAGES_KEY,
+            "{not json",
+        )
+        .unwrap();
+    assert!(store.read_languages(acct).unwrap().is_empty());
+}
+
+#[test]
+fn mail_in_a_language_the_owner_reads_is_never_translated() {
+    let (store, acct) = store();
+    store
+        .set_read_languages(acct, &langs(&["fr"]), Utc::now())
+        .unwrap();
+    let fr = triaged(acct, "g1", "t1").lang("fr").ingest(&store);
+    let es = triaged(acct, "g2", "t2").lang("es").ingest(&store);
+    assert_eq!(row(&store, fr).unwrap().1, "not_needed");
+    assert_eq!(row(&store, es).unwrap().1, "pending");
+    let claimed = store.claim_translations(acct, Utc::now(), 10).unwrap();
+    assert_eq!(
+        claimed.iter().map(|j| j.message_id).collect::<Vec<_>>(),
+        vec![es]
+    );
+    assert!(
+        store.thread_view_with_html(acct, "t1").unwrap().messages[0]
+            .translation
+            .is_none()
+    );
+}
+
+#[test]
+fn adding_a_language_closes_its_queue_and_leaves_paid_translations() {
+    let (store, acct) = store();
+    let live = triaged(acct, "g1", "t1").lang("de").ingest(&store);
+    let archived = store
+        .ingest_archive_message(&triaged(acct, "g2", "t2").lang("de").build())
+        .unwrap()
+        .unwrap();
+    let paid = triaged(acct, "g3", "t3").lang("de").ingest(&store);
+    let spanish = triaged(acct, "g4", "t4").lang("es").ingest(&store);
+    // All three live rows are claimed; only `paid`'s result lands, so the
+    // other two are still `pending` (in flight) when the setting changes.
+    let now = Utc::now();
+    assert_eq!(store.claim_translations(acct, now, 10).unwrap().len(), 3);
+    let t = translated("Your invoice", "Hello");
+    store
+        .record_translation(&job(&store, paid), &write(&t), now)
+        .unwrap();
+    assert_eq!(row(&store, paid).unwrap().1, "done");
+
+    store
+        .set_read_languages(acct, &langs(&["de"]), now)
+        .unwrap();
+    assert_eq!(row(&store, live).unwrap().1, "not_needed");
+    assert_eq!(row(&store, archived).unwrap().1, "not_needed");
+    assert_eq!(row(&store, paid).unwrap().1, "done");
+    assert_eq!(row(&store, spanish).unwrap().1, "pending");
+    // Closing the row lets triage go ahead on the original.
+    let held: Option<i64> = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT triage_wait_until FROM message_translations WHERE message_id = ?1",
+            params![live],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, None);
+}
+
+#[test]
+fn removing_a_language_brings_its_mail_back_translated_on_open() {
+    let (store, acct) = store();
+    // Detected German, but the translator read English: that row is closed
+    // for a reason the setting has nothing to do with.
+    let english = triaged(acct, "g1", "t1").lang("de").ingest(&store);
+    store.claim_translations(acct, Utc::now(), 10).unwrap();
+    store
+        .record_translation(
+            &job(&store, english),
+            &TranslationWrite::NotNeeded {
+                model: "claude-sonnet-5",
+                prompt_version: crate::translate::PROMPT_VERSION,
+            },
+            Utc::now(),
+        )
+        .unwrap();
+    assert_eq!(row(&store, english).unwrap().0, "en");
+
+    store
+        .set_read_languages(acct, &langs(&["de"]), Utc::now())
+        .unwrap();
+    let read = triaged(acct, "g2", "t2").lang("de").ingest(&store);
+    assert_eq!(row(&store, read).unwrap().1, "not_needed");
+
+    store.set_read_languages(acct, &[], Utc::now()).unwrap();
+    // Back, but parked: it spends nothing until its thread is opened.
+    assert_eq!(row(&store, read), Some(("de".into(), "deferred".into(), 0)));
+    assert_eq!(row(&store, english).unwrap().1, "not_needed");
+    assert!(
+        store
+            .claim_translations(acct, Utc::now(), 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .promote_deferred_translations(acct, "t2", Utc::now())
+            .unwrap(),
+        1
+    );
+    assert_eq!(row(&store, read).unwrap().1, "pending");
+}

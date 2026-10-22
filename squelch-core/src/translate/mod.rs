@@ -13,7 +13,7 @@ pub mod detect;
 pub mod facts;
 pub mod segment;
 
-pub use detect::{Lang, detect};
+pub use detect::{Lang, detect, normalize_read_languages};
 
 use crate::config::{Config, Stage2Provider};
 use crate::triage::llm::{self, ClassifyError, LlmOutcome, LlmRequest, MAX_TOKENS, Usage};

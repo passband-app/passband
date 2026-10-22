@@ -149,6 +149,11 @@ fn client_router(state: ApiState) -> Router {
             "/client/thread/{thread_id}/translate",
             post(handlers::translate_thread),
         )
+        // "Languages I read": mail in them is never translated.
+        .route(
+            "/client/translate-config",
+            get(handlers::get_translate_config).post(handlers::set_translate_config),
+        )
         .route("/client/attachments/{id}", get(handlers::get_attachment))
         // FILES ON THEIR WAY OUT (see the handlers' header). The upload carries
         // its own body limit: the router's default is 2 MB, sized for JSON, and

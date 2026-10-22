@@ -2017,6 +2017,19 @@ impl Store for SqliteStore {
         self.record_translation(job, write, now)
     }
 
+    fn read_languages(&self, account_id: AccountId) -> Result<Vec<String>> {
+        self.read_languages(account_id)
+    }
+
+    fn set_read_languages(
+        &self,
+        account_id: AccountId,
+        codes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        self.set_read_languages(account_id, codes, now)
+    }
+
     fn promote_deferred_translations(
         &self,
         account_id: AccountId,

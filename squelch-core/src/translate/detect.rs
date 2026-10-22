@@ -71,6 +71,34 @@ impl Lang {
     pub fn is_english(self) -> bool {
         self.0 == whatlang::Lang::Eng
     }
+
+    /// The owner's "Languages I read" choices: every language a detection
+    /// can name except English, sorted by English name.
+    pub fn readable_choices() -> Vec<Lang> {
+        let mut all: Vec<Lang> = whatlang::Lang::all()
+            .iter()
+            .copied()
+            .map(Lang)
+            .filter(|l| !l.is_english())
+            .collect();
+        all.sort_by_key(|l| l.english_name());
+        all
+    }
+}
+
+/// A "Languages I read" set as stored: known non-English ISO 639-1 codes,
+/// lowercase, deduplicated and sorted. Anything else is dropped, so a client
+/// cannot store a code no detection will ever match.
+pub fn normalize_read_languages<S: AsRef<str>>(codes: &[S]) -> Vec<String> {
+    let mut out: Vec<String> = codes
+        .iter()
+        .filter_map(|c| Lang::from_code(c.as_ref()))
+        .filter(|l| !l.is_english())
+        .map(|l| l.code().to_string())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// The language `subject` and `body` are written in, when it is NOT English

@@ -45,6 +45,11 @@
 use super::*;
 use crate::store::{MessageTranslation, TranslationJob, TranslationStatus, TranslationWrite};
 
+/// `app_settings` key holding the owner's "Languages I read": a JSON array
+/// of ISO 639-1 codes ([`crate::translate::normalize_read_languages`]). Mail
+/// detected in one of them is shown as written and never translated.
+pub const READ_LANGUAGES_KEY: &str = "translate.read_languages";
+
 /// Attempts a row gets, claims that died mid-call included.
 pub const MAX_ATTEMPTS: i64 = 5;
 /// How long a claimed row is left alone before another pass may take it.
@@ -152,7 +157,15 @@ pub(super) fn queue_translation_conn(
     hold: bool,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let (status, wait_until) = if deferred {
+    // A LANGUAGE THE OWNER READS gets a row all the same, closed as
+    // `not_needed`, so taking the language off the list later can bring it
+    // back ([`SqliteStore::set_read_languages`]).
+    let readable = read_languages_conn(conn, account_id)?
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(source_lang));
+    let (status, wait_until) = if readable {
+        (TranslationStatus::NotNeeded, None)
+    } else if deferred {
         (TranslationStatus::Deferred, None)
     } else {
         (
@@ -349,6 +362,22 @@ fn close_translation_conn(
         }
     }
     Ok(())
+}
+
+/// The owner's "Languages I read" for `account`. A value that does not parse
+/// reads as none: the safe direction is translating too much, not too little.
+pub(super) fn read_languages_conn(conn: &Connection, account: AccountId) -> Result<Vec<String>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE account_id = ?1 AND key = ?2",
+            params![account, READ_LANGUAGES_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let codes: Vec<String> = raw
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default();
+    Ok(crate::translate::normalize_read_languages(&codes))
 }
 
 fn strings_json(items: &[String]) -> Option<String> {
@@ -576,6 +605,11 @@ impl SqliteStore {
                 tx.execute(
                     "UPDATE message_translations
                      SET status = ?2, model = ?3, prompt_version = ?4,
+                         -- The model read English. Recording that keeps a
+                         -- not_needed row in a real language meaning the
+                         -- owner reads it, which set_read_languages relies on.
+                         source_lang = CASE WHEN ?2 = 'not_needed' THEN 'en'
+                                            ELSE source_lang END,
                          subject = NULL, body = NULL, body_html = NULL,
                          snippet = NULL, missing_facts = NULL, updated_at = ?5,
                          lease = NULL, triage_wait_until = NULL, releases = 0,
@@ -662,6 +696,68 @@ impl SqliteStore {
             params![account_id, thread_id, now.timestamp()],
         )?;
         Ok(n)
+    }
+
+    pub(super) fn read_languages(&self, account_id: AccountId) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        read_languages_conn(&conn, account_id)
+    }
+
+    /// Replace the owner's "Languages I read" and bring the queue in line,
+    /// in one transaction. Rows not yet served in a language just added are
+    /// closed `not_needed`, which releases any triage they were holding.
+    /// `not_needed` rows in a language just removed come back `deferred`, so
+    /// they translate when their thread is opened and spend nothing before.
+    /// Served translations are left as they are: they are paid for and
+    /// still carry the original.
+    pub(super) fn set_read_languages(
+        &self,
+        account_id: AccountId,
+        codes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        let codes = crate::translate::normalize_read_languages(codes);
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let before = read_languages_conn(&tx, account_id)?;
+        let removed: Vec<&String> = before.iter().filter(|c| !codes.contains(c)).collect();
+        let now_s = now.timestamp();
+        tx.execute(
+            "INSERT INTO app_settings (account_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_id, key) DO UPDATE SET value = excluded.value",
+            params![
+                account_id,
+                READ_LANGUAGES_KEY,
+                serde_json::to_string(&codes).unwrap_or_else(|_| "[]".into())
+            ],
+        )?;
+        tx.execute(
+            "UPDATE message_translations
+             SET status = 'not_needed', lease = NULL, triage_wait_until = NULL,
+                 releases = 0, first_released_at = NULL, updated_at = ?3
+             WHERE account_id = ?1
+               AND status IN ('pending', 'failed', 'deferred')
+               AND source_lang IN (SELECT value FROM json_each(?2))",
+            params![
+                account_id,
+                serde_json::to_string(&codes).unwrap_or_else(|_| "[]".into()),
+                now_s
+            ],
+        )?;
+        tx.execute(
+            "UPDATE message_translations
+             SET status = 'deferred', attempts = 0, model = NULL,
+                 prompt_version = NULL, updated_at = ?3
+             WHERE account_id = ?1 AND status = 'not_needed'
+               AND source_lang IN (SELECT value FROM json_each(?2))",
+            params![
+                account_id,
+                serde_json::to_string(&removed).unwrap_or_else(|_| "[]".into()),
+                now_s
+            ],
+        )?;
+        tx.commit()?;
+        Ok(codes)
     }
 
     pub(super) fn message_translations(

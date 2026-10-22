@@ -56,9 +56,16 @@ impl<S: Store> StoreEvidence<'_, S> {
                 );
                 let offset = offset.unwrap_or(0);
                 // Character offsets keep Unicode boundaries stable across pages.
-                let page: String = message.body.chars().skip(offset).take(2000).collect();
+                let page: String = message
+                    .body
+                    .chars()
+                    .skip(offset)
+                    .take(crate::triage::context::READ_MESSAGE_PAGE_CHARS)
+                    .collect();
                 let next = offset.saturating_add(page.chars().count());
-                let more = message.body.chars().count() > next;
+                // Whether anything follows the page, without counting the
+                // whole body.
+                let more = message.body.chars().nth(next).is_some();
                 let mut value = serde_json::to_value(message)
                     .map_err(|_| CoreError::InvalidInput("message serialization".into()))?;
                 value["body"] = page.into();

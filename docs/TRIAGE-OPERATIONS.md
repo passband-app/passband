@@ -97,6 +97,14 @@ outage_retry_secs = 300
 [triage.context]
 initial_thread_messages = 8
 max_related_messages = 20
+# The newest thread siblings ride with a whole (capped) body; the rest carry
+# an excerpt of this many characters, flagged body_excerpted.
+full_sibling_bodies = 2
+sibling_excerpt_chars = 400
+# The most of a condensed body (the target's, the newest siblings') that rides
+# whole into the initial context, in characters; past it the model pages the
+# stored text with read_message (body_truncated, next_offset).
+full_body_chars = 16000
 max_context_bytes = 120000
 max_tool_result_bytes = 24000
 

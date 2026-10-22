@@ -18,6 +18,17 @@
 #   building nothing anybody deploys. arm64 comes back when there is a native
 #   arm runner or a cross-compiling Dockerfile of squelchd's shape — not by
 #   re-adding binfmt.
+#
+# BUILD CACHE is a GHCR registry ref per image (<image>:buildcache), not
+# type=gha. GitHub Actions caches are scoped to the ref that wrote them, and a
+# tag run can read only its own ref's entries or the default branch's, so with
+# every release on a new tag no run ever read the previous release's layers;
+# mode=max meanwhile parked several GB per tag in the repo's 10 GB Actions
+# cache, crowding out the rust-cache entry every PR's ci.yml run restores. A
+# registry ref has no ref isolation. The Dockerfiles cook dependencies in their
+# own cargo-chef layer, so a tag that changes no dependency compiles only the
+# workspace crates. The packages are public, so the cache costs no quota; the
+# :buildcache tag is a cache manifest, not a runnable image.
 name: release-daemon
 
 on:
@@ -79,8 +90,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelchd:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelchd:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
   # The in-cluster tenant provisioner. Published so replacing the k3s node is a
   # pull rather than a hand-build on the box, which is what PRODUCTION.md's
@@ -118,10 +129,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # A named scope, unlike squelchd's default: three jobs sharing one
-          # GHA cache scope evict each other's layers on every tag.
-          cache-from: type=gha,scope=warden
-          cache-to: type=gha,mode=max,scope=warden
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-warden:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-warden:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
   # The hosted signup plane. Railway builds its own image from this repo, so
   # this tag is for reproducibility and for anyone running the control plane
@@ -157,5 +166,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=control
-          cache-to: type=gha,mode=max,scope=control
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-control:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/squelch-control:buildcache,mode=max,image-manifest=true,oci-mediatypes=true

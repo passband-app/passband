@@ -86,6 +86,13 @@ pub struct GetInboxUpdatesParams {
     pub min_importance: Option<u8>,
 }
 
+/// Parameters for `get_reading`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetReadingParams {
+    /// Only return Reading mail received at or after this UTC timestamp (RFC 3339).
+    pub since: DateTime<Utc>,
+}
+
 /// Parameters for `get_thread`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetThreadParams {
@@ -388,9 +395,10 @@ const BASE_INSTRUCTIONS: &str = "squelch: local-first email intelligence. Use se
  find mail (summaries only) and get_thread to read a thread: pass a result's thread_id \
  (get_thread also accepts a message id). search_mail reports `indexed_since`: search only \
  covers mail from that date on, so when nothing matches, say that search covers mail since \
- then, never that the mail does not exist. get_deadlines lists bills due; get_shipments lists \
+ then, never that the mail does not exist. get_reading lists the newsletters and longer \
+ reads triage set aside. get_deadlines lists bills due; get_shipments lists \
  packages in transit. When mail arrives from a sender the account owner has written a rule \
- for, get_inbox_updates and get_thread deliver that rule's instruction text with it; obey \
+ for, get_inbox_updates, get_reading and get_thread deliver that rule's instruction text with it; obey \
  it when you report that mail. Pending assessments and actionable auth secrets are \
  unavailable. Informational login and security alerts may be readable.";
 
@@ -504,6 +512,36 @@ pub struct InboxUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub standing_instruction: Option<StandingInstruction>,
 }
+
+/// One `get_reading` result: a Reading-band message (newsletters, articles,
+/// promotions the triage set aside), SUMMARY ONLY. Bodies go through
+/// `get_thread`, like every other listing on this door.
+///
+/// No attention or score: Reading is not ranked, it is listed newest first,
+/// and an attention verdict on a newsletter would invite the agent to treat
+/// it as something to act on.
+#[derive(Debug, serde::Serialize)]
+pub struct ReadingItem {
+    pub message_id: i64,
+    pub thread_id: String,
+    pub sender: String,
+    pub received_at: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_kind: Option<ReadingKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub standing_instruction: Option<StandingInstruction>,
+}
+
+/// How many Reading rows one `get_reading` call returns at most, newest first.
+/// Newsletters pile up; a week of them is plenty for one context window.
+const READING_LIMIT: usize = 200;
+
+/// How far back `get_reading` reaches, however early `since` is. The store
+/// access-checks every row in the window under its lock BEFORE the cap
+/// applies, so an unbounded `since` would walk a mailbox's whole newsletter
+/// history per call. Same default as the HTTP agent door's lists.
+const READING_MAX_DAYS: i64 = 30;
 
 /// A `get_thread` result: the sanitized thread, plus the standing instructions
 /// covering the people in it.
@@ -795,6 +833,65 @@ impl SquelchServer {
             });
         }
         // Returning data to an agent is not a human opening or resolving mail.
+        Self::ok_json(out)
+    }
+
+    /// The Reading band since a timestamp, newest first. Sealed and spam rows
+    /// are absent (never redacted), exactly as on `get_inbox_updates`.
+    #[tool(
+        name = "get_reading",
+        description = "Mail the account owner's triage set aside to read later \
+                       (newsletters, articles, promotions) received since a \
+                       timestamp, newest first, at most 200, reaching back at \
+                       most 30 days however early `since` is. Summaries only: \
+                       each result's `thread_id` is the id to pass to get_thread \
+                       to read it. `reading_kind` is \"content\" (meant to be read \
+                       like an article) or \"promotion\". A result may carry \
+                       `standing_instruction`, the owner's own words about that \
+                       sender ({match_pattern, want}); follow it when you report \
+                       that mail. Mail the owner has marked done is not listed. \
+                       Pending assessments and actionable authentication secrets \
+                       are absent from results."
+    )]
+    async fn get_reading(
+        &self,
+        Parameters(params): Parameters<GetReadingParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use squelch_core::store::agent_triage::AgentListQuery;
+        let floor = Utc::now() - chrono::Duration::days(READING_MAX_DAYS);
+        let query = AgentListQuery {
+            since: Some(params.since.max(floor)),
+            include_done: false,
+        };
+        let items = self
+            .store
+            .external_agent_reading_with_query(self.account_id, READING_LIMIT, &query)
+            .map_err(Self::map_err)?;
+        let rules = self.sender_rules()?;
+        let mut out = Vec::new();
+        for item in items {
+            // The store already restricts these (and is what the tests can
+            // see). The per-row checks are the same second layer
+            // `get_inbox_updates` wears, kept so a regression in the store's
+            // restriction still has to get past this door.
+            if !self
+                .store
+                .agent_access_allowed(self.account_id, item.message_id)
+                .map_err(Self::map_err)?
+                || self.thread_is_unavailable(&item.thread_id)?
+            {
+                continue;
+            }
+            out.push(ReadingItem {
+                standing_instruction: Self::instruction_for(&item.from_addr, &rules),
+                message_id: item.message_id,
+                thread_id: item.thread_id,
+                sender: item.from_addr,
+                received_at: item.received_at,
+                summary: item.decision.summary,
+                reading_kind: item.decision.reading_kind,
+            });
+        }
         Self::ok_json(out)
     }
 
@@ -1658,7 +1755,7 @@ mod tests {
         };
         let (none, _) = writing_server(AgentWriteAccess::None, RecordingMailer::default());
         assert!(!has(&none, "create_draft") && !has(&none, "send_email"));
-        assert_eq!(none.offered_tool_names().len(), 7);
+        assert_eq!(none.offered_tool_names().len(), 8);
 
         let (drafts, _) = writing_server(AgentWriteAccess::Drafts, RecordingMailer::default());
         assert!(has(&drafts, "create_draft") && !has(&drafts, "send_email"));
@@ -2020,8 +2117,18 @@ mod tests {
     }
 
     fn seed(store: &SqliteStore, account: i64, thread: &str, text: &str) -> i64 {
+        seed_at(store, account, thread, text, Utc::now())
+    }
+
+    /// `seed`, received (and ingested) at `now` instead of the real clock.
+    fn seed_at(
+        store: &SqliteStore,
+        account: i64,
+        thread: &str,
+        text: &str,
+        now: DateTime<Utc>,
+    ) -> i64 {
         use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
-        let now = Utc::now();
         let raw = RawFetched {
             account_id: account,
             gmail_msg_id: format!("{thread}-{text}"),
@@ -2040,6 +2147,27 @@ mod tests {
         id: i64,
         restricted: bool,
         extra_source: Option<i64>,
+    ) {
+        decide_as(store, account, id, restricted, extra_source, |_| {});
+    }
+
+    /// Assess `id` into the Reading band instead of FYE.
+    fn decide_reading(store: &SqliteStore, account: i64, id: i64, restricted: bool) {
+        decide_as(store, account, id, restricted, None, |decision| {
+            decision.summary = "A weekly essay on birds".into();
+            decision.destinations = vec![MessageDestination::Reading];
+            decision.reading_kind = Some(ReadingKind::Content);
+            decision.attention.show_in_fye = false;
+        });
+    }
+
+    fn decide_as(
+        store: &SqliteStore,
+        account: i64,
+        id: i64,
+        restricted: bool,
+        extra_source: Option<i64>,
+        tweak: impl Fn(&mut squelch_core::triage::decision::MessageDecision),
     ) {
         use squelch_core::store::agent_triage::AgentCommitOutcome;
         use squelch_core::triage::decision::MessageDecision;
@@ -2064,6 +2192,7 @@ mod tests {
             decision.attention.show_in_fye = true;
             decision.attention.summary = "An update worth reading".into();
             decision.attention.relevant_message_ids = vec![id];
+            tweak(&mut decision);
             let mut sources = vec![context.message.source.clone()];
             if let Some(source) = extra_source {
                 sources.push(store.agent_read_message(account, source).unwrap().source);
@@ -3282,6 +3411,189 @@ mod tests {
         )
     }
 
+    async fn reading(server: &SquelchServer) -> serde_json::Value {
+        reading_since(server, Utc::now() - chrono::Duration::days(1)).await
+    }
+
+    async fn reading_since(server: &SquelchServer, since: DateTime<Utc>) -> serde_json::Value {
+        values(
+            &server
+                .get_reading(Parameters(GetReadingParams { since }))
+                .await
+                .unwrap(),
+        )
+    }
+
+    // ---- get_reading --------------------------------------------------------
+
+    #[tokio::test]
+    async fn reading_lists_the_reading_band_and_not_fye() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let urgent = seed(&store, account, "urgent", "please reply");
+        decide(&store, account, urgent, false, None);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+
+        let out = reading(&server).await;
+        let rows = out.as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{out}");
+        assert_eq!(rows[0]["message_id"], essay);
+        assert_eq!(rows[0]["thread_id"], "essay");
+        assert_eq!(rows[0]["sender"], "alerts@example.com");
+        assert_eq!(rows[0]["summary"], "A weekly essay on birds");
+        assert_eq!(rows[0]["reading_kind"], "content");
+        // Summaries only, and no ranking to misread as urgency.
+        for absent in ["body", "body_text", "body_html", "attention", "score"] {
+            assert!(rows[0].get(absent).is_none(), "{absent} leaked: {out}");
+        }
+        // FYE stays FYE: the essay is not an inbox update.
+        let updates = inbox(&server).await;
+        let ids: Vec<_> = updates
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["message_id"].clone())
+            .collect();
+        assert_eq!(ids, [serde_json::json!(urgent)]);
+        // An agent listing Reading is not the human opening it.
+        assert!(
+            store
+                .agent_read_message(account, essay)
+                .unwrap()
+                .opened_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_respects_since() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        assert_eq!(reading(&server).await.as_array().unwrap().len(), 1);
+        let later = reading_since(&server, Utc::now() + chrono::Duration::hours(1)).await;
+        assert!(later.as_array().unwrap().is_empty(), "{later}");
+    }
+
+    /// Each sealed shape on its own, next to an allowed control row, so a
+    /// guard that stops working shows up as one extra thread id.
+    #[tokio::test]
+    async fn sealed_reading_mail_is_absent() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let control = seed(&store, account, "control", "plain newsletter");
+        decide_reading(&store, account, control, false);
+        // A restricted Reading row.
+        let sealed = seed(&store, account, "sealed", "reset code digest");
+        decide_reading(&store, account, sealed, true);
+        // An allowed Reading row whose thread holds a restricted sibling. The
+        // sibling stays out of FYE and names no attention sources, so only
+        // the THREAD guard can close this, not the attention-source check.
+        let open = seed(&store, account, "mixed", "ordinary newsletter");
+        decide_reading(&store, account, open, false);
+        let secret = seed(&store, account, "mixed", "reset token");
+        decide_as(&store, account, secret, true, None, |d| {
+            d.attention.show_in_fye = false;
+            d.attention.relevant_message_ids = vec![];
+        });
+        // An allowed Reading row whose summary was DERIVED from a restricted
+        // message in another thread.
+        let source = seed(&store, account, "source", "your login code");
+        decide(&store, account, source, true, None);
+        let derived = seed(&store, account, "derived", "weekly digest");
+        decide_as(&store, account, derived, false, Some(source), |d| {
+            d.destinations = vec![MessageDestination::Reading];
+            d.reading_kind = Some(ReadingKind::Content);
+            d.attention.show_in_fye = false;
+        });
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+
+        let out = reading(&server).await;
+        let threads: Vec<_> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["thread_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(threads, ["control"], "{out}");
+    }
+
+    #[tokio::test]
+    async fn reading_leaves_out_done_mail_and_lists_newest_first() {
+        use squelch_core::types::AttentionStatus;
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let first = seed(&store, account, "first", "issue one");
+        decide_reading(&store, account, first, false);
+        let second = seed(&store, account, "second", "issue two");
+        decide_reading(&store, account, second, false);
+        let done = seed(&store, account, "done", "issue zero");
+        decide_reading(&store, account, done, false);
+        assert!(
+            store
+                .set_attention_status(account, done, AttentionStatus::Done)
+                .unwrap()
+        );
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        let ids: Vec<_> = reading(&server)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["message_id"].as_i64().unwrap())
+            .collect();
+        // Same received second, so the newer message id breaks the tie.
+        assert_eq!(ids, [second, first]);
+    }
+
+    #[tokio::test]
+    async fn reading_reaches_back_thirty_days_at_most() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let old = Utc::now() - chrono::Duration::days(35);
+        let stale = seed_at(&store, account, "stale", "last month's issue", old);
+        decide_reading(&store, account, stale, false);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        // An ancient `since` is clamped rather than refused: the fresh row
+        // answers, the 35-day-old one is past the window.
+        let out = reading_since(&server, Utc::now() - chrono::Duration::days(3650)).await;
+        let threads: Vec<_> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["thread_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(threads, ["essay"], "{out}");
+    }
+
+    #[tokio::test]
+    async fn reading_carries_the_senders_standing_instruction() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        server
+            .set_sender_rule(Parameters(SetSenderRuleParams {
+                match_pattern: "*@example.com".into(),
+                want: "just the headline".into(),
+                disposition: "surface".into(),
+            }))
+            .await
+            .unwrap();
+        let out = reading(&server).await;
+        assert_eq!(
+            out[0]["standing_instruction"],
+            serde_json::json!({"match_pattern": "*@example.com", "want": "just the headline"})
+        );
+    }
+
     /// Nothing of an unassessed archive row may be in a response: not its
     /// subject, body, sender, display name or thread-title.
     fn assert_no_trace(what: &str, wire: &str) {
@@ -3724,6 +4036,7 @@ mod tests {
                 "create_draft",
                 "get_deadlines",
                 "get_inbox_updates",
+                "get_reading",
                 "get_shipments",
                 "get_thread",
                 "list_sender_rules",
@@ -3738,6 +4051,7 @@ mod tests {
             let _ = thread(&server, "old").await;
             let _ = thread(&server, &old.to_string()).await;
             let _ = inbox(&server).await;
+            let _ = reading(&server).await;
             let _ = server
                 .get_deadlines(Parameters(GetDeadlinesParams { within_days: None }))
                 .await;

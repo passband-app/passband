@@ -24,6 +24,10 @@ actor RehearsalAPI {
     private var drafts: [Int: DraftView] = [:]
     private var nextDraftID = 1
     private var clearedShipments: Set<Int> = []
+    /// The practice "Languages I read", kept for the session so the card's
+    /// add and remove answer the way a daemon's do. Nothing in practice is
+    /// translated by it; `reset` drops it.
+    private var readLanguages: [String] = []
     private var statusOverrides: [Int: AttentionStatus] = [:]
     private var tierOverrides: [Int: Tier] = [:]
     private var importanceOverrides: [Int: Int] = [:]
@@ -48,7 +52,7 @@ actor RehearsalAPI {
         self.accountEmail = accountEmail
         referenceDate = Date()
         rules = []; nextRuleID = 1; drafts = [:]; nextDraftID = 1; clearedShipments = []
-        groups = []; nextGroupID = 1; groupHistory = [:]
+        groups = []; nextGroupID = 1; groupHistory = [:]; readLanguages = []
         statusOverrides = [:]; tierOverrides = [:]; importanceOverrides = [:]; reminders = [:]
     }
     func snapshot() -> OnboardingRehearsal { mailbox }
@@ -305,6 +309,19 @@ actor RehearsalAPI {
             data = try json(["can_share": false])
         case ("GET", "/client/tracking-config"):
             data = try json(["available": false, "default_enabled": false])
+        case ("GET", "/client/translate-config"):
+            data = try translateConfig()
+        case ("POST", "/client/translate-config"):
+            // The daemon's rule: unknown codes and English are dropped, and the
+            // body replaces the whole set.
+            let known = Set(Self.practiceLanguages.map(\.code))
+            var next: [String] = []
+            for code in (body["read_languages"] as? [String] ?? []).map({ $0.lowercased() })
+            where known.contains(code) && !next.contains(code) {
+                next.append(code)
+            }
+            readLanguages = next
+            data = try translateConfig()
         case ("POST", "/client/refresh"), ("POST", "/client/spam/refresh"):
             // The sample inbox is already populated; refresh reads its current state.
             data = try json(["triggered": true])
@@ -718,6 +735,19 @@ actor RehearsalAPI {
         """
     }
     private func stamp(_ offset: TimeInterval = 0) -> String { referenceDate.addingTimeInterval(offset).ISO8601Format() }
+    /// A short list rather than the detector's ~68: enough to try the card on.
+    /// Sorted by name, the way the daemon sends it.
+    static let practiceLanguages: [TranslateLanguage] = [
+        ("zh", "Chinese"), ("nl", "Dutch"), ("fr", "French"), ("de", "German"),
+        ("hi", "Hindi"), ("it", "Italian"), ("ja", "Japanese"), ("ko", "Korean"),
+        ("pt", "Portuguese"), ("es", "Spanish"),
+    ].map { TranslateLanguage(code: $0.0, name: $0.1) }
+
+    /// Active, because the practice inbox shows translated mail.
+    private func translateConfig() throws -> Data {
+        try encode(TranslateConfig(active: true, read_languages: readLanguages, available: Self.practiceLanguages))
+    }
+
     private func encode<T: Encodable>(_ value: T) throws -> Data { try JSONEncoder().encode(value) }
     private func json(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) }
     private func unsupported() -> APIError { APIError(.badRequest, 400, "This action isn't available in the practice inbox. Nothing was sent or changed outside this rehearsal.") }

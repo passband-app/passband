@@ -2151,6 +2151,109 @@ struct TrackingConfigBody: Codable, Sendable {
     var default_enabled: Bool?
 }
 
+/// One language the daemon's detector knows, by ISO 639-1 code and English
+/// name ("fr", "French").
+struct TranslateLanguage: Codable, Sendable, Hashable, Identifiable {
+    var code: String
+    var name: String
+    var id: String { code }
+}
+
+/// GET/POST /client/translate-config (docs/TRANSLATION.md): the languages the
+/// owner reads, which the daemon leaves untranslated. `active` false means the
+/// daemon has no model to translate with, so the set changes nothing yet.
+///
+/// Decoded LENIENTLY, field by field, and a malformed `available` entry is
+/// dropped rather than failing the list: this is a settings card, and a card
+/// that will not decode is a setting nobody can reach.
+struct TranslateConfig: Codable, Sendable, Hashable {
+    var active: Bool
+    /// Lowercase ISO codes, as stored.
+    var read_languages: [String]
+    /// Every language the detector knows except English, sorted by name.
+    var available: [TranslateLanguage]
+
+    init(active: Bool, read_languages: [String], available: [TranslateLanguage]) {
+        self.active = active
+        self.read_languages = read_languages
+        self.available = available
+    }
+
+    private enum CodingKeys: String, CodingKey { case active, read_languages, available }
+
+    /// Decodes one array element as whatever it is, so a bad one can be
+    /// skipped without stopping the container.
+    private struct Skip: Decodable { init(from decoder: Decoder) throws {} }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        active = ((try? c.decodeIfPresent(Bool.self, forKey: .active)) ?? nil) ?? false
+        var codes: [String] = []
+        if var list = try? c.nestedUnkeyedContainer(forKey: .read_languages) {
+            while !list.isAtEnd {
+                if let code = try? list.decode(String.self) {
+                    let normal = code.lowercased()
+                    if !normal.isEmpty, !codes.contains(normal) { codes.append(normal) }
+                } else if (try? list.decode(Skip.self)) == nil {
+                    break
+                }
+            }
+        }
+        read_languages = codes
+        var langs: [TranslateLanguage] = []
+        if var list = try? c.nestedUnkeyedContainer(forKey: .available) {
+            while !list.isAtEnd {
+                if let lang = try? list.decode(TranslateLanguage.self), !lang.code.isEmpty {
+                    langs.append(TranslateLanguage(code: lang.code.lowercased(), name: lang.name))
+                } else if (try? list.decode(Skip.self)) == nil {
+                    break
+                }
+            }
+        }
+        available = langs
+    }
+
+    /// What a chip says: the detector's English name, or the bare code for a
+    /// stored language the detector no longer lists, so it can still be removed.
+    func name(of code: String) -> String {
+        available.first { $0.code == code }?.name ?? code.uppercased()
+    }
+
+    /// The add menu: everything known and not already chosen, in the daemon's
+    /// (alphabetical) order.
+    var addable: [TranslateLanguage] {
+        available.filter { !read_languages.contains($0.code) }
+    }
+}
+
+/// POST /client/translate-config. Replaces the whole set; the daemon drops
+/// unknown codes and "en".
+struct TranslateConfigBody: Codable, Sendable {
+    var read_languages: [String]
+}
+
+/// What the settings card knows about the translate config. Not a wire type,
+/// but kept beside it so the read's failure rule is testable without the app.
+enum TranslateConfigState: Sendable, Equatable {
+    /// Not asked yet, or asked and still waiting.
+    case unknown
+    /// The daemon predates the setting (404): every language is translated
+    /// and there is nothing to choose.
+    case notOffered
+    /// The read failed for any other reason. Must not look like `notOffered`.
+    case unreadable
+    case loaded(TranslateConfig)
+
+    /// What a failed read leaves showing. A 404 always wins (the daemon was
+    /// replaced by an older one); anything else keeps a set already shown,
+    /// because the stored set did not change when the network blinked.
+    func failed(notFound: Bool) -> TranslateConfigState {
+        if notFound { return .notOffered }
+        if case .loaded = self { return self }
+        return .unreadable
+    }
+}
+
 /// What an agent connected over Agent MCP may WRITE to this mailbox. The
 /// owner's setting, held by the daemon per mailbox and checked there on every
 /// agent call; this app only shows and sets it. Each level includes the ones

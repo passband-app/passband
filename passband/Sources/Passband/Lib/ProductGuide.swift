@@ -77,7 +77,7 @@ enum ProductGuide {
             case .readingMail:
                 "an open email: moving between messages and emails, done, skip, unsubscribe, "
                     + "attachments, images, chat or email style, the contact card, translated "
-                    + "mail and show original"
+                    + "mail, show original, languages you read"
             case .writingMail:
                 "reply, reply all, forward, new message, Cc and Bcc, send, undo send, send "
                     + "later, drafts, attachments, groups, signature, read tracking"
@@ -372,6 +372,7 @@ enum ProductGuide {
         - While the translation is still being written, the original shows with "translating from French…" above it, and the English takes its place when it is ready. If it has not arrived after about ten minutes, the line says "translation not ready yet · showing the original", and opening the thread again checks again.
         - If Passband could not confirm that every detail carried over, the line also says the translation may be incomplete. Check the original for numbers, codes and links before acting on it.
         - Search finds the email by the words of either version. A reply or a forward uses the original.
+        - Settings > Mail > Translation lists the languages you read. Mail in those is shown as written and not translated. Adding a language leaves mail already translated as it is, with "show original" still there; removing one means mail in it is translated when it is opened. With no languages listed, everything not in English is translated.
 
         Attachments and images:
         - Clicking an attachment card or an inline image previews it in Quick Look, where the arrow keys move between that message's attachments. The download arrow on a card saves the file.

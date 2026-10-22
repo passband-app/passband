@@ -1134,6 +1134,11 @@ final class AppStore {
     /// unconfigured: no toggle anywhere, no receipts fetched.
     var tracking: TrackingConfig?
 
+    // MARK: translation languages
+    /// The languages the owner reads, which the daemon leaves untranslated.
+    /// Fetched by the settings card, not at connect: nothing else reads it.
+    var translateConfig: TranslateConfigState = .unknown
+
     // MARK: account switching
 
     /// Bumped on every account switch. Every async writer of account-scoped
@@ -2329,6 +2334,7 @@ final class AppStore {
         authRings = []
         authQueue = []
         tracking = nil
+        translateConfig = .unknown
         history = [HistoryEntry(view: .sitrep, selectedId: nil)]
         historyIndex = 0
         route(to: .sitrep)
@@ -6290,6 +6296,30 @@ final class AppStore {
     /// post-write view, so `configured` is refreshed alongside it.
     func setTrackingDefault(_ enabled: Bool) async throws {
         tracking = try await APIClient.shared.setTrackingDefault(enabled)
+    }
+
+    /// Read the languages left untranslated. A 404 is a daemon older than the
+    /// setting and draws a quiet hint, kept apart from a failed read, which
+    /// must not look like "not offered".
+    func refreshTranslateConfig() async {
+        let e = epoch
+        do {
+            let next = try await APIClient.shared.getTranslateConfig()
+            guard e == epoch else { return }
+            translateConfig = .loaded(next)
+        } catch {
+            guard e == epoch else { return }
+            translateConfig = translateConfig.failed(notFound: (error as? APIError)?.kind == .notFound)
+        }
+    }
+
+    /// Replace the whole set. Throws so the card can say why; the stored
+    /// answer only moves to what the daemon confirms.
+    func setReadLanguages(_ codes: [String]) async throws {
+        let e = epoch
+        let next = try await APIClient.shared.setReadLanguages(codes)
+        guard e == epoch else { return }
+        translateConfig = .loaded(next)
     }
 
     func openTriageFix(_ target: TriageFixTarget) { triageFix = target }

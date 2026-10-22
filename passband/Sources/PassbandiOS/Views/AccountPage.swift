@@ -237,6 +237,7 @@ struct AccountPage: View {
                 case .mail:
                     MailSection()
                     SearchSection()
+                    TranslationSection()
                     SignatureSection()
                     ReadTrackingSection()
                 // Not panes here: the phone pushes these two from `pages`, as
@@ -272,7 +273,7 @@ struct AccountPage: View {
     private func blurb(_ section: SettingsSection) -> String {
         switch section {
         case .general: "your name, theme, chime"
-        case .mail: "images, search order, signature, read tracking"
+        case .mail: "images, search, translation, signature, tracking"
         case .rules: "how each sender's mail is handled"
         case .groups: "people you write to together"
         case .assistant: "your own api key, and which model"

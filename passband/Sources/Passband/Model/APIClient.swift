@@ -1168,6 +1168,21 @@ actor APIClient {
         try await post("/client/tracking-config", body: TrackingConfigBody(default_enabled: enabled))
     }
 
+    // MARK: - translation languages
+
+    /// The languages left untranslated. A daemon older than the setting
+    /// answers 404, which the card reads as "not offered here".
+    func getTranslateConfig() async throws -> TranslateConfig {
+        try await get("/client/translate-config")
+    }
+
+    /// Replace the whole set. The answer is the daemon's post-write view, with
+    /// anything it refused already dropped.
+    @discardableResult
+    func setReadLanguages(_ codes: [String]) async throws -> TranslateConfig {
+        try await post("/client/translate-config", body: TranslateConfigBody(read_languages: codes))
+    }
+
     // MARK: - agent write access
 
     /// What an agent may write to this mailbox. A daemon older than the

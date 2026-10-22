@@ -33,6 +33,13 @@ struct TranslationWireTests {
         aStaleRefetchIsDropped()
         thePollMergesOnlyTranslations()
         theStripCopyHasNoDashes()
+        theLanguageConfigDecodes()
+        aSparseLanguageConfigStillDecodes()
+        aBadLanguageEntryIsDropped()
+        theAddMenuOmitsTheChosen()
+        aStoredCodeTheDetectorDroppedStillHasAName()
+        theLanguageBodyIsTheWholeSet()
+        anOlderDaemonIsNotOfferedAndAFailureIsNotThat()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -47,6 +54,69 @@ struct TranslationWireTests {
             failures += 1
             print("  FAIL: \(what)")
         }
+    }
+
+    static func config(_ json: String) -> TranslateConfig? {
+        try? JSONDecoder().decode(TranslateConfig.self, from: Data(json.utf8))
+    }
+
+    static func theLanguageConfigDecodes() {
+        let c = config(
+            #"{"active":true,"read_languages":["fr","es"],"available":[{"code":"fr","name":"French"},{"code":"es","name":"Spanish"},{"code":"de","name":"German"}]}"#
+        )
+        expect(c?.active == true, "active")
+        expect(c?.read_languages == ["fr", "es"], "the chosen codes, in order")
+        expect(c?.available.count == 3, "every known language")
+        expect(c?.name(of: "es") == "Spanish", "a code reads as its English name")
+    }
+
+    static func aSparseLanguageConfigStillDecodes() {
+        let empty = config("{}")
+        expect(empty != nil, "an empty object decodes")
+        expect(empty?.active == false, "and is inactive")
+        expect(empty?.read_languages == [], "with nothing chosen")
+        expect(empty?.available == [], "and nothing to add")
+        let mistyped = config(#"{"active":"yes","read_languages":"fr","available":null}"#)
+        expect(mistyped != nil, "mistyped fields do not fail the card")
+        expect(mistyped?.active == false, "a mistyped active is off")
+        expect(mistyped?.read_languages == [], "a mistyped list is empty")
+    }
+
+    static func aBadLanguageEntryIsDropped() {
+        let c = config(
+            #"{"active":true,"read_languages":["FR",7,"fr","es"],"available":[{"code":"fr","name":"French"},{"name":"Nameless"},"de",{"code":"ES","name":"Spanish"}]}"#
+        )
+        expect(c?.read_languages == ["fr", "es"], "codes are lowercased, deduped, and non-strings skipped")
+        expect(c?.available.map(\.code) == ["fr", "es"], "malformed languages are dropped, the rest kept")
+    }
+
+    static func theAddMenuOmitsTheChosen() {
+        let c = config(
+            #"{"active":true,"read_languages":["fr"],"available":[{"code":"de","name":"German"},{"code":"fr","name":"French"},{"code":"es","name":"Spanish"}]}"#
+        )
+        expect(c?.addable.map(\.code) == ["de", "es"], "the menu is the known minus the chosen, in the daemon's order")
+    }
+
+    static func aStoredCodeTheDetectorDroppedStillHasAName() {
+        let c = config(#"{"active":true,"read_languages":["xx"],"available":[]}"#)
+        expect(c?.name(of: "xx") == "XX", "an unlisted code still shows, so it can be removed")
+    }
+
+    static func theLanguageBodyIsTheWholeSet() {
+        let data = try? JSONEncoder().encode(TranslateConfigBody(read_languages: ["fr", "es"]))
+        let text = data.flatMap { String(data: $0, encoding: .utf8) }
+        expect(text == #"{"read_languages":["fr","es"]}"#, "the body is the whole set and nothing else")
+        let none = try? JSONEncoder().encode(TranslateConfigBody(read_languages: []))
+        expect(none.flatMap { String(data: $0, encoding: .utf8) } == #"{"read_languages":[]}"#,
+               "clearing the set sends an empty list, not an absent key")
+    }
+
+    static func anOlderDaemonIsNotOfferedAndAFailureIsNotThat() {
+        let shown = TranslateConfigState.loaded(TranslateConfig(active: true, read_languages: ["fr"], available: []))
+        expect(TranslateConfigState.unknown.failed(notFound: true) == .notOffered, "a 404 is not offered")
+        expect(TranslateConfigState.unknown.failed(notFound: false) == .unreadable, "any other failure is unreadable")
+        expect(shown.failed(notFound: false) == shown, "a blip keeps the set already shown")
+        expect(shown.failed(notFound: true) == .notOffered, "a 404 replaces it: the daemon is older now")
     }
 
     static let base =

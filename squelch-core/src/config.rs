@@ -573,9 +573,10 @@ fn hours_or(hours: i64, fallback: chrono::Duration) -> chrono::Duration {
 }
 
 /// `days` as a [`chrono::Duration`], clamped to [`REVISIT_MAX_DAYS`] and floored
-/// at one; `fallback` if it somehow still does not fit.
+/// at zero (a zero horizon schedules nothing, as it always has); `fallback` if
+/// it somehow still does not fit.
 fn days_or(days: i64, fallback: chrono::Duration) -> chrono::Duration {
-    let bounded = days.clamp(1, REVISIT_MAX_DAYS);
+    let bounded = days.clamp(0, REVISIT_MAX_DAYS);
     chrono::Duration::try_days(bounded).unwrap_or(fallback)
 }
 
@@ -3376,6 +3377,11 @@ archive_access_daily_cap = 9
         assert_eq!(cfg.min_lead(), chrono::Duration::zero());
         assert_eq!(cfg.dedupe_window(), chrono::Duration::zero());
         assert_eq!(cfg.max_horizon(), chrono::Duration::days(REVISIT_MAX_DAYS));
+        let off = RevisitPassConfig {
+            max_horizon_days: 0,
+            ..RevisitPassConfig::default()
+        };
+        assert_eq!(off.max_horizon(), chrono::Duration::zero());
         // The addition the scheduler actually performs, which is what panics.
         let now = chrono::Utc::now();
         let _ = now + cfg.max_horizon();

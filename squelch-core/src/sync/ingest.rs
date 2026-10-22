@@ -2807,8 +2807,31 @@ mod tests {
             view.messages[0].is_sent,
             "the outbound copy is flagged for the reader's right-aligned bubble"
         );
+        let listed = {
+            use crate::store::SpamScope;
+            use crate::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+            store
+                .human_agent_updates(
+                    acct,
+                    &AgentInventoryQuery {
+                        // Far enough back to reach the fixture's July `Date:`,
+                        // so the window cannot be what keeps the list empty.
+                        since: now - chrono::Duration::days(3650),
+                        min_importance: None,
+                        status: None,
+                        band: None,
+                        pending_reminders: false,
+                        spam: SpamScope::Exclude,
+                        ranking: Default::default(),
+                        before: None,
+                        limit: None,
+                    },
+                )
+                .unwrap()
+        };
+        assert!(listed.is_empty(), "sent mail never enters the mail list");
         let bands = store
-            .stats(acct, now - chrono::Duration::days(1))
+            .stats(acct, now - chrono::Duration::days(3650))
             .unwrap()
             .bands;
         assert_eq!(

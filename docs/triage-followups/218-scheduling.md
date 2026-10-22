@@ -14,8 +14,11 @@ Notification polling is unchanged.
 
 After a provider cooldown, the account admits one investigation as a recovery
 probe. A successful response clears the expired circuit; an outage extends it.
-Budget deferrals do not reopen the circuit. Whole-investigation timeouts remain
-job-local and retain their finite attempt limit. Circuits remain per account,
+Budget deferrals do not reopen the circuit. Deadlines (one per model turn, and
+the run's over all of them) remain job-local: a timed-out attempt is retried,
+and a second timeout in a row fails the job once the provider has answered
+since the first (an earlier turn of the same run, or another investigation).
+Circuits remain per account,
 not a fleet-wide provider/configuration registry.
 
 The regression fixture contains 200,000 completed jobs and a 1,500-job migration

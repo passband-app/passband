@@ -31,6 +31,7 @@ pub async fn run_access(
         kind: kind.into(),
         usage,
         model_calls,
+        retry_after: None,
     };
     // Never silently truncate a credential out of evidence and then grant access.
     let input = json!({"sender":message.from_addr,"subject":message.subject,"body":message.body})
@@ -46,19 +47,29 @@ pub async fn run_access(
         effort: connection.effort,
         max_tries: 1,
     };
+    // The request's own timeout sits behind the deadline, so the shared
+    // client's (sized for a Gmail fetch) cannot cut a longer check first as
+    // a transport failure that stands the whole account off.
+    let deadline = std::time::Duration::from_secs(config.fast_deadline_secs());
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(config.fast_timeout_secs.max(1)),
-        llm::classify_llm(
+        deadline,
+        llm::classify_llm_within(
             connection.http,
             connection.url,
             connection.api_key,
             connection.provider,
             &request,
+            deadline.saturating_add(std::time::Duration::from_secs(
+                crate::triage::agent_config::DEADLINE_SLACK_SECS,
+            )),
         ),
     )
     .await
     .map_err(|_| fail("access_timeout", vec![], 1))?
-    .map_err(|error| fail(&error.kind, vec![], 1))?;
+    .map_err(|error| AgentFailure {
+        retry_after: error.retry_after,
+        ..fail(&error.kind, vec![], 1)
+    })?;
     match outcome {
         LlmOutcome::Ok(text, usage) => {
             let usage: Vec<Usage> = usage.into_iter().collect();

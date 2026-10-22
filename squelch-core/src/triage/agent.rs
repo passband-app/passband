@@ -60,6 +60,11 @@ pub struct AgentConnection<'a> {
     pub model: &'a str,
     pub effort: Option<&'a str>,
 }
+/// The failure kind of a run cut by a deadline, its own turn's or the whole
+/// run's. The worker's "two in a row and the job is failed" rule matches on
+/// it, so it is spelled once.
+pub const AGENT_TIMEOUT: &str = "agent_timeout";
+
 /// Failed investigations still report usage for completed provider responses.
 /// A timed-out in-flight request may be billed without returning provider usage.
 #[derive(Debug)]
@@ -68,6 +73,9 @@ pub struct AgentFailure {
     pub usage: Vec<Usage>,
     /// Number of attempted turns; a rejected first call may be refunded safely.
     pub model_calls: usize,
+    /// When the provider said to come back, on a 429, a 529 or any 5xx
+    /// (see [`llm::ClassifyError::retry_after`]); the worker's cooldown.
+    pub retry_after: Option<std::time::Duration>,
 }
 impl std::fmt::Display for AgentFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,37 +94,47 @@ pub async fn run_agent(
         kind,
         usage: Vec::new(),
         model_calls: 0,
+        retry_after: None,
     })?;
     condense_initial_context(&mut context.initial, &config.context);
     // Reserve half the context window for investigation results. Truncation is
     // visible in the payload and never silently drops a message's identity.
     bound_evidence_text(&mut context.initial, config.context.max_context_bytes / 2);
-    let mut usage = Vec::new();
-    let mut model_calls = 0;
+    let mut progress = RunProgress::default();
+    // Each turn has `timeout_secs` of its own (inside `run_bounded`); this is
+    // the ceiling on the whole run, every turn and every evidence read, so
+    // nothing here can outlive the job's lease.
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(config.agent.timeout_secs),
-        run_bounded(
-            connection,
-            config,
-            context,
-            reader,
-            &mut usage,
-            &mut model_calls,
-        ),
+        std::time::Duration::from_secs(config.agent.run_deadline_secs()),
+        run_bounded(connection, config, context, reader, &mut progress),
     )
     .await;
     match outcome {
         Ok(Ok(run)) => Ok(run),
-        Ok(Err(kind)) => Err(AgentFailure {
+        Ok(Err(kind)) => Err(progress.failure(kind)),
+        // A `retry_after` is set only on the way out of `run_bounded`, which
+        // is the arm above; a dropped run has none.
+        Err(_) => Err(progress.failure(AGENT_TIMEOUT.into())),
+    }
+}
+
+/// What a run has spent and learned so far, kept outside the run's future
+/// so a deadline that drops the future still reports the usage and the
+/// calls it made, and the provider's `retry-after` if one came back.
+#[derive(Default)]
+struct RunProgress {
+    usage: Vec<Usage>,
+    model_calls: usize,
+    retry_after: Option<std::time::Duration>,
+}
+impl RunProgress {
+    fn failure(self, kind: String) -> AgentFailure {
+        AgentFailure {
             kind,
-            usage,
-            model_calls,
-        }),
-        Err(_) => Err(AgentFailure {
-            kind: "agent_timeout".into(),
-            usage,
-            model_calls,
-        }),
+            usage: self.usage,
+            model_calls: self.model_calls,
+            retry_after: self.retry_after,
+        }
     }
 }
 
@@ -125,8 +143,7 @@ async fn run_bounded(
     config: &AgentTriageConfig,
     context: ContextSnapshot,
     reader: &dyn EvidenceReader,
-    usage: &mut Vec<Usage>,
-    model_calls: &mut usize,
+    progress: &mut RunProgress,
 ) -> Result<AgentRun, String> {
     let mut sources: BTreeSet<i64> = context.source_message_ids.iter().copied().collect();
     let mut revisions = context.thread_revisions.clone();
@@ -162,21 +179,40 @@ async fn run_bounded(
         };
         // Retain provider usage before decoding either JSON syntax or step
         // structure. A malformed paid answer still belongs in the spend ledger.
-        *model_calls += 1;
-        let response = llm::classify_agent_step(
-            connection.http,
-            connection.url,
-            connection.api_key,
-            connection.provider,
-            &request,
+        progress.model_calls += 1;
+        // ONE TURN'S deadline. A turn that overruns it is the run's
+        // `agent_timeout`, billed for the request in flight; the turns before
+        // it are not what overran. The request's own timeout sits behind the
+        // deadline, so the shared client's (sized for a Gmail fetch) cannot
+        // cut a longer turn first as a transport failure.
+        let deadline = std::time::Duration::from_secs(config.agent.timeout_secs);
+        let step = tokio::time::timeout(
+            deadline,
+            llm::classify_agent_step(
+                connection.http,
+                connection.url,
+                connection.api_key,
+                connection.provider,
+                &request,
+                deadline.saturating_add(std::time::Duration::from_secs(
+                    crate::triage::agent_config::DEADLINE_SLACK_SECS,
+                )),
+            ),
         )
-        .await
-        .map_err(|error| error.kind)?;
+        .await;
+        let response = match step {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                progress.retry_after = error.retry_after;
+                return Err(error.kind);
+            }
+            Err(_elapsed) => return Err(AGENT_TIMEOUT.into()),
+        };
         // A review request grants one stronger-model call. Follow-up tool
         // investigation returns to the base model unless another review is
         // explicitly requested within the remaining review budget.
         model = config.agent.model.as_deref().unwrap_or(connection.model);
-        usage.extend(response.usage());
+        progress.usage.extend(response.usage());
         let step = match response {
             LlmOutcome::Ok(value, _) => match serde_json::from_str::<WireStep>(&value) {
                 Ok(wire) => wire.result,
@@ -212,7 +248,7 @@ async fn run_bounded(
                             decision,
                             source_message_ids: sources.into_iter().collect(),
                             thread_revisions: revisions,
-                            usage: usage.clone(),
+                            usage: progress.usage.clone(),
                             model_turns: turn + 1,
                             tool_calls,
                         });
@@ -1463,6 +1499,121 @@ mod tests {
             run.model_turns, 2,
             "the refusal costs one turn, then it finishes"
         );
+        server.abort();
+    }
+
+    /// [`mock_provider`] that takes 5 s over every answer.
+    async fn slow_provider(
+        state: axum::extract::State<
+            std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Value>>>,
+        >,
+        request: axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+        mock_provider(state, request).await
+    }
+
+    /// The deadline is per TURN: two turns that each fit inside it make a
+    /// run that would not have fit inside the old single ceiling over the
+    /// whole run, and the run finishes. The client's own timeout, shorter
+    /// than a turn here as the engine's shared client's would be for a
+    /// turn the operator allowed past 180 s, does not cut it either. The
+    /// turns are 5 s under an 8 s deadline: the property needs two turns
+    /// to outrun one deadline, and 3 s is the margin a loaded runner gets.
+    #[tokio::test]
+    async fn each_turn_has_the_deadline_to_itself() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let responses = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            // A step of no known shape costs a repair turn...
+            json!({"result": {"step": "ponder"}}),
+            // ...and the second turn finishes.
+            json!({"result": {"step": "finish", "decision": valid()}}),
+        ])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/", post(slow_provider))
+            .with_state(responses);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let connection = AgentConnection {
+            http: &http,
+            url: &url,
+            api_key: "test",
+            provider: Stage2Provider::OpenAI,
+            model: "test",
+            effort: None,
+        };
+        let context = ContextSnapshot {
+            thread_id: "thread".into(),
+            initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+            source_message_ids: vec![7],
+            ..Default::default()
+        };
+        let mut config = AgentTriageConfig::default();
+        config.agent.timeout_secs = 8;
+        let started = std::time::Instant::now();
+        let run = run_agent(connection, &config, context, &NoEvidence)
+            .await
+            .expect("two turns, each inside its own deadline");
+        assert_eq!(run.model_turns, 2);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(9500),
+            "{:?}: the run took longer than one turn's deadline",
+            started.elapsed()
+        );
+        server.abort();
+    }
+
+    /// One turn past its deadline is the run's `agent_timeout`, billed for
+    /// that one request, cut at the deadline rather than at the run's.
+    #[tokio::test]
+    async fn a_turn_past_its_deadline_is_the_runs_timeout() {
+        use axum::{Router, routing::post};
+        let app = Router::new().route(
+            "/",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                axum::Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = reqwest::Client::new();
+        let connection = AgentConnection {
+            http: &http,
+            url: &url,
+            api_key: "test",
+            provider: Stage2Provider::OpenAI,
+            model: "test",
+            effort: None,
+        };
+        let context = ContextSnapshot {
+            thread_id: "thread".into(),
+            initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+            source_message_ids: vec![7],
+            ..Default::default()
+        };
+        let mut config = AgentTriageConfig::default();
+        config.agent.timeout_secs = 1;
+        let started = std::time::Instant::now();
+        let failure = match run_agent(connection, &config, context, &NoEvidence).await {
+            Err(failure) => failure,
+            Ok(_) => panic!("the turn overran"),
+        };
+        assert_eq!(failure.kind, "agent_timeout");
+        assert_eq!(failure.model_calls, 1);
+        assert!(failure.retry_after.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
         server.abort();
     }
 

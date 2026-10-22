@@ -84,6 +84,7 @@ The independent notification model uses existing `[notify]` settings.
 max_model_turns = 4
 max_tool_calls = 8
 max_review_calls = 1
+# Per model turn; a whole investigation gets timeout_secs x (max_model_turns + 1).
 timeout_secs = 90
 concurrency = 2
 worker_poll_secs = 1
@@ -192,15 +193,39 @@ Invalid output and stale commits retry with exponential delay, then remain faile
 for inspection and manual re-triage. Observable output constraints get repair
 turns within the same investigation before consuming a new attempt. Provider
 configuration failures, transport failures, rate limits, and server errors
-instead leave work pending and retry after the shared outage cooldown;
-they do not consume the terminal-attempt allowance. After the cooldown, one
-investigation probes recovery; a successful response restores normal admission,
-and another outage extends the cooldown. Empty refine polling backs off up to
-30 seconds and an ingest wake resets the delay. A first-call configuration
-rejection refunds its budget reservation. Earlier paid calls remain charged.
-Whole-investigation and access-call deadlines are job-local failures: they consume
-retry attempts without pausing the account, and their uncertain spend is not
-refunded. Daily budget exhaustion defers work to the next UTC day. Investigations for the
+instead leave work pending and retry after a shared cooldown; they do not
+consume the terminal-attempt allowance. A configuration failure (a rejected
+key, an unknown model) stands the account off for `outage_retry_secs`, less up
+to 15 seconds of jitter so a fleet rejected together does not probe together.
+A rate limit, a server error or a transport failure (a connection refused, the
+client's own timeout) stands it off for the `retry-after` the provider sent
+when it sent one (a second to `outage_retry_secs`, with up to 15 seconds of
+jitter riding under that ceiling: the ceiling is the longest wait), otherwise
+15 to 30 seconds; every probe that fails in turn doubles that wait, up to
+`outage_retry_secs`, and a `retry-after` shorter than the rung reached no
+longer shortens it, so a throttle that is not lifting is probed as the outage
+it is. After the cooldown, one investigation probes recovery; a successful
+response restores normal admission (and the first rung), and another outage
+extends the cooldown. Empty refine
+polling backs off up to 30 seconds and an ingest wake resets the delay. A
+first-call configuration rejection refunds its budget reservation. Earlier
+paid calls remain charged. Deadlines are job-local failures that never pause
+the account: each model turn has `timeout_secs`, the investigation
+`timeout_secs` for every turn it may take and one turn more, and an attempt
+that overruns is retried; a second timeout in a row fails the job for
+inspection when the provider has answered since the first (an earlier turn of
+the same run, or another investigation: the message is what is slow, and every
+timed-out attempt is a billed request that re-sends the same context), while a
+provider answering nothing, or a process that has not yet seen it answer,
+leaves the job to its ordinary attempts, pending rather than failed. An access-call deadline
+consumes retry attempts in the usual way. Their uncertain spend is not refunded. A run dropped at
+shutdown hands its job back at once, due after the retry ladder's wait for the
+attempt it took and keeping that attempt (a job dropped on its last allowed
+attempt is failed instead); a process
+that dies outright, or a run
+whose last write the store refused, holds the lease (the run's deadline and
+30 s for an investigation, the access deadline and 30 s for an access check)
+until it lapses. Daily budget exhaustion defers work to the next UTC day. Investigations for the
 same thread are serialized, including related-source assessment jobs. Immediate
 requests coalesce by message/content revision, independent of trigger text.
 Changes during a lease accumulate at most one follow-up. Retry absorbs that

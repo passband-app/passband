@@ -325,7 +325,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             sender_preferences: sender_preferences.as_deref(),
         };
         let outcome = tokio::time::timeout(
-            Duration::from_secs(self.cfg.fast_timeout_secs),
+            Duration::from_secs(self.cfg.fast_deadline_secs()),
             notify_llm::classify_at(
                 &self.http,
                 &llm.url,

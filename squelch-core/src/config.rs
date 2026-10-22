@@ -452,6 +452,17 @@ pub struct NotifyConfig {
     pub price_out_per_mtok: f64,
 }
 
+impl NotifyConfig {
+    /// The fast lane's deadline, bounded like every triage wait: at least a
+    /// second, at most a day (`agent_config::MAX_TIMEOUT_SECS`), so the
+    /// access call, its lease and the notification lease read one number
+    /// and an absurd setting cannot size a lease past what the arithmetic
+    /// on it assumes.
+    pub fn fast_deadline_secs(&self) -> u64 {
+        self.fast_timeout_secs
+            .clamp(1, crate::triage::agent_config::MAX_TIMEOUT_SECS)
+    }
+}
 impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
@@ -2043,6 +2054,33 @@ impl Config {
             "SQUELCH_TRIAGE_TIMEOUT_SECS",
             &mut self.triage.agent.timeout_secs,
         );
+        // Bounded like the caps below, and said: the outage interval is the
+        // throttle ladder's ceiling, so it cannot be shorter than the
+        // ladder's first wait, and neither it nor a model turn may be longer
+        // than a day, which every lease and deadline built on them assumes.
+        // A value out of range used to be accepted and silently exceeded (a
+        // 20 s interval got 15 to 30 s throttle waits), and an operator who
+        // set one must not meet a boot panic on upgrade.
+        {
+            use crate::triage::agent_config::{MAX_TIMEOUT_SECS, MIN_OUTAGE_RETRY_SECS};
+            let outage = &mut self.triage.agent.outage_retry_secs;
+            if !(MIN_OUTAGE_RETRY_SECS..=MAX_TIMEOUT_SECS).contains(outage) {
+                let clamped = (*outage).clamp(MIN_OUTAGE_RETRY_SECS, MAX_TIMEOUT_SECS);
+                eprintln!(
+                    "squelch: config triage.agent.outage_retry_secs={outage} is out of range \
+                     ({MIN_OUTAGE_RETRY_SECS}..={MAX_TIMEOUT_SECS}); clamping to {clamped}"
+                );
+                *outage = clamped;
+            }
+            let timeout = &mut self.triage.agent.timeout_secs;
+            if *timeout > MAX_TIMEOUT_SECS {
+                eprintln!(
+                    "squelch: config triage.agent.timeout_secs={timeout} is past the day \
+                     limit; clamping to {MAX_TIMEOUT_SECS}"
+                );
+                *timeout = MAX_TIMEOUT_SECS;
+            }
+        }
         env_override(
             "SQUELCH_TRIAGE_CONCURRENCY",
             &mut self.triage.agent.concurrency,
@@ -2625,6 +2663,37 @@ mod tests {
         assert_eq!(config.triage.agent.background_daily_run_cap, 5);
         assert_eq!(config.triage.agent.max_attempts, 4);
         assert_eq!(config.triage.agent.outage_retry_secs, 600);
+    }
+
+    /// The outage interval and the turn deadline are clamped, not refused:
+    /// an operator's old setting must not become a boot panic.
+    #[test]
+    fn triage_intervals_out_of_range_are_clamped_not_refused() {
+        use crate::triage::agent_config::{MAX_TIMEOUT_SECS, MIN_OUTAGE_RETRY_SECS};
+        let _guard = ENV_LOCK.lock().unwrap();
+        let names = [
+            "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
+            "SQUELCH_TRIAGE_TIMEOUT_SECS",
+        ];
+        let previous: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
+        unsafe {
+            std::env::set_var(names[0], "20");
+            std::env::set_var(names[1], "100000");
+        }
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        unsafe {
+            for (name, value) in names.into_iter().zip(previous) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+        assert_eq!(config.triage.agent.outage_retry_secs, MIN_OUTAGE_RETRY_SECS);
+        assert_eq!(config.triage.agent.timeout_secs, MAX_TIMEOUT_SECS);
+        assert!(config.triage.validate().is_ok());
     }
 
     #[test]

@@ -109,6 +109,11 @@ pub struct ClassifyError {
     /// Whether this was a retryable class that exhausted its budget (vs. a hard
     /// transport error). Informational only.
     pub retryable: bool,
+    /// The `retry-after` the provider sent with the status that exhausted the
+    /// retries (a 429, a 529 or any 5xx saying when to come back), so a caller that
+    /// retries no further itself can wait exactly that long instead of a
+    /// fixed cooldown. `None` when the provider named no time.
+    pub retry_after: Option<Duration>,
 }
 
 impl std::fmt::Display for ClassifyError {
@@ -137,12 +142,57 @@ pub async fn classify_llm(
     provider: Stage2Provider,
     req: &LlmRequest<'_>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
+    dispatch(http, url, api_key, provider, req, false, None).await
+}
+
+/// [`classify_llm`] with the request's own timeout, for a caller whose
+/// deadline may run past the shared client's (the access check under a long
+/// `fast_timeout_secs`); see [`classify_agent_step`] for why the client's
+/// must not cut it first.
+pub async fn classify_llm_within(
+    http: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    provider: Stage2Provider,
+    req: &LlmRequest<'_>,
+    request_timeout: Duration,
+) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
+    dispatch(
+        http,
+        url,
+        api_key,
+        provider,
+        req,
+        false,
+        Some(request_timeout),
+    )
+    .await
+}
+
+async fn dispatch(
+    http: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    provider: Stage2Provider,
+    req: &LlmRequest<'_>,
+    tool_submission: bool,
+    request_timeout: Option<Duration>,
+) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     match provider {
-        Stage2Provider::Anthropic => classify_anthropic(http, url, api_key, req, false).await,
-        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req).await,
+        Stage2Provider::Anthropic => {
+            classify_anthropic(http, url, api_key, req, tool_submission, request_timeout).await
+        }
+        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req, request_timeout).await,
     }
 }
 
+/// One agent turn. `request_timeout` is this request's own, overriding the
+/// client's: the engine's shared client is sized for a Gmail fetch (180 s),
+/// and a turn the operator allowed to run longer would otherwise be cut by
+/// the client, as a `transport` failure that stands the whole account off,
+/// rather than at the turn's deadline as the job's own timeout. The caller
+/// wraps the turn in that deadline; this one is the backstop behind it.
+///
 /// The investigation schema exceeds Anthropic's strict grammar complexity
 /// limits, so the agent step is submitted through a native tool instead of
 /// `output_config.format`. The tool is NOT forced: Claude Opus 5.5 (and every
@@ -158,10 +208,29 @@ pub async fn classify_agent_step(
     api_key: &str,
     provider: Stage2Provider,
     req: &LlmRequest<'_>,
+    request_timeout: Duration,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
-    match provider {
-        Stage2Provider::Anthropic => classify_anthropic(http, url, api_key, req, true).await,
-        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req).await,
+    dispatch(
+        http,
+        url,
+        api_key,
+        provider,
+        req,
+        true,
+        Some(request_timeout),
+    )
+    .await
+}
+
+/// The request's own timeout where the caller set one (an agent turn, see
+/// [`classify_agent_step`]); the client's otherwise.
+fn with_timeout(
+    req: reqwest::RequestBuilder,
+    timeout: Option<Duration>,
+) -> reqwest::RequestBuilder {
+    match timeout {
+        Some(timeout) => req.timeout(timeout),
+        None => req,
     }
 }
 
@@ -432,6 +501,7 @@ async fn classify_anthropic(
     api_key: &str,
     req: &LlmRequest<'_>,
     tool_submission: bool,
+    request_timeout: Option<Duration>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     let max_tokens = MAX_TOKENS;
 
@@ -462,6 +532,7 @@ async fn classify_anthropic(
     let mut body = serde_json::to_value(body).map_err(|_| ClassifyError {
         kind: "request_encode".into(),
         retryable: false,
+        retry_after: None,
     })?;
     if tool_submission {
         body["output_config"]
@@ -479,8 +550,7 @@ async fn classify_anthropic(
     }
 
     let build = || {
-        let req = http
-            .post(url)
+        let req = with_timeout(http.post(url), request_timeout)
             .header("x-api-key", api_key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json");
@@ -551,6 +621,7 @@ async fn classify_openai(
     url: &str,
     api_key: &str,
     req: &LlmRequest<'_>,
+    request_timeout: Option<Duration>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     let max_completion_tokens = MAX_TOKENS;
 
@@ -578,7 +649,7 @@ async fn classify_openai(
     };
 
     let build = || {
-        http.post(url)
+        with_timeout(http.post(url), request_timeout)
             .bearer_auth(api_key)
             .header("content-type", "application/json")
             .json(&body)
@@ -660,6 +731,7 @@ where
                     return Err(ClassifyError {
                         kind: "transport".into(),
                         retryable: true,
+                        retry_after: None,
                     });
                 }
                 sleep_backoff(attempt, None).await;
@@ -672,6 +744,7 @@ where
             let parsed: T = resp.json().await.map_err(|_| ClassifyError {
                 kind: "response_decode".into(),
                 retryable: false,
+                retry_after: None,
             })?;
             return Ok(SendOk::Body(parsed));
         }
@@ -679,13 +752,17 @@ where
         let code = status.as_u16();
         let retryable = code == 429 || code == 529 || (500..600).contains(&code);
         if retryable {
+            let retry_after = parse_retry_after(&resp);
             if attempt >= max_tries {
+                // The provider's own "come back in" rides out with the
+                // error: a single-try caller (the agent) sets its cooldown
+                // from it rather than from a fixed outage interval.
                 return Err(ClassifyError {
                     kind: format!("http_{code}"),
                     retryable: true,
+                    retry_after,
                 });
             }
-            let retry_after = parse_retry_after(&resp);
             sleep_backoff(attempt, retry_after).await;
             continue;
         }
@@ -771,21 +848,24 @@ pub fn is_config_failure(kind: &str) -> bool {
         .any(|prefix| kind.starts_with(prefix))
 }
 
-/// Parse a `retry-after` header (seconds) if present.
+/// The `retry-after` the provider sent, in either form the header takes
+/// (delta-seconds, or the HTTP-date a gateway in front of the provider may
+/// send), at most an hour: the carriers' parser, so a fix to it lands here.
 fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
-    resp.headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
+    crate::carriers::retry_after(resp.headers())
 }
 
-/// Exponential backoff with a 60s cap; honors a server `retry-after` when given.
+/// Exponential backoff with a 60s cap; honors a server `retry-after` when
+/// given. A `retry-after` of zero (an HTTP-date already past, which the
+/// parser reads as "now") is not a wait at all, and a retry loop with no
+/// wait is a hammer: the exponential step applies instead.
 async fn sleep_backoff(attempt: u32, retry_after: Option<Duration>) {
-    let base = retry_after.unwrap_or_else(|| {
-        let secs = 1u64 << (attempt.min(6) - 1); // 1,2,4,8,16,32...
-        Duration::from_secs(secs)
-    });
+    let base = retry_after
+        .filter(|wait| !wait.is_zero())
+        .unwrap_or_else(|| {
+            let secs = 1u64 << (attempt.min(6) - 1); // 1,2,4,8,16,32...
+            Duration::from_secs(secs)
+        });
     tokio::time::sleep(base.min(BACKOFF_CAP)).await;
 }
 
@@ -865,6 +945,7 @@ mod tests {
                 "test",
                 Stage2Provider::Anthropic,
                 &req,
+                Duration::from_secs(30),
             )
             .await
             .unwrap();
@@ -915,6 +996,50 @@ mod tests {
         assert!(!is_config_failure("json_parse"));
         assert!(!is_config_failure("response_decode"));
         assert!(!is_config_failure("importance_out_of_range"));
+    }
+
+    /// A 429 that exhausts the caller's tries carries the provider's
+    /// `retry-after` out with it, so a single-try caller (the agent) can
+    /// stand off for exactly that long rather than a fixed interval.
+    #[tokio::test]
+    async fn an_exhausted_throttle_carries_the_providers_retry_after() {
+        use axum::{Router, http::StatusCode, routing::post};
+        use serde_json::json;
+        let app = Router::new().route(
+            "/",
+            post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "7")],
+                    axum::Json(json!({"error": {"type": "rate_limit_error"}})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let req = LlmRequest {
+            model: "test",
+            system: "test",
+            user: "test",
+            schema: json!({"type": "object"}),
+            effort: None,
+            max_tries: 1,
+        };
+        let error = classify_agent_step(
+            &reqwest::Client::new(),
+            &url,
+            "test",
+            Stage2Provider::Anthropic,
+            &req,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, "http_429");
+        assert!(error.retryable);
+        assert_eq!(error.retry_after, Some(Duration::from_secs(7)));
+        server.abort();
     }
 
     #[tokio::test]

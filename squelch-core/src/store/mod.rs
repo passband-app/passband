@@ -27,16 +27,16 @@ use crate::triage::extract::shipments::ShipmentsApplied;
 use crate::triage::rule_suggest::SmartBlock;
 use crate::triage::{CalendarInfo, CarrierTrack, DeadlineHit, ReceiptInfo, ShipmentInfo};
 use crate::types::{
-    AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, Banking,
-    CalendarUpdate, Deadline, Disposition, Event, EventKind, FieldReasons, NewMessage, OpenRate,
-    Receipt, RetriageProgress, SealedKind, SearchHit, SenderRule, Sensitivity, ShredCandidate,
-    StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord, Update,
+    AccountId, AttachmentInfo, AttentionStatus, AuditEntry, Banking, CalendarUpdate, Deadline,
+    Disposition, Event, EventKind, FieldReasons, NewMessage, OpenRate, Receipt, RetriageProgress,
+    SealedKind, SearchHit, SenderRule, Sensitivity, ShredCandidate, StoreStats, ThreadView, Tier,
+    TriageAxis, TriageFeedback, UnsubscribeRecord,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Server-side bucket for the sitrep chassis, selected by the `band` param on
-/// `/client/updates`. See [`Store::attention_updates`].
+/// `/client/updates`.
 ///
 /// - `Standing` — mail owed the user's attention, immune to the surfacing clock
 ///   and never rotating out until resolved: a dated obligation (tier
@@ -999,68 +999,6 @@ pub struct ParentContext {
     pub from_name: Option<String>,
 }
 
-/// One non-confident triage row queued for the Stage-2 LLM pass, with message
-/// context and the matched Filtered-rule's `want_text`. Produced by
-/// [`Store::stage2_queue`], whose predicate (`model_used IS NULL AND
-/// sensitivity='normal'`) excludes sealed rows in SQL, so this never represents
-/// sealed mail.
-#[derive(Debug, Clone)]
-pub struct Stage2Queued {
-    /// Local message id (triage.message_id).
-    pub message_id: i64,
-    pub account_id: AccountId,
-    /// Gmail thread id — the per-thread budget key.
-    pub thread_id: String,
-    pub from_addr: String,
-    pub subject: String,
-    pub body: String,
-    /// Drives the pass loop's SKIP-STALE check: rows older than
-    /// `stage2_max_age_days` are marked `model_used='stale-skip'` without
-    /// spending a model call.
-    pub received_at: DateTime<Utc>,
-    /// `true` if the sender is a Sent-derived contact. Feeds the TRUSTED CONTEXT
-    /// block and gates unknown-sender deadline capping.
-    pub is_known_contact: bool,
-    /// The matched Filtered rule's `want_text`, presented in the TRUSTED CONTEXT
-    /// block as the account owner's standing instruction for this sender.
-    pub rule_want_text: Option<String>,
-    /// WHY the router escalated this row
-    /// ([`crate::triage::router::EscalationReason::as_str`]). Shown to the
-    /// model, because "look harder" without saying at what is a worse question
-    /// than the one Stage-1 already answered.
-    pub escalation_reason: Option<String>,
-    /// What this sender's mail has historically been worth to the account owner.
-    pub sender_history: SenderHistory,
-    /// Other messages in the same thread, oldest first. SEALED SIBLINGS ARE
-    /// EXCLUDED IN SQL: a sealed message's subject must never reach a model,
-    /// including as another row's context.
-    pub thread: Vec<ThreadSibling>,
-    /// Always `'normal'` for queued rows; carried so the sealed guard can assert.
-    pub sensitivity: Sensitivity,
-    /// When a human last asked for this row to be re-triaged; see
-    /// [`Stage1Queued::retriage_at`]. Overrides the SKIP-STALE check above.
-    pub retriage_at: Option<DateTime<Utc>>,
-    /// `triage.notify_eligible_at`; see [`TriagedMessage::notify_eligible_at`].
-    /// Carried on the queue row so the Stage-2 apply site can emit without a
-    /// second read, and so the emission decision measures the age of OUR sight
-    /// of the message rather than the sender's `Date:` header.
-    pub notify_eligible_at: Option<DateTime<Utc>>,
-}
-
-/// How the account owner has treated this sender before. Aggregates, not
-/// content: a count of prior mail, how much of it surfaced, and how often they
-/// overrode the verdict — the cheapest honest answer to "is this sender someone
-/// we get right?"
-#[derive(Debug, Clone, Default)]
-pub struct SenderHistory {
-    /// Prior non-sealed, inbound messages from this address.
-    pub total: i64,
-    /// How many landed at signal or in the standing band.
-    pub surfaced: i64,
-    /// How many the account owner corrected by hand.
-    pub corrected: i64,
-}
-
 /// One recent message from a sender, as the RULE SUGGESTER sees it: the subject
 /// plus what triage and the owner did with it. Non-sealed, inbound, non-spam
 /// only; see [`Store::sender_rule_digest`].
@@ -1094,141 +1032,6 @@ impl SmartBlockMemo {
     }
 }
 
-/// One other message in the escalated row's thread. Verdict and envelope only,
-/// never a body: the point is whether the owner is IN this conversation, which
-/// the metadata answers without a second body's worth of tokens or a second
-/// body's worth of injection surface.
-#[derive(Debug, Clone)]
-pub struct ThreadSibling {
-    pub from_addr: String,
-    pub subject: String,
-    /// UNTRUSTED: model-authored from email content, neutralized before it
-    /// renders in a prompt.
-    pub one_line: String,
-    pub tier: Tier,
-    pub received_at: DateTime<Utc>,
-    /// `true` when this sibling is the account owner's own message — the single
-    /// most useful bit in the thread, since a conversation the owner has replied
-    /// in is one they have already voted for.
-    pub is_sent: bool,
-}
-
-/// The store-facing outcome of applying a parsed Stage-2 result onto a triage
-/// row (pure mapping lives in `triage::stage2::apply_result`). When `deadline`
-/// is `Some`, a `deadlines` row is (re)written.
-#[derive(Debug, Clone)]
-pub struct Stage2Applied {
-    pub message_id: i64,
-    pub account_id: AccountId,
-    pub importance: u8,
-    pub tier: Tier,
-    pub one_line: String,
-    pub reason: String,
-    /// Per-property Stage-2 justifications describing the values THIS apply
-    /// stores, fully replacing any Stage-1 reasons. Served HUMAN-DOOR ONLY.
-    pub field_reasons: FieldReasons,
-    /// Stamped onto `model_used`, marking the row processed so the queue
-    /// predicate no longer selects it.
-    pub model_used: String,
-    /// A deadline to (re)write for this message, if the model extracted one.
-    pub deadline: Option<DeadlineHit>,
-    /// Stamped onto `triage.category`; `None` leaves the column untouched.
-    pub category: Option<String>,
-}
-
-/// One row queued for the Stage-1 LLM refine pass: an ingested, NON-SEALED,
-/// non-rule-decided message still carrying its heuristic seed values
-/// (`stage1_model_used IS NULL AND sensitivity='normal'`). The predicate
-/// excludes sealed rows in SQL, so this never represents sealed mail.
-#[derive(Debug, Clone)]
-pub struct Stage1Queued {
-    pub message_id: i64,
-    pub account_id: AccountId,
-    /// Carried for context/logging; Stage-1 budgets only GLOBALLY, never
-    /// per-thread.
-    pub thread_id: String,
-    pub from_addr: String,
-    pub subject: String,
-    pub body: String,
-    /// Drives the deadline sanity bounds and the stale-skip check.
-    pub received_at: DateTime<Utc>,
-    /// `true` if the sender is a Sent-derived contact. Feeds the TRUSTED CONTEXT
-    /// block and gates the unknown-sender deadline cap.
-    pub is_known_contact: bool,
-    /// `true` if the account owner has ever corrected a triage verdict for this
-    /// sender address. Feeds [`crate::triage::router::EscalationReason::SenderCorrected`]:
-    /// a human override is the strongest evidence in the system that a sender is
-    /// one we get wrong, so their next message earns the harder look.
-    pub sender_corrected: bool,
-    /// Always `'normal'` for queued rows; carried so the sealed guard can assert.
-    pub sensitivity: Sensitivity,
-    /// `triage.retriage_at`: when a human last asked for THIS row to be
-    /// re-triaged, `None` when nobody ever has. Read through
-    /// the legacy re-triage window, which is what lets an explicit
-    /// re-triage of old mail bypass the pass's stale skip.
-    pub retriage_at: Option<DateTime<Utc>>,
-    /// `triage.notify_eligible_at`; see [`TriagedMessage::notify_eligible_at`].
-    /// Carried on the queue row so the Stage-1 apply site can emit without a
-    /// second read.
-    pub notify_eligible_at: Option<DateTime<Utc>>,
-}
-
-/// A triage row's HEURISTIC SEED verdict, read back when the Stage-1 model call
-/// did not produce one. Just enough to decide a notification: the seed is what
-/// the user will actually see on that row, so it is what the notification has to
-/// describe.
-#[derive(Debug, Clone)]
-pub struct SeedVerdict {
-    pub tier: Tier,
-    pub importance: u8,
-    pub one_line: String,
-    /// The ingest-time escalation seed, which is the STORED form of the
-    /// heuristic's own confidence (`needs_stage2 = !confident`). A row still
-    /// bound for Stage-2 has another verdict coming and must not notify from
-    /// this one.
-    pub needs_stage2: bool,
-    pub deadline: Option<DateTime<Utc>>,
-    /// `triage.notify_eligible_at`; see [`TriagedMessage::notify_eligible_at`].
-    /// Read back HERE rather than taken off the queued row because this whole
-    /// struct is the row as it stands at emission time, and the fallback site
-    /// has no other read of it.
-    pub notify_eligible_at: Option<DateTime<Utc>>,
-}
-
-/// One message whose scheduled re-evaluation has come due. Carries the PRIOR
-/// verdict, because the re-classification's whole job is to answer "does this
-/// still hold?" and it cannot do that without knowing what it is revising.
-///
-/// The queue predicate excludes sealed rows, sent mail, rows past their revisit
-/// budget, and — critically — rows the account owner has corrected by hand.
-#[derive(Debug, Clone)]
-pub struct RevisitQueued {
-    /// The `triage_revisits` row id, stamped fired when this is consumed.
-    pub revisit_id: i64,
-    pub message_id: i64,
-    pub account_id: AccountId,
-    pub thread_id: String,
-    pub from_addr: String,
-    pub subject: String,
-    pub body: String,
-    pub received_at: DateTime<Utc>,
-    /// When this revisit was scheduled for (not when it fired).
-    pub revisit_at: DateTime<Utc>,
-    /// Why it was scheduled. UNTRUSTED for `source == "model"`.
-    pub reason: String,
-    /// `model` | `deadline` | `fye_stale`.
-    pub source: String,
-    pub prior_tier: Tier,
-    pub prior_importance: u8,
-    /// The prior one-liner. Model-authored from untrusted email; neutralized
-    /// before it renders in a prompt.
-    pub prior_one_line: String,
-    pub is_known_contact: bool,
-    pub sender_corrected: bool,
-    /// Always `'normal'` for queued rows; carried so the sealed guard can assert.
-    pub sensitivity: Sensitivity,
-}
-
 /// The store-facing outcome of applying a parsed Stage-1 LLM result onto a
 /// triage row: stamps `stage1_model_used` (leaving the Stage-1 queue) and sets
 /// `needs_stage2` (whether the row escalates).
@@ -1245,12 +1048,10 @@ pub struct Stage1Applied {
     pub field_reasons: FieldReasons,
     /// The Stage-1 model id to stamp `stage1_model_used` with.
     pub stage1_model_used: String,
-    /// `true` when [`crate::triage::router::should_escalate`] found a reason:
-    /// sets `needs_stage2=1` so the Stage-2 queue predicate picks the row up.
+    /// Stored as `needs_stage2`. Historical: the retired escalation router set
+    /// it; nothing reads it to route mail any more.
     pub needs_stage2: bool,
-    /// The routing reason's slug, stored so the escalation MIX is inspectable
-    /// after the fact. Tuning the router without knowing which arm is firing is
-    /// guesswork, and the arms are the whole design.
+    /// Stored as `escalation_reason`. Historical, like `needs_stage2`.
     pub escalation_reason: Option<&'static str>,
     /// A deadline to (re)write for this message, if the model extracted one.
     pub deadline: Option<DeadlineHit>,
@@ -1282,8 +1083,8 @@ pub struct ExtractQueued {
     pub received_at: DateTime<Utc>,
     /// Always `'normal'` for queued rows; carried so the sealed guard can assert.
     pub sensitivity: Sensitivity,
-    /// When a human last asked for this row to be re-triaged; see
-    /// [`Stage1Queued::retriage_at`]. Overrides the stale skip in
+    /// When a human last asked for this row to be re-triaged. Overrides the
+    /// stale skip in
     /// [`crate::triage::extract::route_extract_row`] and in the shipments loop.
     pub retriage_at: Option<DateTime<Utc>>,
 }
@@ -1550,21 +1351,13 @@ impl ArchiveDisk {
 
 /// The squelch local store. Implemented by [`SqliteStore`].
 ///
-/// SECURITY: every method that can feed the MCP surface (`ranked_updates`,
-/// `thread_view`, `deadlines`) MUST exclude `sensitivity = 'sealed'` in the SQL
+/// SECURITY: every method that can feed the MCP surface (`thread_view`,
+/// `deadlines`, the agent listings) MUST exclude `sensitivity = 'sealed'` in the SQL
 /// itself. `sealed_messages` is the sole local-only escape hatch (TUI).
 pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// Insert or update a message (and its FTS body + derived contacts).
     /// Returns the local message id.
     fn upsert_message(&self, msg: &NewMessage) -> Result<i64>;
-
-    /// Ranked, MCP-facing updates. Sealed rows are excluded in SQL.
-    fn ranked_updates(
-        &self,
-        account_id: AccountId,
-        since: DateTime<Utc>,
-        min_importance: Option<u8>,
-    ) -> Result<Vec<Update>>;
 
     /// MCP-facing thread view. Returns `NotFound` for a sealed thread so it is
     /// indistinguishable from a nonexistent one.
@@ -2253,30 +2046,6 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     // from MCP, sync, or triage. `search` still excludes sealed rows; the
     // sealed_* / audit methods are the human door's privileged surface.
 
-    /// HUMAN-DOOR-ONLY: ranked updates carrying attention-lifecycle fields for
-    /// the sitrep chassis, `band` applying a server-side bucket (see
-    /// [`SitrepBand`]). Sealed rows are excluded in SQL.
-    ///
-    /// The returned `surfaced_at` is the PRE-stamp value — this method never
-    /// mutates the ledger; the caller stamps with [`Store::mark_surfaced`] AFTER
-    /// the serialization set is computed.
-    ///
-    /// `pending_reminders` narrows to rows with a reminder still owed and orders
-    /// them soonest-first, which is a SCHEDULE rather than a band: every such row
-    /// is `done` by construction (see [`Store::set_reminder`]), so a caller
-    /// asking for it must not also be filtering done away.
-    #[allow(clippy::too_many_arguments)] // the filters of one listing, one per axis
-    fn attention_updates(
-        &self,
-        account_id: AccountId,
-        since: DateTime<Utc>,
-        min_importance: Option<u8>,
-        status: Option<AttentionStatus>,
-        band: Option<SitrepBand>,
-        pending_reminders: bool,
-        spam: SpamScope,
-    ) -> Result<Vec<AttentionUpdate>>;
-
     /// SEEN-LEDGER stamp, in ONE transaction: for each non-sealed message id set
     /// `surfaced_at=now` only if currently NULL, and promote `status`
     /// `new`->`open`. Sealed rows are guarded out in SQL. Returns the
@@ -2354,7 +2123,7 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// two different things depending on which mode served it. Use
     /// [`Store::search_filtered`] to rank on relevance alone.
     ///
-    /// SECURITY: sealed rows are excluded in SQL, exactly like `ranked_updates`.
+    /// SECURITY: sealed rows are excluded in SQL, exactly like `thread_view`.
     fn search(
         &self,
         account_id: AccountId,
@@ -2863,12 +2632,6 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     // queue predicate is `model_used IS NULL AND sensitivity='normal'`, so sealed
     // rows are structurally excluded.
 
-    /// Up to `limit` rows queued for the Stage-1 LLM refine pass
-    /// (`stage1_model_used IS NULL AND sensitivity='normal' AND is_sent=0`),
-    /// newest first. Rule-decided rows carry a non-NULL `stage1_model_used` and
-    /// are excluded.
-    fn stage1_queue(&self, account_id: AccountId, limit: usize) -> Result<Vec<Stage1Queued>>;
-
     /// Apply a parsed Stage-1 LLM result onto a triage row IN ONE TRANSACTION:
     /// overwrite importance/tier/one_line/reason/field_reasons, stamp
     /// `stage1_model_used` (leaving the Stage-1 queue), set `needs_stage2`, and
@@ -2881,33 +2644,11 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// particular, no notification event.
     fn stage1_apply(&self, applied: &Stage1Applied) -> Result<bool>;
 
-    /// Mark a Stage-1-queued row PROCESSED without changing its heuristic seed
-    /// values — stamp `stage1_model_used` only, PRESERVING the `needs_stage2`
-    /// seed written at ingest, so on the heuristic-only fallback (API down /
-    /// refusal / permanent error) the seed's own confidence decides escalation.
-    /// Guarded by `sensitivity='normal'`.
-    fn stage1_mark_processed(
-        &self,
-        account_id: AccountId,
-        message_id: i64,
-        stage1_model_used: &str,
-    ) -> Result<()>;
-
-    /// The row's CURRENT verdict as the heuristic seed left it, for the Stage-1
-    /// fallback's notification decision. `None` when the row is missing or
-    /// sealed. Read on the fallback path only, which is rare by construction.
-    fn triage_seed_verdict(
-        &self,
-        account_id: AccountId,
-        message_id: i64,
-    ) -> Result<Option<SeedVerdict>>;
-
     /// `triage.notify_eligible_at` as the STORE holds it, for one message.
     /// `None` when the row is missing or was never stamped.
     ///
-    /// NOT GATED ON `sensitivity`, which is the whole reason it is not
-    /// [`Store::triage_seed_verdict`]: a sealed row has no seed verdict to read
-    /// and still has a stamp, and the fast lane's sealed path needs the stored
+    /// NOT GATED ON `sensitivity`: a sealed row still has a stamp, and the fast
+    /// lane's sealed path needs the stored
     /// stamp for exactly the reason its model path does. `ingest_message` writes
     /// the column on FIRST INSERT ONLY and preserves it on conflict, so the
     /// value ingest recomputed on a re-ingest is not the value that decides the
@@ -2917,61 +2658,6 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         account_id: AccountId,
         message_id: i64,
     ) -> Result<Option<DateTime<Utc>>>;
-
-    // ---- REVISITS (see `crate::triage::revisit`) --------------------------
-
-    /// Replace a message's PENDING scheduled re-evaluations with `requests`.
-    /// Already-fired rows are left as history. A sealed row stores nothing:
-    /// firing a revisit would put sealed mail back in front of a model.
-    fn revisits_schedule(
-        &self,
-        account_id: AccountId,
-        message_id: i64,
-        requests: &[crate::triage::revisit::RevisitRequest],
-        now: DateTime<Utc>,
-    ) -> Result<()>;
-
-    /// Up to `limit` revisits that have come due, oldest first. Excludes sealed
-    /// rows, sent mail, already-resolved rows, rows at or past `max_lifetime`
-    /// re-evaluations, and any message the account owner has corrected by hand.
-    fn revisit_queue(
-        &self,
-        account_id: AccountId,
-        now: DateTime<Utc>,
-        max_lifetime: u32,
-        limit: usize,
-    ) -> Result<Vec<RevisitQueued>>;
-
-    /// Stamp a revisit fired and charge the message's lifetime counter. Called
-    /// even when the re-classification failed, so a broken row cannot be retried
-    /// every cycle forever. Idempotent: guarded on `fired_at IS NULL`.
-    fn revisit_mark_fired(
-        &self,
-        account_id: AccountId,
-        revisit_id: i64,
-        now: DateTime<Utc>,
-    ) -> Result<()>;
-
-    /// Message ids in the standing band, not done, with no human correction and
-    /// nothing that has looked at them since `older_than` — no pending revisit
-    /// and none FIRED inside that window, which is what stops the sweep from
-    /// re-asking every sync tick: the automatic staleness sweep's candidates.
-    fn revisit_stale_standing(
-        &self,
-        account_id: AccountId,
-        older_than: DateTime<Utc>,
-        max_lifetime: u32,
-        limit: usize,
-    ) -> Result<Vec<i64>>;
-
-    /// Apply a re-evaluated verdict: [`Store::stage1_apply`]'s write, plus
-    /// clearing `model_used` so a newly escalated row can re-enter the Stage-2
-    /// queue, and refusing any row carrying a human correction.
-    ///
-    /// `false` means the guarded UPDATE matched nothing — the row was sealed or
-    /// corrected between the queue read and the apply — and the caller must
-    /// treat the verdict as NOT landed.
-    fn revisit_apply(&self, applied: &Stage1Applied) -> Result<bool>;
 
     /// Bump the Stage-1 usage ledger for `(account_id, day)`: +1 call plus the
     /// response's token counts. Kept separate from Stage-2's ledger.
@@ -3013,12 +2699,6 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         days: u32,
     ) -> Result<Vec<(String, Vec<Stage2UsageDay>)>>;
 
-    /// Up to `limit` queued Stage-2 rows (`stage1_model_used IS NOT NULL AND
-    /// needs_stage2=1 AND model_used IS NULL AND sensitivity='normal'`) with
-    /// message context and any matched Filtered rule's `want_text`. Newest-first,
-    /// so the freshest ambiguous mail gets a look first.
-    fn stage2_queue(&self, account_id: AccountId, limit: usize) -> Result<Vec<Stage2Queued>>;
-
     /// Today's Stage-2 API-call count for a budget scope: `thread_id` is either a
     /// real Gmail thread id (per-thread cap) or the `'__global__'` sentinel
     /// (per-account cap). `day` is caller-provided so tests are deterministic.
@@ -3051,25 +2731,6 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// deliberately keep their charge: the model ran and was paid for.
     fn stage2_refund_budget(&self, account_id: AccountId, thread_id: &str, day: &str)
     -> Result<()>;
-
-    /// Apply a parsed Stage-2 result onto a triage row IN ONE TRANSACTION:
-    /// overwrite importance/tier/one_line/reason, stamp `model_used` (leaving the
-    /// queue), and (re)write the `deadlines` row when the model extracted one.
-    /// Guarded by `sensitivity='normal'`.
-    ///
-    /// `false` is the sealed-mid-pass case, as on [`Store::stage1_apply`]:
-    /// nothing was written and the caller must not emit for it.
-    fn stage2_apply(&self, applied: &Stage2Applied) -> Result<bool>;
-
-    /// Mark a queued row PROCESSED without changing its Stage-1 values — stamp
-    /// `model_used` only, on refusal or a permanent API error, so the row does
-    /// not loop forever. Guarded by `sensitivity='normal'`.
-    fn stage2_mark_processed(
-        &self,
-        account_id: AccountId,
-        message_id: i64,
-        model_used: &str,
-    ) -> Result<()>;
 
     /// Bump the Stage-2 usage ledger for `(account_id, day)`: +1 call plus the
     /// response's token counts, after each classify that carried a usage block.

@@ -234,21 +234,19 @@ use crate::store::{
     DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread,
     IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer,
     MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode, MissingVector,
-    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, RevisitQueued,
-    SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
-    SeedVerdict, SenderDigestRow, SenderDomainEntry, SenderEntry, SenderHistory, SentMessage,
-    SitrepBand, SpamScope, Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides,
-    Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling,
-    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, SPAM_SYNCED_AT_KEY,
+    SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
+    SenderDomainEntry, SenderEntry, SentMessage, Stage1Applied, Stage2CapOverrides, Stage2Usage,
+    Stage2UsageDay, Store, SyncState, TermDf, TrackedMessage, TriageDebug, TriagedMessage,
+    UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
-    AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
-    CalendarUpdate, ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition,
-    Event, EventKind, GroupHistoryEntry, GroupMember, GroupMode, NewMessage, OpenRate, Receipt,
-    RetriageProgress, SanitizedMessage, SealedKind, SearchHit, SendGroup, SenderRule, Sensitivity,
-    ShredCandidate, StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
-    Update,
+    AccountId, AttachmentInfo, AttentionStatus, AuditEntry, BandCounts, Banking, CalendarUpdate,
+    ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition, Event, EventKind,
+    GroupHistoryEntry, GroupMember, GroupMode, NewMessage, OpenRate, Receipt, RetriageProgress,
+    SanitizedMessage, SealedKind, SearchHit, SendGroup, SenderRule, Sensitivity, ShredCandidate,
+    StoreStats, ThreadView, Tier, TriageAxis, TriageFeedback, UnsubscribeRecord,
 };
 
 /// `app_settings` key recording when this account's open ledger started, so the
@@ -880,15 +878,6 @@ impl Store for SqliteStore {
         self.upsert_message(msg)
     }
 
-    fn ranked_updates(
-        &self,
-        account_id: AccountId,
-        since: DateTime<Utc>,
-        min_importance: Option<u8>,
-    ) -> Result<Vec<Update>> {
-        self.ranked_updates(account_id, since, min_importance)
-    }
-
     fn thread_view(&self, account_id: AccountId, thread_id: &str) -> Result<ThreadView> {
         self.thread_view(account_id, thread_id)
     }
@@ -1354,27 +1343,6 @@ impl Store for SqliteStore {
         self.search_filtered(account_id, text, filter, sort, partial, limit, offset)
     }
 
-    fn attention_updates(
-        &self,
-        account_id: AccountId,
-        since: DateTime<Utc>,
-        min_importance: Option<u8>,
-        status: Option<AttentionStatus>,
-        band: Option<SitrepBand>,
-        pending_reminders: bool,
-        spam: SpamScope,
-    ) -> Result<Vec<AttentionUpdate>> {
-        self.attention_updates(
-            account_id,
-            since,
-            min_importance,
-            status,
-            band,
-            pending_reminders,
-            spam,
-        )
-    }
-
     fn mark_surfaced(&self, account_id: AccountId, message_ids: &[i64]) -> Result<usize> {
         self.mark_surfaced(account_id, message_ids)
     }
@@ -1721,29 +1689,8 @@ impl Store for SqliteStore {
         self.mail_activity(account_id, since, until)
     }
 
-    fn stage1_queue(&self, account_id: AccountId, limit: usize) -> Result<Vec<Stage1Queued>> {
-        self.stage1_queue(account_id, limit)
-    }
-
     fn stage1_apply(&self, applied: &Stage1Applied) -> Result<bool> {
         self.stage1_apply(applied)
-    }
-
-    fn stage1_mark_processed(
-        &self,
-        account_id: AccountId,
-        message_id: i64,
-        stage1_model_used: &str,
-    ) -> Result<()> {
-        self.stage1_mark_processed(account_id, message_id, stage1_model_used)
-    }
-
-    fn triage_seed_verdict(
-        &self,
-        account_id: AccountId,
-        message_id: i64,
-    ) -> Result<Option<SeedVerdict>> {
-        self.triage_seed_verdict(account_id, message_id)
     }
 
     fn notify_eligible_at(
@@ -1752,49 +1699,6 @@ impl Store for SqliteStore {
         message_id: i64,
     ) -> Result<Option<DateTime<Utc>>> {
         self.notify_eligible_at(account_id, message_id)
-    }
-
-    fn revisits_schedule(
-        &self,
-        account_id: AccountId,
-        message_id: i64,
-        requests: &[crate::triage::revisit::RevisitRequest],
-        now: DateTime<Utc>,
-    ) -> Result<()> {
-        self.revisits_schedule(account_id, message_id, requests, now)
-    }
-
-    fn revisit_queue(
-        &self,
-        account_id: AccountId,
-        now: DateTime<Utc>,
-        max_lifetime: u32,
-        limit: usize,
-    ) -> Result<Vec<RevisitQueued>> {
-        self.revisit_queue(account_id, now, max_lifetime, limit)
-    }
-
-    fn revisit_mark_fired(
-        &self,
-        account_id: AccountId,
-        revisit_id: i64,
-        now: DateTime<Utc>,
-    ) -> Result<()> {
-        self.revisit_mark_fired(account_id, revisit_id, now)
-    }
-
-    fn revisit_stale_standing(
-        &self,
-        account_id: AccountId,
-        older_than: DateTime<Utc>,
-        max_lifetime: u32,
-        limit: usize,
-    ) -> Result<Vec<i64>> {
-        self.revisit_stale_standing(account_id, older_than, max_lifetime, limit)
-    }
-
-    fn revisit_apply(&self, applied: &Stage1Applied) -> Result<bool> {
-        self.revisit_apply(applied)
     }
 
     fn stage1_bump_usage(
@@ -1833,10 +1737,6 @@ impl Store for SqliteStore {
         self.list_usage_by_category(account_id, days)
     }
 
-    fn stage2_queue(&self, account_id: AccountId, limit: usize) -> Result<Vec<Stage2Queued>> {
-        self.stage2_queue(account_id, limit)
-    }
-
     fn stage2_budget_used(&self, account_id: AccountId, thread_id: &str, day: &str) -> Result<u32> {
         self.stage2_budget_used(account_id, thread_id, day)
     }
@@ -1857,19 +1757,6 @@ impl Store for SqliteStore {
         day: &str,
     ) -> Result<()> {
         self.stage2_refund_budget(account_id, thread_id, day)
-    }
-
-    fn stage2_apply(&self, applied: &Stage2Applied) -> Result<bool> {
-        self.stage2_apply(applied)
-    }
-
-    fn stage2_mark_processed(
-        &self,
-        account_id: AccountId,
-        message_id: i64,
-        model_used: &str,
-    ) -> Result<()> {
-        self.stage2_mark_processed(account_id, message_id, model_used)
     }
 
     fn stage2_bump_usage(

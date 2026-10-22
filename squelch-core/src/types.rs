@@ -154,8 +154,8 @@ pub struct Update {
     pub reason: String,
     pub deadline: Option<DateTime<Utc>>,
     pub matched_rule: Option<i64>,
-    /// HUMAN-DOOR ONLY: set by [`crate::store::Store::attention_updates`], left
-    /// `None` by the MCP path so no key reaches the agent door.
+    /// HUMAN-DOOR ONLY: set by the human door's listing, left `None` by the
+    /// MCP path so no key reaches the agent door.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_reasons: Option<FieldReasons>,
     /// Whether the message carries stored attachments (the paperclip glyph).

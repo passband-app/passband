@@ -477,9 +477,10 @@ spam it is told to distrust: everything the agent reads is text it may act on.
   silent full listing.
 - **The page's rows carry the mail's own words, and only there.** Nothing
   triaged a spam row, so its `one_line` is the empty string and the page would
-  be a column of senders against a blank. `attention_updates` fills `subject`
-  and `preview` (the stored 200-character snippet) on `SpamScope::Only` and on
-  nothing else. Both are `Option`, skipped when `None`, so the agent door's
+  be a column of senders against a blank. The human door's listing
+  (`human_agent_updates`) fills `subject` and `preview` (the stored
+  200-character snippet) on the rows it serves, spam or not. Both are
+  `Option`, skipped when `None`, so the agent door's
   `Update` never grows the keys at all — the same discipline `from_name` holds,
   for the sharper version of its reason: this is text out of the corpus written
   to talk readers into things. A person reading their own spam folder expects

@@ -4554,7 +4554,45 @@ mod tests {
     use crate::config::Stage1Config;
     use crate::store::SpamScope;
     use crate::store::SqliteStore;
-    use crate::types::{Disposition, NewMessage, Tier};
+    use crate::types::{AttentionUpdate, Disposition, NewMessage, Tier};
+
+    /// The mail list as the client reads it (`human_agent_updates`, every
+    /// band, nothing filtered but spam scope): what a sync test means by
+    /// "visible in the mailbox". Sent copies never appear in it.
+    fn inventory(
+        store: &SqliteStore,
+        acct: AccountId,
+        since: DateTime<Utc>,
+        spam: SpamScope,
+    ) -> Vec<AttentionUpdate> {
+        use crate::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+        store
+            .human_agent_updates(
+                acct,
+                &AgentInventoryQuery {
+                    since,
+                    min_importance: None,
+                    status: None,
+                    band: None,
+                    pending_reminders: false,
+                    spam,
+                    ranking: Default::default(),
+                    before: None,
+                    limit: None,
+                },
+            )
+            .unwrap()
+    }
+
+    /// The last day of non-spam mail in [`inventory`].
+    fn listed(store: &SqliteStore, acct: AccountId, now: DateTime<Utc>) -> Vec<AttentionUpdate> {
+        inventory(
+            store,
+            acct,
+            now - ChronoDuration::days(1),
+            SpamScope::Exclude,
+        )
+    }
 
     #[test]
     fn gmail_quota_limit_note_names_the_limit_and_nothing_else() {
@@ -4750,19 +4788,14 @@ mod tests {
     /// one the `DO UPDATE SET` quietly rewrote, would pass every in-memory check
     /// and still leave the emission sites reading the wrong clock.
     ///
-    /// `triage_seed_verdict` because it is the one read that carries the column
-    /// for ANY normal row, sent copies included — the queue SELECTs filter
-    /// `m.is_sent = 0`, so they cannot see half of what these tests assert on.
+    /// `notify_eligible_at` because it reads the column for ANY row, sent
+    /// copies and sealed mail included.
     fn stamp_of(
         store: &SqliteStore,
         account_id: AccountId,
         message_id: i64,
     ) -> Option<DateTime<Utc>> {
-        store
-            .triage_seed_verdict(account_id, message_id)
-            .unwrap()
-            .expect("a triage row for this message")
-            .notify_eligible_at
+        store.notify_eligible_at(account_id, message_id).unwrap()
     }
 
     /// An ops-alert EML dated `at`: automated sender + alert language, so it
@@ -5101,13 +5134,10 @@ mod tests {
         assert_eq!(me.len(), 1);
         assert_eq!(me[0].sent_count, 1, "From: self must not bump self");
 
-        // Sent mail must NOT pollute the ranked inbox.
-        let updates = store
-            .ranked_updates(acct, now - ChronoDuration::days(1), None)
-            .unwrap();
+        // Sent mail must NOT pollute the mail list.
         assert!(
-            updates.is_empty(),
-            "sent mail must never surface in ranked_updates"
+            listed(&store, acct, now).is_empty(),
+            "sent mail must never surface in the mail list"
         );
 
         // And it must not appear in search results either.
@@ -6752,30 +6782,15 @@ mod tests {
         assert_eq!(n, 1);
 
         // It is spam, and it is invisible to the ordinary mailbox.
-        let inbox = store
-            .attention_updates(
-                acct,
-                Utc::now() - ChronoDuration::days(1),
-                None,
-                None,
-                None,
-                false,
-                crate::store::SpamScope::Exclude,
-            )
-            .unwrap();
+        let inbox = listed(&store, acct, Utc::now());
         assert!(inbox.is_empty(), "spam must not reach the mailbox listing");
 
-        let spam = store
-            .attention_updates(
-                acct,
-                Utc::now() - ChronoDuration::days(1),
-                None,
-                None,
-                None,
-                false,
-                crate::store::SpamScope::Only,
-            )
-            .unwrap();
+        let spam = inventory(
+            &store,
+            acct,
+            Utc::now() - ChronoDuration::days(1),
+            SpamScope::Only,
+        );
         assert_eq!(spam.len(), 1, "and it must reach the spam page");
 
         // Never triaged: the same 'n/a' markers the sent branch gets.
@@ -6882,20 +6897,13 @@ mod tests {
         assert_eq!(row.importance, 0);
         assert_eq!(row.stage1_model_used.as_deref(), Some("n/a"));
         assert!(!row.needs_stage2);
-        assert!(store.stage1_queue(acct, 10).unwrap().is_empty());
-        assert!(store.stage2_queue(acct, 10).unwrap().is_empty());
 
         // THE SILENCE INVARIANT: never a push for mail the user sent themselves.
         assert!(store.events_after(acct, 0, 100).unwrap().is_empty());
         assert_eq!(store.latest_event_id(acct).unwrap(), 0);
 
         // And it stays out of the bands and out of search, as sent mail must.
-        assert!(
-            store
-                .ranked_updates(acct, now - ChronoDuration::days(1), None)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(listed(&store, acct, now).is_empty());
         assert!(store.search(acct, "lunch", 10, 0).unwrap().is_empty());
 
         // The recipients still seed contacts, which is half the point of having
@@ -7619,15 +7627,13 @@ mod tests {
         // ONE row, and it is the visible one.
         let view = store.thread_view_with_html(acct, "g-self").unwrap();
         assert_eq!(view.messages.len(), 1, "one row, not two");
-        let visible = store
-            .ranked_updates(acct, now - ChronoDuration::days(1), None)
-            .unwrap();
+        let visible = listed(&store, acct, now);
         assert_eq!(
             visible.len(),
             1,
             "the inbox copy must win the unique-key race"
         );
-        assert_eq!(visible[0].id, view.messages[0].id);
+        assert_eq!(visible[0].update.id, view.messages[0].id);
 
         // The INBOX walk ran FIRST and claimed the id, so the sent half never even
         // re-fetched it.
@@ -7668,10 +7674,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store
-                .ranked_updates(acct, now - ChronoDuration::days(1), None)
-                .unwrap()
-                .len(),
+            listed(&store, acct, now).len(),
             1,
             "the inbox batch is ingested even though the sent walk failed"
         );
@@ -7735,10 +7738,7 @@ mod tests {
         assert_eq!(cursor_of(&store, acct), Some(220), "max across both walks");
         // Both landed, each on its own side of the visibility line.
         assert_eq!(
-            store
-                .ranked_updates(acct, now - ChronoDuration::days(1), None)
-                .unwrap()
-                .len(),
+            listed(&store, acct, now).len(),
             1,
             "only the received message is in a band"
         );
@@ -7808,11 +7808,9 @@ mod tests {
         );
         assert!(store.is_known_contact(acct, "bob@friends.com").unwrap());
         // The dual-listed message keeps its visible copy, exactly as in the walk.
-        let visible: Vec<String> = store
-            .ranked_updates(acct, now - ChronoDuration::days(1), None)
-            .unwrap()
+        let visible: Vec<String> = listed(&store, acct, now)
             .into_iter()
-            .map(|u| u.thread_id)
+            .map(|u| u.update.thread_id)
             .collect();
         assert!(visible.contains(&"g-in".to_string()));
         assert!(visible.contains(&"g-self".to_string()));
@@ -8154,10 +8152,7 @@ mod tests {
         assert_eq!(view.messages[0].id, echoed, "the same local row");
         assert!(store.events_after(acct, 0, 100).unwrap().is_empty());
         assert!(
-            store
-                .ranked_updates(acct, now - ChronoDuration::days(1), None)
-                .unwrap()
-                .is_empty(),
+            listed(&store, acct, now).is_empty(),
             "re-delivery must not promote the echo into a band"
         );
         let row = store
@@ -8298,17 +8293,12 @@ mod tests {
         );
 
         // ...and the reminder fired anyway.
-        let rows = store
-            .attention_updates(
-                acct,
-                Utc::now() - ChronoDuration::days(30),
-                None,
-                None,
-                None,
-                false,
-                SpamScope::Exclude,
-            )
-            .unwrap();
+        let rows = inventory(
+            &store,
+            acct,
+            Utc::now() - ChronoDuration::days(30),
+            SpamScope::Exclude,
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, crate::types::AttentionStatus::Open);
         assert!(rows[0].remind_at.is_none(), "the pending stamp MOVED");

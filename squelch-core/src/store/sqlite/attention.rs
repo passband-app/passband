@@ -35,41 +35,6 @@ const CANONICAL_MAIL_CTE: &str = concat!(
 )"
 );
 
-/// Columns 0..=8 of the updates SELECT — the prefix `ranked_updates` and
-/// `attention_updates` share verbatim — into an [`Update`]. An unparseable tier
-/// falls back to the least-alarming value rather than failing the whole read.
-///
-/// The two HUMAN-DOOR-ONLY fields are left `None`: that is exactly right for the
-/// agent door, and `attention_updates` fills them from its extra columns.
-fn update_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Update> {
-    Ok(Update {
-        id: r.get(0)?,
-        thread_id: r.get(1)?,
-        tier: Tier::parse(&r.get::<_, String>(2)?).unwrap_or(Tier::Noise),
-        importance: r.get::<_, i64>(3)?.clamp(0, 255) as u8,
-        sender: r.get(4)?,
-        one_line: r.get(5)?,
-        reason: r.get(6)?,
-        deadline: dt_opt(r, 7)?,
-        matched_rule: r.get(8)?,
-        field_reasons: None,
-        has_attachments: None,
-        from_name: None,
-        subject: None,
-        preview: None,
-    })
-}
-
-/// BLANK IS THE SAME AS ABSENT for every optional string this listing serves.
-/// A display name of `""` renders as `"" <addr>`, which parses back to a
-/// nameless sender anyway; a subject of one non-breaking space (what a mailer
-/// that "cleared" the field sends) draws a row with nothing on it, which reads
-/// as a bug rather than as blank mail. One spelling of the rule, so the three
-/// fields cannot drift into three answers.
-fn non_blank(s: Option<String>) -> Option<String> {
-    s.filter(|v| !v.trim().is_empty())
-}
-
 /// The recency window every human-door listing runs under (`?2` is the caller's
 /// `since`), plus the ONE exemption from it: a row carrying a reminder, pending
 /// or fired.
@@ -172,236 +137,6 @@ pub(super) const STANDING_BAND: &str = "(t.tier IN ('past_due','deadline')
        AND t.status != 'done'";
 
 impl SqliteStore {
-    pub(super) fn ranked_updates(
-        &self,
-        account_id: AccountId,
-        since: DateTime<Utc>,
-        min_importance: Option<u8>,
-    ) -> Result<Vec<Update>> {
-        let conn = self.lock()?;
-        let min = min_importance.unwrap_or(0) as i64;
-        // Human inventory includes restricted and pending mail.
-        let mut stmt = conn.prepare(
-            "SELECT m.id, m.thread_id, t.tier, t.importance, m.from_addr, t.one_line,
-                    t.reason, t.deadline, t.matched_rule_id
-             FROM triage t
-             JOIN messages m ON m.id = t.message_id
-             WHERE t.account_id = ?1
-
-               AND m.is_sent = 0
-               AND m.is_spam = 0
-               AND m.is_archive = 0
-               AND m.received_at >= ?2
-               AND t.importance >= ?3
-             ORDER BY t.importance DESC, m.received_at DESC",
-        )?;
-        // AGENT DOOR: `update_from_row` leaves field_reasons/has_attachments None.
-        let out = stmt
-            .query_map(
-                params![account_id, since.to_rfc3339(), min],
-                update_from_row,
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(out)
-    }
-
-    #[allow(clippy::too_many_arguments)] // the filters of one listing, one per axis
-    pub(super) fn attention_updates(
-        &self,
-        account_id: AccountId,
-        since: DateTime<Utc>,
-        min_importance: Option<u8>,
-        status: Option<AttentionStatus>,
-        band: Option<SitrepBand>,
-        pending_reminders: bool,
-        spam: SpamScope,
-    ) -> Result<Vec<AttentionUpdate>> {
-        let conn = self.lock()?;
-        let min = min_importance.unwrap_or(0) as i64;
-
-        // Base predicate: sealed excluded, sent excluded, the provider's spam
-        // verdict on whichever side `spam` asked for, since/importance window
-        // (see WITHIN_WINDOW for why a reminder row is exempt from the `since`).
-        // Bands:
-        //   standing = dated obligation OR live correspondence, not yet done
-        //              (see STANDING_BAND for the definition and its limits)
-        //   new      = surfaced_at IS NULL AND status != 'done'
-        //   open     = status = 'open'
-        // The `status != 'done'` on `new` keeps AUTO-RESOLVED receipts out of the
-        // band — a receipt is a record, not new inbox clutter.
-        //
-        // THE BANDS NEVER PASS `SpamScope::Only`. Only the flat spam page does,
-        // and it passes no band with it: spam rows are all status='new' with
-        // importance 0 and no reminder, so every band but `new` would be empty
-        // anyway, and `new` would be the same list under a name that promises
-        // the user something needs doing about it.
-        //
-        // THE STANDING BAND ENFORCES THAT rather than trusting it. `band` and
-        // `spam` arrive as independent query parameters, so nothing upstream
-        // stops `?band=standing&spam=only` — a request for the mail owed the
-        // user's attention, restricted to the mail the provider called junk.
-        // That is a contradiction in terms, and the band is the one listing
-        // where the answer must never be "here is your spam": overriding is
-        // right where a 400 would be pedantry about an impossible question.
-        // The other bands keep the caller's scope; only this one is absolute.
-        let spam = if band == Some(SitrepBand::Standing) {
-            SpamScope::Exclude
-        } else {
-            spam
-        };
-        let spam_sql = spam.predicate();
-        let mut where_sql = format!(
-            "WHERE t.account_id = ?1
-
-               AND m.is_sent = 0
-               AND {spam_sql}
-               AND {LIVE_OR_REMINDER}
-               AND {WITHIN_WINDOW}
-               AND t.importance >= ?3"
-        );
-        if let Some(s) = status {
-            where_sql.push_str(match s {
-                AttentionStatus::New => " AND t.status = 'new'",
-                AttentionStatus::Open => " AND t.status = 'open'",
-                AttentionStatus::Done => " AND t.status = 'done'",
-            });
-        }
-        match band {
-            Some(SitrepBand::Standing) => {
-                where_sql.push_str(&format!(" AND {STANDING_BAND}"));
-            }
-            Some(SitrepBand::New) => {
-                where_sql.push_str(" AND t.surfaced_at IS NULL AND t.status != 'done'")
-            }
-            Some(SitrepBand::Open) => where_sql.push_str(" AND t.status = 'open'"),
-            None => {}
-        }
-        // THE PENDING-REMINDER LISTING, deliberately orthogonal to `status`: every
-        // row here is done (that is what `set_reminder` does to it), so this is
-        // the one listing that must NOT inherit the bands' "done means gone"
-        // reading. It is a schedule, not a band.
-        if pending_reminders {
-            where_sql.push_str(" AND t.remind_at IS NOT NULL");
-        }
-        // The `open` band is the aging one: age*importance floats
-        // long-unresolved-and-important items, computed in SQL via julianday so
-        // the ordering stays server-side. Other bands sort by importance. The
-        // same expression orders WITHIN a thread (below) and BETWEEN the
-        // representatives, so the row shown is the one the sort would have put
-        // first anyway.
-        //
-        // A pending-reminder listing sorts by DUE DATE instead, and wins over the
-        // aging sort when both are asked for: soonest-first is the only ordering
-        // a schedule can have. It is also what decides whether `?4` is bound at
-        // all, so the two must be read off the SAME flag or the bind count and
-        // the SQL disagree.
-        let age_order = band == Some(SitrepBand::Open) && !pending_reminders;
-        let (inner_order, outer_order) = if pending_reminders {
-            (
-                "t.remind_at ASC, m.received_at DESC",
-                "remind_at ASC, received_at DESC",
-            )
-        } else if age_order {
-            (
-                "(julianday(?4) - julianday(m.received_at)) * t.importance DESC, m.received_at DESC",
-                "(julianday(?4) - julianday(received_at)) * importance DESC, received_at DESC",
-            )
-        } else {
-            (
-                "t.importance DESC, m.received_at DESC",
-                "importance DESC, received_at DESC",
-            )
-        };
-        // ONE ROW PER THREAD: a two-message thread is one conversation and must
-        // not occupy two band rows. ROW_NUMBER picks the band-sort-first message
-        // as the representative; resolving it resolves the whole thread (see
-        // set_attention_status), so the hidden siblings can never pop back in.
-        // The thread key falls back to the message id for a blank thread_id, so
-        // an unthreaded row can only ever collapse with itself.
-        //
-        // EXCEPT ON THE SCHEDULE, which lists one row per REMINDER: two siblings
-        // of one thread can each carry their own, and collapsing them hides one
-        // behind the other — unseeable and uncancellable, yet still due to fire.
-        // Only the partition key changes; every row keys on itself, so nothing
-        // collapses.
-        let thread_key = if pending_reminders {
-            "'msg-' || m.id"
-        } else {
-            "COALESCE(NULLIF(m.thread_id, ''), 'msg-' || m.id)"
-        };
-        let sql = format!(
-            "SELECT * FROM (
-               SELECT m.id, m.thread_id, t.tier, t.importance, m.from_addr, t.one_line,
-                      t.reason, t.deadline, t.matched_rule_id,
-                      t.status, t.surfaced_at, t.resolved_at, t.field_reasons,
-                      EXISTS(SELECT 1 FROM attachments a
-                             WHERE a.account_id = m.account_id
-                               AND a.message_id = m.id) AS has_atts,
-                      m.from_name AS from_name,
-                      m.received_at AS received_at,
-                      t.remind_at AS remind_at,
-                      t.reminded_at AS reminded_at,
-                      m.subject AS subject,
-                      m.snippet AS snippet,
-                      ROW_NUMBER() OVER (
-                          PARTITION BY {thread_key}
-                          ORDER BY {inner_order}
-                      ) AS rn
-               FROM triage t
-               JOIN messages m ON m.id = t.message_id
-               {where_sql})
-             WHERE rn = 1
-             ORDER BY {outer_order}"
-        );
-
-        let now = Utc::now().to_rfc3339();
-        let mut stmt = conn.prepare(&sql)?;
-        let map_row = |r: &rusqlite::Row| {
-            let mut update = update_from_row(r)?;
-            // HUMAN DOOR: the extra columns the agent door never sees. A NULL
-            // or malformed reasons blob yields None — one bad row must never fail
-            // the whole updates read.
-            update.field_reasons = r
-                .get::<_, Option<String>>(12)?
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok());
-            update.has_attachments = Some(r.get::<_, i64>(13)? != 0);
-            update.from_name = non_blank(r.get::<_, Option<String>>(14)?);
-            // THE SPAM PAGE'S ROW TEXT, on the spam page and nowhere else.
-            // Every row here was skipped by triage, so `one_line` is empty on
-            // all of them and the middle of the row would be blank; the mail's
-            // own subject and opening words are the only thing left to put
-            // there. Reading these columns for the bands too would be 200
-            // characters a row, on every poll, for a fill their summaries
-            // already made unnecessary — see `Update::subject`.
-            if spam == SpamScope::Only {
-                update.subject = non_blank(r.get::<_, Option<String>>(18)?);
-                update.preview = non_blank(r.get::<_, Option<String>>(19)?);
-            }
-            Ok(AttentionUpdate {
-                deadline_date: None,
-                update,
-                status: AttentionStatus::parse(&r.get::<_, String>(9)?)
-                    .unwrap_or(AttentionStatus::New),
-                received_at: dt_opt(r, 15)?,
-                placement: None,
-                surfaced_at: dt_opt(r, 10)?,
-                resolved_at: dt_opt(r, 11)?,
-                // HUMAN DOOR again: columns 16/17, past the `received_at` (15).
-                remind_at: dt_opt(r, 16)?,
-                reminded_at: dt_opt(r, 17)?,
-            })
-        };
-        let out = if age_order {
-            stmt.query_map(params![account_id, since.to_rfc3339(), min, now], map_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map(params![account_id, since.to_rfc3339(), min], map_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        Ok(out)
-    }
-
     pub(super) fn mark_surfaced(
         &self,
         account_id: AccountId,
@@ -589,8 +324,8 @@ impl SqliteStore {
             AttentionStatus::Done => Some(Utc::now().to_rfc3339()),
             _ => None,
         };
-        // DONE RESOLVES THE WHOLE THREAD: the bands show one row per thread
-        // (attention_updates), so resolving the representative must also resolve
+        // DONE RESOLVES THE WHOLE THREAD: the bands show one row per thread,
+        // so resolving the representative must also resolve
         // its siblings — otherwise a hidden sibling pops straight back into the
         // band and done becomes whack-a-mole. Reopen (open/new) stays
         // message-scoped: the undo path restores exactly the one row it removed,
@@ -836,15 +571,11 @@ impl SqliteStore {
             )
             .optional()?;
 
-        // Sitrep band counts over non-sealed rows. These definitions MUST match
-        // the `band` query on attention_updates, or header and list disagree —
-        // including its one-row-per-thread collapse, hence DISTINCT thread keys
-        // (blank thread_id falls back to the message id, same as the list),
-        // and its received_at window, hence `bands_since` AND the same
-        // WITHIN_WINDOW reminder exemption the list runs under — a fired
-        // reminder the header refused to count is a header contradicting its
-        // list (the list's default min importance is 0, a no-op, so it is not
-        // mirrored here).
+        // Sitrep band counts over non-sealed rows, one per THREAD, hence
+        // DISTINCT thread keys (blank thread_id falls back to the message id),
+        // over the received_at window, hence `bands_since` AND the WITHIN_WINDOW
+        // reminder exemption: a fired reminder still counts however old the
+        // mail is.
         // Standing is decided in the subquery, where the `m` join alias the
         // shared expression is written against is still in scope.
         let (standing, new_count, open_count): (i64, i64, i64) = conn.query_row(

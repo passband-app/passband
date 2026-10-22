@@ -129,15 +129,6 @@ pub fn ingest_context<'a>(
     }
 }
 
-pub fn seed_context<'a>(
-    _row: &'a crate::store::Stage1Queued,
-    _seed: &'a crate::store::SeedVerdict,
-    _deadline: Option<&'a DeadlineHit>,
-    _rule: Option<Disposition>,
-) -> Option<EventContext<'a>> {
-    None
-}
-
 pub fn current_rule(from_addr: &str, rules: &[SenderRule]) -> Option<Disposition> {
     crate::triage::rules::match_sender_rule(from_addr, rules).map(|r| r.disposition)
 }

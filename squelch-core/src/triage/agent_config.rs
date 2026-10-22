@@ -44,6 +44,11 @@ pub struct AgentConfig {
     pub max_model_turns: usize,
     pub max_tool_calls: usize,
     pub max_review_calls: usize,
+    /// Wall clock for ONE model turn (the request and its answer), not the
+    /// whole investigation: a run of several turns gets this per turn, and
+    /// [`Self::run_deadline_secs`] in total. It used to bound the whole run,
+    /// so an `xhigh` investigation that thought for two minutes across three
+    /// turns timed out at 90 s and was billed for every turn it had made.
     pub timeout_secs: u64,
     pub concurrency: usize,
     /// Queue polling is independent from Gmail polling.
@@ -67,7 +72,10 @@ pub struct AgentConfig {
     pub archive_access_daily_cap: u32,
     /// Failed investigations remain inspectable and can be explicitly retried.
     pub max_attempts: u32,
-    /// Shared provider-outage circuit cooldown. Outages do not consume attempts.
+    /// The account's stand-off after a configuration failure (a rejected
+    /// key, an unknown model), and the ceiling of the shorter, doubling
+    /// cooldown a throttle or a server error gets (15 s, 30 s, 60 s, ...
+    /// up to this). Outages do not consume attempts.
     pub outage_retry_secs: u64,
 }
 impl Default for AgentConfig {
@@ -89,7 +97,36 @@ impl Default for AgentConfig {
         }
     }
 }
+/// The longest any triage wait may be: a model turn, the run deadline built
+/// on it, the outage interval. A day, so the arithmetic on top of each (the
+/// run's slack, the request's backstop, a lease) never overflows. The
+/// config loader clamps to it, with a line on stderr, rather than refusing
+/// a setting an operator may already have.
+pub const MAX_TIMEOUT_SECS: u64 = 86_400;
+/// The room a lease leaves past the deadline it covers, and a request's own
+/// HTTP timeout past the turn's: enough for the store write that follows a
+/// run, or for the deadline's own timer to fire first, and too little to
+/// matter if it is ever used up.
+pub const DEADLINE_SLACK_SECS: u64 = 30;
+/// The shortest outage interval: the throttle ladder's first rung and its
+/// jitter (`sync::triage_worker::THROTTLE_COOLDOWN_SECS` and the jitter
+/// beside it), which the interval is the ceiling of. A shorter one would be
+/// exceeded by the ladder's own first wait; the loader clamps to this too.
+pub const MIN_OUTAGE_RETRY_SECS: u64 = 30;
+
 impl AgentConfig {
+    /// The whole investigation's wall clock: [`Self::timeout_secs`] per turn
+    /// for every turn it may take, and one turn more for the work between
+    /// turns (the store reads behind a tool call, the review call), at most
+    /// a day whatever the operator wrote. The job's lease is sized from
+    /// this too, so a run that uses all of it is never reclaimed from under
+    /// itself.
+    pub fn run_deadline_secs(&self) -> u64 {
+        self.timeout_secs
+            .saturating_mul((self.max_model_turns.max(1) as u64).saturating_add(1))
+            .min(MAX_TIMEOUT_SECS)
+    }
+
     /// Always reserve at least one run for first classification when operators
     /// lower only the total cap. Both effective values are exposed by the API.
     pub fn effective_background_daily_run_cap(&self) -> u32 {
@@ -190,5 +227,38 @@ impl RankingConfig {
             return Err("ranking time scales must be finite and positive".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The run's deadline is one turn's deadline for every turn it may
+    /// take and one more for the work between turns, at most a day; the
+    /// job's lease is sized from it.
+    #[test]
+    fn the_run_deadline_covers_every_turn_and_the_work_between() {
+        let agent = AgentConfig::default();
+        assert_eq!(agent.max_model_turns, 4);
+        assert_eq!(agent.run_deadline_secs(), agent.timeout_secs * 5);
+        let one = AgentConfig {
+            max_model_turns: 0,
+            ..Default::default()
+        };
+        assert_eq!(one.run_deadline_secs(), one.timeout_secs * 2);
+        for absurd in [
+            AgentConfig {
+                timeout_secs: 100_000,
+                max_model_turns: 100,
+                ..Default::default()
+            },
+            AgentConfig {
+                max_model_turns: usize::MAX,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(absurd.run_deadline_secs(), MAX_TIMEOUT_SECS);
+        }
     }
 }

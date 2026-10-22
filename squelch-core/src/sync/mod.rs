@@ -13,7 +13,7 @@ mod profile;
 mod triage_worker;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -907,6 +907,32 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// Shared cooldown after provider failure. Rejected configuration must not
     /// trigger one request per queued message or consume message retry attempts.
     agent_retry_after: AtomicI64,
+    /// How many provider probes have failed in a row since an investigation
+    /// last succeeded: the rung of the throttle cooldown's ladder
+    /// (`triage_worker::throttle_cooldown_secs`). The access lane's fast
+    /// model answering does not reset it.
+    agent_throttle_strikes: AtomicU32,
+    /// The access lane's own ladder: its fast model is another model,
+    /// throttled and recovering on its own, so its failures climb this one
+    /// and its successes reset it, and neither touches the investigation
+    /// lane's.
+    agent_access_strikes: AtomicU32,
+    /// Whether an investigation has answered since the last investigation
+    /// timed out: the account-level half of the "two timeouts in a row"
+    /// rule in `triage_worker::retry_agent`, which fails a job only when
+    /// one has. Raised when an investigation answers (a whole run, or an
+    /// earlier turn of a run that then failed), lowered by every timeout.
+    /// Starts lowered: a fresh process has seen no answer, and a job whose
+    /// previous attempt timed out before a roll must not be failed on the
+    /// strength of the restart. The access lane's fast model does not raise
+    /// it.
+    agent_answered_since_timeout: AtomicBool,
+    /// When the account's last provider cooldown ended (or will end), as a
+    /// timestamp: the throttle episode's own stamp, which no success clears
+    /// (a success clears `agent_retry_after`), so `open_cooldown` can tell
+    /// a fresh throttle hours after an old episode from the next probe of
+    /// a continuing one. Zero until a cooldown has been opened.
+    agent_last_cooldown_end: AtomicI64,
     /// Scrape-facing counters. Its own registry unless the daemon shares one
     /// via [`SyncEngine::with_metrics`], so an engine built anywhere (tests, the
     /// contacts harvest, `run`) still records rather than branching on absence.
@@ -960,7 +986,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // 180s, not 60: the long pole on this client is now a reasoning-model
         // triage call at high effort, which legitimately thinks for minutes on a
         // hard row. A Gmail fetch that runs that long is already wedged, and
-        // this timeout only exists to unwedge it.
+        // this timeout only exists to unwedge it. An agent turn the operator
+        // allows to run longer sets its own request timeout
+        // (`llm::classify_agent_step`), so this one never cuts it.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .connect_timeout(Duration::from_secs(15))
@@ -1011,6 +1039,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             archive: ArchiveRun::default(),
             vectors_dirty: Arc::new(AtomicBool::new(true)),
             agent_retry_after: AtomicI64::new(0),
+            agent_throttle_strikes: AtomicU32::new(0),
+            agent_access_strikes: AtomicU32::new(0),
+            agent_answered_since_timeout: AtomicBool::new(false),
+            agent_last_cooldown_end: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
             profile_url: profile::PEOPLE_ME_URL.to_string(),
@@ -2371,11 +2403,33 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             tokio::select! {
                 _ = self.refine_wake.notified() => { idle_rounds = 0; }
                 _ = self.refine_poke.poked() => { idle_rounds = 0; }
-                _ = tokio::time::sleep(interval.saturating_mul(1 << idle_rounds).min(MAX_LANE_IDLE_BACKOFF)) => {}
+                _ = tokio::time::sleep(self.refine_idle_sleep(interval, idle_rounds)) => {}
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return; }
                 }
             }
+        }
+    }
+
+    /// How long the refine lane sleeps between rounds: the idle backoff, cut
+    /// to the moment a provider cooldown lapses when that is sooner, so the
+    /// recovery probe runs when the cooldown says (seven seconds after a
+    /// `retry-after: 7`) and not at the next idle tick, up to thirty
+    /// seconds later. A round that found the cooldown open counts as idle,
+    /// which is what would otherwise stretch the sleep.
+    fn refine_idle_sleep(&self, interval: Duration, idle_rounds: u32) -> Duration {
+        let backoff = Duration::from_secs(triage_worker::doubling_backoff_secs(
+            interval.as_secs(),
+            idle_rounds,
+            MAX_LANE_IDLE_BACKOFF.as_secs(),
+        ));
+        let until = self.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+        if until > 0 {
+            // A second past the stamp, which is whole seconds: a wake just
+            // short of it would find the cooldown still open.
+            backoff.min(Duration::from_secs(until as u64 + 1))
+        } else {
+            backoff
         }
     }
 
@@ -11026,6 +11080,821 @@ mod tests {
         assert_eq!(engine.account_created_at(), Some(created));
     }
 
+    /// A throttle stands the account off for what the provider asked, a
+    /// server error (and a throttle that named no time) for a short spread
+    /// wait, and a configuration failure for the outage interval. The one
+    /// 429 that used to cost every job on the account five minutes now
+    /// costs the seconds the provider named.
+    #[tokio::test]
+    async fn a_throttle_stands_the_account_off_for_the_providers_retry_after() {
+        use crate::store::agent_triage::AgentTriageStore;
+        for (status, retry_after, lo, hi) in [
+            (StatusCode::TOO_MANY_REQUESTS, Some("7"), 6, 23),
+            (StatusCode::TOO_MANY_REQUESTS, None, 14, 30),
+            (StatusCode::SERVICE_UNAVAILABLE, None, 14, 30),
+            (StatusCode::FORBIDDEN, None, 284, 300),
+        ] {
+            let (store, account) = store_at_cursor(Some(100));
+            ingest_into(
+                &store,
+                account,
+                &fixture(
+                    account,
+                    "throttled",
+                    "From: alice@example.com\r\nSubject: Hello\r\n\r\nA note",
+                    false,
+                ),
+                Utc::now(),
+            );
+            let app = Router::new().route(
+                "/",
+                axum::routing::post(move || async move {
+                    let mut resp =
+                        (status, Json(json!({"error": {"type": "unavailable"}}))).into_response();
+                    if let Some(after) = retry_after {
+                        resp.headers_mut()
+                            .insert("retry-after", after.parse().unwrap());
+                    }
+                    resp
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let llm = ResolvedLlm {
+                url: format!("http://{}/", listener.local_addr().unwrap()),
+                api_key: "test".into(),
+                provider: Stage2Provider::OpenAI,
+            };
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+            let day = Utc::now().format("%Y-%m-%d").to_string();
+            let job = store
+                .claim_agent_job(account, "investigation", Utc::now(), 120)
+                .unwrap()
+                .unwrap();
+            engine.process_agent_job(job, &llm, &day).await;
+            let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+            assert!(
+                (lo..=hi).contains(&wait),
+                "{status}, retry-after {retry_after:?}: stood off {wait}s"
+            );
+            server.abort();
+        }
+    }
+
+    /// A throttle that does not lift (a spent monthly budget answers 429 to
+    /// every probe) is probed on a doubling ladder up to the outage
+    /// interval, not every fifteen seconds for the rest of the month.
+    #[tokio::test]
+    async fn a_throttle_that_does_not_lift_backs_off_to_the_outage_interval() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "throttled-for-good",
+                "From: alice@example.com\r\nSubject: Hello\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error": {"type": "rate_limit_error"}})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        assert_eq!(engine.config.triage.agent.outage_retry_secs, 300);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        // Two jobs fail together in the first pass, as `concurrency` jobs do
+        // when the provider goes: one rung, not two.
+        let second = ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "throttled-too",
+                "From: bob@example.com\r\nSubject: Other\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        assert_ne!(second, 0);
+        let claim = || {
+            store
+                .claim_agent_job(
+                    account,
+                    "investigation",
+                    Utc::now() + ChronoDuration::hours(2),
+                    120,
+                )
+                .unwrap()
+                .expect("deferred, never failed")
+        };
+        let (one, two) = (claim(), claim());
+        assert_ne!(one.id, two.id);
+        futures::future::join(
+            engine.process_agent_job(one, &llm, &day),
+            engine.process_agent_job(two, &llm, &day),
+        )
+        .await;
+        let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+        assert!((14..=30).contains(&wait), "first rung: stood off {wait}s");
+        assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
+        for rung in [30, 60, 120, 240, 285, 285] {
+            // The previous cooldown has lapsed: this probe is admitted.
+            engine.agent_retry_after.store(0, Ordering::Relaxed);
+            let job = claim();
+            assert_eq!(job.attempts, 1, "a cooldown spends no attempt");
+            engine.process_agent_job(job, &llm, &day).await;
+            let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+            assert!(
+                (rung - 1..=rung + 15).contains(&wait),
+                "rung {rung}: stood off {wait}s"
+            );
+        }
+        server.abort();
+    }
+
+    /// A run dropped before it wrote the job's state (the lane is dropped at
+    /// shutdown) hands the job back at once, keeping the attempt it took and
+    /// due after the ladder's wait for it, instead of holding its lease, and
+    /// every job on its thread, for the eight minutes the lease now covers.
+    #[tokio::test]
+    async fn a_run_dropped_at_shutdown_hands_its_job_back() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "interrupted",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let lease = engine.config.triage.agent.run_deadline_secs() as i64 + 30;
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), lease)
+            .unwrap()
+            .unwrap();
+        let id = job.id;
+        // Nothing else can claim it while it runs...
+        assert!(
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), lease)
+                .unwrap()
+                .is_none()
+        );
+        // ...and dropping the run mid-request is the shutdown.
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(300),
+            engine.process_agent_job(job, &llm, &day),
+        )
+        .await;
+        assert!(dropped.is_err(), "the run was still in flight");
+        // Handed back at once, due after the retry ladder's wait for the
+        // attempt it took: not re-run on the spot.
+        assert!(
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), lease)
+                .unwrap()
+                .is_none()
+        );
+        let again = store
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                lease,
+            )
+            .unwrap()
+            .expect("handed back the moment the run was dropped");
+        assert_eq!(again.id, id);
+        assert_eq!(again.attempts, 2, "the hand-back kept the attempt it took");
+        // A hand-back is not a push-back: `last_error` stays as it was, so an
+        // `archive_access` check keeps its place at the head of the claim
+        // order (CLAIM_JOB_SQL reads `last_error IS NULL`).
+        assert_eq!(again.last_error, None);
+        server.abort();
+    }
+
+    /// A job dropped on its last allowed attempt is failed, not handed
+    /// back: the claim has no attempts filter and a retry's check runs only
+    /// after a failed attempt, so a hand-back there would run it again.
+    #[tokio::test]
+    async fn a_job_dropped_on_its_last_attempt_is_failed_not_handed_back() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "interrupted-again",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let max_attempts = engine.config.triage.agent.max_attempts;
+        assert_eq!(max_attempts, 6);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let claim = |at: DateTime<Utc>| {
+            store
+                .claim_agent_job(account, "investigation", at, 120)
+                .unwrap()
+        };
+        // Five interruptions, each keeping its attempt and handing the job
+        // back on the ladder's spacing (claimed here from the future)...
+        for expected in 1..max_attempts {
+            let job = claim(Utc::now() + ChronoDuration::hours(2)).expect("handed back");
+            assert_eq!(job.attempts, i64::from(expected));
+            let dropped = tokio::time::timeout(
+                Duration::from_millis(200),
+                engine.process_agent_job(job, &llm, &day),
+            )
+            .await;
+            assert!(dropped.is_err());
+        }
+        // ...and the sixth, on the last allowed attempt, is the end.
+        let job = claim(Utc::now() + ChronoDuration::hours(2)).expect("one attempt left");
+        assert_eq!(job.attempts, i64::from(max_attempts));
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(200),
+            engine.process_agent_job(job, &llm, &day),
+        )
+        .await;
+        assert!(dropped.is_err());
+        assert!(
+            claim(Utc::now() + ChronoDuration::hours(2)).is_none(),
+            "failed, not handed back a seventh time"
+        );
+        server.abort();
+    }
+
+    /// A fresh throttle hours after an old episode starts the ladder over
+    /// at the provider's own number, even when the episode's ladder was
+    /// never reset (its recovery probe was an access check, or the queue
+    /// drained on a failure); the next probe of a continuing episode does
+    /// not.
+    #[tokio::test]
+    async fn a_fresh_throttle_hours_after_an_episode_starts_the_ladder_over() {
+        use super::triage_worker::JobStart;
+        let (store, account) = store_at_cursor(Some(100));
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let asked = Some(Duration::from_secs(7));
+        let hours_ago = Utc::now().timestamp() - 7 * 3600;
+        engine.agent_throttle_strikes.store(4, Ordering::Relaxed);
+        engine
+            .agent_last_cooldown_end
+            .store(hours_ago, Ordering::Relaxed);
+        // The episode ended by a success: the cooldown stamp was cleared.
+        engine.agent_retry_after.store(0, Ordering::Relaxed);
+        let start = JobStart {
+            generation: hours_ago,
+            at: Utc::now(),
+        };
+        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        assert!((7..=22).contains(&wait), "the provider's number: {wait}s");
+        assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
+        // A continuing episode: its last cooldown lapsed moments before
+        // this probe started, so the rung reached stands.
+        let engine = super::tests::engine(store.clone(), account, "http://127.0.0.1:1");
+        let lapsed = Utc::now().timestamp() - 2;
+        engine.agent_throttle_strikes.store(4, Ordering::Relaxed);
+        engine
+            .agent_last_cooldown_end
+            .store(lapsed, Ordering::Relaxed);
+        engine.agent_retry_after.store(lapsed, Ordering::Relaxed);
+        let start = JobStart {
+            generation: lapsed,
+            at: Utc::now(),
+        };
+        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        assert!((239..=255).contains(&wait), "the fifth rung: {wait}s");
+        assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 5);
+        // And a probe that itself ran long before failing is still that
+        // episode's probe: its start is what is measured.
+        let engine = super::tests::engine(store.clone(), account, "http://127.0.0.1:1");
+        engine.agent_throttle_strikes.store(4, Ordering::Relaxed);
+        engine
+            .agent_last_cooldown_end
+            .store(lapsed, Ordering::Relaxed);
+        engine.agent_retry_after.store(lapsed, Ordering::Relaxed);
+        let start = JobStart {
+            generation: lapsed,
+            at: DateTime::from_timestamp(lapsed + 1, 0).unwrap(),
+        };
+        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        assert!((239..=255).contains(&wait), "still the fifth rung: {wait}s");
+    }
+
+    /// The access lane's failures climb a ladder of their own, the
+    /// investigation lane's untouched: its model is another model, so a
+    /// throttle whose recovery probes are access checks is still probed as
+    /// the outage it is, and a throttled fast model does not park the
+    /// investigation lane's ladder at the ceiling.
+    #[tokio::test]
+    async fn an_access_failure_climbs_the_access_lanes_own_ladder() {
+        use super::triage_worker::JobStart;
+        let (store, account) = store_at_cursor(Some(100));
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        for rung in [15, 30, 60] {
+            engine.agent_retry_after.store(0, Ordering::Relaxed);
+            let start = JobStart {
+                generation: engine.agent_last_cooldown_end.load(Ordering::Relaxed),
+                at: Utc::now(),
+            };
+            let (_, wait) = engine.open_cooldown(None, false, start, false);
+            assert!(
+                (rung - 1..=rung + 15).contains(&wait),
+                "rung {rung}: stood off {wait}s"
+            );
+            assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(engine.agent_access_strikes.load(Ordering::Relaxed), 3);
+    }
+
+    /// A job that times out twice while the provider answered another job
+    /// in between is failed: two billed attempts at the long message, not
+    /// `max_attempts` (six), and the account is never paused.
+    #[tokio::test]
+    async fn a_job_that_times_out_twice_is_failed_not_retried_four_more_times() {
+        use crate::store::agent_triage::AgentTriageStore;
+        use crate::triage::decision::*;
+        let (store, account) = store_at_cursor(Some(100));
+        let slow = ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "slow-mail",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let quick = ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "quick-mail",
+                "From: bob@example.com\r\nSubject: Quick\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let evidence = vec![EvidenceRef {
+            message_id: quick,
+            location: "body".into(),
+        }];
+        let decision = MessageDecision {
+            kinds: vec![EmailKind::Correspondence],
+            summary: "A note".into(),
+            reason: "Personal mail".into(),
+            external_access: AccessAssessment {
+                restricted: false,
+                reason: "No credentials".into(),
+                evidence: evidence.clone(),
+            },
+            attention: ThreadAttentionDecision {
+                relevant_message_ids: vec![quick],
+                evidence,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                let decision = decision.clone();
+                async move {
+                    // The slow message's two attempts never answer; the quick
+                    // one, between them, does.
+                    if counted.fetch_add(1, Ordering::Relaxed) != 1 {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        return Json(json!({})).into_response();
+                    }
+                    let answer = json!({"result": {"step": "finish", "decision": decision}});
+                    Json(json!({
+                        "choices": [{
+                            "message": {"content": answer.to_string()},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 8}
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = Config::default();
+        config.triage.agent.timeout_secs = 1;
+        assert_eq!(config.triage.agent.max_attempts, 6, "the default allowance");
+        let engine = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let claim = |at: DateTime<Utc>| {
+            store
+                .claim_agent_job(account, "investigation", at, 120)
+                .unwrap()
+        };
+        let (one, two) = (claim(Utc::now()).unwrap(), claim(Utc::now()).unwrap());
+        let (first, other) = if one.message_id == slow {
+            (one, two)
+        } else {
+            (two, one)
+        };
+        assert_eq!(other.message_id, quick);
+        engine.process_agent_job(first, &llm, &day).await;
+        engine.process_agent_job(other, &llm, &day).await;
+        assert_eq!(engine.agent_retry_after.load(Ordering::Relaxed), 0);
+        // The retry is scheduled ahead; claiming from the future sees it.
+        let again = claim(Utc::now() + ChronoDuration::hours(2)).expect("retried once");
+        assert_eq!((again.message_id, again.attempts), (slow, 2));
+        engine.process_agent_job(again, &llm, &day).await;
+        assert_eq!(engine.agent_retry_after.load(Ordering::Relaxed), 0);
+        assert!(
+            claim(Utc::now() + ChronoDuration::hours(2)).is_none(),
+            "failed, not retried a third time"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        server.abort();
+    }
+
+    /// The headline case, alone on a quiet queue: a message whose first
+    /// turn answers and whose second overruns is failed after two attempts,
+    /// the answered turn being the provider's proof that the message is
+    /// what is slow.
+    #[tokio::test]
+    async fn a_message_whose_second_turn_times_out_twice_is_failed() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "two-turns",
+                "From: alice@example.com\r\nSubject: Long\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                async move {
+                    // Odd calls answer with a step of no known shape, which
+                    // costs a repair turn; even calls (that turn) never answer.
+                    if counted.fetch_add(1, Ordering::Relaxed) % 2 == 1 {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        return Json(json!({})).into_response();
+                    }
+                    let answer = json!({"result": {"step": "ponder"}});
+                    Json(json!({
+                        "choices": [{
+                            "message": {"content": answer.to_string()},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 8}
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = Config::default();
+        config.triage.agent.timeout_secs = 1;
+        let engine = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let mut attempts = 0;
+        while let Some(job) = store
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                120,
+            )
+            .unwrap()
+        {
+            attempts += 1;
+            assert!(attempts <= 3, "the job keeps coming back");
+            engine.process_agent_job(job, &llm, &day).await;
+        }
+        assert_eq!(attempts, 2);
+        assert_eq!(calls.load(Ordering::Relaxed), 4, "two turns per attempt");
+        server.abort();
+    }
+
+    /// A provider that answers nothing is not a long message: with no
+    /// success between its timeouts a job walks the ordinary attempts and
+    /// stays pending, so a slow quarter hour at the provider does not leave
+    /// the head of the queue failed for a person to re-triage.
+    #[tokio::test]
+    async fn a_slow_provider_leaves_timed_out_work_pending_not_failed() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "slow-provider",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = Config::default();
+        config.triage.agent.timeout_secs = 1;
+        config.triage.agent.max_attempts = 4;
+        let engine = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let mut attempts = 0;
+        while let Some(job) = store
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                120,
+            )
+            .unwrap()
+        {
+            attempts += 1;
+            assert!(attempts <= 4, "the allowance holds");
+            assert_eq!(job.attempts, attempts);
+            engine.process_agent_job(job, &llm, &day).await;
+            assert_eq!(engine.agent_retry_after.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(attempts, 4, "every attempt, not two");
+        assert!(
+            !engine.agent_answered_since_timeout.load(Ordering::Relaxed),
+            "nothing answered"
+        );
+        server.abort();
+    }
+
+    /// A job whose previous attempt timed out before a restart is not
+    /// failed on its first timeout after it: the new process has seen no
+    /// answer, so it cannot say the message rather than the provider is
+    /// what is slow.
+    #[tokio::test]
+    async fn a_restart_does_not_fail_a_job_on_its_first_timeout() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "before-the-roll",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        // The previous process: one attempt, timed out, retried.
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .retry_agent_job(&job, Utc::now(), crate::triage::agent::AGENT_TIMEOUT)
+                .unwrap()
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = Config::default();
+        config.triage.agent.timeout_secs = 1;
+        // The new process.
+        let engine = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (job.attempts, job.last_error.as_deref()),
+            (2, Some(crate::triage::agent::AGENT_TIMEOUT))
+        );
+        engine.process_agent_job(job, &llm, &day).await;
+        let again = store
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                120,
+            )
+            .unwrap()
+            .expect("retried, not failed");
+        assert_eq!(again.attempts, 3);
+        server.abort();
+    }
+
+    /// A job in flight when another opened a cooldown is the same probe
+    /// even when that cooldown has lapsed by the time its own request
+    /// fails: no strike of its own, so the ladder does not skip a rung.
+    #[tokio::test]
+    async fn a_sibling_of_a_lapsed_cooldown_adds_no_strike() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        for name in ["opener", "sibling"] {
+            ingest_into(
+                &store,
+                account,
+                &fixture(
+                    account,
+                    name,
+                    "From: alice@example.com\r\nSubject: Hello\r\n\r\nA note",
+                    false,
+                ),
+                Utc::now(),
+            );
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                async move {
+                    // The first request to arrive is throttled at once; the
+                    // second is slow, and then fails too.
+                    if counted.fetch_add(1, Ordering::Relaxed) > 0 {
+                        tokio::time::sleep(Duration::from_millis(2000)).await;
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error": {"type": "overloaded"}})),
+                        );
+                    }
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(json!({"error": {"type": "rate_limit_error"}})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let claim = || {
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), 120)
+                .unwrap()
+                .unwrap()
+        };
+        let (one, two) = (claim(), claim());
+        let lapse = async {
+            // The opener's cooldown lapses before the sibling fails (a
+            // second in: well after the opener's instant 429, well before
+            // the sibling's 2 s).
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            engine
+                .agent_retry_after
+                .store(Utc::now().timestamp() - 1, Ordering::Relaxed);
+        };
+        futures::future::join3(
+            engine.process_agent_job(one, &llm, &day),
+            engine.process_agent_job(two, &llm, &day),
+            lapse,
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            engine.agent_throttle_strikes.load(Ordering::Relaxed),
+            1,
+            "one cooldown, one strike"
+        );
+        let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+        assert!(
+            (14..=30).contains(&wait),
+            "the sibling waits the opener's rung: {wait}s"
+        );
+        server.abort();
+    }
+
+    /// Between rounds the refine lane sleeps its idle backoff, or until a
+    /// provider cooldown lapses when that is sooner: the recovery probe is
+    /// not left to the next idle tick.
+    #[tokio::test]
+    async fn the_refine_lane_sleeps_until_the_recovery_probe_is_due() {
+        let (store, account) = store_at_cursor(Some(100));
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let interval = Duration::from_secs(engine.config.triage.agent.worker_poll_secs);
+        assert_eq!(engine.refine_idle_sleep(interval, 5), MAX_LANE_IDLE_BACKOFF);
+        engine
+            .agent_retry_after
+            .store(Utc::now().timestamp() + 7, Ordering::Relaxed);
+        let sleep = engine.refine_idle_sleep(interval, 5);
+        assert!(
+            (Duration::from_secs(7)..=Duration::from_secs(8)).contains(&sleep),
+            "{sleep:?}"
+        );
+        assert_eq!(engine.refine_idle_sleep(interval, 0), interval.min(sleep));
+        engine
+            .agent_retry_after
+            .store(Utc::now().timestamp() - 1, Ordering::Relaxed);
+        assert_eq!(engine.refine_idle_sleep(interval, 5), MAX_LANE_IDLE_BACKOFF);
+    }
+
     #[tokio::test]
     async fn investigation_timeouts_exhaust_the_job_without_pausing_other_mail() {
         use crate::store::agent_triage::AgentTriageStore;
@@ -11377,6 +12246,9 @@ mod tests {
         );
         unavailable.store(false, Ordering::Relaxed);
         engine.agent_retry_after.store(0, Ordering::Relaxed);
+        // As if the probes above had been throttles: the ladder is reset by
+        // the success below.
+        engine.agent_throttle_strikes.store(3, Ordering::Relaxed);
         let job = store
             .claim_agent_job(
                 account,
@@ -11388,6 +12260,7 @@ mod tests {
             .unwrap();
         engine.process_agent_job(job, &llm, &day).await;
         assert!(store.agent_access_allowed(account, id).unwrap());
+        assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 0);
         assert_eq!(
             store
                 .stage2_budget_used(account, GLOBAL_BUDGET_KEY, &day)

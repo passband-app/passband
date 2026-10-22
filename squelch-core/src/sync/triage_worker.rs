@@ -1,8 +1,11 @@
 //! Durable model work. Ingest never waits for these decisions.
 use super::*;
 use crate::metrics::AgentVerdict;
-use crate::store::agent_triage::{AgentCommitOutcome, AgentContext, AgentJob, AgentSourceSnapshot};
+use crate::store::agent_triage::{
+    AgentCommitOutcome, AgentContext, AgentJob, AgentSourceSnapshot, AgentTriageStore,
+};
 use crate::triage::agent::{AgentConnection, run_agent};
+use crate::triage::agent_config::DEADLINE_SLACK_SECS;
 use crate::triage::context::{ContextSnapshot, EvidenceReader, EvidenceRequest, EvidenceResult};
 use std::collections::BTreeMap;
 
@@ -15,15 +18,11 @@ struct StoreEvidence<'a, S: Store> {
 
 fn read_job(account: AccountId, message_id: i64) -> AgentJob {
     AgentJob {
-        id: 0,
         account_id: account,
         message_id,
         kind: "triage".into(),
         trigger: "context".into(),
-        lease_token: String::new(),
-        attempts: 0,
-        arrival_eligible: false,
-        foreground: false,
+        ..Default::default()
     }
 }
 
@@ -277,11 +276,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 } else {
                     "initial_investigation"
                 };
-            match self.store.claim_agent_job(
+            // Each lease outlives its deadline, so a run that uses all of
+            // it is never reclaimed from under itself: an investigation's
+            // the whole run's, an access job's the one call it makes under
+            // the short access deadline, so a process that dies mid-check
+            // (nothing dropped, no hand-back) holds its thread for seconds.
+            match self.store.claim_agent_job_sized(
                 self.account_id,
                 kind,
                 Utc::now(),
-                self.config.triage.agent.timeout_secs as i64 + 30,
+                (self.config.triage.agent.run_deadline_secs() + DEADLINE_SLACK_SECS) as i64,
+                (self.config.notify.fast_deadline_secs() + DEADLINE_SLACK_SECS) as i64,
             ) {
                 Ok(Some(job)) => {
                     if job.trigger.starts_with("revisit:") {
@@ -305,34 +310,51 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         claimed
     }
 
+    /// Runs one claimed job to a written state: committed, failed, retried
+    /// or deferred. Dropped before that (the refine lane's future is dropped
+    /// at shutdown, or when `run_lanes` ends the lanes), the job is handed
+    /// back at once, see [`ClaimGuard`].
     pub(super) async fn process_agent_job(&self, job: AgentJob, llm: &ResolvedLlm, day: &str) {
+        let mut guard = ClaimGuard {
+            store: &*self.store,
+            metrics: &self.metrics,
+            job: &job,
+            max_attempts: self.config.triage.agent.max_attempts,
+            armed: true,
+        };
         if job.kind == "access" {
-            self.process_access_job(job, llm, day).await;
-            return;
+            self.process_access_job(&job, llm, day).await;
+        } else {
+            self.run_agent_job(&job, llm, day).await;
         }
-        let mut context = match self.store.load_agent_context(&job) {
+        guard.armed = false;
+    }
+
+    async fn run_agent_job(&self, job: &AgentJob, llm: &ResolvedLlm, day: &str) {
+        let mut context = match self.store.load_agent_context(job) {
             Ok(context) => context,
             Err(_) => {
-                self.retry_agent(&job, "context_unavailable");
+                self.retry_agent(job, "context_unavailable");
                 return;
             }
         };
         let now = Utc::now();
         let retry_after = self.agent_retry_after.load(Ordering::Relaxed);
+        let episode = self.agent_last_cooldown_end.load(Ordering::Relaxed);
         if now.timestamp() < retry_after {
             let until = DateTime::from_timestamp(retry_after, 0).unwrap_or(now);
-            let _ = self.store.defer_agent_job(&job, until, "provider_cooldown");
+            let _ = self.store.defer_agent_job(job, until, "provider_cooldown");
             return;
         }
         if job.trigger.starts_with("revisit:") && !self.config.revisit.enabled {
             let _ = self.store.defer_agent_job(
-                &job,
+                job,
                 now + ChronoDuration::hours(1),
                 "revisits_disabled",
             );
             return;
         }
-        let limits = investigation_budget_limits(&self.config, &job);
+        let limits = investigation_budget_limits(&self.config, job);
         match self
             .store
             .reserve_agent_budget(self.account_id, day, &limits)
@@ -345,12 +367,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .and_utc();
                 let _ = self
                     .store
-                    .defer_agent_job(&job, tomorrow, "daily_budget_exhausted");
+                    .defer_agent_job(job, tomorrow, "daily_budget_exhausted");
                 self.metrics.record_agent(AgentVerdict::Deferred);
                 return;
             }
             Err(_) => {
-                self.retry_agent(&job, "budget_unavailable");
+                self.retry_agent(job, "budget_unavailable");
                 return;
             }
         }
@@ -372,7 +394,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             let _ = self
                 .store
                 .refund_agent_budget(self.account_id, day, &limits);
-            self.retry_agent(&job, "context_unavailable");
+            self.retry_agent(job, "context_unavailable");
             return;
         }
         // Snapshot the content shown in this investigation, not unseen siblings.
@@ -415,7 +437,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 );
             }
         }
-        let input = snapshot(&context, &job, config.context.initial_thread_messages);
+        let input = snapshot(&context, job, config.context.initial_thread_messages);
         // A new account triages the jobs somebody is waiting on at the
         // onboarding effort for its first days (`Stage2Config::effort_for_job`):
         // the store's foreground lane, and nothing else. A person's
@@ -440,15 +462,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         };
         match run_agent(connection, &config, input, &reader).await {
             Ok(run) => {
-                let until = self.agent_retry_after.load(Ordering::Relaxed);
-                if until > 0 && until <= Utc::now().timestamp() {
-                    let _ = self.agent_retry_after.compare_exchange(
-                        until,
-                        0,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
-                }
+                self.note_provider_success();
+                // An investigation answered: its ladder starts over, and the
+                // two-timeouts rule may fail the next job that times out
+                // twice.
+                self.agent_throttle_strikes.store(0, Ordering::Relaxed);
+                self.agent_answered_since_timeout
+                    .store(true, Ordering::Relaxed);
                 context.run_metadata = serde_json::json!({
                     "prompt_version": crate::triage::agent::PROMPT_VERSION,
                     "schema_version": 1,
@@ -468,7 +488,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 }
                 let sources = reader.sources.lock().expect("evidence sources").clone();
                 match self.store.commit_agent_decision_with_policy(
-                    &job,
+                    job,
                     &context,
                     &run.decision,
                     &sources,
@@ -487,14 +507,147 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     }
                     Ok(AgentCommitOutcome::Stale) => {
                         self.metrics.record_agent(AgentVerdict::Stale);
-                        self.retry_agent(&job, "context_changed");
+                        self.retry_agent(job, "context_changed");
                     }
                     Err(_) => {
-                        self.retry_agent(&job, "commit_failed");
+                        self.retry_agent(job, "commit_failed");
                     }
                 }
             }
-            Err(error) => self.handle_agent_failure(&job, error, day, &limits, false),
+            Err(error) => {
+                let start = JobStart {
+                    generation: episode,
+                    at: now,
+                };
+                self.handle_agent_failure(job, error, day, &limits, false, start)
+            }
+        }
+    }
+
+    /// Opens the account's provider cooldown for a failure that just landed,
+    /// or joins the one a sibling opened, and returns its end and the
+    /// account's stand-off from now in seconds (a longer cooldown may
+    /// already be open, so that is not always this failure's own).
+    ///
+    /// A config failure (a bad key, a wrong model) is not going to fix
+    /// itself: the long outage interval (less the jitter, so a fleet whose
+    /// shared key went bad together does not probe the gateway together),
+    /// and a new episode for the throttle ladder. A throttle or a server
+    /// error is the provider asking for a moment, and says how long when it
+    /// says anything: that long, else a short spread wait, doubling for
+    /// every probe that fails in turn up to the outage interval, so a
+    /// throttle that is not lifting (a spent monthly budget) is probed as
+    /// the outage it is. Either way one probe is admitted when the cooldown
+    /// lapses.
+    ///
+    /// A job that was in flight when another opened a cooldown (the other
+    /// worker of the same pass: `concurrency` jobs fail together when the
+    /// provider goes) is the same probe as the one that opened it, not the
+    /// next, whether or not that cooldown has lapsed by the time its own
+    /// request fails: the opener's rung, and no strike of its own. One rung
+    /// per cooldown, not one per worker; the one predicate (the stamp the
+    /// job started under against the stamp now) decides both the rung and
+    /// the strike.
+    ///
+    /// An episode whose last cooldown ended longer ago than the outage
+    /// interval before this job STARTED, with no investigation answering
+    /// since to reset the ladder (the queue drained on a failure, or the
+    /// recovery probe was an access check), is over: a fresh throttle hours
+    /// later starts at the first rung and the provider's own number. The
+    /// episode's end is its own stamp, which no success clears (so it is
+    /// also the stamp "same probe" is judged by: the clearable one would
+    /// make a sibling look like an opener when a success cleared it
+    /// mid-flight), and the job's start is what is measured, not its
+    /// failure: a probe that runs long before it fails is still the probe.
+    ///
+    /// Each lane has a ladder of its own: the investigation model and the
+    /// fast access model are different models, throttled and recovering on
+    /// their own, so a lane's failures climb its ladder and its success
+    /// resets it, and neither touches the other's. The cooldown a failure
+    /// opens is the account's (both lanes wait it out), at the failing
+    /// lane's rung. The end returned is the account's: a longer cooldown a
+    /// sibling opened wins, and the job is deferred to that, not to this
+    /// failure's own.
+    pub(super) fn open_cooldown(
+        &self,
+        retry_after: Option<std::time::Duration>,
+        rejected: bool,
+        start: JobStart,
+        investigation: bool,
+    ) -> (DateTime<Utc>, i64) {
+        use crate::triage::agent_config::{MAX_TIMEOUT_SECS, MIN_OUTAGE_RETRY_SECS};
+        let now = Utc::now();
+        // The loader clamps and says so; this is for a config that did not
+        // pass through it.
+        let outage = self
+            .config
+            .triage
+            .agent
+            .outage_retry_secs
+            .clamp(MIN_OUTAGE_RETRY_SECS, MAX_TIMEOUT_SECS);
+        let same_probe = self.agent_last_cooldown_end.load(Ordering::Relaxed) != start.generation;
+        let stale = !same_probe
+            && start.generation > 0
+            && start.at.timestamp().saturating_sub(start.generation) > outage as i64;
+        let ladder = if investigation {
+            &self.agent_throttle_strikes
+        } else {
+            &self.agent_access_strikes
+        };
+        if stale {
+            ladder.store(0, Ordering::Relaxed);
+        }
+        let strikes = ladder.load(Ordering::Relaxed);
+        let strikes = if same_probe {
+            strikes.saturating_sub(1)
+        } else {
+            strikes
+        };
+        let jitter = clock_jitter_secs(now, self.account_id);
+        let seconds = if rejected {
+            throttle_cooldown_secs(None, u32::MAX, outage, jitter)
+        } else {
+            throttle_cooldown_secs(retry_after, strikes, outage, jitter)
+        };
+        let until = now + ChronoDuration::seconds(seconds as i64);
+        let previous = self
+            .agent_retry_after
+            .fetch_max(until.timestamp(), Ordering::Relaxed);
+        self.agent_last_cooldown_end
+            .fetch_max(until.timestamp(), Ordering::Relaxed);
+        if rejected {
+            self.agent_throttle_strikes.store(0, Ordering::Relaxed);
+            self.agent_access_strikes.store(0, Ordering::Relaxed);
+        } else if !same_probe {
+            // This failure opened a new cooldown: one strike on its lane's
+            // ladder, added rather than stored, so two openers on one
+            // engine (should a pass ever run beside another) cannot lose
+            // one. The sibling of the same probe adds none, even when the
+            // opener's cooldown has lapsed by the time its own request
+            // fails.
+            ladder.fetch_add(1, Ordering::Relaxed);
+        }
+        let effective = until.timestamp().max(previous);
+        (
+            DateTime::from_timestamp(effective, 0).unwrap_or(until),
+            effective - now.timestamp(),
+        )
+    }
+
+    /// The provider answered, in either lane: a cooldown that has lapsed is
+    /// cleared so the next pass admits every worker rather than one probe.
+    /// Each lane's ladder, and the investigation lane's "answered since"
+    /// flag, are reset where that lane's model answers: the access lane's
+    /// fast model answering says nothing about the investigation model.
+    fn note_provider_success(&self) {
+        let until = self.agent_retry_after.load(Ordering::Relaxed);
+        if until > 0 && until <= Utc::now().timestamp() {
+            let _ = self.agent_retry_after.compare_exchange(
+                until,
+                0,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -505,7 +658,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         day: &str,
         limits: &[(String, u32)],
         access: bool,
+        start: JobStart,
     ) {
+        // A turn of this run answered (a second call was made, which only
+        // follows an answered first): the provider is answering, whatever
+        // happened after. Not usage, which a gateway may omit.
+        let answered_a_turn = error.model_calls > 1;
         for usage in error.usage {
             if access {
                 let _ = self.store.extract_bump_usage(
@@ -528,47 +686,46 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             if rejected {
                 self.metrics.record_llm_config_failure();
             }
-            let until = Utc::now()
-                + ChronoDuration::seconds(
-                    self.config.triage.agent.outage_retry_secs.min(86400) as i64
-                );
+            // `until` is the account's stand-off, a sibling's longer one
+            // included: the job is deferred to what will actually admit it.
+            let (until, wait) = self.open_cooldown(error.retry_after, rejected, start, !access);
             eprintln!(
                 "squelch: triage provider unavailable ({}); queued work retained, retrying in {}s",
-                error.kind,
-                self.config.triage.agent.outage_retry_secs.min(86400)
+                error.kind, wait
             );
-            self.agent_retry_after
-                .fetch_max(until.timestamp(), Ordering::Relaxed);
             self.metrics.note_triage_cooldown(until.timestamp());
             let _ = self.store.defer_agent_job(job, until, &error.kind);
             self.metrics.record_agent(AgentVerdict::Retryable);
-        } else if crate::triage::llm::is_content_refusal(&error.kind) {
-            // See is_content_refusal: fail once, in either lane.
-            self.metrics.record_agent(AgentVerdict::Failed);
-            if let Err(error) = self.store.fail_agent_job(job, &error.kind) {
-                eprintln!("squelch: could not record refused triage job: {error}");
-            }
         } else {
+            if answered_a_turn {
+                // An earlier turn of this run answered, whatever the run
+                // then failed with: the provider is answering. The rule
+                // need not wait for some other job to say so, or a long
+                // message alone on a quiet queue would walk every attempt.
+                self.agent_answered_since_timeout
+                    .store(true, Ordering::Relaxed);
+            }
             self.retry_agent(job, &error.kind);
         }
     }
 
-    async fn process_access_job(&self, job: AgentJob, llm: &ResolvedLlm, day: &str) {
+    async fn process_access_job(&self, job: &AgentJob, llm: &ResolvedLlm, day: &str) {
         let now = Utc::now();
         let retry_after = self.agent_retry_after.load(Ordering::Relaxed);
+        let episode = self.agent_last_cooldown_end.load(Ordering::Relaxed);
         if now.timestamp() < retry_after {
             let until = DateTime::from_timestamp(retry_after, 0).unwrap_or(now);
-            let _ = self.store.defer_agent_job(&job, until, "provider_cooldown");
+            let _ = self.store.defer_agent_job(job, until, "provider_cooldown");
             return;
         }
-        let message = match self.store.load_agent_access_message(&job) {
+        let message = match self.store.load_agent_access_message(job) {
             Ok(message) => message,
             Err(_) => {
-                self.retry_agent(&job, "context_unavailable");
+                self.retry_agent(job, "context_unavailable");
                 return;
             }
         };
-        let limits = investigation_budget_limits(&self.config, &job);
+        let limits = investigation_budget_limits(&self.config, job);
         match self
             .store
             .reserve_agent_budget(self.account_id, day, &limits)
@@ -581,12 +738,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .and_utc();
                 let _ = self
                     .store
-                    .defer_agent_job(&job, tomorrow, "daily_budget_exhausted");
+                    .defer_agent_job(job, tomorrow, "daily_budget_exhausted");
                 self.metrics.record_agent(AgentVerdict::Deferred);
                 return;
             }
             Err(_) => {
-                self.retry_agent(&job, "budget_unavailable");
+                self.retry_agent(job, "budget_unavailable");
                 return;
             }
         }
@@ -615,15 +772,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         .await
         {
             Ok(run) => {
-                let until = self.agent_retry_after.load(Ordering::Relaxed);
-                if until > 0 && until <= Utc::now().timestamp() {
-                    let _ = self.agent_retry_after.compare_exchange(
-                        until,
-                        0,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
-                }
+                self.note_provider_success();
+                self.agent_access_strikes.store(0, Ordering::Relaxed);
                 let metadata = serde_json::json!({"prompt_version":crate::triage::access::PROMPT_VERSION,
                     "model":model,"model_calls":run.model_calls,"usage":run.usage,"assessment":run.decision});
                 for usage in run.usage {
@@ -636,35 +786,75 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 }
                 match self
                     .store
-                    .commit_agent_access(&job, &message, &run.decision, &metadata)
+                    .commit_agent_access(job, &message, &run.decision, &metadata)
                 {
                     Ok(AgentCommitOutcome::Applied) => {
                         self.metrics.record_agent(AgentVerdict::Applied)
                     }
-                    Ok(AgentCommitOutcome::Stale) => self.retry_agent(&job, "context_changed"),
-                    Err(_) => self.retry_agent(&job, "commit_failed"),
+                    Ok(AgentCommitOutcome::Stale) => self.retry_agent(job, "context_changed"),
+                    Err(_) => self.retry_agent(job, "commit_failed"),
                 }
             }
-            Err(error) => self.handle_agent_failure(&job, error, day, &limits, true),
+            Err(error) => {
+                let start = JobStart {
+                    generation: episode,
+                    at: now,
+                };
+                self.handle_agent_failure(job, error, day, &limits, true, start)
+            }
         }
     }
 
+    /// Schedules the next attempt, or fails the job when another would be
+    /// waste: the attempt allowance is spent; the model refused the content
+    /// (`is_content_refusal`: the same mail gets the same answer, in either
+    /// lane); or this investigation timed out right after the previous
+    /// attempt did WHILE the provider answered some other job in between.
+    /// Every timed-out turn is a billed request (the provider may finish
+    /// the answer after the deadline) that re-sends the same context, so
+    /// two in a row with a success between them are the long message's
+    /// verdict, not `max_attempts` tries at it. Two in a row with nothing
+    /// answered since the first are as likely the provider's slow quarter
+    /// hour as the message, and a job failed for that needs a person to
+    /// re-triage it; the ordinary attempts, with their growing waits, leave
+    /// it pending and mostly outlast the incident (deadlines never pause the
+    /// account, see `is_provider_outage`). "Answered since" is the
+    /// account's one flag: raised when an investigation answers (this run's
+    /// own earlier turn included), lowered by every timeout, never raised
+    /// by the access lane's fast model, which says nothing about this one.
+    /// A timeout after a
+    /// different failure (a commit race, a cooldown deferral) still gets its
+    /// retry: the previous attempt's code is what the claim read back, see
+    /// [`AgentJob::last_error`]. The access call keeps the ordinary
+    /// allowance: its deadline is the short `fast_timeout_secs`, cut by a
+    /// latency spike rather than a long message, and a failed access job
+    /// leaves the message's access pending until a person re-triages it.
     fn retry_agent(&self, job: &AgentJob, code: &str) {
-        if job.attempts >= i64::from(self.config.triage.agent.max_attempts) {
-            self.metrics.record_agent(AgentVerdict::Failed);
-            if let Err(error) = self.store.fail_agent_job(job, code) {
-                eprintln!("squelch: could not record failed triage job: {error}");
-            }
-            return;
+        let timed_out = code == crate::triage::agent::AGENT_TIMEOUT;
+        let mut answered_since_last_timeout = false;
+        if timed_out {
+            // Raised only once an investigation has answered since the last
+            // timeout (a fresh process has seen nothing); this timeout
+            // lowers it again.
+            answered_since_last_timeout = self
+                .agent_answered_since_timeout
+                .swap(false, Ordering::Relaxed);
         }
+        let timed_out_twice = answered_since_last_timeout
+            && job.last_error.as_deref() == Some(crate::triage::agent::AGENT_TIMEOUT);
+        let next = next_attempt_wait(job.attempts, self.config.triage.agent.max_attempts);
+        let wait = match next {
+            Some(wait) if !crate::triage::llm::is_content_refusal(code) && !timed_out_twice => wait,
+            _ => {
+                self.metrics.record_agent(AgentVerdict::Failed);
+                if let Err(error) = self.store.fail_agent_job(job, code) {
+                    eprintln!("squelch: could not record failed triage job: {error}");
+                }
+                return;
+            }
+        };
         self.metrics.record_agent(AgentVerdict::Retryable);
-        let seconds = 15_i64
-            .saturating_mul(2_i64.pow(job.attempts.clamp(0, 8) as u32))
-            .min(3600);
-        if let Err(error) =
-            self.store
-                .retry_agent_job(job, Utc::now() + ChronoDuration::seconds(seconds), code)
-        {
+        if let Err(error) = self.store.retry_agent_job(job, Utc::now() + wait, code) {
             eprintln!("squelch: could not schedule triage retry: {error}");
         }
     }
@@ -828,7 +1018,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// deliberate one, which makes no model call of its own.
     fn notification_lease_secs(&self, kind: &str) -> i64 {
         match kind {
-            "notification" => self.config.notify.fast_timeout_secs as i64 + 30,
+            "notification" => {
+                (self.config.notify.fast_deadline_secs() + DEADLINE_SLACK_SECS) as i64
+            }
             _ => 30,
         }
     }
@@ -871,6 +1063,187 @@ pub(super) const MAX_NOTIFY_IDLE_BACKOFF: Duration = Duration::from_secs(5);
 /// The job kinds the notification lane claims, in claim order: an arrival's
 /// push, then the deliberate one that follows a decision.
 pub(super) const NOTIFICATION_JOB_KINDS: [&str; 2] = ["notification", "deliberate_notification"];
+
+/// `base` doubled `step` times, at most `cap`: the shape of every backoff
+/// in this file (a job's retries, the throttle ladder), saturating rather
+/// than overflowing at any step.
+pub(super) fn doubling_backoff_secs(base: u64, step: u32, cap: u64) -> u64 {
+    base.saturating_mul(1u64 << step.min(63)).min(cap)
+}
+
+/// A job's wait before its next attempt, after `attempts` of them: 30 s,
+/// 60 s, 120 s, ... up to an hour. The retry's wait, and the hand-back's.
+pub(super) fn retry_backoff_secs(attempts: u32) -> u64 {
+    doubling_backoff_secs(15, attempts, 3600)
+}
+
+/// The first rung of the cooldown after a throttle (429) or a server error
+/// (5xx, 529, a transport failure): short, and spread over a window, as is
+/// every wait the ladder yields, so the tenants of one host, each with its
+/// own engine seeing the same provider (and told the same `retry-after`),
+/// do not all come back in the same second. The cooldown doubles for every
+/// probe that fails in turn, `15, 30, 60, ...`, up to
+/// [`AgentConfig::outage_retry_secs`], and starts over at the first success.
+///
+/// [`AgentConfig::outage_retry_secs`]: crate::triage::agent_config::AgentConfig::outage_retry_secs
+pub(super) const THROTTLE_COOLDOWN_SECS: u64 = 15;
+pub(super) const THROTTLE_COOLDOWN_JITTER_SECS: u64 = 15;
+
+/// How long to stand off a provider that throttled or errored, given how
+/// many probes have failed in a row (`strikes`, zero on the first failure
+/// after a success) and the account's outage interval (`ceiling`).
+///
+/// The provider's own `retry-after` is believed on the first failure, from
+/// a second up to the ceiling: the ceiling is the operator's "never longer
+/// than this", and a gateway's hour-long header does not get to stop an
+/// account's triage for an hour on one response. After the first failure
+/// the header is a floor, not the answer: a throttle that keeps naming the
+/// same few seconds (a spent monthly budget says `retry-after: 60` for the
+/// rest of the month) would otherwise be probed every minute, each probe a
+/// request. So the rung the strike count reaches,
+/// [`THROTTLE_COOLDOWN_SECS`] doubled per strike, is the wait, or the
+/// `retry-after` when that is longer; a jitter drawn from the clock rides
+/// on either, and nothing exceeds the ceiling. The account used to wait
+/// [`AgentConfig::outage_retry_secs`] (five minutes) for any 429, whatever
+/// the provider asked for.
+///
+/// [`AgentConfig::outage_retry_secs`]: crate::triage::agent_config::AgentConfig::outage_retry_secs
+pub(super) fn throttle_cooldown_secs(
+    retry_after: Option<std::time::Duration>,
+    strikes: u32,
+    ceiling: u64,
+    jitter: u64,
+) -> u64 {
+    let jitter = jitter.min(THROTTLE_COOLDOWN_JITTER_SECS);
+    // Validation holds the interval at or above this; the floor is for a
+    // caller that did not validate.
+    let ceiling = ceiling.max(THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS);
+    // A `retry-after` of zero (an HTTP-date already past) is no number at
+    // all, and takes the rung, as the multi-try path's `sleep_backoff` does.
+    let asked = retry_after
+        .filter(|asked| !asked.is_zero())
+        .map(|asked| asked.as_secs().clamp(1, ceiling));
+    let rung = doubling_backoff_secs(THROTTLE_COOLDOWN_SECS, strikes, ceiling);
+    let wait = match (asked, strikes) {
+        (Some(asked), 0) => asked,
+        (Some(asked), _) => asked.max(rung),
+        (None, _) => rung,
+    };
+    // The jitter rides UNDER the ceiling, not over it: at the terminal rung
+    // every tenant told the same thing would otherwise wait exactly the
+    // ceiling and probe in the same second, which is the case the spread is
+    // for. So the ceiling is the longest wait, and the jitter's room sits
+    // just below it.
+    let wait = wait.min(ceiling - THROTTLE_COOLDOWN_JITTER_SECS) + jitter;
+    match asked {
+        // The provider's number is never undercut, on any strike: the
+        // jitter and the rung spread above it, never below it, since a
+        // probe before the provider's window closes is a certain throttle
+        // and a wasted request. `asked` is already within the ceiling.
+        Some(asked) => wait.max(asked),
+        None => wait,
+    }
+}
+
+/// Hands a claimed job back if its run is dropped before it reached a
+/// terminal decision: the refine lane's future is dropped at shutdown (and
+/// whenever `run_lanes` ends the lanes on a poll failure), and the lease,
+/// sized for the whole run (eight minutes at the defaults), would otherwise
+/// hold the job, and every other job on its thread, until it lapsed. The
+/// hand-back writes no `last_error`, keeps the attempt the run took, and
+/// makes the job due after the retry ladder's wait for that attempt
+/// ([`AgentTriageStore::release_agent_job`]), so a job interrupted again
+/// and again (a poll lane failing every minute under a long run, a run
+/// that panics) is re-run on the ladder's spacing, not on the spot, and
+/// runs out of attempts like any other rather than bouncing for ever on a
+/// refunded one; and since the claim has no
+/// attempts filter and a retry's check runs only after a failed attempt,
+/// a job dropped on its last allowed attempt is failed here, as
+/// [`INTERRUPTED`], rather than handed back. Disarmed once the run has
+/// decided and attempted its terminal write, whether or not the store took
+/// it: a run that decided to FAIL a job (a refusal, the attempts spent)
+/// and met a busy store must not have the job handed back to be re-run,
+/// and re-billed, at once; that job waits out its lease and the next claim
+/// spends an attempt, as before this change. The budget unit the run
+/// reserved stays spent either way: the request in flight may well have
+/// been billed, and a daemon that keeps dropping runs (a crash loop) is
+/// what the daily cap is for. A process that dies without dropping
+/// anything (a kill, an OOM) still waits out the lease.
+struct ClaimGuard<'a, S: AgentTriageStore> {
+    store: &'a S,
+    metrics: &'a crate::metrics::SyncMetrics,
+    job: &'a AgentJob,
+    max_attempts: u32,
+    armed: bool,
+}
+impl<S: AgentTriageStore> Drop for ClaimGuard<'_, S> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match next_attempt_wait(self.job.attempts, self.max_attempts) {
+            None => {
+                self.metrics.record_agent(AgentVerdict::Failed);
+                let _ = self.store.fail_agent_job(self.job, INTERRUPTED);
+            }
+            Some(wait) => {
+                self.metrics.record_agent(AgentVerdict::Retryable);
+                // An access check is one short call that a door may be
+                // waiting on, and the door's wait reads a parked job as
+                // not waiting: its hand-back is due at once. An
+                // investigation's is due on the ladder, so a lane dropped
+                // again and again does not re-bill a long run on the spot.
+                let due = if self.job.kind == "access" {
+                    Utc::now()
+                } else {
+                    Utc::now() + wait
+                };
+                let _ = self.store.release_agent_job(self.job, due);
+            }
+        }
+    }
+}
+
+/// What a job that has made `attempts` of its `max_attempts` gets next:
+/// the wait before another, on the ladder, or `None` when the allowance is
+/// spent. The one rule the retry and the hand-back share.
+pub(super) fn next_attempt_wait(attempts: i64, max_attempts: u32) -> Option<ChronoDuration> {
+    if attempts >= i64::from(max_attempts) {
+        return None;
+    }
+    let attempts = u32::try_from(attempts).unwrap_or(u32::MAX);
+    Some(ChronoDuration::seconds(retry_backoff_secs(attempts) as i64))
+}
+/// The `last_error` of a job failed by [`ClaimGuard`]: dropped on its last
+/// allowed attempt.
+pub(super) const INTERRUPTED: &str = "interrupted";
+
+/// What a job's run started under: the account's last cooldown end as it
+/// stood at admission (`generation`, the value of `agent_last_cooldown_end`
+/// then, which only grows) and when. Both feed
+/// [`SyncEngine::open_cooldown`] when the run fails.
+#[derive(Clone, Copy)]
+pub(super) struct JobStart {
+    pub(super) generation: i64,
+    pub(super) at: DateTime<Utc>,
+}
+
+/// The spread every stand-off carries, zero to
+/// [`THROTTLE_COOLDOWN_JITTER_SECS`] seconds: drawn from the clock's
+/// milliseconds and the account, so the tenants of one host whose failures
+/// land in the same millisecond (one upstream burst) still draw different
+/// numbers. Seven is odd, so adjacent accounts land in different buckets.
+fn clock_jitter_secs(now: DateTime<Utc>, account: AccountId) -> u64 {
+    let salt = u64::try_from(account).unwrap_or(0).wrapping_mul(7);
+    (u64::from(now.timestamp_subsec_millis()).wrapping_add(salt))
+        % (THROTTLE_COOLDOWN_JITTER_SECS + 1)
+}
+
+const _: () = assert!(
+    THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS
+        == crate::triage::agent_config::MIN_OUTAGE_RETRY_SECS,
+    "the outage interval's floor is the ladder's first wait"
+);
 
 /// Provider failures describe shared availability, not a permanently bad email.
 fn is_provider_outage(kind: &str) -> bool {
@@ -974,6 +1347,117 @@ mod notification_lane_tests {
                 "{why}: idle_rounds={idle_rounds} interval={interval:?} until_due={until_due:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cooldown_tests {
+    use super::*;
+    use chrono::Timelike;
+
+    const CEILING: u64 = 300;
+
+    /// On the first failure the provider's `retry-after` is believed between
+    /// a second and the ceiling, the jitter riding on it so the tenants told
+    /// the same number spread out; without one the stand-off is short and
+    /// spread.
+    #[test]
+    fn a_throttle_cooldown_is_what_the_provider_asked_or_a_short_spread_wait() {
+        let secs = |s| Some(std::time::Duration::from_secs(s));
+        assert_eq!(throttle_cooldown_secs(secs(7), 0, CEILING, 0), 7);
+        // Zero (a past HTTP-date) is no number: the first rung.
+        assert_eq!(
+            throttle_cooldown_secs(secs(0), 0, CEILING, 0),
+            THROTTLE_COOLDOWN_SECS
+        );
+        // Past the ceiling, the ceiling: the provider's number is honoured in
+        // full up to it, jitter or no jitter.
+        assert_eq!(throttle_cooldown_secs(secs(99_999), 0, CEILING, 0), CEILING);
+        assert_eq!(throttle_cooldown_secs(secs(7), 0, CEILING, 15), 22);
+        // A number within the jitter's room of the ceiling is never undercut.
+        assert_eq!(throttle_cooldown_secs(secs(295), 0, CEILING, 0), 295);
+        assert_eq!(throttle_cooldown_secs(secs(295), 0, CEILING, 15), CEILING);
+        assert_eq!(throttle_cooldown_secs(secs(290), 0, CEILING, 15), CEILING);
+        // Without a number, every value in the spread is reachable, and a
+        // jitter past the room is held to it.
+        let spread =
+            THROTTLE_COOLDOWN_SECS..=THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS;
+        let seen: std::collections::BTreeSet<u64> = (0..=THROTTLE_COOLDOWN_JITTER_SECS)
+            .map(|jitter| throttle_cooldown_secs(None, 0, CEILING, jitter))
+            .collect();
+        assert_eq!(seen.len() as u64, THROTTLE_COOLDOWN_JITTER_SECS + 1);
+        assert!(seen.iter().all(|wait| spread.contains(wait)));
+        assert_eq!(
+            throttle_cooldown_secs(None, 0, CEILING, 999),
+            THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS
+        );
+    }
+
+    /// The jitter is drawn from the clock's milliseconds and the account,
+    /// so two tenants failing in the same millisecond draw different
+    /// numbers, and every bucket is reachable for one account.
+    #[test]
+    fn the_jitter_spreads_tenants_that_fail_in_the_same_millisecond() {
+        let at = Utc::now().with_nanosecond(0).unwrap();
+        let tenants: std::collections::BTreeSet<u64> = (1..=4)
+            .map(|account| clock_jitter_secs(at, account))
+            .collect();
+        assert_eq!(tenants.len(), 4);
+        let buckets: std::collections::BTreeSet<u64> = (0..=THROTTLE_COOLDOWN_JITTER_SECS)
+            .map(|m| clock_jitter_secs(at.with_nanosecond(m as u32 * 1_000_000).unwrap(), 1))
+            .collect();
+        assert_eq!(buckets.len() as u64, THROTTLE_COOLDOWN_JITTER_SECS + 1);
+        assert!(buckets.iter().all(|j| *j <= THROTTLE_COOLDOWN_JITTER_SECS));
+    }
+
+    /// Every probe that fails in turn doubles the wait up to the outage
+    /// interval, and a `retry-after` shorter than the rung no longer
+    /// shortens it: a throttle that is not lifting is probed as an outage.
+    #[test]
+    fn a_throttle_that_keeps_failing_climbs_to_the_outage_interval() {
+        let rungs: Vec<u64> = (0..8)
+            .map(|strikes| throttle_cooldown_secs(None, strikes, CEILING, 0))
+            .collect();
+        // The terminal rung leaves the jitter its room below the ceiling.
+        assert_eq!(rungs, [15, 30, 60, 120, 240, 285, 285, 285]);
+        // The jitter rides on top of every rung, the terminal one included,
+        // so tenants at the ceiling still spread.
+        assert_eq!(throttle_cooldown_secs(None, 3, CEILING, 15), 135);
+        assert_eq!(throttle_cooldown_secs(None, 5, CEILING, 15), 300);
+        let at_ceiling: std::collections::BTreeSet<u64> = (0..=THROTTLE_COOLDOWN_JITTER_SECS)
+            .map(|jitter| throttle_cooldown_secs(None, 9, CEILING, jitter))
+            .collect();
+        assert_eq!(at_ceiling.len() as u64, THROTTLE_COOLDOWN_JITTER_SECS + 1);
+        assert_eq!(at_ceiling.iter().max(), Some(&CEILING));
+        // A short retry-after is believed once, then is a floor...
+        let secs = |s| Some(std::time::Duration::from_secs(s));
+        assert_eq!(throttle_cooldown_secs(secs(60), 0, CEILING, 0), 60);
+        assert_eq!(throttle_cooldown_secs(secs(60), 1, CEILING, 0), 60);
+        assert_eq!(throttle_cooldown_secs(secs(60), 2, CEILING, 0), 60);
+        assert_eq!(throttle_cooldown_secs(secs(60), 3, CEILING, 0), 120);
+        // ...and a long one is believed up to the ceiling, on any strike.
+        assert_eq!(throttle_cooldown_secs(secs(1800), 0, CEILING, 0), CEILING);
+        assert_eq!(throttle_cooldown_secs(secs(1800), 5, CEILING, 0), CEILING);
+        assert_eq!(throttle_cooldown_secs(secs(1800), 0, 3600, 0), 1800);
+        // Within the jitter's room of the ceiling it is not undercut on a
+        // later strike either.
+        assert_eq!(throttle_cooldown_secs(secs(295), 3, CEILING, 0), 295);
+        // The ceiling is never below the first rung and the jitter's room,
+        // and a strike count past any ladder does not overflow.
+        assert_eq!(throttle_cooldown_secs(None, 40, 1, 0), 15);
+        assert_eq!(throttle_cooldown_secs(None, u32::MAX, 86_400, 0), 86_385);
+    }
+
+    /// The one doubling behind the ladder and a job's retries: saturating
+    /// at every step, never past the cap.
+    #[test]
+    fn a_doubling_backoff_saturates_at_the_cap() {
+        assert_eq!(doubling_backoff_secs(15, 0, 3600), 15);
+        assert_eq!(doubling_backoff_secs(15, 3, 3600), 120);
+        assert_eq!(doubling_backoff_secs(15, 8, 3600), 3600);
+        assert_eq!(doubling_backoff_secs(15, u32::MAX, 3600), 3600);
+        assert_eq!(doubling_backoff_secs(u64::MAX, 1, u64::MAX), u64::MAX);
+        assert_eq!(doubling_backoff_secs(0, 70, 10), 0);
     }
 }
 

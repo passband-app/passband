@@ -326,7 +326,7 @@ Organize settings by actual responsibility:
 max_model_turns = 4
 max_tool_calls = 8
 max_review_calls = 1
-timeout_secs = 90
+timeout_secs = 90  # per model turn
 concurrency = 2
 
 [triage.context]

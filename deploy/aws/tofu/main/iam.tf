@@ -169,7 +169,7 @@ data "aws_iam_openid_connect_provider" "github" {
 }
 
 locals {
-  github_deploy_sub = "repo:${var.github_repo}:environment:${var.github_environment}:job_workflow_ref:${var.github_repo}/${var.github_workflow_path}@refs/heads/main"
+  github_deploy_sub = "${var.github_sub_prefix}:environment:${var.github_environment}:job_workflow_ref:${var.github_repo}/${var.github_workflow_path}@refs/heads/main"
 
   github_oidc_arn = var.create_github_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
 }

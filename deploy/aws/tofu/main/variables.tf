@@ -48,6 +48,22 @@ variable "github_repo" {
   default     = "passband-app/passband"
 }
 
+variable "github_sub_prefix" {
+  description = <<-EOT
+    The leading `repo:` part of the OIDC sub, exactly as GitHub reports it in
+    `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` (field
+    sub_claim_prefix). This repo uses IMMUTABLE subjects, so the prefix carries
+    the owner and repo IDs, not just names; a name-based prefix is refused at
+    AssumeRoleWithWebIdentity. job_workflow_ref stays name-based.
+  EOT
+  type        = string
+  default     = "repo:passband-app@336248739/passband@1293146964"
+  validation {
+    condition     = startswith(var.github_sub_prefix, "repo:")
+    error_message = "Must start with repo: (copy sub_claim_prefix verbatim)."
+  }
+}
+
 variable "github_environment" {
   description = "GitHub environment the workflow_dispatch jobs run in."
   type        = string

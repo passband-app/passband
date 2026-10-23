@@ -166,7 +166,12 @@ aws sts get-caller-identity              # Account = passband-prod, Arn = …AWS
 Before the deploy role is ever used. The role's trust (tofu `iam.tf`) pins the
 token's `sub` to the CUSTOMIZED form
 
-`repo:passband-app/passband:environment:aws-production:job_workflow_ref:passband-app/passband/.github/workflows/deploy-aws.yml@refs/heads/main`
+`repo:passband-app@336248739/passband@1293146964:environment:aws-production:job_workflow_ref:passband-app/passband/.github/workflows/deploy-aws.yml@refs/heads/main`
+
+The repo uses GitHub's IMMUTABLE subjects, so the `repo:` part carries owner
+and repo IDs (tofu `github_sub_prefix`, copied from the API's
+`sub_claim_prefix`); `job_workflow_ref` stays name-based. If the VERIFY below
+shows a different `sub_claim_prefix`, set `github_sub_prefix` to it.
 
 (`tofu -chdir=$TF output -raw github_deploy_oidc_sub` after Phase 1). That
 string exists only once the repo's sub template includes those claims. The
@@ -197,7 +202,7 @@ shows the new TTLs (`dig signup.passband.app | grep -A1 'ANSWER SECTION'`);
 GitHub holds both settings:
 
 ```sh
-gh api repos/$R/actions/oidc/customization/sub                     # use_default false, the three keys
+gh api repos/$R/actions/oidc/customization/sub                     # use_default false, the three keys, sub_claim_prefix == tofu github_sub_prefix
 gh api repos/$R/environments/aws-production/deployment-branch-policies --jq '.branch_policies[].name'   # main
 ```
 

@@ -129,7 +129,7 @@ Blackbox has NO public route, ever (same rule as on Railway).
   variable `AWS_DEPLOY_ENABLED == 'true'`, so the workflow is INERT until
   cutover.
 - GitHub → AWS via OIDC, one role, trust restricted to
-  `repo:passband-app/passband:ref:refs/heads/main` (and the `workflow_dispatch`
+  the customized immutable sub (`repo:passband-app@<id>/passband@<id>:environment:aws-production:job_workflow_ref:...deploy-aws.yml@refs/heads/main`; CUTOVER.md 0d) (and the `workflow_dispatch`
   environment). Permissions: push to these ECR repos, update these ECS
   services, SSM SendCommand to the monitor instance, S3 sync + CloudFront
   invalidation for the site. Nothing else.

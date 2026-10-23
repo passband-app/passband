@@ -201,8 +201,10 @@ resource "aws_lb_target_group" "this" {
   }
 }
 
+# Open hosts: anyone may reach these (control's signup, relay's opens, Grafana's
+# own login page).
 resource "aws_lb_listener_rule" "host" {
-  for_each = local.target_groups
+  for_each = { for k, v in local.target_groups : k => v if !contains(keys(local.source_restricted), k) }
 
   listener_arn = aws_lb_listener.https.arn
   priority     = index(keys(local.target_groups), each.key) + 10
@@ -216,6 +218,68 @@ resource "aws_lb_listener_rule" "host" {
   action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.this[each.key].arn
+  }
+}
+
+# Source-restricted hosts. A request for one of these hosts from any other
+# address matches no rule and gets the listener's default 404, and that
+# includes a forged `Host:` sent straight at the ALB's DNS name, so DNS
+# cutover is not the gate.
+#   bifrost: the LLM proxy AND its admin plane (UI, /api/*, HTTP Basic). Its
+#            callers are control and blackbox (both egress from the NAT EIP)
+#            and the tenants on carrier. A fresh Bifrost has no admin auth until
+#            first-run config, so this rule is what keeps that window closed;
+#            operator_cidrs opens it to the operator for that step only.
+#   metrics: Prometheus remote-write from carrier's prometheus-agent only.
+#
+# ALB limits: one source-ip condition per rule, at most 3 values per
+# condition, at most 5 match evaluations per rule (docs: "Condition types
+# for listener rules"). So each allow-list is cut into chunks of 3, one rule
+# per chunk, each rule host (1) + source-ip (<= 3) = <= 4 evaluations.
+locals {
+  source_restricted = {
+    bifrost = concat(["${aws_eip.nat.public_ip}/32"], var.carrier_egress_cidrs, var.operator_cidrs)
+    metrics = var.carrier_egress_cidrs
+  }
+
+  restricted_rules = merge([
+    for svc, base in { bifrost = 100, metrics = 200 } : {
+      for i in range(ceil(length(local.source_restricted[svc]) / 3)) : "${svc}-${i}" => {
+        service  = svc
+        priority = base + i
+        chunk    = i
+      }
+    }
+  ]...)
+}
+
+resource "aws_lb_listener_rule" "restricted" {
+  # Keys are built from list LENGTHS (known at plan time even though the NAT
+  # EIP's address is not), never from the CIDR values themselves.
+  for_each = local.restricted_rules
+
+  listener_arn = aws_lb_listener.https.arn
+  priority     = each.value.priority
+
+  condition {
+    host_header {
+      values = [local.target_groups[each.value.service].host]
+    }
+  }
+
+  condition {
+    source_ip {
+      values = slice(
+        local.source_restricted[each.value.service],
+        each.value.chunk * 3,
+        min(length(local.source_restricted[each.value.service]), each.value.chunk * 3 + 3),
+      )
+    }
+  }
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this[each.value.service].arn
   }
 }
 

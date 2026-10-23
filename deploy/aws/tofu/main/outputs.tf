@@ -52,8 +52,34 @@ output "ecr_registry" {
 }
 
 output "github_deploy_role_arn" {
-  description = "Set as the AWS_DEPLOY_ROLE_ARN repo variable (an ARN is not a secret)."
+  description = "For reference only: the workflow derives this from AWS_ACCOUNT_ID (arn:aws:iam::<id>:role/passband-github-deploy). There is no ARN repo variable."
   value       = aws_iam_role.github_deploy.arn
+}
+
+output "github_deploy_oidc_sub" {
+  description = "The exact OIDC sub the deploy role trusts. Needs the repo's customized sub template (README.md step 1)."
+  value       = local.github_deploy_sub
+}
+
+output "github_repo_variables" {
+  description = "Repo variables deploy-aws.yml reads, with their values (none is a secret). AWS_ARM64_RUNNER is optional and not tofu's to know (README.md step 6)."
+  value = {
+    AWS_ACCOUNT_ID           = local.account_id
+    AWS_SITE_BUCKET          = aws_s3_bucket.site.bucket
+    AWS_SITE_DISTRIBUTION_ID = aws_cloudfront_distribution.site.id
+    AWS_SITE_FUNCTION_NAME   = aws_cloudfront_function.site.name
+    AWS_MONITOR_INSTANCE_ID  = aws_instance.monitor.id
+  }
+}
+
+output "monitor_deploy_document" {
+  description = "The only SSM document CI may run on the monitor box (one ImageTag parameter, a 40-hex SHA)."
+  value       = aws_ssm_document.monitor_deploy.name
+}
+
+output "security_alerts_topic_arn" {
+  description = "SNS topic the CloudTrail tripwires publish to. Confirm the email subscription after the first apply."
+  value       = aws_sns_topic.security_alerts.arn
 }
 
 output "ecs_cluster_name" {

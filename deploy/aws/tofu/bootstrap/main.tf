@@ -12,15 +12,18 @@ terraform {
     }
   }
 
-  # Step 1 runs with no backend (local state). Step 2 uncomments this block,
-  # fills in the bucket name from `tofu output state_bucket`, and runs
-  # `tofu init -migrate-state`.
+  # Step 1 runs with no backend (local state). Then uncomment this block,
+  # fill in the bucket and key from `tofu output`, and run
+  # `tofu init -migrate-state`. SSE-KMS with the state key; no client-side
+  # encryption block here (the key cannot encrypt the state that creates it),
+  # and this state holds no secret.
   #
   # backend "s3" {
   #   bucket       = "passband-tofu-state-<account id>"
   #   key          = "bootstrap/terraform.tfstate"
   #   region       = "us-west-2"
   #   encrypt      = true
+  #   kms_key_id   = "<tofu output -raw state_kms_key_arn>"
   #   use_lockfile = true
   # }
 }

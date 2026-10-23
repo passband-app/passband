@@ -1,4 +1,4 @@
-# Fargate ARM64, private subnets, no public IPs, ECS Exec on.
+# Fargate ARM64, private subnets, no public IPs, ECS Exec on control only.
 #
 # CI owns the image. Tofu registers each family's FIRST revision with a
 # placeholder tag and then ignores the service's task_definition, so a later
@@ -195,10 +195,17 @@ resource "aws_ecs_service" "this" {
   desired_count   = var.services_running ? 1 : 0
   launch_type     = "FARGATE"
 
-  enable_execute_command            = true
+  # DESIGN.md: ECS Exec on control only (the operator's CLI lives there).
+  # Exec into bifrost would be a shell holding ANTHROPIC_API_KEY, into relay
+  # one holding the APNs key; neither needs it.
+  enable_execute_command            = each.key == "control"
   enable_ecs_managed_tags           = true
   propagate_tags                    = "SERVICE"
   health_check_grace_period_seconds = 60
+  # When the services are meant to run, an apply (the services_running flip
+  # above all) does not return until each one is steady, so the first real
+  # start fails loudly instead of going green at 0 tasks.
+  wait_for_steady_state = var.services_running
 
   deployment_minimum_healthy_percent = local.single_writer[each.key] ? 0 : 100
   deployment_maximum_percent         = local.single_writer[each.key] ? 100 : 200
@@ -224,5 +231,5 @@ resource "aws_ecs_service" "this" {
     ignore_changes = [task_definition]
   }
 
-  depends_on = [aws_lb_listener_rule.host]
+  depends_on = [aws_lb_listener_rule.host, aws_lb_listener_rule.restricted]
 }

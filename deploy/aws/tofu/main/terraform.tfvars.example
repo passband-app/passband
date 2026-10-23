@@ -6,7 +6,16 @@
 state_bucket      = "passband-tofu-state-000000000000"
 state_kms_key_arn = "arn:aws:kms:us-west-2:000000000000:key/00000000-0000-0000-0000-000000000000"
 
-budget_email = "ops@example.invalid"
+budget_email = "ops@example.invalid" # budget alarm AND security alerts
+
+# Exact fck-nat image name; look up the current one (README.md, "Bumping the
+# NAT AMI"). The date below is a placeholder.
+fck_nat_ami_name = "fck-nat-al2023-hvm-1.4.0-20260101-arm64-ebs"
+
+# carrier's egress. CONFIRM with `curl -s ifconfig.me` on carrier first.
+carrier_egress_cidrs = ["5.78.205.240/32"]
+# Your own /32, ONLY while doing Bifrost first-run config (README.md step 7).
+operator_cidrs = []
 
 # Leave false until every secret has a value and CI has pushed real images.
 services_running = false

@@ -150,13 +150,19 @@ resource "aws_eip" "nat" {
   tags   = { Name = "passband-nat" }
 }
 
+# Pinned to ONE exact image name from fck-nat's publishing account, never
+# `most_recent` over a wildcard: a new third-party AMI would otherwise replace
+# the box that carries all egress (with an SSM role) on whatever apply happens
+# next. Bumping is a deliberate edit of var.fck_nat_ami_name (README.md,
+# "Bumping the NAT AMI"). include_deprecated: AWS hides public AMIs from
+# DescribeImages two years after publish, and a pin must keep resolving.
 data "aws_ami" "fck_nat" {
-  most_recent = true
-  owners      = ["568608671756"] # fck-nat's publishing account
+  owners             = ["568608671756"] # fck-nat's publishing account
+  include_deprecated = true
 
   filter {
     name   = "name"
-    values = ["fck-nat-al2023-*-arm64-ebs"]
+    values = [var.fck_nat_ami_name]
   }
 
   filter {

@@ -5,7 +5,9 @@
 # entrypoint names a Railway host (probe TARGETS live in prometheus.yml), so
 # both are reused as-is. Never published on the host and never routed by the
 # ALB: Prometheus reaches it over the compose network only.
-FROM prom/blackbox-exporter:v0.25.0
+# Pinned by the multi-arch index digest (fetched from Docker Hub 2026-10-23):
+# the tag is for humans, the digest is what is pulled. Bump both together.
+FROM prom/blackbox-exporter:v0.25.0@sha256:b04a9fef4fa086a02fc7fcd8dcdbc4b7b35cc30cdee860fdc6a19dd8b208d63e
 COPY deploy/monitoring/blackbox/blackbox.yml /etc/blackbox_exporter/config.template.yml
 COPY deploy/monitoring/blackbox/entrypoint.sh /entrypoint.sh
 EXPOSE 9115

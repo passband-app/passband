@@ -3,7 +3,7 @@
 #            Decrypt only through Secrets Manager and only for its own secret
 #            ARNs (iam.tf), so the key does not widen anybody's reach.
 #   logs:    CloudWatch log groups, ECS Exec session encryption + its logs,
-#            and the CloudTrail trail.
+#            the CloudTrail trail, and the security alerts SNS topic.
 # RDS, EFS and EBS use their AWS-managed default keys: still encrypted at rest,
 # and nothing outside the account ever needs a grant on them.
 
@@ -86,6 +86,23 @@ data "aws_iam_policy_document" "kms_logs" {
       test     = "StringEquals"
       variable = "aws:SourceArn"
       values   = ["arn:${local.partition}:cloudtrail:${var.region}:${local.account_id}:trail/passband"]
+    }
+  }
+
+  # EventBridge publishing to the encrypted passband-security-alerts topic
+  # (audit.tf). SNS calls KMS with the topic ARN as encryption context.
+  statement {
+    sid       = "EventBridgeToAlertsTopic"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:aws:sns:topicArn"
+      values   = ["arn:${local.partition}:sns:${var.region}:${local.account_id}:passband-security-alerts"]
     }
   }
 

@@ -12,7 +12,7 @@
 //! | `disable` | `NoTls` | nothing |
 //! | `require` | rustls, plaintext refused | chain to the RDS bundle AND hostname |
 //! | `verify-full` | rustls, plaintext refused | chain to the RDS bundle AND hostname |
-//! | anything else | startup error naming the value | — |
+//! | anything else | startup error naming the value (if it looks like one) | — |
 //!
 //! `require` IS STRICTER THAN LIBPQ, deliberately. In libpq `require` encrypts
 //! without verifying anything (unless a root cert file happens to exist), which
@@ -67,7 +67,8 @@ pub(crate) enum TlsChoice {
 /// Why a connection string could not be turned into a config.
 ///
 /// Carries NO PART OF THE STRING except, for [`Self::UnsupportedSslMode`], the
-/// `sslmode` value itself. The string carries the password.
+/// `sslmode` value itself, and only when it looks like an sslmode
+/// (`^[a-z-]{1,16}$`; see [`shown_mode`]). The string carries the password.
 #[derive(Debug, thiserror::Error)]
 pub enum PgTlsError {
     #[error(
@@ -96,11 +97,28 @@ pub(crate) fn parse(database_url: &str) -> Result<(tokio_postgres::Config, TlsCh
     let (ssl_mode, choice) = match mode.as_str() {
         "disable" => (SslMode::Disable, TlsChoice::Plain),
         "require" | "verify-full" => (SslMode::Require, TlsChoice::Verified),
-        _ => return Err(PgTlsError::UnsupportedSslMode(mode)),
+        _ => return Err(PgTlsError::UnsupportedSslMode(shown_mode(&mode))),
     };
     let mut config: tokio_postgres::Config = rest.parse()?;
     config.ssl_mode(ssl_mode);
     Ok((config, choice))
+}
+
+/// What an [`PgTlsError::UnsupportedSslMode`] may echo: the value if it could
+/// only be a mistyped mode, a placeholder otherwise. A value is not always
+/// just the value: in `key=value` form a backslash-escaped space joins the
+/// next parameter on, so `sslmode=require\ password=hunter2` reads as ONE
+/// sslmode whose value contains the password.
+const UNPRINTABLE_MODE: &str = "<not shown>";
+
+fn shown_mode(mode: &str) -> String {
+    let looks_like_a_mode =
+        (1..=16).contains(&mode.len()) && mode.bytes().all(|c| c.is_ascii_lowercase() || c == b'-');
+    if looks_like_a_mode {
+        mode.to_string()
+    } else {
+        UNPRINTABLE_MODE.to_string()
+    }
 }
 
 /// The rustls connector for [`TlsChoice::Verified`]: the RDS bundle as the only
@@ -112,7 +130,8 @@ pub(crate) fn rds_connector() -> Result<MakeRustlsConnect, PgTlsError> {
 }
 
 /// [`rds_connector`] with the roots as a parameter, so a test can stand up a
-/// server with its own CA and watch the same verifier accept and refuse it.
+/// server with its own CA and watch the same verifier accept and refuse it
+/// (`tests::the_verifier_checks_chain_and_hostname`).
 fn connector_trusting(pem: &[u8]) -> Result<MakeRustlsConnect, PgTlsError> {
     let mut roots = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(pem) {
@@ -176,11 +195,13 @@ fn split_url(s: &str) -> Result<Option<(String, String)>, PgTlsError> {
     Ok(Some((mode, rest)))
 }
 
+/// Percent-decoding exactly as tokio-postgres's URL parser does it (`+` stays a
+/// `+`; it is not form encoding). Lossy where tokio-postgres would error on
+/// invalid UTF-8: such a key is not `sslmode`, and such a value is refused.
 fn decode(s: &str) -> String {
-    url::form_urlencoded::parse(format!("x={s}").as_bytes())
-        .next()
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_default()
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 /// `key=value` form. Mirrors tokio-postgres's `Parser`: whitespace-separated
@@ -359,15 +380,22 @@ mod tests {
 
     #[test]
     fn other_modes_are_refused_naming_the_value_and_never_the_url() {
-        for bad in ["prefer", "allow", "verify-ca", "REQUIRE", ""] {
+        for (bad, shown) in [
+            ("prefer", "prefer"),
+            ("allow", "allow"),
+            ("verify-ca", "verify-ca"),
+            ("REQUIRE", UNPRINTABLE_MODE),
+            ("", UNPRINTABLE_MODE),
+            ("verify-full-please-x", UNPRINTABLE_MODE),
+        ] {
             let s = url(&format!("?sslmode={bad}"));
             let err = parse(&s).unwrap_err();
             let msg = err.to_string();
             assert!(
-                matches!(err, PgTlsError::UnsupportedSslMode(ref v) if v == bad),
+                matches!(err, PgTlsError::UnsupportedSslMode(ref v) if v == shown),
                 "{msg}"
             );
-            assert!(msg.contains(&format!("`{bad}`")), "{msg}");
+            assert!(msg.contains(&format!("`{shown}`")), "{msg}");
             assert!(!msg.contains(SECRET), "{msg}");
             assert!(!msg.contains("rds.amazonaws.com"), "{msg}");
             assert!(!format!("{err:?}").contains(SECRET));
@@ -375,6 +403,35 @@ mod tests {
         let err = parse(&url("?sslmode=require&sslmode=disable")).unwrap_err();
         assert!(matches!(err, PgTlsError::DuplicateSslMode));
         assert!(!err.to_string().contains(SECRET));
+    }
+
+    /// Review finding: an escaped space glues the next parameter onto the
+    /// sslmode value, so echoing the value would echo the password.
+    #[test]
+    fn an_sslmode_that_swallowed_the_password_is_not_echoed() {
+        for s in [
+            "host=h user=u sslmode=require\\ password=hunter2 dbname=d",
+            "host=h user=u sslmode='require password=hunter2' dbname=d",
+        ] {
+            let err = parse(s).unwrap_err();
+            assert!(matches!(err, PgTlsError::UnsupportedSslMode(_)), "{err}");
+            assert!(!err.to_string().contains("hunter2"), "{err}");
+            assert!(!format!("{err:?}").contains("hunter2"), "{err:?}");
+        }
+        // And in a URL, where `%20` decodes to the same thing.
+        let err = parse(&url("?sslmode=require%20password%3Dhunter2")).unwrap_err();
+        assert!(!err.to_string().contains("hunter2"), "{err}");
+    }
+
+    #[test]
+    fn url_values_are_percent_decoded_like_tokio_postgres() {
+        assert_eq!(decode("verify%2Dfull"), "verify-full");
+        // `+` is literal in tokio-postgres's parser, not a space.
+        assert_eq!(decode("a+b"), "a+b");
+        assert_eq!(
+            choice(&url("?sslmode=verify%2dfull")),
+            (SslMode::Require, TlsChoice::Verified)
+        );
     }
 
     #[test]
@@ -391,5 +448,171 @@ mod tests {
         rds_connector().unwrap();
         let n = CertificateDer::pem_slice_iter(RDS_CA_BUNDLE).count();
         assert!(n > 100, "{n}");
+    }
+
+    /// The verifier itself, with no database: a throwaway CA signs a leaf
+    /// for `localhost`, and a loopback server answers the SSLRequest with `S`
+    /// and then speaks TLS with that leaf. The connector built by
+    /// [`connector_trusting`] (the one [`rds_connector`] wraps) must accept
+    /// it under the name it names, and refuse it under another name or when
+    /// trusting a different CA. This is the whole point of verify-full, so it
+    /// is asserted on the wire, not inferred from configuration.
+    mod verifier {
+        use super::super::*;
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::time::Duration;
+
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+        use rustls::pki_types::PrivateKeyDer;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct Pki {
+            ca_pem: String,
+            leaf: CertificateDer<'static>,
+            leaf_key: Vec<u8>,
+        }
+
+        fn pki(ca_name: &str, leaf_names: &[&str]) -> Pki {
+            let ca_key = KeyPair::generate().unwrap();
+            let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+            ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            ca.distinguished_name.push(DnType::CommonName, ca_name);
+            let ca_cert = ca.self_signed(&ca_key).unwrap();
+            let issuer = Issuer::new(ca, ca_key);
+            let leaf_key = KeyPair::generate().unwrap();
+            let names: Vec<String> = leaf_names.iter().map(|n| n.to_string()).collect();
+            let leaf = CertificateParams::new(names)
+                .unwrap()
+                .signed_by(&leaf_key, &issuer)
+                .unwrap();
+            Pki {
+                ca_pem: ca_cert.pem(),
+                leaf: leaf.der().clone(),
+                leaf_key: leaf_key.serialize_der(),
+            }
+        }
+
+        /// One connection: SSLRequest -> `S` -> TLS handshake. Resolves to
+        /// whether the SERVER saw the handshake complete.
+        async fn serve_once(pki: &Pki) -> (u16, tokio::task::JoinHandle<bool>) {
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![pki.leaf.clone()],
+                PrivateKeyDer::Pkcs8(pki.leaf_key.clone().into()),
+            )
+            .unwrap();
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+            let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut head = [0u8; 8];
+                sock.read_exact(&mut head).await.unwrap();
+                assert_eq!(
+                    head,
+                    [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f],
+                    "not an SSLRequest"
+                );
+                sock.write_all(b"S").await.unwrap();
+                let wait = Duration::from_secs(10);
+                matches!(
+                    tokio::time::timeout(wait, acceptor.accept(sock)).await,
+                    Ok(Ok(_))
+                )
+            });
+            (port, server)
+        }
+
+        /// Dial `host` (always at 127.0.0.1) with sslmode=require semantics
+        /// and the connector trusting `ca_pem`; the rustls error, if any.
+        async fn dial(host: &str, port: u16, ca_pem: &str) -> Option<rustls::Error> {
+            let mut config = tokio_postgres::Config::new();
+            config
+                .host(host)
+                .hostaddr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+                .port(port)
+                .user("u")
+                .dbname("d")
+                .ssl_mode(SslMode::Require)
+                .connect_timeout(Duration::from_secs(10));
+            let connector = connector_trusting(ca_pem.as_bytes()).unwrap();
+            // Never Ok: the server hangs up after the handshake, before any
+            // Postgres protocol. What matters is WHY it fails.
+            let err = config.connect(connector).await.err().expect("connected?");
+            rustls_cause(&err)
+        }
+
+        fn rustls_cause(err: &(dyn std::error::Error + 'static)) -> Option<rustls::Error> {
+            let mut cur = Some(err);
+            while let Some(e) = cur {
+                if let Some(r) = e.downcast_ref::<rustls::Error>() {
+                    return Some(r.clone());
+                }
+                // io::Error's source() skips its own payload; look inside.
+                if let Some(r) = e
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(|io| io.get_ref())
+                    .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+                {
+                    return Some(r.clone());
+                }
+                cur = e.source();
+            }
+            None
+        }
+
+        fn is_not_valid_for_name(e: &Option<rustls::Error>) -> bool {
+            use rustls::CertificateError as C;
+            matches!(
+                e,
+                Some(rustls::Error::InvalidCertificate(
+                    C::NotValidForName | C::NotValidForNameContext { .. }
+                ))
+            )
+        }
+
+        #[tokio::test]
+        async fn the_verifier_checks_chain_and_hostname() {
+            let good = pki("pg_tls test CA", &["localhost"]);
+
+            // The name the certificate carries, chained to the trusted CA.
+            let (port, server) = serve_once(&good).await;
+            let err = dial("localhost", port, &good.ca_pem).await;
+            assert!(err.is_none(), "localhost refused: {err:?}");
+            assert!(
+                server.await.unwrap(),
+                "server never completed the handshake"
+            );
+
+            // Same server, same CA, dialed by a name the certificate lacks.
+            let (port, server) = serve_once(&good).await;
+            let err = dial("127.0.0.1", port, &good.ca_pem).await;
+            assert!(is_not_valid_for_name(&err), "127.0.0.1: {err:?}");
+            assert!(!server.await.unwrap());
+
+            // Right name, but a CA the connector does not trust. (A distinct
+            // CA name: with the same name webpki would match it as the issuer
+            // and fail on the signature instead, BadSignature, still a refusal.)
+            let stranger = pki("some other CA", &["localhost"]);
+            let (port, server) = serve_once(&good).await;
+            let err = dial("localhost", port, &stranger.ca_pem).await;
+            assert!(
+                matches!(
+                    err,
+                    Some(rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::UnknownIssuer
+                    ))
+                ),
+                "other CA: {err:?}"
+            );
+            assert!(!server.await.unwrap());
+        }
     }
 }

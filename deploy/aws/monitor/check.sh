@@ -1,7 +1,8 @@
 #!/bin/bash
 # Local/CI checks for the monitor box config. Run from anywhere:
 #   bash deploy/aws/monitor/check.sh
-# 1. bootstrap.sh's first-boot copy of compose.yaml is byte-identical to it.
+# 1. compose.yaml ships inside the prometheus image at the path bootstrap.sh's
+#    bin/up copies it out of (the box has no other way to get it).
 # 2. bootstrap.sh fits in EC2 user data (16 KiB, before base64).
 # 3. The AWS prometheus.yml and datasource differ from the Railway ones ONLY
 #    in the Railway hostnames (so a scrape-job change made on one side and
@@ -12,9 +13,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
 fail() { echo "check: $*" >&2; exit 1; }
 
-diff -u "$HERE/compose.yaml" \
-  <(sed -n '/^# BEGIN compose.yaml$/,/^# END compose.yaml$/p' "$HERE/bootstrap.sh" | sed '1d;$d') \
-  || fail "bootstrap.sh's embedded compose.yaml differs from compose.yaml"
+COMPOSE_IN_IMAGE=/etc/passband-monitor/compose.yaml
+grep -qxF "COPY deploy/aws/monitor/compose.yaml $COMPOSE_IN_IMAGE" "$HERE/Dockerfile.prometheus" \
+  || fail "Dockerfile.prometheus does not COPY compose.yaml to $COMPOSE_IN_IMAGE"
+grep -qF "docker cp \"\$cid:$COMPOSE_IN_IMAGE\" compose.yaml.new" "$HERE/bootstrap.sh" \
+  || fail "bootstrap.sh's bin/up does not copy compose.yaml from $COMPOSE_IN_IMAGE"
 
 size=$(wc -c < "$HERE/bootstrap.sh")
 [ "$size" -le 16384 ] || fail "bootstrap.sh is $size bytes; EC2 user data caps at 16384"

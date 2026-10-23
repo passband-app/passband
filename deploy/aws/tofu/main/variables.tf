@@ -21,8 +21,20 @@ variable "region" {
 }
 
 variable "budget_email" {
-  description = "Operator address for the $150/month AWS Budgets alarm."
+  description = "Operator address for the $150/month AWS Budgets alarm AND the security alerts topic (audit.tf). Confirm the SNS subscription email after the first apply."
   type        = string
+}
+
+variable "enable_guardduty" {
+  description = <<-EOT
+    Turn on GuardDuty (account detector, us-west-2). Off by default for cost:
+    roughly $5-15/month at this size, mostly CloudTrail management-event and
+    VPC flow/DNS analysis. Worth it the day anything here holds real users: it
+    catches instance credentials used from outside AWS and odd API callers,
+    which the EventBridge rules in audit.tf do not.
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "budget_limit_usd" {
@@ -42,6 +54,12 @@ variable "github_environment" {
   default     = "aws-production"
 }
 
+variable "github_workflow_path" {
+  description = "The workflow file the deploy role trusts (job_workflow_ref, pinned to refs/heads/main)."
+  type        = string
+  default     = ".github/workflows/deploy-aws.yml"
+}
+
 variable "create_github_oidc_provider" {
   description = "false if the account already has the token.actions.githubusercontent.com provider."
   type        = bool
@@ -53,6 +71,69 @@ variable "create_github_oidc_provider" {
 variable "vpc_cidr" {
   type    = string
   default = "10.40.0.0/16"
+}
+
+variable "fck_nat_ami_name" {
+  description = <<-EOT
+    EXACT name of the fck-nat AMI (owner 568608671756) the NAT runs, e.g.
+    fck-nat-al2023-hvm-1.4.0-20260201-arm64-ebs. No wildcard: a new upstream
+    AMI must never roll the NAT on its own. Find the current one with
+      aws ec2 describe-images --region us-west-2 --owners 568608671756 \
+        --filters 'Name=name,Values=fck-nat-al2023-hvm-*-arm64-ebs' \
+        --query 'sort_by(Images,&CreationDate)[-3:].[Name,ImageId,CreationDate]' --output table
+    and bump deliberately (README.md, "Bumping the NAT AMI").
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^fck-nat-al2023-hvm-[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]{8}-arm64-ebs$", var.fck_nat_ami_name))
+    error_message = "fck_nat_ami_name must be one exact arm64 AL2023 fck-nat image name (fck-nat-al2023-hvm-<x.y.z>-<YYYYMMDD>-arm64-ebs), no wildcards."
+  }
+}
+
+# --- Who may reach the source-restricted hosts (alb.tf) -----------------------
+
+variable "carrier_egress_cidrs" {
+  description = <<-EOT
+    carrier's (the Hetzner k3s tenant box) public egress address(es), as /32s.
+    The only sources besides the NAT EIP that may reach Bifrost, and the only
+    ones that may reach metrics (remote-write). Currently believed to be
+    5.78.205.240/32; CONFIRM before applying by running `curl -s ifconfig.me`
+    ON carrier (from a pod, if pod egress is SNATed differently). A wrong value
+    here cuts every tenant off from LLM triage.
+  EOT
+  type        = list(string)
+
+  validation {
+    condition     = length(var.carrier_egress_cidrs) >= 1 && length(var.carrier_egress_cidrs) <= 5
+    error_message = "carrier_egress_cidrs needs 1 to 5 CIDRs (each becomes an ALB source-ip value; rules hold 3, see alb.tf)."
+  }
+
+  validation {
+    condition     = alltrue([for c in var.carrier_egress_cidrs : can(cidrhost(c, 0)) && !startswith(c, "0.0.0.0/")])
+    error_message = "carrier_egress_cidrs entries must be CIDRs (e.g. 5.78.205.240/32), never 0.0.0.0/0."
+  }
+}
+
+variable "operator_cidrs" {
+  description = <<-EOT
+    Extra sources allowed to reach Bifrost (UI included). Empty in steady
+    state. Set it TEMPORARILY to the operator's own /32 for Bifrost first-run
+    config (README.md step 7), apply, configure, then set it back to [] and
+    apply again.
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = length(var.operator_cidrs) <= 3
+    error_message = "operator_cidrs holds at most 3 CIDRs."
+  }
+
+  validation {
+    condition     = alltrue([for c in var.operator_cidrs : can(cidrhost(c, 0)) && !startswith(c, "0.0.0.0/")])
+    error_message = "operator_cidrs entries must be CIDRs (your /32), never 0.0.0.0/0."
+  }
 }
 
 # --- Hostnames (DNS stays at the current provider; tofu only outputs records) -

@@ -196,3 +196,48 @@ resource "aws_dlm_lifecycle_policy" "monitor_data" {
     }
   }
 }
+
+# --- CI's only way onto the box ---------------------------------------------------
+# The deploy role may SendCommand with THIS document and no other (iam.tf). It
+# takes one parameter, a 40-hex commit SHA (SSM rejects anything else before it
+# reaches the box), pins it as IMAGE_TAG in the compose .env bootstrap.sh
+# wrote, and runs the unit's ExecReload (bin/up: fetch-secrets, compose pull,
+# up -d, health wait). reload-or-restart so a unit that is not active (a fresh
+# box still waiting on its first images) is started instead of erroring.
+#
+# compose.yaml is NOT shipped through this document: it travels inside the
+# passband-prometheus image at the same tag, and bin/up copies it out before
+# pulling (bootstrap.sh). So a compose.yaml change is an ordinary monitor
+# deploy, and CI still never gets an arbitrary shell here.
+resource "aws_ssm_document" "monitor_deploy" {
+  name            = "passband-monitor-deploy"
+  document_type   = "Command"
+  document_format = "JSON"
+  target_type     = "/AWS::EC2::Instance"
+
+  content = jsonencode({
+    schemaVersion = "2.2"
+    description   = "Pin the monitor stack's IMAGE_TAG to a commit SHA and reload passband-monitor."
+    parameters = {
+      ImageTag = {
+        type           = "String"
+        description    = "Commit SHA the deploy built (the ECR image tag)."
+        allowedPattern = "^[0-9a-f]{40}$"
+      }
+    }
+    mainSteps = [{
+      action = "aws:runShellScript"
+      name   = "deploy"
+      inputs = {
+        timeoutSeconds = "1200"
+        runCommand = [
+          "set -eu",
+          "cd /opt/passband-monitor",
+          "sed -i \"s/^IMAGE_TAG=.*/IMAGE_TAG={{ImageTag}}/\" .env",
+          "grep -qx 'IMAGE_TAG={{ImageTag}}' .env",
+          "systemctl reload-or-restart passband-monitor.service",
+        ]
+      }
+    }]
+  })
+}

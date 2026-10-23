@@ -1,10 +1,12 @@
 # The AWS `monitor` box (deploy/aws/DESIGN.md, "monitoring"): prometheus,
 # grafana and blackbox, from ECR, on one t4g.small. Lives on the box at
-# /opt/passband-monitor/compose.yaml; bootstrap.sh installs the first copy and
-# every deploy (deploy-aws.yml, monitor job) overwrites it with this file.
+# /opt/passband-monitor/compose.yaml, but it is not copied there by hand or by
+# CI: Dockerfile.prometheus bakes this file into the prometheus image, and the
+# box's bin/up (bootstrap.sh) copies it out of passband-prometheus:IMAGE_TAG on
+# every start and deploy. So it changes with an ordinary monitor deploy.
 #
 # Interpolated from /opt/passband-monitor/.env, which bootstrap.sh writes and
-# the deploy updates: ECR_REGISTRY (<account>.dkr.ecr.<region>.amazonaws.com)
+# the deploy updates (the SSM document passband-monitor-deploy): ECR_REGISTRY (<account>.dkr.ecr.<region>.amazonaws.com)
 # and IMAGE_TAG (the commit SHA the deploy built). Secrets are NOT in that
 # file: they are fetched from Secrets Manager on every start into per-service
 # env files on tmpfs (/run/passband-monitor, mode 0600), so each container

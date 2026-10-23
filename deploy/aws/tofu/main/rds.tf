@@ -21,9 +21,24 @@ resource "aws_db_parameter_group" "main" {
     value = "1"
   }
 
+  # Slow statements are logged (with their text), but never their bind
+  # parameter VALUES: PG16 defaults log_parameter_max_length to -1 (log them
+  # in full), and a slow INSERT/UPDATE would then put row data, tokens
+  # included, into the CloudWatch postgres log. Same for the statement logged
+  # with an error (log_min_error_statement).
   parameter {
     name  = "log_min_duration_statement"
-    value = "1000" # slow queries only; parameters are not logged
+    value = "1000"
+  }
+
+  parameter {
+    name  = "log_parameter_max_length"
+    value = "0"
+  }
+
+  parameter {
+    name  = "log_parameter_max_length_on_error"
+    value = "0"
   }
 }
 

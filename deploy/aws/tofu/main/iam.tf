@@ -169,6 +169,8 @@ data "aws_iam_openid_connect_provider" "github" {
 }
 
 locals {
+  github_deploy_sub = "repo:${var.github_repo}:environment:${var.github_environment}:job_workflow_ref:${var.github_repo}/${var.github_workflow_path}@refs/heads/main"
+
   github_oidc_arn = var.create_github_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
 }
 
@@ -187,10 +189,17 @@ data "aws_iam_policy_document" "github_assume" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      # Every deploy job runs in the environment, so this is the token's sub.
-      # The environment's main-only branch rule is the branch guard; a bare
-      # `ref:refs/heads/main` sub would let any workflow on main skip it.
-      values = ["repo:${var.github_repo}:environment:${var.github_environment}"]
+      # The CUSTOMIZED sub (README.md step 1 sets the repo's OIDC template to
+      # include_claim_keys ["repo", "context", "job_workflow_ref"]). GitHub
+      # renders that as
+      #   repo:<owner/name>:environment:<env>:job_workflow_ref:<owner/name>/<path>@<ref>
+      # (docs.github.com/en/actions/reference/security/oidc, "Customizing the
+      # subject claims"). So the trust itself requires the deploy-aws.yml
+      # file AS IT IS ON main, running in the environment: a workflow on
+      # another branch, or a different workflow on main, gets a different sub
+      # and is refused even if the environment's branch policy is missing.
+      # The environment's main-only branch policy is the second lock.
+      values = [local.github_deploy_sub]
     }
   }
 }
@@ -232,6 +241,20 @@ data "aws_iam_policy_document" "github_deploy" {
     resources = ["*"]
   }
 
+  # The render action copies the family's tags (default_tags) into the new
+  # revision, and RegisterTaskDefinition with tags is authorized as
+  # ecs:TagResource too (tag-on-create). Scoped to that call only.
+  statement {
+    sid       = "EcsTagOnRegister"
+    actions   = ["ecs:TagResource"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "ecs:CreateAction"
+      values   = ["RegisterTaskDefinition"]
+    }
+  }
+
   statement {
     sid       = "EcsServices"
     actions   = ["ecs:DescribeServices", "ecs:UpdateService"]
@@ -252,13 +275,16 @@ data "aws_iam_policy_document" "github_deploy" {
     }
   }
 
-  # --- SSM: `docker compose pull && up -d` on the monitor box -------------------
+  # --- SSM: pin IMAGE_TAG and reload the stack on the monitor box --------------
+  # Only through passband-monitor-deploy (monitor.tf), which takes a 40-hex
+  # commit SHA and nothing else. No AWS-RunShellScript: CI gets no shell on
+  # the box (and so none of the monitor secrets, nor RDS).
   statement {
     sid     = "SsmSendCommandToMonitor"
     actions = ["ssm:SendCommand"]
     resources = [
       aws_instance.monitor.arn,
-      "arn:${local.partition}:ssm:${var.region}::document/AWS-RunShellScript",
+      aws_ssm_document.monitor_deploy.arn,
     ]
   }
 

@@ -172,7 +172,7 @@ resource "aws_budgets_budget" "monthly" {
 #   secrets   GetSecretValue / BatchGetSecretValue / PutSecretValue /
 #             UpdateSecret / DeleteSecret / PutResourcePolicy by anyone who is
 #             NOT an ECS execution role or the monitor instance role. Expected
-#             noise: the operator putting values in (README step 5) and reading
+#             noise: the operator putting values in (CUTOVER.md Phase 2) and reading
 #             the RDS master secret. Anything else is a page.
 #   shells    ecs ExecuteCommand, ssm StartSession / ResumeSession.
 #   iam       every IAM write (each tofu apply that touches IAM mails too).

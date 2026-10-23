@@ -106,7 +106,7 @@ resource "aws_cloudfront_function" "site" {
   code    = fileexists(local.site_function_path) ? file(local.site_function_path) : local.site_function_placeholder
 
   lifecycle {
-    ignore_changes = [code]
+    ignore_changes = [code, comment]
 
     precondition {
       condition     = fileexists(local.site_function_path)

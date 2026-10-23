@@ -43,8 +43,8 @@ Hostnames (ALB host-based routing, one ACM cert with all SANs):
 
 | Host | Target | Health check |
 |---|---|---|
-| `signup.passband.app` | control :8080 (confirm port from squelch-control) | `GET /healthz` |
-| `relay.squelch.sh` | relay (port from squelch-relay) | `GET /healthz` |
+| `signup.passband.app` | control :8852 (its entrypoint default, `0.0.0.0:${PORT:-8852}`) | `GET /healthz` |
+| `relay.squelch.sh` | relay :8850 (its entrypoint default) | `GET /healthz` |
 | `bifrost.passband.app` | bifrost :8080 | `GET /`, matcher `200-499` (Bifrost's /health is behind auth) |
 | `grafana.passband.app` | monitor :3000 | `GET /api/health` |
 | `metrics.passband.app` | monitor :9090 (remote-write receiver, basic auth on every route) | `GET /-/healthy`, matcher `200,401` |

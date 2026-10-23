@@ -119,7 +119,7 @@ variable "operator_cidrs" {
   description = <<-EOT
     Extra sources allowed to reach Bifrost (UI included). Empty in steady
     state. Set it TEMPORARILY to the operator's own /32 for Bifrost first-run
-    config (README.md step 7), apply, configure, then set it back to [] and
+    config (CUTOVER.md Phase 4), apply, configure, then set it back to [] and
     apply again.
   EOT
   type        = list(string)

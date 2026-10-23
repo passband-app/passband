@@ -18,6 +18,19 @@ Ground rules for the whole run:
   (Phase 6) and the relay's opens buffer (Phase 7); both have explicit steps.
 - Railway keeps serving until each service's DNS flips. Nothing here deletes
   anything on Railway before Phase 10.
+- **Expect security-alert mail all the way through.** From Phase 1 on, the
+  `passband-security-alerts` topic mails `budget_email` on every Secrets
+  Manager read or write by you (each `put`, `putin`, `sget`, the RDS master
+  password read), every `cexec` (ECS Exec), every SSM session, every console
+  sign-in, and every `tofu apply` that touches IAM. That is the tripwire
+  working. Skim each one anyway: a mail you cannot match to a command you just
+  ran is the whole point of having it.
+- **Two hosts do not answer your laptop.** `bifrost.passband.app` answers only
+  the NAT EIP (control, blackbox), carrier, and `operator_cidrs`;
+  `metrics.passband.app` answers only carrier. Anyone else, you included, gets
+  the ALB's 404, even with `--resolve`. Phase 4 opens Bifrost to your /32 for
+  its configuration and closes it again; Prometheus is queried through
+  Grafana's datasource proxy (`promq`, Phase 5).
 
 Hosted tenants at the time of writing: `braelyn braelyn-work ellie ellie-atuin
 ethan-2 phiilpp we-z`. The authority is `squelch-control tenants` (Phase 6), not
@@ -27,10 +40,10 @@ this line.
 
 | # | Phase | Why here |
 |---|---|---|
-| 0 | AWS account, tools, prep that has lead time | DNS TTLs need a day to age out; the new APNs key id is a required tofu variable |
+| 0 | AWS account, tools, GitHub OIDC + environment, prep that has lead time | DNS TTLs need a day to age out; the new APNs key id is a required tofu variable; the deploy role's trust names a `sub` that exists only once GitHub is set up |
 | 1 | Tofu: bootstrap, certs, full apply (services at 0) | |
 | 2 | Every secret, RDS app role | Tasks cannot start without a value in every container; Grafana's admin password only takes on its FIRST boot |
-| 3 | GitHub env + variables, first images, services on | |
+| 3 | Repo variables, first images, services on | |
 | 4 | Bifrost fresh, configured privately | Needs a running task; must have auth on before anything public points at it |
 | 5 | Monitoring | Before any tenant-touching phase, so the new dashboard watches Phases 7 and 8 roll the fleet |
 | 6 | Control: database move, signup DNS | `llm mint` (Phase 8) writes key ids into the control store, so the store must already be on RDS |
@@ -73,6 +86,12 @@ cexec() { local t; t=$(aws ecs list-tasks --cluster passband --service-name cont
     --interactive --command "$*"; }
 
 alb_ip() { dig +short "$(tofu -chdir=$TF output -raw alb_dns_name)" | head -1; }
+myip() { curl -fsS https://checkip.amazonaws.com | tr -d '\n'; }
+
+# carrier_curl <args…>: curl from a throwaway pod on carrier, i.e. from the
+# source address the ALB allow-list sees for tenants. Prints the status code.
+carrier_curl() { kubectl -n default run "cc-$RANDOM" --rm -i --quiet --restart=Never \
+    --image=curlimages/curl:8.10.1 -- -s -o /dev/null -w '%{http_code}\n' "$@"; }
 set -o pipefail
 ```
 
@@ -130,11 +149,60 @@ aws sts get-caller-identity              # Account = passband-prod, Arn = …AWS
 4. **New Slack webhooks** (old ones are in the breach): one for
    `#passband-signups` (control) and one for the Grafana alerts channel. Create
    them now; revoke the old ones in Phases 5 and 6.
+5. **carrier's egress address** (it becomes `carrier_egress_cidrs` in 1b, the
+   only non-AWS source Bifrost and metrics will answer). From a pod, because
+   that is the path tenants take:
+
+   ```sh
+   kubectl -n default run "ip-$RANDOM" --rm -i --quiet --restart=Never \
+     --image=curlimages/curl:8.10.1 -- -fsS https://checkip.amazonaws.com
+   ```
+
+   Believed to be `5.78.205.240`. If it differs from the node's own address
+   (`curl -s https://checkip.amazonaws.com` over SSH on carrier), list both.
+
+### 0d. GitHub: OIDC subject and the `aws-production` environment
+
+Before the deploy role is ever used. The role's trust (tofu `iam.tf`) pins the
+token's `sub` to the CUSTOMIZED form
+
+`repo:passband-app/passband:environment:aws-production:job_workflow_ref:passband-app/passband/.github/workflows/deploy-aws.yml@refs/heads/main`
+
+(`tofu -chdir=$TF output -raw github_deploy_oidc_sub` after Phase 1). That
+string exists only once the repo's sub template includes those claims. The
+environment must exist, with its branch policy, before any run references it:
+GitHub auto-creates a missing environment with no protection at all.
+
+```sh
+R=passband-app/passband
+gh api -X PUT repos/$R/environments/aws-production --input - <<'EOF'
+{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+EOF
+gh api -X POST repos/$R/environments/aws-production/deployment-branch-policies -f name=main -f type=branch
+gh api -X PUT repos/$R/actions/oidc/customization/sub --input - <<'EOF'
+{"use_default": false, "include_claim_keys": ["repo", "context", "job_workflow_ref"]}
+EOF
+```
+
+Two locks, either sufficient on its own: the trust refuses any other branch, a
+tag, a PR, and any other workflow file on main (its `job_workflow_ref`
+differs), and the environment's branch policy refuses non-main refs. Branch
+policies on a private repo's environment need a paid GitHub plan; if the PUT is
+refused for that reason, the sub pin still holds. The template is repo-wide:
+today `deploy-aws.yml` is the only workflow with `id-token: write`, so nothing
+else changes.
 
 **VERIFY.** `aws sts get-caller-identity` returns the member account; `dig`
-shows the new TTLs (`dig signup.passband.app | grep -A1 'ANSWER SECTION'`).
+shows the new TTLs (`dig signup.passband.app | grep -A1 'ANSWER SECTION'`);
+GitHub holds both settings:
 
-**ROLLBACK.** Nothing serves from AWS yet. Nothing to roll back.
+```sh
+gh api repos/$R/actions/oidc/customization/sub                     # use_default false, the three keys
+gh api repos/$R/environments/aws-production/deployment-branch-policies --jq '.branch_policies[].name'   # main
+```
+
+**ROLLBACK.** Nothing serves from AWS yet. The sub template can go back with
+`{"use_default": true}`; nothing else uses OIDC.
 
 ---
 
@@ -178,7 +246,26 @@ client id), `control_warden_url`, `control_invite_from`,
 `control_llm_budget_usd`, `control_llm_models`, `control_assistant_models`
 (copy verbatim: these become the provider key's allow-list via `llm sync`),
 `relay_apns_team_id`, `relay_apns_key_id` (the **new** key from 0c, not
-Railway's), `services_running = false`, `bifrost_store = "efs"`.
+Railway's), `services_running = false`, `bifrost_store = "efs"`, and three
+that have no Railway counterpart:
+
+- `fck_nat_ami_name`: one EXACT image name, no wildcard (tofu never picks a
+  newer NAT AMI by itself). Take the newest from:
+
+  ```sh
+  aws ec2 describe-images --owners 568608671756 \
+    --filters 'Name=name,Values=fck-nat-al2023-hvm-*-arm64-ebs' \
+    --query 'sort_by(Images,&CreationDate)[-3:].[Name,ImageId,CreationDate]' --output table
+  ```
+
+- `carrier_egress_cidrs`: the address(es) from 0c step 5, as `/32`s. A wrong
+  value here cuts every tenant off from LLM triage the moment Phase 8 flips
+  DNS (Phase 8 checks it first).
+- `operator_cidrs = []`. Phase 4 sets it to your /32 for Bifrost's
+  configuration and puts it back.
+
+`budget_email` also receives the security alerts; `enable_guardduty` stays
+`false` unless you want it (about $5-15/month).
 
 Railway carries no `SQUELCH_CONTROL_ASSISTANT_BUDGET_USD`,
 `_WAITLIST_ORIGIN` or `_LOG`; leave those unset (binary defaults, as today).
@@ -204,6 +291,14 @@ tofu -chdir=$TF apply          # waits on validation, then builds the rest; serv
 tofu -chdir=$TF output secret_names
 ```
 
+Then **confirm the SNS subscription**: AWS mails `budget_email` a
+"Subscription Confirmation" for `passband-security-alerts`. Until you click
+it, the tripwires mail nobody. From this apply on, the alerts described under
+the ground rules start arriving.
+
+The monitor box boots now and its unit retries every minute: no images in ECR
+and no monitor secrets yet. That is expected until Phase 3.
+
 **VERIFY.**
 
 ```sh
@@ -215,6 +310,13 @@ aws rds describe-db-instances --db-instance-identifier passband \
   --query 'DBInstances[0].[DBInstanceStatus,StorageEncrypted,DeletionProtection,Endpoint.Address]' --output text   # available True True …
 aws ssm describe-instance-information --query 'InstanceInformationList[].[InstanceId,PingStatus]' --output text    # monitor: Online
 aws ec2 describe-nat-gateways --query 'NatGateways[?State==`available`]' --output text                             # empty (fck-nat instance, not a gateway)
+aws sns list-subscriptions-by-topic --topic-arn "$(tofu -chdir=$TF output -raw security_alerts_topic_arn)" \
+  --query 'Subscriptions[].SubscriptionArn' --output text                                                          # an ARN, not PendingConfirmation
+tofu -chdir=$TF output -raw nat_egress_ip; echo                                                                    # the address control and blackbox egress from
+aws elbv2 describe-rules --listener-arn "$(aws elbv2 describe-listeners --load-balancer-arn \
+    "$(aws elbv2 describe-load-balancers --names passband --query 'LoadBalancers[0].LoadBalancerArn' --output text)" \
+    --query 'Listeners[?Port==`443`].ListenerArn' --output text)" \
+  --query 'Rules[].[Priority,join(`,`,Conditions[?Field==`source-ip`].SourceIpConfig.Values[])]' --output text       # 100+: NAT EIP + carrier; 200+: carrier
 ```
 
 **ROLLBACK.** Nothing is public. Leave it; stateful resources refuse
@@ -270,8 +372,10 @@ unset PW
 openssl rand -hex 24 | tr -d '\n' | putin passband/monitor/GF_SECURITY_ADMIN_PASSWORD
 
 # Bifrost's provider key: a PLACEHOLDER until auth is on (Phase 4). Bifrost
-# starts with auth OFF; anyone sending Host: bifrost.passband.app to the ALB
-# reaches it, and with a placeholder there is nothing to spend.
+# starts with auth OFF. The ALB already admits only the NAT EIP, carrier and
+# operator_cidrs, so the window is small; the placeholder makes it worth
+# nothing too (carrier runs tenant pods, and the NAT EIP is shared by every
+# task), for the price of one extra put in Phase 4.
 printf 'placeholder-until-bifrost-auth-is-on' | putin passband/bifrost/ANTHROPIC_API_KEY
 ```
 
@@ -287,9 +391,9 @@ put passband/monitor/SLACK_ALERTS_WEBHOOK_URL             # new alerts webhook. 
 
 ### 2d. RDS app role and DATABASE_URL
 
-The design's README does this with psql on the monitor box. This runbook
-tunnels through the box instead, so the Phase 6 dump file never has to reach
-it. Same security group toggle either way.
+This is the one procedure for the database role (the tofu README defers to
+it). It tunnels through the monitor box rather than running psql on it, so the
+Phase 6 dump file never has to reach the box.
 
 ```sh
 grep -q '^operator_db_access' $TF/terraform.tfvars || echo 'operator_db_access = false' >> $TF/terraform.tfvars
@@ -318,7 +422,15 @@ admin() { PGPASSWORD=$(aws secretsmanager get-secret-value \
 admin -c 'select version()'                    # PostgreSQL 16.x, over TLS
 
 CTRL_PW=$(openssl rand -hex 32)
-printf "CREATE ROLE control LOGIN PASSWORD '%s';\nGRANT control TO passband_admin;\nALTER DATABASE control OWNER TO control;\n" "$CTRL_PW" | admin -v ON_ERROR_STOP=1
+# The server gets a SCRAM verifier, never the password: a failed statement is
+# logged WITH its text (log_min_error_statement), and that log is CloudWatch.
+scram() { python3 -I -c 'import sys,os,hashlib,hmac,base64 as b
+p=sys.stdin.buffer.read(); s=os.urandom(16); k=hashlib.pbkdf2_hmac("sha256",p,s,4096)
+c=hmac.new(k,b"Client Key","sha256").digest(); v=hmac.new(k,b"Server Key","sha256").digest()
+e=lambda x:b.b64encode(x).decode()
+sys.stdout.write("SCRAM-SHA-256$4096:%s$%s:%s"%(e(s),e(hashlib.sha256(c).digest()),e(v)))'; }
+printf "CREATE ROLE control LOGIN PASSWORD '%s';\nGRANT control TO passband_admin;\nALTER DATABASE control OWNER TO control;\n" \
+  "$(printf '%s' "$CTRL_PW" | scram)" | admin -v ON_ERROR_STOP=1
 printf 'postgres://control:%s@%s:5432/control?sslmode=verify-full' "$CTRL_PW" "$RDS_HOST" \
   | putin passband/control/SQUELCH_CONTROL_DATABASE_URL
 unset CTRL_PW
@@ -327,16 +439,23 @@ unset CTRL_PW
 Leave `operator_db_access = true` and the tunnel available until Phase 6 is
 done (the restore uses it); turn it off at the end of Phase 6.
 
-**VERIFY.** Every container has a value, shown by length only:
+**VERIFY.** Every container has a current version. `describe-secret` reads
+metadata only, so this loop neither pulls every value onto the laptop nor mails
+an alert per secret:
 
 ```sh
 for s in $(tofu -chdir=$TF output -json secret_names | jq -r '.[]'); do
-  n=$(aws secretsmanager get-secret-value --secret-id "$s" --query SecretString --output text 2>/dev/null | wc -c)
-  printf '%-55s %s\n' "$s" "${n:-MISSING}"
+  v=$(aws secretsmanager describe-secret --secret-id "$s" \
+    --query 'VersionIdsToStages && contains(values(VersionIdsToStages)[], `AWSCURRENT`)' --output text 2>/dev/null)
+  printf '%-55s %s\n' "$s" "$([ "$v" = True ] && echo set || echo MISSING)"
 done
 ```
 
-Expect every row non-zero except `BLACKBOX_BIFROST_CANARY_KEY`. The bcrypt
+Expect `set` on every row except `BLACKBOX_BIFROST_CANARY_KEY`. The monitor
+box refuses to start while any of `PROM_REMOTE_WRITE_PASSWORD`,
+`PROM_WEB_BCRYPT`, `GF_SECURITY_ADMIN_PASSWORD` or `PROM_PASSWORD` is missing
+(its `fetch-secrets` fails closed on those), and Grafana itself exits without
+`SLACK_ALERTS_WEBHOOK_URL`. The bcrypt
 starts `$2y$` (`sget passband/monitor/PROM_WEB_BCRYPT | cut -c1-4`, four
 characters, safe to show). The DATABASE_URL works as the app will use it:
 
@@ -350,45 +469,45 @@ previous version stays as `AWSPREVIOUS`.
 
 ---
 
-## Phase 3: GitHub, first images, services on
+## Phase 3: repo variables, first images, services on
 
-**Preconditions.** Phase 2 complete, including `SLACK_ALERTS_WEBHOOK_URL` and
-`GF_SECURITY_ADMIN_PASSWORD`. **Do not start this phase without them**: the
-monitor box pulls `:latest` the moment this phase pushes it, Grafana writes its
-admin password into `grafana.db` on its first boot only, and a first boot
-without it leaves `admin/admin` on a host reachable through the ALB.
+**Preconditions.** Phase 0d (GitHub OIDC sub + environment) and Phase 2
+complete, including `SLACK_ALERTS_WEBHOOK_URL` and `GF_SECURITY_ADMIN_PASSWORD`.
+The monitor box pulls `:latest` the moment this phase pushes it. Its
+`fetch-secrets` refuses to start the stack while a required monitor secret is
+missing, so Grafana can no longer first-boot as `admin/admin`; but Grafana still
+exits without the Slack URL, and a box that keeps failing just wastes the phase.
 
-### 3a. Environment `aws-production`, main only
+### 3a. GitHub, as set in 0d
 
 ```sh
 R=passband-app/passband
-gh api -X PUT repos/$R/environments/aws-production \
-  -F 'deployment_branch_policy[protected_branches]=false' -F 'deployment_branch_policy[custom_branch_policies]=true'
-gh api -X POST repos/$R/environments/aws-production/deployment-branch-policies -f name=main -f type=branch
+gh api repos/$R/actions/oidc/customization/sub --jq '.include_claim_keys'           # ["repo","context","job_workflow_ref"]
+diff <(tofu -chdir=$TF output -raw github_deploy_oidc_sub; echo) \
+     <(echo "repo:$R:environment:aws-production:job_workflow_ref:$R/.github/workflows/deploy-aws.yml@refs/heads/main") && echo SUB-MATCHES
 ```
 
-The OIDC role trusts `repo:passband-app/passband:environment:aws-production`
-and nothing else, so **this branch rule is the only thing stopping a branch
-from deploying.** Branch rules on a private repo's environment need a paid
-GitHub plan; on a plan without them the environment exists with no rule and
-any branch can assume the role.
+If the template is not customized, every deploy job fails at
+`configure-aws-credentials` with `Not authorized to perform
+sts:AssumeRoleWithWebIdentity`: the default `sub` is not the one the role
+trusts. Fix 0d; do not loosen the trust.
 
 ### 3b. Repo variables (none are secrets)
 
+Straight from tofu, so the names cannot drift from what the workflow reads:
+
 ```sh
-gh variable set AWS_ACCOUNT_ID           -R $R --body "$(aws sts get-caller-identity --query Account --output text)"
-gh variable set AWS_SITE_BUCKET          -R $R --body "$(tofu -chdir=$TF output -raw site_bucket)"
-gh variable set AWS_SITE_DISTRIBUTION_ID -R $R --body "$(tofu -chdir=$TF output -raw site_distribution_id)"
-gh variable set AWS_SITE_FUNCTION_NAME   -R $R --body "$(tofu -chdir=$TF output -raw site_function_name)"
-gh variable set AWS_MONITOR_INSTANCE_ID  -R $R --body "$(tofu -chdir=$TF output -raw monitor_instance_id)"
+tofu -chdir=$TF output -json github_repo_variables \
+  | jq -r 'to_entries[] | "\(.key) \(.value)"' \
+  | while read -r k v; do gh variable set "$k" -R $R --body "$v"; done
+gh variable list -R $R | grep '^AWS_'
 # AWS_ARM64_RUNNER: leave unset (ubuntu-24.04-arm) unless the org uses another label.
 ```
 
-The workflow builds the role ARN from `AWS_ACCOUNT_ID` and the fixed name
-`passband-github-deploy`; it does not read an `AWS_DEPLOY_ROLE_ARN` variable
-(the tofu README's step 6 names one; the workflow is what runs). Confirm the
-names match: `tofu -chdir=$TF output -raw github_deploy_role_arn` ends in
-`role/passband-github-deploy`.
+That sets `AWS_ACCOUNT_ID`, `AWS_SITE_BUCKET`, `AWS_SITE_DISTRIBUTION_ID`,
+`AWS_SITE_FUNCTION_NAME` (`passband-site-router`) and
+`AWS_MONITOR_INSTANCE_ID`. There is no role-ARN variable: the workflow builds
+`arn:aws:iam::<AWS_ACCOUNT_ID>:role/passband-github-deploy`.
 
 ### 3c. Arm and build
 
@@ -398,15 +517,30 @@ gh workflow run deploy-aws.yml -R $R --ref main -f service=all
 gh run watch -R $R "$(gh run list -R $R --workflow deploy-aws.yml --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
 
+Every job must be green: `ecs (control|relay|bifrost)`, `monitor`,
+`site-build` and `site`. `site-build` runs bun with no AWS credentials and hands
+`out/` and `function.js` to `site`, which alone assumes the role. `monitor`
+reaches the box only through the SSM document `passband-monitor-deploy`
+(one parameter, the commit SHA); the box's `bin/up` copies `compose.yaml` out of
+the new prometheus image and fails the job unless all three containers answer.
+
+With `desired_count = 0` the ECS deploys go green vacuously (0 running == 0
+desired); they prove the images exist and register CI's task definition
+revisions. **3d needs those revisions**: tofu ignores the services'
+`task_definition`, so flipping them on before this run leaves them on
+`:placeholder`, which never becomes healthy, and the apply hangs about 20
+minutes before failing.
+
 From here every push to `main` deploys to AWS as well as Railway. That is
 harmless while AWS serves nothing public.
 
 ### 3d. Services on
 
 ```sh
+aws ecs describe-services --cluster passband --services control relay bifrost \
+  --query 'services[].taskDefinition' --output text                          # every revision > 1
 sed -i '' 's/^services_running.*/services_running = true/' $TF/terraform.tfvars
-tofu -chdir=$TF apply
-aws ecs wait services-stable --cluster passband --services control relay bifrost
+tofu -chdir=$TF apply           # waits for each service to reach steady state, and fails if one does not
 ```
 
 **VERIFY.**
@@ -420,7 +554,12 @@ IP=$(alb_ip)
 curl -sS --resolve signup.passband.app:443:$IP https://signup.passband.app/healthz; echo     # ok
 curl -sS --resolve relay.squelch.sh:443:$IP    https://relay.squelch.sh/healthz;    echo     # ok
 curl -s -o /dev/null -w '%{http_code}\n' --resolve grafana.passband.app:443:$IP https://grafana.passband.app/api/health   # 200
-curl -s -o /dev/null -w '%{http_code}\n' --resolve metrics.passband.app:443:$IP https://metrics.passband.app/-/healthy    # 401
+# Source-restricted: your laptop is not on either list, so these are the ALB's 404.
+curl -s -o /dev/null -w '%{http_code}\n' --resolve metrics.passband.app:443:$IP https://metrics.passband.app/-/healthy    # 404
+curl -s -o /dev/null -w '%{http_code}\n' --resolve bifrost.passband.app:443:$IP https://bifrost.passband.app/            # 404
+# The same two hosts from carrier, i.e. the tenants' source address: admitted.
+carrier_curl --resolve metrics.passband.app:443:$IP https://metrics.passband.app/-/healthy    # 401 (basic auth), NOT 404
+carrier_curl --resolve bifrost.passband.app:443:$IP -X POST -d '{}' https://bifrost.passband.app/anthropic/v1/messages   # Bifrost's own 4xx/2xx, NOT 404
 aws logs tail /passband/relay --since 15m | grep serving       # push_token=true
 cexec "sh -c 'env | grep -c ^SQUELCH_CONTROL_'"                 # a count, never values
 cexec "squelch-control tenants"                                  # empty: RDS is fresh until Phase 6
@@ -430,6 +569,14 @@ If a task will not start, `aws ecs describe-tasks` on a stopped task shows
 `stoppedReason`; `ResourceInitializationError … secret` is a container with no
 value.
 
+The ALB's refusal is `404` with body `not found`; Bifrost answers an empty
+POST to `/anthropic/v1/messages` with its own error, never 404. A carrier `404`
+means `carrier_egress_cidrs` is wrong: fix it in
+`terraform.tfvars` and apply now, long before Phase 8 depends on it.
+
+ECS Exec exists on `control` only (`cexec`). There is no exec into `relay` or
+`bifrost`; read their state from CloudWatch logs and the ALB.
+
 **ROLLBACK.** `services_running = false` and apply. `gh variable set
 AWS_DEPLOY_ENABLED --body false` re-inerts the workflow. Railway is untouched.
 
@@ -438,14 +585,23 @@ AWS_DEPLOY_ENABLED --body false` re-inerts the workflow. Railway is untouched.
 ## Phase 4: Bifrost, fresh and private
 
 **Preconditions.** Phase 3; `bifrost` running 1/1. Do this immediately after
-3d: until auth is on, Bifrost is open to anyone who sends the right Host header
-to the ALB (the placeholder key is why that window costs nothing).
+3d: until auth is on, Bifrost answers anyone on its allow-list (the NAT EIP,
+carrier) with no credential. The ALB rule keeps everyone else out; the
+placeholder key is why the window costs nothing even from inside it.
 
-Pin the hostname to the ALB on this laptop only. Nothing public changes.
+Open Bifrost to this laptop, for this phase only, and pin the hostname to the
+ALB here. Nothing public changes.
 
 ```sh
+OPIP=$(myip); echo "$OPIP"
+sed -i '' "s#^operator_cidrs.*#operator_cidrs = [\"$OPIP/32\"]#" $TF/terraform.tfvars
+tofu -chdir=$TF apply           # one more listener rule (priority 100+) carrying your /32
 echo "$(alb_ip) bifrost.passband.app" | sudo tee -a /etc/hosts
+curl -s -o /dev/null -w '%{http_code}\n' https://bifrost.passband.app/      # NOT 404 now
 ```
+
+If your address changes mid-phase (VPN, Wi-Fi hop), everything below starts
+answering `404 not found`: redo the three lines above.
 
 1. Open `https://bifrost.passband.app`. Enable auth with the admin credential:
    username and password are the two halves of
@@ -513,6 +669,9 @@ echo "$(alb_ip) bifrost.passband.app" | sudo tee -a /etc/hosts
      --parameters 'commands=["systemctl reload passband-monitor.service"]' --query Command.CommandId --output text
    ```
 
+   (You, as admin, may run `AWS-RunShellScript`; CI may not. Its only door is
+   `passband-monitor-deploy`, which takes a commit SHA and nothing else.)
+
 **VERIFY.**
 
 ```sh
@@ -524,8 +683,17 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST https://bifrost.passband.app/an
 Plus step 5's `--check` exit 0, step 6's 200 with no body in Logs, and the
 content-logging toggle seen OFF in the UI.
 
-**ROLLBACK.** Nothing public points here. Fix in the UI. Keep the `/etc/hosts`
-line until Phase 8.
+Then **close it again** and prove it closed:
+
+```sh
+sed -i '' 's#^operator_cidrs.*#operator_cidrs = []#' $TF/terraform.tfvars
+tofu -chdir=$TF apply
+curl -s -w ' %{http_code}\n' https://bifrost.passband.app/              # not found 404: the ALB, not Bifrost
+```
+
+**ROLLBACK.** Nothing public points here. Fix in the UI (reopen with
+`operator_cidrs` as above, then close it). Keep the `/etc/hosts` line until
+Phase 8; with `operator_cidrs = []` it only ever reaches the ALB's 404.
 
 ---
 
@@ -558,15 +726,26 @@ line until Phase 8.
 
 **VERIFY.**
 
+metrics.passband.app answers carrier only, so from the laptop Prometheus is
+queried through Grafana's datasource proxy (admin login, public host). `promq`
+is reused in Phase 8.
+
 ```sh
-promq() { printf 'user = "remote:%s"\n' "$(sget passband/monitor/PROM_REMOTE_WRITE_PASSWORD)" \
-  | curl -sS -K - -G https://metrics.passband.app/api/v1/query --data-urlencode "query=$1" | jq -c '.data.result[] | [.metric, .value[1]]'; }
-kubectl -n monitoring logs deploy/prometheus-agent --since=10m | grep -iE 'remote|401|error' | tail
+gfq() { printf 'user = "admin:%s"\n' "$(sget passband/monitor/GF_SECURITY_ADMIN_PASSWORD)" | curl -sS -K - "https://grafana.passband.app$1"; }
+promq() { gfq "/api/datasources/proxy/uid/prometheus/api/v1/query?query=$(jq -rn --arg q "$1" '$q|@uri')" \
+  | jq -c '.data.result[] | [.metric, .value[1]]'; }
+gfq /api/datasources/uid/prometheus/health | jq .status     # "OK"
+kubectl -n monitoring logs deploy/prometheus-agent --since=10m | grep -iE 'remote|401|404|error' | tail   # nothing new
 promq 'count by (tenant) (squelchd_build_info)'            # one row per hosted tenant
 promq 'probe_success'                                       # blackbox jobs report
-gfq() { printf 'user = "admin:%s"\n' "$(sget passband/monitor/GF_SECURITY_ADMIN_PASSWORD)" | curl -sS -K - "https://grafana.passband.app$1"; }
-gfq /api/datasources/uid/prometheus/health | jq .status     # "OK"
+curl -s -w ' %{http_code}\n' https://metrics.passband.app/-/healthy    # not found 404 from here: restricted
 ```
+
+Each `gfq`/`promq` reads the Grafana password from Secrets Manager, so each
+one mails an alert. Batch your queries.
+
+A `404` in the agent's log means carrier's egress is not in
+`carrier_egress_cidrs` (3d's `carrier_curl` should have caught it).
 
 Open `passband-health`: per-tenant panels populated. The LLM canary panel is
 **expected red until Phase 8** (it probes `bifrost.passband.app`, still
@@ -804,8 +983,19 @@ is refused there), never silently, but it fails; so wait until control
 resolves the ALB. Tenants keep working on their old keys against Railway until
 their own mint, so there is no gap before a tenant's turn.
 
+0. **Last check that tenants will be admitted.** After the flip, every
+   tenant's triage reaches the ALB from carrier's egress address, and a wrong
+   `carrier_egress_cidrs` is a fleet-wide `404`:
+
+   ```sh
+   carrier_curl --resolve bifrost.passband.app:443:$(alb_ip) -X POST -d '{}' \
+     https://bifrost.passband.app/anthropic/v1/messages        # 401/403 (no VK), NOT 404
+   ```
+
+   Do not continue on a `404`.
 1. DNS: `bifrost` CNAME → the ALB name. Remove the `/etc/hosts` line from
-   Phase 4.
+   Phase 4. From now on the laptop gets `404 not found` from Bifrost; that is
+   the allow-list, not an outage.
 2. Wait for the VPC to see it:
 
    ```sh
@@ -841,13 +1031,21 @@ for t in braelyn braelyn-work ellie ellie-atuin ethan-2 phiilpp we-z; do
 promq 'last_over_time(probe_success{job="blackbox-bifrost-llm"}[20m])'   # 1
 ```
 
+The canary going to `1` is also the proof that the monitor box (egress via
+the NAT EIP) is admitted.
+
 In the Bifrost UI: two keys per tenant plus `blackbox-canary`, and spend
-appearing on tenant keys within the hour. Dashboard "LLM config failures"
+appearing on tenant keys within the hour. The UI needs your /32 in
+`operator_cidrs` again (Phase 4's three lines, minus `/etc/hosts`); set it back
+to `[]` and apply when done. Dashboard "LLM config failures"
 flat.
 
 **ROLLBACK.** There is none past step 3 for a minted tenant: its new key
 exists only on the AWS gateway. Fix forward (`llm mint <label>` again,
-`llm sync`). Before step 3, point the `bifrost` CNAME back at Railway.
+`llm sync`). Before step 3, point the `bifrost` CNAME back at Railway. A
+fleet-wide `404` at the gateway right after step 1 is the allow-list: fix
+`carrier_egress_cidrs` and apply (about a minute), or flip the CNAME back
+while you do.
 
 ---
 
@@ -936,7 +1134,8 @@ aws rds wait db-snapshot-available --db-snapshot-identifier passband-post-cutove
    every tenant shows `apns-relay-2` (Phase 7 VERIFY loop).
 
 **VERIFY.** `railway list` shows no project; `dig` for every product host
-resolves to AWS (ALB or CloudFront); no `railway` header on any of them.
+resolves to AWS (ALB or CloudFront); no `railway` header on any of them. `grep -E '^(operator_cidrs|operator_db_access)' $TF/terraform.tfvars` shows
+`[]` and `false`, and `tofu -chdir=$TF plan` says "No changes".
 
 ### Docs and code owed (list only; each is its own PR)
 
@@ -958,6 +1157,9 @@ resolves to AWS (ALB or CloudFront); no `railway` header on any of them.
 - `squelch-control/README.md` "## Deploying to Railway" and the
   `${{Postgres.DATABASE_URL}}` text in the env table; `squelch-relay/README.md`
   deployment sketch; `deploy/DEPLOY.md` §8; `docs/HOSTED.md`.
+- `docs/VERIFICATION.md` and `passband-site/privacy.html` name
+  `bifrost.passband.app`; neither may tell a reader to probe it (it now answers
+  only our own egress and carrier).
 - Code, after the soak: `railway*.toml`, `passband-site/Dockerfile` (Railway's
   build), the `release-daemon.yml` comment about Railway, and the NoTls branch
   in the control store if nothing dials plaintext any more.
@@ -970,8 +1172,14 @@ resolves to AWS (ALB or CloudFront); no `railway` header on any of them.
 |---|---|---|
 | ACM cert stuck `PENDING_VALIDATION` | Namecheap Host field given the full name (zone appended twice), or a CAA record without `amazon.com` | Enter the name minus the zone; add CAA `0 issue "amazon.com"` |
 | ECS task stops with `ResourceInitializationError` | A secret container with no value | `put` it; the service retries |
-| Grafana login `admin/admin` works | Grafana first booted before `GF_SECURITY_ADMIN_PASSWORD` existed; it applies on first DB init only | `docker compose exec grafana grafana cli admin reset-admin-password` over SSM with the stored value piped in, or wipe Grafana's state dir and reboot it |
-| Grafana container exits at boot | `SLACK_ALERTS_WEBHOOK_URL` unset | Set it, `systemctl reload passband-monitor` |
+| Monitor unit never starts; journal says `REQUIRED passband/monitor/<X> has no value` | `fetch-secrets` fails closed on the Prometheus passwords and the Grafana admin password | `put` it; the unit retries every minute |
+| Grafana login `admin/admin` works | Should be impossible (fail-closed above); means `grafana.db` was created some other way | `grafana cli admin reset-admin-password` over an SSM session with the stored value piped in, or wipe `/data/grafana` and reload |
+| Grafana container exits at boot; monitor deploy fails "not healthy after 3 minutes" | `SLACK_ALERTS_WEBHOOK_URL` unset (fetch-secrets treats it as optional, Grafana 12.2 does not) | Set it, `systemctl reload passband-monitor` |
+| Monitor deploy job fails `AccessDenied` on `ssm:SendCommand` | Something sent `AWS-RunShellScript` as the deploy role | CI's only document is `passband-monitor-deploy` (`--parameters ImageTag=<40-hex sha>`) |
+| `404 not found` from `bifrost.` or `metrics.passband.app` | Your address is not on the allow-list (correct), or carrier's egress changed | Laptop: `operator_cidrs` for Bifrost, `promq` for metrics. Carrier: fix `carrier_egress_cidrs`, apply |
+| Every deploy job fails `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Repo OIDC sub template not customized, or the run is not deploy-aws.yml on main in `aws-production` | Phase 0d; never widen the trust |
+| A flood of security-alert mail | Expected during the cutover: every secret read/write, exec, SSM session, IAM apply | Match each to a command you ran; an unmatched one is an incident |
+| `tofu apply` with `services_running = true` hangs ~20 min then fails | A service still on `:placeholder` (CI never deployed it) or a task that cannot pass its health check | Run the workflow for that service, then apply again; `stoppedReason` on the stopped task |
 | Prometheus rejects every login | `PROM_WEB_BCRYPT` mangled (`$` interpolated) or not the hash of the same password | Regenerate both from one `PW` as in 2b; `fetch-secrets` single-quotes to prevent the first |
 | Carrier still pushing to Railway after the apply | prometheus-agent never re-reads its ConfigMap | `kubectl -n monitoring rollout restart deploy/prometheus-agent` |
 | Every tenant `400 no keys found that support model` | Provider key `models` not converged (the August 2026 outage) | `squelch-control llm sync`, then `--check` |
@@ -986,6 +1194,6 @@ resolves to AWS (ALB or CloudFront); no `railway` header on any of them.
 | Railway deploy shows SKIPPED after a `railway up` | `railway up` from the repo root is skipped on several services | Never `railway up` during this cutover; Railway deploys from `main` |
 | Control refuses to boot naming an `sslmode` | Anything other than absent/`disable`/`require`/`verify-full` | Use `verify-full` with the RDS hostname, never an IP |
 | `pg_restore` stops on `transaction_timeout` | PG17 dump into PG16 | Rerun without `--exit-on-error`, read each error; the row-count diff is the gate |
-| A branch run assumes the deploy role | Environment branch rule missing (plan does not support it on a private repo) | Fix the rule or the plan before arming; the role trusts the environment, not the branch |
+| A branch run assumes the deploy role | Should be impossible: the trust pins `job_workflow_ref` to deploy-aws.yml `@refs/heads/main` | Check `tofu output github_deploy_oidc_sub` and the role's trust policy; treat as an incident |
 | Site deploy never picks up a new release | Release pushes the appcast with `GITHUB_TOKEN`, which starts no workflow | The `workflow_run` trigger covers it; a manual `-f service=site` dispatch otherwise |
 | `squelch-control` env change in tofu "did nothing" | Task definitions are CI-owned after the first apply | `gh workflow run deploy-aws.yml -f service=control` after the apply |

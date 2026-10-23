@@ -168,8 +168,10 @@ cat > "$APP_DIR/bin/fetch-secrets" <<'SCRIPT_EOF'
 # This matters most for GF_SECURITY_ADMIN_PASSWORD: Grafana seeds its admin
 # password from it ONCE, when grafana.db is first created on /data, and with
 # it unset that is admin/admin, persisted, behind a public ALB.
+# SLACK_ALERTS_WEBHOOK_URL is required too: Grafana 12.2 exits at startup
+# without it (deploy/monitoring/README.md), which would surface only as a
+# vague health timeout.
 # OPTIONAL secrets are skipped with a warning when they have no value:
-#   SLACK_ALERTS_WEBHOOK_URL     alerts are not delivered to Slack
 #   BLACKBOX_BIFROST_CANARY_KEY  the Bifrost canary probe fails (and alerts)
 #   BLACKBOX_CANARY_MODEL        the canary uses its built-in default model
 # Any OTHER error (permissions, network) fails the unit, and systemd retries.
@@ -225,7 +227,7 @@ write_env() { # write_env <service> [R:]<NAME>...
 }
 
 write_env prometheus R:PROM_REMOTE_WRITE_PASSWORD R:PROM_WEB_BCRYPT
-write_env grafana R:GF_SECURITY_ADMIN_PASSWORD R:PROM_PASSWORD SLACK_ALERTS_WEBHOOK_URL
+write_env grafana R:GF_SECURITY_ADMIN_PASSWORD R:PROM_PASSWORD R:SLACK_ALERTS_WEBHOOK_URL
 write_env blackbox BLACKBOX_BIFROST_CANARY_KEY BLACKBOX_CANARY_MODEL
 for i in "${!SERVICES[@]}"; do mv -f "${PENDING[$i]}" "$RUN/${SERVICES[$i]}.env"; done
 SCRIPT_EOF

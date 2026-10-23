@@ -57,12 +57,12 @@ output "github_deploy_role_arn" {
 }
 
 output "github_deploy_oidc_sub" {
-  description = "The exact OIDC sub the deploy role trusts. Needs the repo's customized sub template (README.md step 1)."
+  description = "The exact OIDC sub the deploy role trusts. Needs the repo's customized sub template (CUTOVER.md Phase 0d)."
   value       = local.github_deploy_sub
 }
 
 output "github_repo_variables" {
-  description = "Repo variables deploy-aws.yml reads, with their values (none is a secret). AWS_ARM64_RUNNER is optional and not tofu's to know (README.md step 6)."
+  description = "Repo variables deploy-aws.yml reads, with their values (none is a secret). AWS_ARM64_RUNNER is optional and not tofu's to know (CUTOVER.md Phase 3b)."
   value = {
     AWS_ACCOUNT_ID           = local.account_id
     AWS_SITE_BUCKET          = aws_s3_bucket.site.bucket

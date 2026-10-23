@@ -81,8 +81,22 @@ struct Backoff {
     /// Cancellation is swallowed rather than thrown: the caller's own
     /// `Task.isCancelled` check ends the loop one line later.
     mutating func sleep() async {
+        try? await Task.sleep(for: .seconds(next()))
+    }
+
+    /// The current window's jittered delay, widening the window toward the
+    /// cap, without sleeping it: for a loop whose sleep is its own (see
+    /// `SitrepPoller.napUntilDue`).
+    mutating func next() -> TimeInterval {
         let delay = TimeInterval.random(in: (window / 2)...window)
-        try? await Task.sleep(for: .seconds(delay))
         window = min(window * 2, cap)
+        return delay
+    }
+}
+
+extension Duration {
+    /// This duration in seconds, for the APIs that still take a `TimeInterval`.
+    var timeInterval: TimeInterval {
+        TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1e18
     }
 }

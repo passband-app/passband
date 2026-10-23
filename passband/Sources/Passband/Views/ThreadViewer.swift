@@ -1630,7 +1630,7 @@ struct ThreadViewer: View {
 
             Text(
                 down
-                    ? "This email is already on your machine — the daemon that serves it isn't answering. Is squelchd running? Retrying every 10 seconds."
+                    ? "This email is already on your machine — the daemon that serves it isn't answering. Is squelchd running? Retrying automatically."
                     : (error ?? "The server didn't return this thread.")
             )
             .font(Typo.ui(13))
@@ -4014,9 +4014,7 @@ private struct StackDoneHold: View {
         return onward ? what + ", then the next sender" : what
     }
 
-    private var seconds: Double {
-        Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
-    }
+    private var seconds: Double { duration.timeInterval }
 
     var body: some View {
         ZStack {

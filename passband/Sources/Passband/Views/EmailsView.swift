@@ -71,7 +71,7 @@ struct EmailsView: View {
     private var sentPage: Loadable<[SentItem]> { store.sentPage }
 
     /// The cached page MINUS anything resolved since it was fetched: the page
-    /// only reloads on the 10s `store.lastRefresh` poll, so without this filter
+    /// only reloads on the `store.lastRefresh` poll, so without this filter
     /// mail finished from the reader sits here visibly undone until the next tick.
     ///
     /// The parked rows skip it entirely, and must: setting a reminder resolves
@@ -200,12 +200,12 @@ struct EmailsView: View {
             #endif
         }
         .keyBindings(.list, bindings)
-        // Fires on mount, on each 10s poll AND on a mode switch — only the page
+        // Fires on mount, on each poll AND on a mode switch — only the page
         // being shown is refreshed, so the spam page costs nothing until you go
         // there. The store's short TTL is what makes the mount half free when a
         // tick just landed; the tick half always outruns it and refreshes for real.
-        // IN A LEAF, not on this body: the tick is a new Date every ten
-        // seconds, and a body that reads it re-evaluates every ten seconds —
+        // IN A LEAF, not on this body: the tick is a new Date every poll, and
+        // a body that reads it re-evaluates every poll —
         // every loaded row's worth of view values, for a fetch that usually
         // finds nothing new. The leaf's body is a zero-size rectangle.
         .background { MailRefreshKeeper(mode: mode, reminders: reminders) }

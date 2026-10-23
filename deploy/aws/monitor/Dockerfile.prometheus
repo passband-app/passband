@@ -1,0 +1,13 @@
+# Prometheus for the AWS `monitor` box (compose.yaml here). Build context is
+# the REPO ROOT: docker build -f deploy/aws/monitor/Dockerfile.prometheus .
+#
+# Mirrors the root Dockerfile.prometheus (which Railway builds until cutover)
+# with the AWS prometheus.yml swapped in; the entrypoint is the shared one.
+# Root user for parity with Railway's image: the data dir is a bind mount
+# from the EBS volume, owned by root.
+FROM prom/prometheus:v3.5.0
+USER root
+COPY deploy/aws/monitor/prometheus/prometheus.yml /etc/prometheus/prometheus.yml
+COPY deploy/monitoring/prometheus/entrypoint.sh /entrypoint.sh
+EXPOSE 9090
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]

@@ -1,0 +1,12 @@
+# Blackbox exporter for the AWS `monitor` box (compose.yaml here). Build
+# context is the REPO ROOT: docker build -f deploy/aws/monitor/Dockerfile.blackbox .
+#
+# Identical to the root Dockerfile.blackbox: neither the module config nor the
+# entrypoint names a Railway host (probe TARGETS live in prometheus.yml), so
+# both are reused as-is. Never published on the host and never routed by the
+# ALB: Prometheus reaches it over the compose network only.
+FROM prom/blackbox-exporter:v0.25.0
+COPY deploy/monitoring/blackbox/blackbox.yml /etc/blackbox_exporter/config.template.yml
+COPY deploy/monitoring/blackbox/entrypoint.sh /entrypoint.sh
+EXPOSE 9115
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]

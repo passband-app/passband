@@ -1,0 +1,443 @@
+# Deploys to AWS (deploy/aws/DESIGN.md, "Deploys"). INERT until cutover:
+# every job is gated on the repo variable AWS_DEPLOY_ENABLED == 'true', and
+# Railway keeps deploying itself from `main` meanwhile.
+#
+# Triggers:
+#   - push to main, path-filtered per service (the `changes` job decides);
+#   - workflow_dispatch, one service or all;
+#   - workflow_run of release-passband-mac: that workflow pushes the new
+#     appcast to main with GITHUB_TOKEN, and pushes made with GITHUB_TOKEN do
+#     NOT start other workflows. Railway's webhook sees that push; this file
+#     would not, so without this trigger the site would keep serving the old
+#     appcast and baking the old /download version until some later push.
+#
+# Repo variables (Settings > Variables; none are secrets):
+#   AWS_DEPLOY_ENABLED       'true' to arm the workflow
+#   AWS_ACCOUNT_ID           the account; the role is passband-github-deploy
+#   AWS_SITE_BUCKET          landing-site S3 bucket
+#   AWS_SITE_DISTRIBUTION_ID CloudFront distribution
+#   AWS_SITE_FUNCTION_NAME   CloudFront Function (default passband-site)
+#   AWS_MONITOR_INSTANCE_ID  the monitor EC2 instance
+#   AWS_ARM64_RUNNER         runner label for the native arm64 Rust builds
+#                            (default ubuntu-24.04-arm)
+#
+# Credentials: GitHub OIDC -> passband-github-deploy. No AWS key exists
+# anywhere. Every deploying job runs in the `aws-production` environment, so
+# the token's `sub` is repo:passband-app/passband:environment:aws-production;
+# the environment's deployment-branch rule (main only) is what keeps a branch
+# from deploying.
+#
+# Third-party actions are pinned by full commit SHA; the tag is in a comment.
+name: deploy-aws
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .dockerignore
+      - Dockerfile
+      - Dockerfile.control
+      - Dockerfile.bifrost
+      - squelch-control/**
+      - squelch-core/**
+      - squelch-httpauth/**
+      - squelch-relay/**
+      - squelch-ratelimit/**
+      - deploy/aws/monitor/**
+      - deploy/monitoring/**
+      - passband-site/**
+      - deploy/aws/site/**
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service to deploy
+        required: true
+        type: choice
+        options: [control, relay, bifrost, monitor, site, all]
+  workflow_run:
+    workflows: [release-passband-mac]
+    types: [completed]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-west-2
+
+jobs:
+  # Decides what to deploy. Outputs: `ecs` (a matrix of ECS services, maybe
+  # empty), `monitor` and `site` ('true'/'false').
+  changes:
+    if: vars.AWS_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      ecs: ${{ steps.plan.outputs.ecs }}
+      monitor: ${{ steps.plan.outputs.monitor }}
+      site: ${{ steps.plan.outputs.site }}
+    steps:
+      # Credentials persisted HERE ONLY (a read-only token, in a job with no
+      # AWS access): paths-filter fetches the push's base commit with git,
+      # and the repo is private.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push'
+
+      # Path sets follow what each image's build actually reads. control and
+      # relay: their Dockerfile's COPYs, narrowed to the crates each binary
+      # links (`cargo tree -p <crate>` path deps: control = core + httpauth,
+      # relay = httpauth + ratelimit), plus the workspace manifests and
+      # toolchain. Both Dockerfiles COPY every crate, so an edit elsewhere
+      # does change the build context, but not the binary.
+      - id: filter
+        if: github.event_name == 'push'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            control:
+              - Cargo.toml
+              - Cargo.lock
+              - rust-toolchain.toml
+              - .dockerignore
+              - Dockerfile.control
+              - squelch-control/**
+              - squelch-core/**
+              - squelch-httpauth/**
+            relay:
+              - Cargo.toml
+              - Cargo.lock
+              - rust-toolchain.toml
+              - .dockerignore
+              - Dockerfile
+              - squelch-relay/**
+              - squelch-httpauth/**
+              - squelch-ratelimit/**
+            bifrost:
+              - Dockerfile.bifrost
+            monitor:
+              - .dockerignore
+              - deploy/aws/monitor/**
+              - deploy/monitoring/grafana/dashboards/**
+              - deploy/monitoring/grafana/provisioning/alerting/**
+              - deploy/monitoring/grafana/provisioning/dashboards/**
+              - deploy/monitoring/prometheus/entrypoint.sh
+              - deploy/monitoring/blackbox/**
+            site:
+              - passband-site/**
+              - deploy/aws/site/**
+
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT: ${{ inputs.service }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          F_CONTROL: ${{ steps.filter.outputs.control }}
+          F_RELAY: ${{ steps.filter.outputs.relay }}
+          F_BIFROST: ${{ steps.filter.outputs.bifrost }}
+          F_MONITOR: ${{ steps.filter.outputs.monitor }}
+          F_SITE: ${{ steps.filter.outputs.site }}
+          ARM: ${{ vars.AWS_ARM64_RUNNER || 'ubuntu-24.04-arm' }}
+        run: |
+          want() { # want <service> <push-filter-result>
+            case "$EVENT" in
+              push) [ "$2" = true ] ;;
+              workflow_dispatch) [ "$INPUT" = "$1" ] || [ "$INPUT" = all ] ;;
+              workflow_run) [ "$1" = site ] && [ "$RUN_CONCLUSION" = success ] ;;
+              *) false ;;
+            esac
+          }
+          # Native arm64 runners for the Rust builds (emulating the ONNX
+          # compile is hours; see release-daemon.yml). bifrost is FROM-only,
+          # so buildx just pulls the arm64 base and any runner will do.
+          ecs='[]'
+          add() {
+            ecs=$(jq -c --arg s "$1" --arg f "$2" --arg r "$3" \
+              '. + [{service: $s, dockerfile: $f, repo: ("passband-" + $s), runner: $r}]' <<<"$ecs")
+          }
+          if want control "$F_CONTROL"; then add control Dockerfile.control "$ARM"; fi
+          if want relay "$F_RELAY"; then add relay Dockerfile "$ARM"; fi
+          if want bifrost "$F_BIFROST"; then add bifrost Dockerfile.bifrost ubuntu-latest; fi
+          monitor=false; if want monitor "$F_MONITOR"; then monitor=true; fi
+          site=false; if want site "$F_SITE"; then site=true; fi
+          {
+            echo "ecs=$ecs"
+            echo "monitor=$monitor"
+            echo "site=$site"
+          } >> "$GITHUB_OUTPUT"
+          echo "plan: ecs=$ecs monitor=$monitor site=$site"
+
+  # control, relay, bifrost: build for linux/arm64, push to ECR by commit SHA,
+  # register a task definition revision pinned to the pushed DIGEST (not the
+  # tag), update the service, and wait for steady state. A deploy that never
+  # stabilises fails the job; the ECS deployment circuit breaker (tofu) rolls
+  # the service back.
+  ecs:
+    needs: changes
+    if: vars.AWS_DEPLOY_ENABLED == 'true' && needs.changes.outputs.ecs != '[]' && needs.changes.outputs.ecs != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.ecs) }}
+    runs-on: ${{ matrix.runner }}
+    environment: aws-production
+    concurrency:
+      group: deploy-aws-${{ matrix.service }}
+      cancel-in-progress: false
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/passband-github-deploy
+          role-session-name: deploy-${{ matrix.service }}-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Cache: a registry ref in the service's own ECR repo (<repo>:buildcache),
+      # the release-daemon.yml pattern. ECR needs image-manifest=true to store
+      # a cache manifest. Dockerfile.control cooks dependencies in a cargo-chef
+      # layer; the root Dockerfile (relay) has no chef stage and DESIGN.md
+      # keeps it unchanged, so relay gets layer caching only.
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/${{ matrix.repo }}:${{ github.sha }}
+          cache-from: type=registry,ref=${{ steps.ecr.outputs.registry }}/${{ matrix.repo }}:buildcache
+          cache-to: type=registry,ref=${{ steps.ecr.outputs.registry }}/${{ matrix.repo }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+      # Starts from the family's CURRENT revision (the one tofu registered,
+      # or the last deploy), so env, secrets, roles and volumes stay whatever
+      # tofu says; only the image changes.
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@8d79160660ad39c402a16e5fc7cd2a32e8f7d6b7 # v1.9.1
+        with:
+          task-definition-family: ${{ matrix.service }}
+          container-name: ${{ matrix.service }}
+          image: ${{ steps.ecr.outputs.registry }}/${{ matrix.repo }}@${{ steps.build.outputs.digest }}
+
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@a00d4d57ac0de1a99b39fe469f3d898d38717c2b # v2.6.4
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: passband
+          service: ${{ matrix.service }}
+          wait-for-service-stability: true
+          wait-for-minutes: 20
+
+  # prometheus, grafana, blackbox on the monitor box. Images are built here
+  # (FROM + COPY only, so no emulation), then SSM Run Command overwrites the
+  # box's compose.yaml, pins IMAGE_TAG to this commit, and reloads the unit,
+  # whose ExecReload pulls, runs `compose up -d`, and fails unless all three
+  # answer their health checks. The job fails unless that command succeeds.
+  monitor:
+    needs: changes
+    if: vars.AWS_DEPLOY_ENABLED == 'true' && needs.changes.outputs.monitor == 'true'
+    runs-on: ubuntu-latest
+    environment: aws-production
+    concurrency:
+      group: deploy-aws-monitor
+      cancel-in-progress: false
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Embedded compose copy matches, AWS configs have not drifted from the
+      # Railway ones, only 3000/9090 are published.
+      - run: bash deploy/aws/monitor/check.sh
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/passband-github-deploy
+          role-session-name: deploy-monitor-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # :latest is what a freshly bootstrapped box pulls before its first
+      # deploy; every deploy then pins the SHA tag.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/aws/monitor/Dockerfile.prometheus
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/passband-prometheus:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/passband-prometheus:latest
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/aws/monitor/Dockerfile.grafana
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/passband-grafana:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/passband-grafana:latest
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/aws/monitor/Dockerfile.blackbox
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/passband-blackbox:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/passband-blackbox:latest
+
+      - name: Roll the monitor box over SSM
+        env:
+          INSTANCE_ID: ${{ vars.AWS_MONITOR_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+          : "${INSTANCE_ID:?set the AWS_MONITOR_INSTANCE_ID repo variable}"
+          b64=$(base64 -w0 deploy/aws/monitor/compose.yaml)
+          params=$(jq -n --arg b64 "$b64" --arg tag "$GITHUB_SHA" '{
+            commands: [
+              "set -eu",
+              "cd /opt/passband-monitor",
+              ("printf %s " + ($b64 | @sh) + " | base64 -d > compose.yaml.new"),
+              "mv -f compose.yaml.new compose.yaml",
+              ("sed -i \"s/^IMAGE_TAG=.*/IMAGE_TAG=" + $tag + "/\" .env"),
+              "systemctl reload-or-restart passband-monitor.service"
+            ],
+            executionTimeout: ["1200"]
+          }')
+          cmd=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy-aws monitor ${GITHUB_SHA::12}" \
+            --timeout-seconds 600 \
+            --parameters "$params" \
+            --query Command.CommandId --output text)
+          echo "ssm command $cmd"
+          # Polled by hand: `aws ssm wait command-executed` gives up after
+          # 100s, and a pull + health wait can take longer than that.
+          status=Pending
+          for _ in $(seq 1 120); do
+            status=$(aws ssm get-command-invocation --command-id "$cmd" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in
+              Pending|InProgress|Delayed) sleep 10 ;;
+              *) break ;;
+            esac
+          done
+          aws ssm get-command-invocation --command-id "$cmd" --instance-id "$INSTANCE_ID" \
+            --query '[StandardOutputContent, StandardErrorContent]' --output text || true
+          [ "$status" = Success ] || { echo "::error::monitor deploy ended $status"; exit 1; }
+
+  # Landing site: S3 objects with server.ts's exact headers, then the
+  # CloudFront Function with the newest appcast version baked in, then an
+  # invalidation, then prune objects server.ts no longer serves.
+  site:
+    needs: changes
+    if: vars.AWS_DEPLOY_ENABLED == 'true' && needs.changes.outputs.site == 'true'
+    runs-on: ubuntu-latest
+    environment: aws-production
+    concurrency:
+      group: deploy-aws-site
+      cancel-in-progress: false
+    timeout-minutes: 30
+    env:
+      BUCKET: ${{ vars.AWS_SITE_BUCKET }}
+      DISTRIBUTION_ID: ${{ vars.AWS_SITE_DISTRIBUTION_ID }}
+      FUNCTION_NAME: ${{ vars.AWS_SITE_FUNCTION_NAME || 'passband-site' }}
+    steps:
+      # workflow_run runs on the default branch's head, which already holds
+      # the appcast commit the release just pushed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      # The differential test boots the real server.ts and compares every
+      # route with the function; a mismatch stops the deploy here.
+      - run: bun test deploy/aws/site
+      - run: bun deploy/aws/site/build.ts
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/passband-github-deploy
+          role-session-name: deploy-site-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      # Objects first, so every key the new function rewrites to exists before
+      # the function is published. Explicit headers per object: S3's guess
+      # would differ from Bun's for woff2, and appcast.xml must be short-cached.
+      - name: Upload objects
+        run: |
+          set -euo pipefail
+          : "${BUCKET:?set the AWS_SITE_BUCKET repo variable}"
+          out=deploy/aws/site/out
+          while IFS=$'\t' read -r key ctype cache; do
+            args=(--content-type "$ctype")
+            [ -n "$cache" ] && args+=(--cache-control "$cache")
+            aws s3 cp "$out/site/$key" "s3://$BUCKET/$key" "${args[@]}" --only-show-errors
+          done < "$out/objects.tsv"
+
+      - name: Publish the CloudFront Function
+        run: |
+          set -euo pipefail
+          etag=$(aws cloudfront describe-function --name "$FUNCTION_NAME" --stage DEVELOPMENT --query ETag --output text)
+          etag=$(aws cloudfront update-function --name "$FUNCTION_NAME" --if-match "$etag" \
+            --function-config "Comment=passband.app routing (server.ts) @ ${GITHUB_SHA::12},Runtime=cloudfront-js-2.0" \
+            --function-code fileb://deploy/aws/site/function.js \
+            --query ETag --output text)
+          # Smoke the DEVELOPMENT stage before it goes live.
+          event='{"version":"1.0","context":{"eventType":"viewer-request"},"viewer":{"ip":"192.0.2.1"},"request":{"method":"GET","uri":"/download","querystring":{},"headers":{},"cookies":{}}}'
+          result=$(aws cloudfront test-function --name "$FUNCTION_NAME" --if-match "$etag" --stage DEVELOPMENT \
+            --event-object "$event" --query 'TestResult.[FunctionErrorMessage,FunctionOutput]' --output text)
+          echo "$result"
+          grep -q '"statusCode":302' <<<"$result" || { echo "::error::function test did not 302 /download"; exit 1; }
+          aws cloudfront publish-function --name "$FUNCTION_NAME" --if-match "$etag" --query FunctionSummary.Status --output text
+
+      - name: Invalidate
+        run: |
+          set -euo pipefail
+          : "${DISTRIBUTION_ID:?set the AWS_SITE_DISTRIBUTION_ID repo variable}"
+          id=$(aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*' \
+            --query Invalidation.Id --output text)
+          aws cloudfront wait invalidation-completed --distribution-id "$DISTRIBUTION_ID" --id "$id"
+
+      # Last, so nothing the live function or a cached page can reach is
+      # removed while it is still reachable.
+      - name: Prune objects server.ts no longer serves
+        run: |
+          set -euo pipefail
+          cut -f1 deploy/aws/site/out/objects.tsv | sort > keep.txt
+          aws s3api list-objects-v2 --bucket "$BUCKET" --query 'Contents[].Key' --output text \
+            | tr '\t' '\n' | grep -v '^None$' | sort | comm -23 - keep.txt \
+            | while read -r key; do
+                [ -n "$key" ] || continue
+                echo "prune $key"
+                aws s3 rm "s3://$BUCKET/$key" --only-show-errors
+              done

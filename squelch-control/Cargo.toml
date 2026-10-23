@@ -46,12 +46,15 @@ reqwest = { workspace = true }
 # the workspace that talks to Postgres: the daemons keep a SQLite file each, on
 # purpose, and a workspace dep would read as an invitation to that changing.
 #
-# NoTls, and that is a deployment fact rather than a shortcut: the control plane
-# reaches its database over Railway's private network
-# (`postgres.railway.internal`), which never leaves the project. The day this
-# connects over the public proxy it needs `tokio-postgres-rustls` and a
-# `MakeTlsConnector` in `connect`, and nothing else here changes.
+# TLS IS THE URL'S `sslmode` (see src/pg_tls.rs): absent/`disable` is NoTls,
+# Railway's private network (`postgres.railway.internal`), unchanged;
+# `require`/`verify-full` is rustls against the AWS RDS CA bundle baked in from
+# certs/rds-global-bundle.pem. rustls with RING and default features off, because
+# ring is the workspace's one crypto backend: rustls's default would pull in
+# aws-lc-rs as a second one (and a C/cmake build) for this crate alone.
 tokio-postgres = "0.7"
+tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 # A POOL FOR RESILIENCE, NOT THROUGHPUT. One `Client` whose connection task dies
 # — Railway restarts Postgres for maintenance, and a private-network blip does
 # the same — is permanently broken, and every request after it would fail with a

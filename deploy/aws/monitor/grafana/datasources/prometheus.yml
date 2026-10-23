@@ -1,0 +1,27 @@
+# Provisioned datasource for Grafana on the AWS `monitor` box: the Prometheus
+# container in the same compose project (deploy/aws/monitor/compose.yaml).
+#
+# THIS IS deploy/monitoring/grafana/provisioning/datasources/prometheus.yml
+# WITH ONE CHANGE: the URL is the compose service name instead of
+# prometheus.railway.internal. Dockerfile.grafana here copies the shared
+# provisioning tree and then lays this file over the Railway one.
+#
+# PROM_PASSWORD holds the same value as Prometheus's PROM_REMOTE_WRITE_PASSWORD
+# (one credential, two names). On this box both come from Secrets Manager
+# (passband/monitor/PROM_PASSWORD and passband/monitor/PROM_REMOTE_WRITE_PASSWORD).
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    basicAuth: true
+    basicAuthUser: remote
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 30s
+    secureJsonData:
+      basicAuthPassword: $PROM_PASSWORD

@@ -1,0 +1,34 @@
+# Accepted trivy findings for deploy/aws/tofu, each with its reason.
+# Run: trivy config --ignorefile deploy/aws/tofu/.trivyignore deploy/aws/tofu
+
+# ECR "tags are mutable": the repos are IMMUTABLE_WITH_EXCLUSION, immutable
+# except buildcache*, which the registry build cache must rewrite. trivy does
+# not model the exclusion mode.
+AVD-AWS-0031
+# ECR / EBS / site bucket not on a customer-managed key: encrypted with the
+# AWS-managed key. Nothing outside the account reads them, so a CMK adds
+# $1/month each and no access boundary (secrets and logs DO use CMKs).
+AVD-AWS-0033
+AVD-AWS-0027
+AVD-AWS-0132
+# Unrestricted egress: the NAT instance (forwarding to the internet is its
+# job) and 443/80 out from tasks and the monitor box, which call Google,
+# Anthropic, APNs, Resend, WorkOS, Slack and AWS APIs by hostname.
+AVD-AWS-0104
+# Public load balancer: it is the front door.
+AVD-AWS-0053
+# WAF: out of scope for this wave (DESIGN.md).
+AVD-AWS-0011
+# Access logging on buckets / CloudFront, VPC flow logs, CloudTrail to
+# CloudWatch, container insights, RDS performance insights: cost, and in the
+# access-log cases a store of client IPs we otherwise do not keep. CloudTrail
+# to S3 is on. ALB access logs are a variable (alb_access_logs).
+AVD-AWS-0089
+AVD-AWS-0010
+AVD-AWS-0178
+AVD-AWS-0162
+AVD-AWS-0034
+AVD-AWS-0133
+# RDS IAM auth: the control store authenticates with a password in its
+# Secrets Manager DATABASE_URL; IAM tokens would need a code change.
+AVD-AWS-0176

@@ -488,8 +488,9 @@ exits without the Slack URL, and a box that keeps failing just wastes the phase.
 ```sh
 R=passband-app/passband
 gh api repos/$R/actions/oidc/customization/sub --jq '.include_claim_keys'           # ["repo","context","job_workflow_ref"]
+# Immutable subjects (0d): the repo part comes from GitHub's sub_claim_prefix.
 diff <(tofu -chdir=$TF output -raw github_deploy_oidc_sub; echo) \
-     <(echo "repo:$R:environment:aws-production:job_workflow_ref:$R/.github/workflows/deploy-aws.yml@refs/heads/main") && echo SUB-MATCHES
+     <(echo "$(gh api repos/$R/actions/oidc/customization/sub --jq .sub_claim_prefix):environment:aws-production:job_workflow_ref:$R/.github/workflows/deploy-aws.yml@refs/heads/main") && echo SUB-MATCHES
 ```
 
 If the template is not customized, every deploy job fails at

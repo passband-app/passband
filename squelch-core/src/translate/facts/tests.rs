@@ -438,3 +438,28 @@ fn a_batch_of_identical_numbers_matches_quickly() {
     let c = check(&v(&["15000 15"]), &v(&["15 thousand 15000"]));
     assert!(c.passed(), "{c:?}");
 }
+
+#[test]
+fn translated_month_and_weekday_names_keep_every_fact() {
+    // What the prompt asks for since v4: the words become English, the digits
+    // stay where they were.
+    let src = v(&[
+        "Le paiement est dû avant le 15 novembre 2026, rendez-vous jeudi 30 octobre à 14h30.",
+    ]);
+    let out =
+        v(&["Payment is due before 15 November 2026, appointment Thursday 30 October at 14h30."]);
+    assert!(
+        missing_facts(&src, &out).is_empty(),
+        "{:?}",
+        missing_facts(&src, &out)
+    );
+    assert!(
+        added_facts(&src, &out).is_empty(),
+        "{:?}",
+        added_facts(&src, &out)
+    );
+    // A digit that moved is still caught.
+    let wrong =
+        v(&["Payment is due before 16 November 2026, appointment Thursday 30 October at 14h30."]);
+    assert!(!missing_facts(&src, &wrong).is_empty());
+}

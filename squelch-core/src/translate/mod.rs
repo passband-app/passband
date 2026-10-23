@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// Stored in `message_translations.prompt_version`. Bump it when the prompt or
 /// the schema changes what a translation is.
-pub const PROMPT_VERSION: i64 = 3;
+pub const PROMPT_VERSION: i64 = 4;
 /// The `stage2_usage` category every translate call is billed to.
 pub const USAGE_CATEGORY: &str = "translate";
 /// Source characters per model call, WEIGHTED by [`weight`]: long mail is
@@ -100,7 +100,8 @@ If the segments are already English as a whole, set \"source_language\" to \"en\
 \n\
 Rules:\n\
 - Translate faithfully and completely. Every fact in a segment must be in its translation. Do not summarize, shorten, omit, explain, or add anything.\n\
-- Keep numbers, amounts, prices, dates, times, reference numbers, order and tracking codes, names, URLs, and email addresses exactly as written, character for character. Do not convert currencies, units, or date formats.\n\
+- Keep every number, amount, price, reference number, order and tracking code, name, URL, and email address exactly as written, character for character. Do not convert currencies, units, or time zones.\n\
+- In dates and times, keep every digit and the order of the parts exactly as written, and translate only the words: month and weekday names become English (\"jeudi 15 novembre 2026\" becomes \"Thursday 15 November 2026\"). Never switch between 12-hour and 24-hour time.\n\
 - A segment may be a fragment of a sentence that continues in the next segment, because the email's formatting split it. Translate each fragment so that the fragments read naturally in sequence, and keep each one in its own position.\n\
 - A segment that is already in English is returned unchanged.\n\
 - Keep the line breaks inside a segment where they are.\n\

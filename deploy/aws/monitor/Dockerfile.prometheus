@@ -1,0 +1,20 @@
+# Prometheus for the AWS `monitor` box (compose.yaml here). Build context is
+# the REPO ROOT: docker build -f deploy/aws/monitor/Dockerfile.prometheus .
+#
+# Mirrors the root Dockerfile.prometheus (which Railway builds until cutover)
+# with the AWS prometheus.yml swapped in; the entrypoint is the shared one.
+# Root user for parity with Railway's image: the data dir is a bind mount
+# from the EBS volume, owned by root.
+# Pinned by the multi-arch index digest (fetched from Docker Hub 2026-10-23):
+# the tag is for humans, the digest is what is pulled. Bump both together.
+FROM prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+USER root
+COPY deploy/aws/monitor/prometheus/prometheus.yml /etc/prometheus/prometheus.yml
+COPY deploy/monitoring/prometheus/entrypoint.sh /entrypoint.sh
+# Carried here, not run here: the box's bin/up copies this file out of the
+# image at IMAGE_TAG (docker create + docker cp) before `compose up`, so a
+# compose.yaml change ships with the same deploy that ships the images, and
+# the deploy role never has to write files on the box (bootstrap.sh header).
+COPY deploy/aws/monitor/compose.yaml /etc/passband-monitor/compose.yaml
+EXPOSE 9090
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]

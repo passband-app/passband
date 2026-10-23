@@ -463,3 +463,18 @@ fn translated_month_and_weekday_names_keep_every_fact() {
         v(&["Payment is due before 16 November 2026, appointment Thursday 30 October at 14h30."]);
     assert!(!missing_facts(&src, &wrong).is_empty());
 }
+
+#[test]
+fn a_space_after_four_digits_is_not_a_thousands_group() {
+    // Yahoo! Travel's address, as Sonnet 5 rendered it: the street number
+    // moved up beside the postcode. Rejected as an "added phone number"
+    // while the space still joined `3302 324`.
+    let src = v(&["住所： 〒410-3302　静岡県伊豆市土肥324"]);
+    let out = v(&["Address: 〒410-3302　324 Toi, Izu City, Shizuoka Prefecture"]);
+    let c = check(&src, &out);
+    assert!(c.missing.is_empty(), "{:?}", c.missing);
+    assert!(c.added.is_empty(), "{:?}", c.added);
+    // Real thousands groups still join.
+    assert!(passes("Betrag 12 345,50", "Amount 12,345.50"));
+    assert!(passes("Total 1 234 567 €", "Total €1,234,567"));
+}

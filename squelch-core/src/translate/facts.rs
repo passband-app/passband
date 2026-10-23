@@ -1011,8 +1011,9 @@ fn is_space_separator(c: char) -> bool {
 
 /// Every number in `s` as (byte start, byte end, digits). Punctuation
 /// separators are skipped whenever a digit sits on each side. A SPACE is
-/// skipped only when exactly three digits follow it (a thousands group), so
-/// `Zimmer 12 2 Personen` stays two numbers.
+/// skipped only when it sits between thousands groups: one to three digits
+/// before it and exactly three after, so `Zimmer 12 2 Personen` stays two
+/// numbers and so does `〒410-3302 324` (a postcode, then a street number).
 fn scan_numbers(s: &str) -> Vec<(usize, usize, String)> {
     let chars: Vec<(usize, char)> = s.char_indices().collect();
     let digit = |i: usize| chars.get(i).is_some_and(|(_, c)| c.is_ascii_digit());
@@ -1027,8 +1028,10 @@ fn scan_numbers(s: &str) -> Vec<(usize, usize, String)> {
         let start = chars[i].0;
         let mut joined = String::new();
         loop {
+            let mut group_len = 0;
             while digit(i) {
                 joined.push(chars[i].1);
+                group_len += 1;
                 i += 1;
             }
             let Some(&(_, c)) = chars.get(i) else { break };
@@ -1036,7 +1039,7 @@ fn scan_numbers(s: &str) -> Vec<(usize, usize, String)> {
                 i += 1;
                 continue;
             }
-            if is_space_separator(c) {
+            if is_space_separator(c) && group_len <= 3 {
                 let group = (i + 1..).take_while(|&j| digit(j)).count();
                 if group == 3 {
                     i += 1;

@@ -814,6 +814,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
 
     create_shipment_order_links(conn)?;
 
+    // See the function: ghosts built before `EventTime::resolve` lost every
+    // zoned local time, so each is rebuilt once from its stored decisions.
+    rebuild_ghosts_for_zoned_times(conn);
+
     // Guarded on table existence — migration unit tests build partial schemas.
     if !tables_exist(conn, &["triage", "deadlines", "messages"])? {
         return Ok(());
@@ -1496,6 +1500,129 @@ fn backfill_message_recipients(conn: &Connection) -> Result<()> {
     }
     tx.commit()?;
     Ok(())
+}
+
+/// The `app_settings` key marking an account whose ghosts have been rebuilt
+/// by [`rebuild_ghosts_for_zoned_times`].
+pub(super) const GHOST_ZONED_TIMES_KEY: &str = "ghost_zoned_times_rebuilt";
+
+/// ONE-TIME: rebuild every ghost so it reads the event times its stored
+/// decisions already hold.
+///
+/// The model writes most event times as a local time and a zone
+/// (`2026-10-19T21:30` in `Asia/Tokyo`), and the projection read only RFC3339
+/// and bare dates, so it dropped those starts and then their ends: a flight
+/// ghost with no times at all. The decisions kept the values, so
+/// [`ghosts::rebuild`], which re-derives a ghost's facts from its assigned
+/// records' stored decisions through the fixed `launder`, restores them. It
+/// assigns nothing new, which is enough: a record that fed no ghost for want
+/// of a start is matched the next time its message is decided.
+///
+/// GATED BY A MARKER per account in `app_settings`, since there is no column
+/// to add and so no "the column was absent" signal. The marker is written for
+/// every account in the same transaction as the rebuilds, under `BEGIN
+/// IMMEDIATE` with the marker read inside it, so squelchd and squelch-mcp
+/// opening one file do not both run it. An account created later has no
+/// marker and has its ghosts rebuilt once on the next open, which is harmless:
+/// a rebuild of a ghost built by the fixed code changes nothing that matters.
+///
+/// NEVER A REASON NOT TO START. One ghost that fails to rebuild is rolled back
+/// to its own savepoint, logged by id and error kind (never its title or
+/// place), and skipped for good; anything that fails the whole pass rolls it
+/// back to retry on the next open. Ghosts number tens to hundreds an account,
+/// so one pass is cheap.
+fn rebuild_ghosts_for_zoned_times(conn: &Connection) {
+    match rebuild_ghosts_once(conn) {
+        Ok((0, _)) => {}
+        Ok((rebuilt, skipped)) => eprintln!(
+            "squelch: migration rebuilt {rebuilt} ghost(s) to read zoned event times ({skipped} skipped)"
+        ),
+        Err(error) => {
+            eprintln!(
+                "squelch: ghost time rebuild failed ({}); will retry next open",
+                ghosts::error_kind(&error)
+            );
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
+}
+
+/// The body of [`rebuild_ghosts_for_zoned_times`]: (rebuilt, skipped).
+fn rebuild_ghosts_once(conn: &Connection) -> Result<(usize, usize)> {
+    // Every table `ghosts::rebuild` reads or writes. The migration suite
+    // builds partial schemas on purpose; production always has them all.
+    if !tables_exist(
+        conn,
+        &[
+            "accounts",
+            "app_settings",
+            "ghost_events",
+            "ghost_event_sources",
+            "ghost_event_keys",
+            "agent_message_decisions",
+            "agent_message_state",
+            "messages",
+        ],
+    )? {
+        return Ok((0, 0));
+    }
+    let pending = |conn: &Connection| -> Result<Vec<i64>> {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM accounts WHERE NOT EXISTS(
+                 SELECT 1 FROM app_settings s WHERE s.account_id=accounts.id AND s.key=?1)
+             ORDER BY id",
+        )?;
+        Ok(stmt
+            .query_map([GHOST_ZONED_TIMES_KEY], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?)
+    };
+    // The converged state, on every open after the first: one indexed read,
+    // no write lock.
+    if pending(conn)?.is_empty() {
+        return Ok((0, 0));
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let now = Utc::now().to_rfc3339();
+    let (mut rebuilt, mut skipped) = (0, 0);
+    // Re-read under the lock: another handle may have done it meanwhile.
+    for account in pending(conn)? {
+        let ids: Vec<i64> = {
+            let mut stmt =
+                conn.prepare("SELECT id FROM ghost_events WHERE account_id=?1 ORDER BY id")?;
+            stmt.query_map([account], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for id in ids {
+            conn.execute_batch("SAVEPOINT ghost_time_rebuild")?;
+            match ghosts::rebuild(conn, account, id, &now) {
+                Ok(()) => {
+                    conn.execute_batch("RELEASE ghost_time_rebuild")?;
+                    rebuilt += 1;
+                }
+                // The transaction itself is gone (see `ghosts::guarded`):
+                // nothing after this could commit as one, so stop.
+                Err(error) if conn.is_autocommit() => return Err(error),
+                Err(error) => {
+                    eprintln!(
+                        "squelch: ghost time rebuild skipped account {account} ghost {id} ({})",
+                        ghosts::error_kind(&error)
+                    );
+                    conn.execute_batch(
+                        "ROLLBACK TO ghost_time_rebuild; RELEASE ghost_time_rebuild",
+                    )?;
+                    skipped += 1;
+                }
+            }
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO app_settings(account_id, key, value) VALUES(?1, ?2, ?3)",
+            params![account, GHOST_ZONED_TIMES_KEY, now],
+        )?;
+    }
+    conn.execute_batch("COMMIT")?;
+    Ok((rebuilt, skipped))
 }
 
 /// Re-run [`banking::sanitize_institution`] over every stored institution,

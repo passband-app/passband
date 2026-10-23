@@ -4876,4 +4876,174 @@ mod tests {
         assert_eq!(owner(), first_owner);
         assert_eq!(ghost_by(&store, g).title, "Show");
     }
+
+    // ---- Zoned local times (the flight with no times) ----
+
+    /// A Tokyo-to-Los Angeles flight as the model writes it: naive local
+    /// times, each with its own zone.
+    fn zoned_flight(title: &str, refs: &[&str]) -> MessageDecision {
+        let mut record = Ev {
+            title,
+            refs,
+            kind: EventRecordKind::Travel,
+            location: None,
+            ..Default::default()
+        }
+        .record();
+        let at = |value: &str, zone: &str| {
+            Some(SupportedTime {
+                value: value.into(),
+                timezone: Some(zone.into()),
+                source_message_id: 0,
+                interpreted_relative: false,
+            })
+        };
+        if let RecordProposal::Event { start, end, .. } = &mut record {
+            *start = at("2026-10-19T21:30", "Asia/Tokyo");
+            *end = at("2026-10-19T14:45", "America/Los_Angeles");
+        }
+        decided(vec![record])
+    }
+
+    /// The stored columns, read raw: what every reader of the table sees.
+    fn stored_times(store: &SqliteStore, id: i64) -> (Option<String>, Option<String>) {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT starts_at,ends_at FROM ghost_events WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_zoned_local_start_and_end_are_stored_with_their_zones_offsets() {
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 60);
+        decide(&store, 1, 1, &zoned_flight("Flight NH 106", &["PNR4XQ"]));
+        let g = &listed(&store, 1)[0];
+        assert_eq!(
+            stored_times(&store, g.id),
+            (
+                Some("2026-10-19T21:30:00+09:00".into()),
+                Some("2026-10-19T14:45:00-07:00".into())
+            )
+        );
+        assert_eq!(g.start, at("2026-10-19T21:30:00+09:00"));
+        assert_eq!(g.stated_end, Some(at("2026-10-19T14:45:00-07:00")));
+        assert_eq!(g.start_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    /// A file store whose ghosts were built before the resolver: the zoned
+    /// times are in the stored decisions and missing from the ghost rows, as
+    /// the old projection left them. Returns the store's path and the ghosts.
+    fn store_with_timeless_ghosts(tag: &str) -> (std::path::PathBuf, Vec<i64>) {
+        let dir =
+            std::env::temp_dir().join(format!("squelch-ghost-times-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.sqlite3");
+        let store = SqliteStore::open(&path).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO accounts(id,email,created_at) VALUES(1,'a@test',?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        mail(&store, 1, 1, "t1", 60);
+        mail(&store, 1, 2, "t2", 30);
+        decide(&store, 1, 1, &zoned_flight("Outbound", &["PNR4XQ"]));
+        decide(&store, 1, 2, &zoned_flight("Another trip", &["QZ7KMB"]));
+        let ids: Vec<i64> = listed(&store, 1).iter().map(|g| g.id).collect();
+        assert_eq!(ids.len(), 2);
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "UPDATE ghost_events SET starts_at=NULL,start_sort=NULL,start_timezone=NULL,ends_at=NULL",
+            )
+            .unwrap();
+        for id in &ids {
+            assert_eq!(stored_times(&store, *id), (None, None));
+        }
+        (path, ids)
+    }
+
+    fn marker(store: &SqliteStore) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM app_settings WHERE account_id=1 AND key=?1",
+                [super::super::migrate::GHOST_ZONED_TIMES_KEY],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn opening_the_store_rebuilds_timeless_ghosts_once() {
+        let (path, ids) = store_with_timeless_ghosts("once");
+        let store = SqliteStore::open(&path).unwrap();
+        for id in &ids {
+            assert_eq!(
+                stored_times(&store, *id),
+                (
+                    Some("2026-10-19T21:30:00+09:00".into()),
+                    Some("2026-10-19T14:45:00-07:00".into())
+                ),
+                "ghost {id}"
+            );
+        }
+        assert_eq!(
+            listed(&store, 1)[0].start_timezone.as_deref(),
+            Some("Asia/Tokyo")
+        );
+        assert_eq!(marker(&store), 1);
+        // Once: a later open leaves the ghosts as it finds them.
+        store
+            .lock()
+            .unwrap()
+            .execute_batch("UPDATE ghost_events SET starts_at=NULL,ends_at=NULL")
+            .unwrap();
+        drop(store);
+        let store = SqliteStore::open(&path).unwrap();
+        for id in &ids {
+            assert_eq!(stored_times(&store, *id), (None, None), "ghost {id}");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_ghost_that_fails_to_rebuild_is_skipped_and_the_store_still_opens() {
+        let (path, ids) = store_with_timeless_ghosts("skip");
+        let (bad, good) = (ids[0], ids[1]);
+        SqliteStore::open(&path)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "DELETE FROM app_settings WHERE key='{}';
+                 UPDATE ghost_events SET starts_at=NULL,start_sort=NULL,ends_at=NULL;
+                 CREATE TRIGGER fail_one BEFORE UPDATE ON ghost_events WHEN NEW.id={bad}
+                 BEGIN SELECT RAISE(ABORT,'no'); END;",
+                super::super::migrate::GHOST_ZONED_TIMES_KEY
+            ))
+            .unwrap();
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(stored_times(&store, bad), (None, None));
+        assert_eq!(
+            stored_times(&store, good),
+            (
+                Some("2026-10-19T21:30:00+09:00".into()),
+                Some("2026-10-19T14:45:00-07:00".into())
+            )
+        );
+        assert_eq!(marker(&store), 1, "one bad ghost does not retry forever");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }

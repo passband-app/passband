@@ -140,10 +140,15 @@ resource "aws_ecs_task_definition" "this" {
       image     = "${aws_ecr_repository.this[each.key].repository_url}:placeholder"
       essential = true
 
+      # hostPort, the empty lists and capabilities.add are what ECS fills in on
+      # registration; spelled out so plans don't show a perpetual replacement.
       portMappings = [{
         containerPort = local.ports[each.key]
+        hostPort      = local.ports[each.key]
         protocol      = "tcp"
       }]
+      systemControls = []
+      volumesFrom    = []
 
       environment = [
         for k, v in local.plain_env[each.key] : { name = k, value = v } if v != null
@@ -170,6 +175,7 @@ resource "aws_ecs_task_definition" "this" {
       linuxParameters = {
         initProcessEnabled = true
         capabilities = {
+          add  = []
           drop = ["NET_RAW"]
         }
       }

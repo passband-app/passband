@@ -414,7 +414,7 @@ struct PracticeProductTour: View {
         if step == .shipments { ids = store.zones.shipments.compactMap(\.thread_id) }
         if let example = step.exampleID { ids.insert("practice-\(example)", at: 0) }
         guard !ids.isEmpty else { return }
-        for id in ids { ThreadPrefetch.shared.prefetch(id, fresh: SitrepView.boardFresh) }
+        for id in ids { ThreadPrefetch.shared.prefetch(id, fresh: ThreadPrefetch.warmFresh) }
         FramePrewarmer.shared.prefer(ids)
     }
 

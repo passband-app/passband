@@ -2676,7 +2676,12 @@ final class AppStore {
         // The seed, after `readingMail` (the style reads it) and before the
         // view mounts. A direct open (`openMessage`) has no cached view yet
         // and hands the reader its copy through `focusedMessageView` instead.
-        readerSeed = ThreadPrefetch.shared.cached(threadId).map { view in
+        // NOT A COPY THAT LACKS THE MESSAGE THIS OPEN NAMES (the reply it is
+        // for, the message it lands on): the reader goes to the daemon for that
+        // one (ThreadViewer.load), and a seed it then replaces is a flash.
+        readerSeed = ThreadPrefetch.shared.cached(
+            threadId, holding: [replyTo, focusMessage].compactMap { $0 }
+        ).map { view in
             ReaderSeed(
                 threadId: threadId, view: view,
                 style: ThreadViewer.resolveStyle(
@@ -2749,6 +2754,9 @@ final class AppStore {
         guard event.kind != .opened else { return }
         // A poll slowed down because nobody is looking catches up now.
         SitrepPoller.shared.noteLiveEvent()
+        // The fastest word that a cached thread is behind: drop the copy now
+        // rather than at the pull this asks for.
+        ThreadPrefetch.shared.retire(CollectionOfOne((event.thread_id, event.message_id)))
         noteThreadArrival(
             thread: event.thread_id, message: event.message_id, sender: event.sender)
     }
@@ -3334,9 +3342,13 @@ final class AppStore {
                 mailPagingState[mode, default: MailPaging()].exhausted = false
             }
             mailLoadedAt[mode] = Date()
+            // Every row is a message, so this is where a reply landing in a
+            // cached thread is noticed, whichever row it is.
+            ThreadPrefetch.shared.retire(fetched.items.lazy.map { ($0.thread_id, $0.id) })
             // Pull the head rows' threads before any click, so an open renders
             // from cache. Runs on the launch warm too, not just on a visit.
-            // Mail still to do first: it is what gets opened.
+            // Mail still to do first: it is what gets opened. Runs every poll
+            // tick on the page, and asks only for threads not already cached.
             ThreadPrefetch.shared.warm(
                 merge.rows.lazy.filter { $0.status != .done }
                     .prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
@@ -3423,6 +3435,9 @@ final class AppStore {
             if page.items != sentRows.value { sentRows.value = page.items }
             if sentRows.error != nil { sentRows.error = nil }
             sentLoadedAt = Date()
+            // A reply sent from another client is a new row here, and the
+            // thread's copy predates it.
+            ThreadPrefetch.shared.retire(page.items.lazy.map { ($0.thread_id, $0.id) })
             ThreadPrefetch.shared.warm(
                 page.items.prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
         } catch {

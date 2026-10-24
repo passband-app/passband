@@ -94,6 +94,39 @@ struct Backoff {
     }
 }
 
+/// Calls `tick` at once and then on the clock, every `seconds` (a divisor of
+/// sixty) on the second hand, until the task is cancelled. The clock a view
+/// reads for what changes with the time alone ("3m", a deadline chip, today's
+/// date in a key), so it redraws on that beat on purpose rather than whenever
+/// something else happens to redraw it.
+///
+/// A beat that falls while `live` says no one is looking is skipped, and the
+/// missed one is made up soon after someone is again (looked for every ten
+/// seconds or so, with the slack to share a wakeup, which costs a check and
+/// no drawing). At once on start, because a
+/// `.task` starts on every appear, and a view coming back after a while is
+/// exactly when its times are furthest behind; `tick` is the caller's to make
+/// a no-op when nothing has moved.
+@MainActor
+func clockTicks(every seconds: Int, while live: () -> Bool, _ tick: () -> Void) async {
+    precondition(seconds > 0 && 60 % seconds == 0, "a beat that divides the minute")
+    tick()
+    var missed = false
+    while true {
+        if missed {
+            do { try await Task.sleep(for: .seconds(10), tolerance: .seconds(5)) } catch { return }
+            if live() {
+                missed = false
+                tick()
+            }
+            continue
+        }
+        let second = Calendar.current.component(.second, from: Date())
+        do { try await Task.sleep(for: .seconds(seconds - second % seconds)) } catch { return }
+        if live() { tick() } else { missed = true }
+    }
+}
+
 extension Duration {
     /// This duration in seconds, for the APIs that still take a `TimeInterval`.
     var timeInterval: TimeInterval {

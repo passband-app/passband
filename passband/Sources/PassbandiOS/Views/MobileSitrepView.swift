@@ -58,6 +58,10 @@ struct MobileSitrepView: View {
     /// see `BoardFold` for why four.
     fileprivate static let eyesVisible = BoardFold.forYourEyes
     @State private var expanded = false
+    /// THE BOARD'S CLOCK, on the minute: what the rows say with the time alone
+    /// ("3m", a deadline chip) and today's date in the headline's key used to
+    /// ride on the redraw every poll brought, when the board read the stats.
+    @State private var minute = Date()
 
     /// Warm the threads behind the rows showing, the first four at once.
     fileprivate static func warm(_ visible: [AttentionUpdate]) {
@@ -99,6 +103,7 @@ struct MobileSitrepView: View {
     }
 
     var body: some View {
+        let _ = minute
         // Preserve the server order on every device.
         let ranked = store.sitrep.standing
         let visible = expanded ? ranked : Array(ranked.prefix(Self.eyesVisible))
@@ -125,12 +130,19 @@ struct MobileSitrepView: View {
                 if !(reading.isEmpty && ranked.isEmpty) {
                     ReadingZone(senders: reading, cursor: cursor)
                 }
-                footnote
+                BoardFootnote(bannerShowing: bannerShowing)
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
         .background(Palette.canvas)
+        .task {
+            await clockTicks(every: 60, while: { Platform.isAppOnScreen }) {
+                // Not on a fresh mount, which has just drawn with now.
+                let now = Date()
+                if abs(now.timeIntervalSince(minute)) >= 1 { minute = now }
+            }
+        }
         .navigationTitle("Sitrep")
         .navigationBarTitleDisplayMode(.inline)
         // THE TWO DOORS OFF THE DASHBOARD: who you are, and the one verb this
@@ -230,7 +242,7 @@ struct MobileSitrepView: View {
     /// Nothing for your eyes, and truly so: the board has loaded, and it is
     /// not empty only because sync or triage is stuck.
     private var isClear: Bool {
-        store.stats != nil && store.sitrep.standing.isEmpty
+        store.hasStats && store.sitrep.standing.isEmpty
             && store.syncStatus.emptyHero(
                 queued: store.triageWaiting, lastSync: store.daemonLastSync) == nil
     }
@@ -267,8 +279,12 @@ struct MobileSitrepView: View {
         // Only "all clear" when triage has actually run; the footnote says why.
         HeroLine.title(
             headline: store.fyeHeadline, count: store.sitrep.standing.count,
-            empty: store.syncStatus.emptyHero(
-                queued: store.triageWaiting, lastSync: store.daemonLastSync)?.title)
+            // Asked only over an empty board, the one place it is said: the
+            // line is read off the stats, which change every poll.
+            empty: store.sitrep.standing.isEmpty
+                ? store.syncStatus.emptyHero(
+                    queued: store.triageWaiting, lastSync: store.daemonLastSync)?.title
+                : nil)
     }
 
     // MARK: - for your eyes
@@ -330,15 +346,23 @@ struct MobileSitrepView: View {
             }
         }
     }
+}
 
-    // MARK: - footnote
+// MARK: - footnote
 
-    /// The page's last line: how fresh the board is, and what went wrong if
-    /// anything did. The Mac says this in its masthead; a phone has no masthead
-    /// to say it in, and "when did this last update" is the one question a
-    /// glanceable surface owes an answer to.
-    @ViewBuilder
-    private var footnote: some View {
+/// The page's last line: how fresh the board is, and what went wrong if
+/// anything did. The Mac says this in its masthead; a phone has no masthead
+/// to say it in, and "when did this last update" is the one question a
+/// glanceable surface owes an answer to.
+///
+/// ITS OWN VIEW: the stamp is read off the stats and the client's refresh
+/// time, and both move every poll. Inline, that made the whole board a reader
+/// of them; here only this line redraws.
+private struct BoardFootnote: View {
+    @Environment(AppStore.self) private var store
+    let bannerShowing: Bool
+
+    var body: some View {
         if let refreshError = store.refreshError {
             Label(refreshError.message, systemImage: "exclamationmark.triangle.fill")
                 .font(Typo.micro)

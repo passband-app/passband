@@ -631,20 +631,68 @@ final class AppStore {
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
     var stats: StoreStats? {
-        didSet {
-            // The calendar gate, out of every poll: written only when it
-            // flips, so its readers (the rail, the Go menu) are not readers
-            // of the stats.
-            let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
-            if open != calendarPageAvailable { calendarPageAvailable = open }
-        }
+        didSet { noteStats() }
     }
+
+    /// THE VALUES THE BUSY VIEWS READ OFF THE STATS (the reader, the inbox,
+    /// both boards, the shells, the composers), written here and only when
+    /// they change. The stats themselves change on EVERY poll: the daemon stamps
+    /// `sync.last_success_at` each time Gmail answers (every five seconds by
+    /// default), so a view that read `stats?.anything`, or a property computed
+    /// from it, was a reader of the whole struct and was re-evaluated every
+    /// ten seconds — the reader's message stack for an address that never
+    /// moves, the root view for capability flags that never move. A view that
+    /// reads one of these and not the stats is redrawn only when it changes.
+    /// Views that draw the sync clock or the counters themselves still read
+    /// the stats, and redraw every poll as they should.
+    ///
+    /// Each is compared first: an assignment of the same value still tells
+    /// every reader to look again.
+    private func noteStats() {
+        let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
+        if open != calendarPageAvailable { calendarPageAvailable = open }
+        let email = stats?.account_email
+        if email != accountEmail { accountEmail = email }
+        let spam = stats?.spam
+        if spam != spamCount { spamCount = spam }
+        let landed = stats != nil
+        if landed != hasStats { hasStats = landed }
+        let dead = stats?.gmail?.connected == false
+        if dead != gmailDisconnected { gmailDisconnected = dead }
+        let draftsV2 = stats?.drafts_v2 == true
+        if draftsV2 != draftsV2Available { draftsV2Available = draftsV2 }
+        let scheduled = stats?.scheduled_send == true
+        if scheduled != scheduledSendAvailable { scheduledSendAvailable = scheduled }
+        let sharing = stats?.invite_sharing == true
+        if sharing != shareAvailable { shareAvailable = sharing }
+        let ios = stats?.ios_connected
+        if ios != iosConnected { iosConnected = ios }
+        let forwarding = stats?.forwarding == true
+        if forwarding != forwardingAvailable { forwardingAvailable = forwarding }
+        let attachments = stats?.compose_attachments == true
+        if attachments != composeAttachmentsAvailable { composeAttachmentsAvailable = attachments }
+        let relay = stats?.assistant_relay == true
+        if relay != relayAvailable { relayAvailable = relay }
+        var waiting = 0
+        if let triage = stats?.triage { waiting = max(triage.queued, 0) + max(triage.leased, 0) }
+        if waiting != triageWaiting { triageWaiting = waiting }
+        noteSyncStatus()
+    }
+
+    /// The mailbox's own address, for the reader's "me". See `noteStats`.
+    private(set) var accountEmail: String?
+    /// The spam folder's count, nil until the daemon has looked (see
+    /// `spamDoorVisible`). See `noteStats`.
+    private(set) var spamCount: Int?
+    /// Whether any stats have landed: the board's "all clear" waits for
+    /// them. See `noteStats`.
+    private(set) var hasStats = false
     /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
     /// number keys, the shortcuts sheet, the assistant's guide and the route
     /// all read this one property; the rule itself, the daemon's timeline AND
     /// the `calendar` hidden feature, is `CalendarGate.pageAvailable`.
     ///
-    /// STORED, and written by `stats`' didSet only when it changes (the
+    /// STORED, and written by `noteStats` only when it changes (the
     /// `statsEpoch` pattern): computed off `stats` it made the rail and the
     /// Go menu re-evaluate on every poll that changed any count. Off the raw
     /// `stats`, not `calendarAccess`: it says only whether a page exists,
@@ -656,8 +704,11 @@ final class AppStore {
     /// (the calendar grant and its consent link, `calendarAccess`) reads
     /// `stats` only while this is the live epoch.
     var statsEpoch: Int?
-    var lastRefresh: Date?
-    var refreshError: RefreshError?
+    var lastRefresh: Date? {
+        // `derive` reads only whether there has been one (`daemonDown`).
+        didSet { if (oldValue == nil) != (lastRefresh == nil) { noteSyncStatus() } }
+    }
+    var refreshError: RefreshError? { didSet { noteSyncStatus() } }
 
     /// Down = refreshes failing AND nothing has ever loaded this session, so the
     /// routed view is replaced by the down pane (Settings excepted: it must stay
@@ -1322,9 +1373,9 @@ final class AppStore {
         // live poller has never pulled (practice claims the connection before
         // it starts), so the stats are asked for once, here, while the client
         // still points at the real daemon. Read BEFORE the wipe either way.
-        var accountEmail = RehearsalMode.isEnabled ? nil : stats?.account_email
-        if accountEmail == nil, !RehearsalMode.isEnabled, connStatus == .connected {
-            accountEmail = (try? await APIClient.shared.getStats())?.account_email
+        var liveAddress = RehearsalMode.isEnabled ? nil : stats?.account_email
+        if liveAddress == nil, !RehearsalMode.isEnabled, connStatus == .connected {
+            liveAddress = (try? await APIClient.shared.getStats())?.account_email
         }
         guard !Task.isCancelled else { return }
         let previousStatus = connStatus
@@ -1358,7 +1409,7 @@ final class AppStore {
         wipeAccountCaches()
         closeOverlaysForPractice()
         RehearsalMode.setEnabled(true)
-        await RehearsalAPI.shared.reset(accountEmail: accountEmail)
+        await RehearsalAPI.shared.reset(accountEmail: liveAddress)
         // The fixture's calendar items keep the same ids from session to
         // session, and the zone retires an item a day after it was first
         // shown. Without this, a second run more than a day after the first
@@ -3529,7 +3580,7 @@ final class AppStore {
     /// condition left is that the daemon is new enough to have the field at
     /// all — `nil` means it cannot serve the page, and offering a door to a
     /// 400 would be worse than not offering one.
-    var spamDoorVisible: Bool { stats?.spam != nil }
+    var spamDoorVisible: Bool { spamCount != nil }
 
     /// Ask the daemon to go and fetch the spam folder. Called when the page is
     /// OPENED, not on the recurring poll: the daemon does not track that folder,
@@ -4276,8 +4327,8 @@ final class AppStore {
     /// nil (no stats yet, or a daemon too old to say) hides the drafts button
     /// and keeps ⌘N on the one-slot rule, because the by-id routes would 404
     /// on an old daemon. Note `DraftSaver.save` tells the two nil cases apart;
-    /// this flag does not need to.
-    var draftsV2Available: Bool { stats?.drafts_v2 == true }
+    /// this flag does not need to. Stored: see `noteStats`.
+    private(set) var draftsV2Available = false
 
     /// Fetch the drafts list into `draftsRows`. The drafts page calls it on open.
     ///
@@ -5420,8 +5471,8 @@ final class AppStore {
     /// Whether the composers may offer a send time. Same shape and same reason
     /// as `composeAttachmentsAvailable`: a daemon without an outbox would 404
     /// the click, so every schedule door (the clock, its chord, the palette)
-    /// is withheld. nil (no stats yet) counts as no.
-    var scheduledSendAvailable: Bool { stats?.scheduled_send == true }
+    /// is withheld. nil (no stats yet) counts as no. Stored: see `noteStats`.
+    private(set) var scheduledSendAvailable = false
 
     /// Set (or, with nil, clear) when a composer's mail goes.
     ///
@@ -6198,7 +6249,8 @@ final class AppStore {
     /// probe and SitrepPoller keeps it fresh, so no extra fetch exists for
     /// this. A self-host daemon never says `assistant_relay`, and nil means
     /// the switch is simply not offered (same posture as `trackingAvailable`).
-    var relayAvailable: Bool { stats?.assistant_relay == true }
+    /// Stored: see `noteStats`.
+    private(set) var relayAvailable = false
 
     // MARK: - gmail connection
 
@@ -6209,7 +6261,8 @@ final class AppStore {
     /// without a metrics registry), and a daemon that cannot see the credential
     /// must not have its silence rendered as an alarm. A false alarm here sends
     /// somebody through a Google consent screen for nothing.
-    var gmailDisconnected: Bool { stats?.gmail?.connected == false }
+    /// Both boards ask at the top of their bodies. Stored: see `noteStats`.
+    private(set) var gmailDisconnected = false
 
     /// A mailbox catch-up in flight, as `(done, total)`.
     ///
@@ -6279,8 +6332,37 @@ final class AppStore {
     /// credential, Gmail throttling or errors, catch-up and triage blockers,
     /// in that precedence. Every surface that talks about sync health reads
     /// this rather than re-deriving it. See Model/SyncStatus.swift.
-    var syncStatus: SyncStatus {
-        SyncStatus.derive(daemonDown: daemonDown, stats: stats, date: Fmt.date)
+    /// STORED, for the reason the values in `noteStats` are: the board's
+    /// banner, its status line and the empty-board hero all ask. Re-derived
+    /// whenever an input moves (the stats, the refresh error, the refresh
+    /// time: everything `derive` and `daemonDown` read) and written only when
+    /// the answer differs, which in a healthy mailbox is never.
+    private(set) var syncStatus: SyncStatus = .healthy
+    /// `derive` reads the clock for one thing, a cooldown's end; this looks
+    /// again at that instant, so the banner does not wait for the next poll
+    /// (as long as five minutes with the window hidden) to say it is over.
+    @ObservationIgnored private var syncStatusExpiry: Task<Void, Never>?
+    @ObservationIgnored private var syncStatusExpiresAt: Date?
+
+    private func noteSyncStatus() {
+        let now = Date()
+        let status = SyncStatus.derive(daemonDown: daemonDown, stats: stats, now: now, date: Fmt.date)
+        if status != syncStatus { syncStatus = status }
+        var expiry: Date?
+        if case .coolingDown(let until?, _) = status, until > now { expiry = until }
+        // The same end already armed: leave its timer be.
+        guard expiry != syncStatusExpiresAt else { return }
+        syncStatusExpiry?.cancel()
+        syncStatusExpiry = nil
+        syncStatusExpiresAt = expiry
+        if let expiry {
+            syncStatusExpiry = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(expiry.timeIntervalSince(now)))
+                guard !Task.isCancelled, let self else { return }
+                self.syncStatusExpiresAt = nil
+                self.noteSyncStatus()
+            }
+        }
     }
 
     /// When the DAEMON last heard from Gmail. Nil on a daemon too old to say,
@@ -6288,10 +6370,8 @@ final class AppStore {
     var daemonLastSync: Date? { Fmt.date(stats?.sync?.last_success_at) }
 
     /// Jobs waiting for, or running through, triage right now. 0 when unknown.
-    var triageWaiting: Int {
-        guard let t = stats?.triage else { return 0 }
-        return max(t.queued, 0) + max(t.leased, 0)
-    }
+    /// Stored: see `noteStats`.
+    private(set) var triageWaiting = 0
 
 
     // MARK: - invite sharing
@@ -6307,8 +6387,8 @@ final class AppStore {
     /// the connect probe. A self-host daemon, a daemon too old to say, and a
     /// hosted tenant nobody has turned sharing on for all read as false, and
     /// false means the button is never offered and the two-week nudge never
-    /// fires.
-    var shareAvailable: Bool { stats?.invite_sharing == true }
+    /// fires. Stored: see `noteStats`.
+    private(set) var shareAvailable = false
 
     /// The hidden features that are on for this mailbox. Read off the same
     /// stats as the capability flags above, and for a different reason than
@@ -6321,8 +6401,8 @@ final class AppStore {
 
     /// The daemon's answer to "has an iPhone app ever talked to this mailbox",
     /// or nil when it has not given one yet (or is too old to). Drives the
-    /// TestFlight ask; see `TestFlightNudge`.
-    var iosConnected: Bool? { stats?.ios_connected }
+    /// TestFlight ask; see `TestFlightNudge`. Stored: see `noteStats`.
+    private(set) var iosConnected: Bool?
 
     // MARK: - forwarding
 
@@ -6337,15 +6417,16 @@ final class AppStore {
     /// unknown field, sends the covering note by itself and returns 200 "sent",
     /// so hoping would mean mailing a stranger an empty "look at this" and
     /// telling the sender it worked. A send has no undo, so the only safe read
-    /// of "we do not know" is no.
-    var forwardingAvailable: Bool { stats?.forwarding == true }
+    /// of "we do not know" is no. Stored: see `noteStats`.
+    private(set) var forwardingAvailable = false
 
     /// Whether the composers may offer to attach files. Same shape and same
     /// reason as `forwardingAvailable`: a daemon that does not know
     /// `attachment_ids` ignores the key and mails the words without the
     /// files, answering 200 — so the affordance is withheld rather than
-    /// offered as a lie. nil (no stats yet) counts as no.
-    var composeAttachmentsAvailable: Bool { stats?.compose_attachments == true }
+    /// offered as a lie. nil (no stats yet) counts as no. Stored: see
+    /// `noteStats`.
+    private(set) var composeAttachmentsAvailable = false
 
     // MARK: - read tracking
 

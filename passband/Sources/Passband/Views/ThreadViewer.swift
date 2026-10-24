@@ -744,7 +744,11 @@ struct ThreadViewer: View {
                                 ? "arrow.down.to.line.compact" : "arrow.up.to.line.compact"
                         )
                         .font(Typo.ui(10, weight: .semibold))
-                        Text(attentionJumpLabel).font(Typo.micro)
+                        // Its own minute, for the reason the unsubscribe
+                        // hint has one: "12 min past due" moves by the clock.
+                        TimelineView(.everyMinute) { _ in
+                            Text(attentionJumpLabel).font(Typo.micro)
+                        }
                     }
                 }
                 .buttonStyle(.textAction)
@@ -792,8 +796,12 @@ struct ThreadViewer: View {
                 }
             } label: {
                 if let unsub {
-                    Text(Self.unsubHint(unsub))
-                        .font(Typo.micro)
+                    // Its own minute: the reader no longer redraws with every
+                    // poll, and "N ago" would stop where it was first drawn.
+                    TimelineView(.everyMinute) { _ in
+                        Text(Self.unsubHint(unsub))
+                            .font(Typo.micro)
+                    }
                 } else {
                     HStack(spacing: Space.s4) {
                         #if os(macOS)
@@ -852,7 +860,7 @@ struct ThreadViewer: View {
                                     message: m, style: style, position: i,
                                     selected: i == index, ruled: i > 0,
                                     opens: opens[m.id] ?? [],
-                                    me: store.stats?.account_email,
+                                    me: store.accountEmail,
                                     // The message before this one IN THE THREAD,
                                     // which is the order this stack is already in
                                     // (oldest first). The first message has none,

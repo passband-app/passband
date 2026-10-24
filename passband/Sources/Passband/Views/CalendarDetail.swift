@@ -450,7 +450,7 @@
             .task(id: source.message_id) {
                 guard
                     let view = try? await ThreadPrefetch.shared.fetch(
-                        source.thread_id, fresh: SitrepView.boardFresh)
+                        source.thread_id, fresh: ThreadPrefetch.warmFresh)
                 else { return }
                 let m = view.messages.first { $0.id == source.message_id } ?? view.messages.last
                 message = m

@@ -2294,6 +2294,10 @@ final class FramePrewarmer {
         // out, so the pool cannot see it, and rendering a second copy would
         // only be discarded when the first comes back.
         guard store.threadId != threadId else { return }
+        // A thread the cache is leaving alone (declined, or not loading) has no
+        // frame to make. The board asks for its top rows every poll tick, and
+        // `fetch` would go to the daemon for it each time.
+        guard !ThreadPrefetch.shared.isWithheld(threadId) else { return }
         guard let view = try? await ThreadPrefetch.shared.fetch(threadId),
             gen == generation, view.cache_allowed == true,
             let message = view.messages.last, let html = message.html, !html.isEmpty

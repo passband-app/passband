@@ -1083,7 +1083,7 @@ extension View {
     func warmsThreadOnHover(_ threadId: String?) -> some View {
         onHover { over in
             guard over, let threadId, !threadId.isEmpty else { return }
-            ThreadPrefetch.shared.prefetch(threadId, fresh: SitrepView.boardFresh)
+            ThreadPrefetch.shared.prefetch(threadId, fresh: ThreadPrefetch.warmFresh)
             FramePrewarmer.shared.nudge(threadId)
         }
     }

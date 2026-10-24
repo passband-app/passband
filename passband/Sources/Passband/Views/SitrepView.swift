@@ -70,11 +70,6 @@ struct SitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
 
-    /// How long a board row's thread stays good in the prefetch cache. Longer
-    /// than the default: a board row is the likeliest click in the app, and a
-    /// reader opened from a stale copy heals itself — the poll refetches in
-    /// place the moment it sees a newer message (AppStore.noteThreadArrival).
-    static let boardFresh: TimeInterval = 5 * 60
     /// How many of the top rows are worth a pre-rendered frame. Bounded by
     /// WebFramePool's prerendered tier; each is a live content process.
     private static let prerenderRows = 4
@@ -82,8 +77,7 @@ struct SitrepView: View {
     /// The whole warm for a list of board rows: threads first, then frames
     /// for the top few.
     fileprivate static func warmBoard(_ ids: [String]) {
-        ThreadPrefetch.shared.warm(
-            ids, immediate: eyesVisible, spacing: .milliseconds(150), fresh: boardFresh)
+        ThreadPrefetch.shared.warm(ids, immediate: eyesVisible, spacing: .milliseconds(150))
         FramePrewarmer.shared.want(Array(ids.prefix(prerenderRows)))
     }
 
@@ -1097,7 +1091,7 @@ private struct ObligationRow: View {
                 // The pointer resting on a row is the best predictor of the
                 // next click: make sure its thread is cached (a no-op when it
                 // already is) and, a beat later, rendered.
-                ThreadPrefetch.shared.prefetch(update.thread_id, fresh: SitrepView.boardFresh)
+                ThreadPrefetch.shared.prefetch(update.thread_id, fresh: ThreadPrefetch.warmFresh)
                 FramePrewarmer.shared.nudge(update.thread_id)
             }
         }

@@ -57,8 +57,14 @@ struct MobileSitrepView: View {
     /// How many ranked standing items show before the "{n} more" expander —
     /// four, well short of the Mac's ten, because a phone's fold is shorter and
     /// four ranked rows plus the expander still fit under it with the hero.
-    private static let eyesVisible = 4
+    fileprivate static let eyesVisible = 4
     @State private var expanded = false
+
+    /// Warm the threads behind the rows showing, the first four at once.
+    fileprivate static func warm(_ visible: [AttentionUpdate]) {
+        ThreadPrefetch.shared.warm(
+            visible.map(\.thread_id), immediate: eyesVisible, spacing: .milliseconds(150))
+    }
 
     /// When the drag now in flight started, to tell a page swipe from a row's.
     @State private var dragBegan: Date?
@@ -186,11 +192,15 @@ struct MobileSitrepView: View {
         // asking here as well is what makes a cold launch paint from one round of
         // requests rather than from whichever zone happened to mount first.
         .task { await store.refreshZones() }
-        .onAppear {
-            ThreadPrefetch.shared.warm(
-                store.sitrep.standing.map(\.thread_id), immediate: Self.eyesVisible,
-                spacing: .milliseconds(150))
-        }
+        // THE ROWS ON SCREEN, not the band: this ran on every return to the
+        // tab and warmed every standing thread, up to two hundred fetches for
+        // four rows anybody could tap. Expanding the list, or a row changing,
+        // warms what that brings into view, and every poll keeps them warm (a
+        // copy lapses, or a reply drops it); a warm of threads already cached
+        // asks nothing.
+        .onAppear { Self.warm(visible) }
+        .onChange(of: visible.map(\.id)) { _, _ in Self.warm(visible) }
+        .background { VisibleWarmKeeper(rows: visible) }
         .onChange(of: visible.count) { _, count in
             if count == 0 { expanded = false }
         }
@@ -350,5 +360,24 @@ struct MobileSitrepView: View {
                 .foregroundStyle(stamp.warn ? Palette.warn : Palette.inkFaintest)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Re-warms the rows showing on every poll, as the Mac's board keeper does.
+/// A zero-size view of its own so that reading the poll heartbeat invalidates
+/// it and not the board.
+private struct VisibleWarmKeeper: View {
+    @Environment(AppStore.self) private var store
+    let rows: [AttentionUpdate]
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            // THE ROWS ON SCREEN ONLY, as the Mac's keeper does: with the
+            // list expanded, re-warming all of it every poll would start a
+            // long trickle every ten seconds.
+            .onChange(of: store.lastRefresh) { _, _ in
+                MobileSitrepView.warm(Array(rows.prefix(MobileSitrepView.eyesVisible)))
+            }
     }
 }

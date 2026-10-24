@@ -48,6 +48,18 @@ struct ThreadViewer: View {
     private var styles: ThreadStyleLedger { .shared }
 
     @State private var thread: ClientThreadView?
+    /// Bumped by every `adopt`, so a check of an aged copy can tell that a
+    /// newer answer (an arrival, the post-send reload) landed while it was out.
+    @State private var adoptions = 0
+    /// Bumped by "try again", so the retry runs as the opening load does: in
+    /// the reader's own task, cancelled with it.
+    @State private var attempt = 0
+
+    /// What the opening task is keyed on: the thread, and which try at it.
+    private struct LoadKey: Hashable {
+        var threadId: String
+        var attempt: Int
+    }
     @State private var error: String?
     @State private var loading = true
     /// HOW THIS THREAD IS DRAWN, resolved once per thread rather than per row:
@@ -370,12 +382,13 @@ struct ThreadViewer: View {
                 .task { await rehearseBar() }
             #endif
         #endif
-        .task(id: threadId) {
-            await load()
+        .task(id: LoadKey(threadId: threadId, attempt: attempt)) {
+            let aged = await load()
             // Only once the thread is HERE: the hand-off names a message, and
             // whether it is in this thread is not knowable until it has loaded.
             consumePendingReply()
             await refreshOpens()
+            if aged { await revalidate() }
         }
         .task(id: newestSender) { await refreshUnsub() }
         // SIZE THE THREAD UP BEFORE IT IS SCROLLED THROUGH. Nothing here waits
@@ -1640,7 +1653,7 @@ struct ThreadViewer: View {
 
             HStack(spacing: Space.s10) {
                 Button {
-                    Task { await load() }
+                    attempt &+= 1
                 } label: {
                     Label("try again", systemImage: "arrow.clockwise")
                         .font(Typo.ui(12, weight: .medium))
@@ -2083,6 +2096,14 @@ struct ThreadViewer: View {
         let epoch = store.epoch
         guard let view = try? await APIClient.shared.getThread(threadId) else { return }
         guard store.isCurrent(epoch), !Task.isCancelled else { return }
+        await takeInPlace(view, arrival: true)
+    }
+
+    /// Adopt a refetched copy of the thread on screen without moving the
+    /// person reading it: `refreshInPlace`'s arrival, or `revalidate`'s
+    /// change. Only an arrival is counted as one, and fetches the receipts
+    /// itself; a check runs before the opening's receipts fetch.
+    private func takeInPlace(_ view: ClientThreadView, arrival: Bool) async {
         // Anchor AFTER the await: a reader who moved while the fetch was in
         // flight is anchored where they are now, not where they were.
         let anchor = anchorId
@@ -2109,10 +2130,10 @@ struct ThreadViewer: View {
         // Only when something actually arrived: a token bump whose refetch
         // brought nothing (the daemon had not stored the message yet) is not a
         // reading experience anybody had.
-        if gained > 0 {
+        if arrival, gained > 0 {
             Analytics.capture("thread_live_arrival", ["followed": held == nil])
         }
-        await refreshOpens()
+        if arrival { await refreshOpens() }
     }
 
     /// The message the reader is actually ON, whether they got there with the
@@ -2764,7 +2785,10 @@ struct ThreadViewer: View {
 
     // MARK: - data
 
-    private func load() async {
+    /// True when what it painted was a prefetched copy past the default
+    /// minute, which the caller then checks with the daemon (`revalidate`).
+    @discardableResult
+    private func load() async -> Bool {
         let epoch = store.epoch
         // A fresh thread mounts fresh rows; where the LAST one's cards were
         // must not anchor this one, and its shape must not be what the minimap
@@ -2793,15 +2817,24 @@ struct ThreadViewer: View {
             adopt(direct, opening: true)
             error = nil
             loading = false
-            return
+            return false
         }
-        // Fresh prefetch hit → render it and skip the round-trip entirely (the
-        // cache is at most 60s old; e/d/refresh paths repopulate it).
-        if let cached = ThreadPrefetch.shared.cached(threadId) {
+        // Fresh prefetch hit → render it and skip the round-trip (a copy is
+        // served only inside its lifetime, a minute by default and five for a
+        // warmed thread, and is dropped once a row names a message it lacks;
+        // e/d/refresh paths repopulate it). One past the minute is checked
+        // with the daemon once it is on screen.
+        // A copy that lacks the message this open names (the reply it was
+        // opened to write, the notification's message) is behind on exactly
+        // the thing asked for, so the open goes to the daemon instead.
+        if let cached = ThreadPrefetch.shared.cached(
+            threadId,
+            holding: [store.pendingReplyMessageId, store.focusedMessageId].compactMap { $0 })
+        {
             adopt(cached, opening: true)
             error = nil
             loading = false
-            return
+            return ThreadPrefetch.shared.isAged(threadId)
         }
         loading = true
         error = nil
@@ -2809,14 +2842,75 @@ struct ThreadViewer: View {
             let view = try await APIClient.shared.getThread(threadId)
             // Account switches clear the shared cache. A request that started
             // before that clear must never repopulate it under the new account.
-            guard store.isCurrent(epoch), !Task.isCancelled else { return }
+            guard store.isCurrent(epoch), !Task.isCancelled else { return false }
             ThreadPrefetch.shared.note(threadId, view)  // instant reopen
             adopt(view, opening: true)
         } catch {
-            guard store.isCurrent(epoch), !Task.isCancelled else { return }
+            guard store.isCurrent(epoch), !Task.isCancelled else { return false }
             self.error = errText(error, "thread load failed")
         }
         loading = false
+        return false
+    }
+
+    /// The open painted a prefetched copy past the default minute, which can
+    /// be behind on anything no row named: a quiet reply, the account's own
+    /// mail sent elsewhere, a status changed by a reminder or an unsubscribe.
+    /// Ask for the current thread and take it in place, as an arrival is
+    /// taken, only if it differs, so an unchanged thread is not redrawn.
+    ///
+    /// An answer is dropped if anything was adopted while it was out: that
+    /// was an arrival or the post-send reload, newer than this. A thread the
+    /// daemon no longer serves says so, as a cold open would have.
+    private func revalidate() async {
+        let epoch = store.epoch
+        let shown = adoptions
+        let view: ClientThreadView
+        do {
+            view = try await APIClient.shared.getThread(threadId)
+        } catch let failure as APIError where failure.kind == .notFound {
+            guard store.isCurrent(epoch), !Task.isCancelled else { return }
+            // As a cold open's 404 leaves it: no thread, nothing for the
+            // verbs or the ask bar to act on.
+            ThreadPrefetch.shared.drop(threadId)
+            // A reply the hand-off opened against the copy goes too.
+            if let to = store.inlineReply?.replyToMessageId, messages.contains(where: { $0.id == to }) {
+                store.closeInlineReply()
+            }
+            thread = nil
+            if store.openThreadSummary?.threadId == threadId { store.openThreadSummary = nil }
+            self.error = errText(failure, "thread load failed")
+            return
+        } catch {
+            // Offline, or the daemon is struggling: the copy on screen stands.
+            return
+        }
+        guard store.isCurrent(epoch), !Task.isCancelled, thread != nil, adoptions == shown
+        else { return }
+        guard view != thread else {
+            ThreadPrefetch.shared.note(threadId, view)
+            return
+        }
+        let held = messages.map(\.id)
+        if landed {
+            await takeInPlace(view, arrival: false)
+        } else {
+            // Not landed yet: the selection is still the open's own (the
+            // newest, or the message it was opened on), and where the initial
+            // anchor dropped the scroll is nobody's position, so `takeInPlace`'s
+            // anchor would pin an older card and the landing would never come.
+            // Keep the selection by id; the newest stays the newest, the
+            // current copy's, and the landing proceeds as an open's does.
+            let selected = index == newestIndex ? nil : messages[safe: index]?.id
+            ThreadPrefetch.shared.note(threadId, view)
+            adopt(view)
+            if let selected, let at = messages.firstIndex(where: { $0.id == selected }) {
+                index = at
+            }
+        }
+        // Mail the check brought: its receipts too, which the opening's
+        // receipts fetch ran before it.
+        if messages.map(\.id) != held { await refreshOpens() }
     }
 
     /// Take a loaded thread and derive its reader state. `opening` is true only
@@ -2827,6 +2921,7 @@ struct ThreadViewer: View {
     /// that moved the paragraph somebody was on.
     private func adopt(_ view: ClientThreadView, opening: Bool = false) {
         thread = view
+        adoptions &+= 1
         // THE STYLE FIRST: the rail below is drawn to its measure, so a mark
         // taken before the thread has chosen one is drawn for the wrong one.
         if opening {

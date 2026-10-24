@@ -2009,9 +2009,7 @@ struct ThreadViewer: View {
     /// chat), asked of the store rather than of a view's environment so the
     /// initializer and the pre-renderer can ask too.
     static func isReadingMail(_ threadId: String, _ store: AppStore) -> Bool {
-        store.readingMail || store.zones.reading.contains { sender in
-            sender.items.contains { $0.thread_id == threadId }
-        }
+        store.readingMail || store.readingThreadIds.contains(threadId)
     }
 
     /// A message reduced to what the guess asks about. The fresh length is the
@@ -4126,7 +4124,12 @@ private struct StackDoneHold: View {
                 .fill(.black.opacity(0.14))
                 .ignoresSafeArea()
             VStack(spacing: Space.s14) {
-                TimelineView(.animation) { ctx in
+                // Sixty a second, not the display's hundred and twenty: a ring
+                // filling over a second or so loses nothing at sixty, and the
+                // hold is exactly when the walk is about to need the frames.
+                // Just under a sixtieth, so a frame that lands a hair early is
+                // not skipped for the one after it.
+                TimelineView(.animation(minimumInterval: 1.0 / 64, paused: pinned != nil)) { ctx in
                     let p = pinned ?? min(1, max(0, ctx.date.timeIntervalSince(startedAt) / seconds))
                     ZStack {
                         Circle()

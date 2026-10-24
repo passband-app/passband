@@ -54,10 +54,9 @@ struct MobileSitrepView: View {
     /// across the two shells rather than forking it for the phone.
     @State private var cursor = SitrepCursor()
 
-    /// How many ranked standing items show before the "{n} more" expander —
-    /// four, well short of the Mac's ten, because a phone's fold is shorter and
-    /// four ranked rows plus the expander still fit under it with the hero.
-    fileprivate static let eyesVisible = 4
+    /// How many ranked standing items show before the "{n} more" expander;
+    /// see `BoardFold` for why four.
+    fileprivate static let eyesVisible = BoardFold.forYourEyes
     @State private var expanded = false
 
     /// Warm the threads behind the rows showing, the first four at once.
@@ -225,7 +224,7 @@ struct MobileSitrepView: View {
     }
 
     private var reading: [ReadingSender] {
-        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+        store.readingOnBoard
     }
 
     /// Nothing for your eyes, and truly so: the board has loaded, and it is

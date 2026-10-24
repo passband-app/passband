@@ -906,11 +906,22 @@ final class AppStore {
     /// reader came in through a Reading tile.
     var readingOrder: [String] = []
 
+    /// What the Reading zone draws: its senders, pruned of mail already
+    /// resolved here.
+    var readingOnBoard: [ReadingSender] { Reading.prune(zones.reading, resolved: resolvedIds) }
+
+    /// Resolve the heroes of the Reading cards on screen. Those past the fold
+    /// resolve their own as they mount, or in the launch warm's deferred half
+    /// once the board has been quiet.
+    private func preloadBoardHeroes() {
+        HeroCache.shared.preload(readingOnBoard.prefix(BoardFold.reading).map(\.latestThreadId))
+    }
+
     /// A Reading tile: the sender's newest email, with the rest of that sender
     /// as the queue and the rest of the board behind it.
     func openReading(_ sender: ReadingSender) {
         guard !sender.latestThreadId.isEmpty else { return }
-        readingOrder = Reading.prune(zones.reading, resolved: resolvedIds).map(\.address)
+        readingOrder = readingOnBoard.map(\.address)
         openThread(
             sender.latestThreadId, queue: sender.items, readingMail: true, from: .reading)
     }
@@ -921,7 +932,7 @@ final class AppStore {
         guard readingMail, let threadId, let first = threadQueue.first else { return nil }
         return Reading.next(
             after: SenderID.address(first.sender), in: readingOrder,
-            board: Reading.prune(zones.reading, resolved: resolvedIds), notThread: threadId)
+            board: readingOnBoard, notThread: threadId)
     }
 
     /// Shared by the preview and advance action so resolved siblings never peek.
@@ -2209,7 +2220,7 @@ final class AppStore {
         // What a zone pass does once its rows are in, done for these rows:
         // the caches were wiped with the last account, and the cards are on
         // screen a round trip before the pass that would refill them.
-        HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
+        preloadBoardHeroes()
         warmZoneThreads()
     }
 
@@ -2918,7 +2929,7 @@ final class AppStore {
             zonesLoadedAt = Date()
         }
 
-        HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
+        preloadBoardHeroes()
         warmZoneThreads()
         // The reading half of the launch image warm's input; the bands are the
         // other half, and it starts once both have landed.

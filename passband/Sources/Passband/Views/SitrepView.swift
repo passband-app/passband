@@ -7,7 +7,7 @@
 import SwiftUI
 
 /// How many ranked standing items show before the quiet "{n} more" expander.
-private let eyesVisible = 10
+private let eyesVisible = BoardFold.forYourEyes
 
 /// THE FOR-YOUR-EYES WALK: the queue the reader is handed when an email is
 /// opened from this band, so `E` (done + next) can step through it without
@@ -312,7 +312,7 @@ struct SitrepView: View {
 
     /// The reading cards as the zone draws them.
     private var readingSenders: [ReadingSender] {
-        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+        store.readingOnBoard
     }
 
     /// Clear AND nothing to read: the board with nothing on it at all, which

@@ -241,8 +241,12 @@ enum SyncStatus: Equatable, Sendable {
     /// What the hero says INSTEAD of "You're all clear." when the board is
     /// empty because triage has not run, not because there is nothing to do.
     /// Nil means the empty board is the truth and "all clear" may stand.
+    ///
+    /// `lastSync` is asked only where it is said (a sync that has stopped):
+    /// it is the sync clock, which moves on every poll, and a board that
+    /// asked for it over a healthy empty board was redrawn with it.
     func emptyHero(
-        queued: Int, lastSync: Date?, now: Date = Date()
+        queued: Int, lastSync: @autoclosure () -> Date?, now: Date = Date()
     ) -> (title: String, note: String)? {
         switch self {
         case .unreachable:
@@ -256,7 +260,7 @@ enum SyncStatus: Equatable, Sendable {
                     "\(Self.emails(queued)) waiting. Triage starts once Gmail sync succeeds."
                 )
             }
-            let since = lastSync.flatMap { Self.ago($0, now: now) }
+            let since = lastSync().flatMap { Self.ago($0, now: now) }
             return (
                 "Nothing new to show.",
                 since.map { "Gmail has not synced since \($0), so newer mail may be waiting." }

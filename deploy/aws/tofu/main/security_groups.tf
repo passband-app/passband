@@ -128,7 +128,7 @@ resource "aws_vpc_security_group_egress_rule" "monitor_https" {
 
 resource "aws_vpc_security_group_egress_rule" "monitor_http" {
   security_group_id = aws_security_group.monitor.id
-  description       = "HTTP out (blackbox http->https redirect probes)"
+  description       = "HTTP out (blackbox http to https redirect probes)"
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "tcp"
   from_port         = 80

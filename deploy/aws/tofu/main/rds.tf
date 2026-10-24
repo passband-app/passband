@@ -17,8 +17,9 @@ resource "aws_db_parameter_group" "main" {
   family = "postgres16"
 
   parameter {
-    name  = "rds.force_ssl"
-    value = "1"
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot" # what RDS records for it; avoids a perpetual diff
   }
 
   # Slow statements are logged (with their text), but never their bind
@@ -53,7 +54,7 @@ resource "aws_db_instance" "main" {
   storage_type          = "gp3"
   storage_encrypted     = true
 
-  db_name                     = "control"
+  db_name                     = "passband" # "control" is reserved by RDS for this engine
   username                    = "passband_admin"
   manage_master_user_password = true
 

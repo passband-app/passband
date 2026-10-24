@@ -423,7 +423,7 @@ export PGSSLMODE=verify-full PGSSLROOTCERT=$PWD/squelch-control/certs/rds-global
 admin() { PGPASSWORD=$(aws secretsmanager get-secret-value \
     --secret-id "$(tofu -chdir=$TF output -raw rds_master_secret_arn)" \
     --query SecretString --output text | jq -r .password) \
-  psql -X "host=$RDS_HOST hostaddr=127.0.0.1 port=15432 dbname=control user=passband_admin" "$@"; }
+  psql -X "host=$RDS_HOST hostaddr=127.0.0.1 port=15432 dbname=passband user=passband_admin" "$@"; }
 admin -c 'select version()'                    # PostgreSQL 16.x, over TLS
 
 CTRL_PW=$(openssl rand -hex 32)
@@ -434,9 +434,9 @@ p=sys.stdin.buffer.read(); s=os.urandom(16); k=hashlib.pbkdf2_hmac("sha256",p,s,
 c=hmac.new(k,b"Client Key","sha256").digest(); v=hmac.new(k,b"Server Key","sha256").digest()
 e=lambda x:b.b64encode(x).decode()
 sys.stdout.write("SCRAM-SHA-256$4096:%s$%s:%s"%(e(s),e(hashlib.sha256(c).digest()),e(v)))'; }
-printf "CREATE ROLE control LOGIN PASSWORD '%s';\nGRANT control TO passband_admin;\nALTER DATABASE control OWNER TO control;\n" \
+printf "CREATE ROLE control LOGIN PASSWORD '%s';\nGRANT control TO passband_admin;\nALTER DATABASE passband OWNER TO control;\n" \
   "$(printf '%s' "$CTRL_PW" | scram)" | admin -v ON_ERROR_STOP=1
-printf 'postgres://control:%s@%s:5432/control?sslmode=verify-full' "$CTRL_PW" "$RDS_HOST" \
+printf 'postgres://control:%s@%s:5432/passband?sslmode=verify-full' "$CTRL_PW" "$RDS_HOST" \
   | putin passband/control/SQUELCH_CONTROL_DATABASE_URL
 unset CTRL_PW
 ```
@@ -466,7 +466,7 @@ characters, safe to show). The DATABASE_URL works as the app will use it:
 
 ```sh
 PGPASSWORD=$(sget passband/control/SQUELCH_CONTROL_DATABASE_URL | sed -E 's#^postgres://control:([^@]+)@.*#\1#') \
-  psql -X "host=$RDS_HOST hostaddr=127.0.0.1 port=15432 dbname=control user=control" -c 'select current_user'   # control
+  psql -X "host=$RDS_HOST hostaddr=127.0.0.1 port=15432 dbname=passband user=control" -c 'select current_user'   # control
 ```
 
 **ROLLBACK.** A wrong value is fixed by another `put-secret-value`; the
@@ -488,8 +488,9 @@ exits without the Slack URL, and a box that keeps failing just wastes the phase.
 ```sh
 R=passband-app/passband
 gh api repos/$R/actions/oidc/customization/sub --jq '.include_claim_keys'           # ["repo","context","job_workflow_ref"]
+# Immutable subjects (0d): the repo part comes from GitHub's sub_claim_prefix.
 diff <(tofu -chdir=$TF output -raw github_deploy_oidc_sub; echo) \
-     <(echo "repo:$R:environment:aws-production:job_workflow_ref:$R/.github/workflows/deploy-aws.yml@refs/heads/main") && echo SUB-MATCHES
+     <(echo "$(gh api repos/$R/actions/oidc/customization/sub --jq .sub_claim_prefix):environment:aws-production:job_workflow_ref:$R/.github/workflows/deploy-aws.yml@refs/heads/main") && echo SUB-MATCHES
 ```
 
 If the template is not customized, every deploy job fails at
@@ -822,7 +823,7 @@ price of a dump that nothing can write behind.
      PGPASSWORD=$(sget passband/control/SQUELCH_CONTROL_DATABASE_URL | sed -E 's#^postgres://control:([^@]+)@.*#\1#') \
      "$tool" "$@"; }
    printf 'DROP SCHEMA public CASCADE;\nCREATE SCHEMA public AUTHORIZATION control;\n' | ctl psql -X -v ON_ERROR_STOP=1
-   ctl pg_restore --no-owner --no-acl --exit-on-error -d control "$WORK/control.dump"
+   ctl pg_restore --no-owner --no-acl --exit-on-error -d passband "$WORK/control.dump"
    ctl psql -X -At -f "$WORK/counts.sql" > "$WORK/counts.rds"
    diff "$WORK/counts.railway" "$WORK/counts.rds" && echo IDENTICAL
    ```

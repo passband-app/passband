@@ -614,6 +614,7 @@ final class AppStore {
         didSet {
             guard sitrep.standing != oldValue.standing else { return }
             Badge.refresh(sitrep.standing)
+            noteHeadlineBand()
         }
     }
     /// The hero's sentence about what For-your-eyes is ABOUT, written by the
@@ -725,7 +726,27 @@ final class AppStore {
     var selectedId: Int?
 
     // MARK: sitrep zones — see SitrepZoneCache
-    var zones = SitrepZoneCache()
+    var zones = SitrepZoneCache() {
+        didSet {
+            // A zone pass writes each zone apart; only Reading's moves this.
+            guard zones.reading != oldValue.reading else { return }
+            noteReadingThreads()
+        }
+    }
+    /// Every thread a Reading sender's window holds, which is what makes a
+    /// thread "reading mail" for the reader (`ThreadViewer.isReadingMail`).
+    /// STORED, rebuilt when the zones change and written only when the set
+    /// does: the reader asked it several times a body, and each was a walk
+    /// of every sender's every item.
+    private(set) var readingThreadIds: Set<String> = []
+
+    private func noteReadingThreads() {
+        var ids = Set<String>()
+        for sender in zones.reading {
+            for item in sender.items { ids.insert(item.thread_id) }
+        }
+        if ids != readingThreadIds { readingThreadIds = ids }
+    }
 
     // MARK: calendar page, see Model/CalendarStore.swift
     /// The last timeline that landed, held here for the reason the zones are:
@@ -1251,19 +1272,27 @@ final class AppStore {
     }
 
     /// The owner's local date as the headline prompt reads it.
-    private static func headlineToday(_ now: Date = Date()) -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd (EEEE)"
-        return f.string(from: now)
+    /// Through `Agenda.format`'s formatters, kept per zone: one made per call
+    /// is what this was, and one kept on the zone it was made in would put
+    /// the day out by the difference after a flight.
+    private static func headlineToday() -> String {
+        Agenda.format(Date(), "yyyy-MM-dd (EEEE)", .current)
     }
 
     /// What a headline is ABOUT: the rows in the band and what triage said of
     /// each, plus the day. Any change here is a board the old sentence may no
-    /// longer describe.
-    var headlineKey: String {
-        Self.headlineToday() + "|"
-            + sitrep.standing.map { "\($0.thread_id):\($0.one_line)" }.joined(separator: "|")
+    /// longer describe. The day is read as it is (a kept formatter), and the
+    /// rows' half is kept in `headlineBand`: this was rebuilt, a new formatter
+    /// and a join of every row included, on every board body that keyed its
+    /// headline task on it.
+    var headlineKey: String { Self.headlineToday() + "|" + headlineBand }
+
+    /// The rows' half of `headlineKey`, rebuilt when the band changes.
+    private(set) var headlineBand = ""
+
+    private func noteHeadlineBand() {
+        let band = sitrep.standing.map { "\($0.thread_id):\($0.one_line)" }.joined(separator: "|")
+        if band != headlineBand { headlineBand = band }
     }
 
     private static let headlineDefaultsKey = "fyeHeadline.last"

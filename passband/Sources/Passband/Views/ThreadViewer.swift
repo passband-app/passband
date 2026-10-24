@@ -1401,8 +1401,9 @@ struct ThreadViewer: View {
     /// often as the answer changes.
     ///
     /// MORE ABOVE THAN BELOW, and above first: the reader opens at the end of
-    /// the thread, so up is the way nearly every scroll goes. Five in all,
-    /// inside the six the pool keeps for mail that has been read.
+    /// the thread, so up is the way nearly every scroll goes. Five in all;
+    /// the prewarmer takes as many as the pool keeps room for
+    /// (`WebFramePool.aheadBudget`: all five on the Mac, two on the phone).
     ///
     /// Only mail the pool may hold at all (`cache_allowed`), and only what is
     /// not already drawn. "Drawn" is judged within a few windows of here: the

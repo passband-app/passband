@@ -108,7 +108,10 @@ final class FrameMeasurer {
         allowRemote: Bool, token: String, onFinished: @escaping () -> Void
     ) {
         reset()
-        guard width > 0 else { return }
+        guard width > 0 else {
+            releaseIfPressed()
+            return
+        }
         // Before the filter below asks what is already on file: a height taken
         // at the other density is on file and wrong.
         ReaderMetrics.sync()
@@ -131,6 +134,7 @@ final class FrameMeasurer {
             return FrameHeights.shared.authoritative(style.frameKey(message.id)) == nil
         }
         guard !jobs.isEmpty else {
+            releaseIfPressed()
             onFinished()
             return
         }
@@ -150,7 +154,10 @@ final class FrameMeasurer {
                 // the number is true of a drawing nobody will see, and filed as
                 // authoritative it would outrank the frame that is showing the
                 // real one. The reader starts a pass of its own for the flip.
-                guard ReaderMetrics.current == metrics else { return }
+                guard ReaderMetrics.current == metrics else {
+                    self.finish()
+                    return
+                }
                 if height > 0 {
                     FrameHeights.shared.set(
                         style.frameKey(message.id), height, authoritative: true)
@@ -161,11 +168,27 @@ final class FrameMeasurer {
                 }
             }
             guard let self, !Task.isCancelled else { return }
-            // The frame stays warm for the next thread; only the pass ends.
-            self.reset()
+            // The frame stays warm for the next thread (but see `finish`); only
+            // the pass ends.
+            self.finish()
             onFinished()
         }
     }
+
+    #if os(iOS)
+        /// Let the kept frame go while no pass is using it: the pool is
+        /// draining (memory is short, or the app has left the screen) and an
+        /// idle frame is a parked content process. The next pass builds
+        /// another, a launch's ~76ms. One mid-pass is the open reader's and is
+        /// left alone.
+        func releaseIdleFrame() {
+            guard pass == nil, let frame else { return }
+            frame.stopLoading()
+            frame.navigationDelegate = nil
+            self.frame = nil
+            relay = nil
+        }
+    #endif
 
     /// The reader leaving. TOKEN-SCOPED because a thread switch is two events
     /// in an order SwiftUI does not promise: the incoming reader may start its
@@ -173,7 +196,20 @@ final class FrameMeasurer {
     /// throw away the pass that had just begun.
     func cancel(token: String) {
         guard self.token == token else { return }
+        finish()
+    }
+
+    /// A pass over, however it ended. On the phone, while the pool is holding
+    /// back (`WebFramePool.isPressed`), the kept frame goes with it.
+    private func finish() {
         reset()
+        releaseIfPressed()
+    }
+
+    private func releaseIfPressed() {
+        #if os(iOS)
+            if WebFramePool.shared.isPressed { releaseIdleFrame() }
+        #endif
     }
 
     /// Stop. Heights already taken stay taken — they are true regardless of

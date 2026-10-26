@@ -326,6 +326,9 @@ systemctl restart --no-block passband-monitor.service
 dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo
 dnf install -y tailscale nginx
 systemctl enable --now tailscaled
+# App connector (bifrost/grafana.passband.app routed via this box): needs forwarding.
+printf 'net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\n' >/etc/sysctl.d/99-tailscale.conf
+sysctl -q -p /etc/sysctl.d/99-tailscale.conf
 # The ALB routes on Host, and serve forwards the tailnet name, so Bifrost goes
 # through a loopback-only nginx that presents bifrost.passband.app (Host + SNI).
 cat >/etc/nginx/conf.d/bifrost-tailnet.conf <<'NGX'
@@ -356,7 +359,7 @@ elif TS_KEY=$(aws secretsmanager get-secret-value --region "$REGION" \
   (umask 077; printf '%s' "$TS_KEY" >/run/passband-monitor/ts-authkey)
   unset TS_KEY
   if tailscale up --auth-key=file:/run/passband-monitor/ts-authkey \
-      --hostname=passband-monitor --advertise-tags=tag:passband-aws; then
+      --hostname=passband-monitor --advertise-tags=tag:passband-aws --advertise-connector; then
     tailscale serve --bg --https=443 http://127.0.0.1:8081
     tailscale serve --bg --https=8443 http://127.0.0.1:3000
     log "tailscale joined; serving Bifrost on :443 and Grafana on :8443"

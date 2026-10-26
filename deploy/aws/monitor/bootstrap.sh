@@ -33,7 +33,7 @@ set -euo pipefail
 
 DATA_DEVICE_NAME=sdf          # tofu aws_volume_attachment.device_name, minus /dev/
 DATA_MOUNT=/data
-DATA_LABEL=passband-data
+DATA_LABEL=pbmon-data # XFS labels are 12 characters at most
 APP_DIR=/opt/passband-monitor
 COMPOSE_VERSION=v5.6.0
 COMPOSE_SHA256=733ec76717ceb59052a9609b9dadfb523b2df8eab57a54212872d10a58078ea2  # docker-compose-linux-aarch64

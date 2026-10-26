@@ -359,7 +359,9 @@ nothing, and leaked), `SQUELCH_CONTROL_ALERT_WEBHOOK` (legacy name).
 openssl rand -base64 48 | tr -d '\n' | putin passband/control/SQUELCH_CONTROL_COOKIE_KEY
 
 # Bifrost admin credential: username:password, one colon, >= 32 chars. Hex keeps ':' out of the halves.
-printf 'passband-ops:%s' "$(openssl rand -hex 24)" | putin passband/control/SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN
+# Bifrost's password policy wants an uppercase letter and a special character;
+# plain hex is refused at "enable auth". No ':' in the password half.
+printf 'passband-ops:Pb-%s' "$(openssl rand -hex 24)" | putin passband/control/SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN
 
 # Relay: two different bearers, 64 hex chars each.
 openssl rand -hex 32 | tr -d '\n' | putin passband/relay/SQUELCH_RELAY_AUTH_TOKEN
@@ -608,6 +610,18 @@ curl -s -o /dev/null -w '%{http_code}\n' https://bifrost.passband.app/      # NO
 
 If your address changes mid-phase (VPN, Wi-Fi hop), everything below starts
 answering `404 not found`: redo the three lines above.
+
+**Done 2026-10-26 through Bifrost's API instead of the UI** (a browser with a
+cached DNS answer lands on Railway's Bifrost, which already has auth, and
+asks for a login that is not this one). The API route: `GET /api/config`,
+then `PUT /api/config` with `client_config` (`disable_content_logging: true`,
+`log_retention_days: 7`) and `auth_config` (`is_enabled`, `admin_username`,
+`admin_password`). Give curl its credentials with `-K <(printf ...)`, never
+`-K -`: stdin is also where `--data-binary @-` reads the body, and an empty
+body comes back as `Invalid JSON`. Virtual keys can be minted the same way
+(`POST /api/governance/virtual-keys`, the shape in `squelch-control/src/bifrost.rs`).
+`llm sync --check` exits 1 on a gateway with ZERO virtual keys (Bifrost
+answers `"virtual_keys": null`); the provider-key half still reports `in sync`.
 
 1. Open `https://bifrost.passband.app`. Enable auth with the admin credential:
    username and password are the two halves of

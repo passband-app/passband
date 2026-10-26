@@ -56,6 +56,9 @@ jobs:
 
   squelchd-image:
     runs-on: ubuntu-latest
+    # Waits for an approval in the release-daemon environment, so a pushed
+    # tag alone cannot publish an image every tenant pod will pull.
+    environment: release-daemon
     needs: verify
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -98,6 +101,9 @@ jobs:
   # registry gap was.
   warden-image:
     runs-on: ubuntu-latest
+    # Waits for an approval in the release-daemon environment, so a pushed
+    # tag alone cannot publish an image every tenant pod will pull.
+    environment: release-daemon
     needs: verify
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -137,6 +143,9 @@ jobs:
   # somewhere Railway is not.
   control-image:
     runs-on: ubuntu-latest
+    # Waits for an approval in the release-daemon environment, so a pushed
+    # tag alone cannot publish an image every tenant pod will pull.
+    environment: release-daemon
     needs: verify
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

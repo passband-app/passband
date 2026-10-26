@@ -57,6 +57,9 @@ concurrency:
 jobs:
   testflight:
     runs-on: macos-26
+    # Waits for an approval in the GitHub environment, which holds the
+    # signing and publishing secrets, so a pushed tag alone cannot ship.
+    environment: release-ios
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

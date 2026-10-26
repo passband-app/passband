@@ -16,6 +16,13 @@ Every tag namespace names its surface, and the three never overlap: pushing a
 phone build never rebuilds three Docker images, and cutting a daemon never
 asks Apple for anything.
 
+**A tag push alone no longer ships.** The three tag-triggered workflows run
+their publishing jobs in GitHub environments (`release-daemon`, `release-mac`,
+`release-ios`) that require an approval, and the Mac and iOS signing secrets
+live in those environments rather than at repo level. After pushing the tag,
+open the run in Actions and approve "Review deployments". Only repository
+admins can create these tags at all (tag ruleset).
+
 Existing per-surface runbooks this document links instead of duplicating:
 [`passband/RELEASING.md`](../passband/RELEASING.md) (the app),
 [`deploy/hosted/SETUP.md`](../deploy/hosted/SETUP.md) (hosted, generic),

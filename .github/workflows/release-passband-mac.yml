@@ -28,6 +28,9 @@ env:
 jobs:
   release-passband:
     runs-on: macos-26
+    # Waits for an approval in the GitHub environment, which holds the
+    # signing and publishing secrets, so a pushed tag alone cannot ship.
+    environment: release-mac
     steps:
       # Full history: the build number is the commit count, and a shallow
       # clone would mint a tiny CFBundleVersion that breaks monotonicity.

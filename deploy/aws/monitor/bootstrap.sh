@@ -318,14 +318,35 @@ systemctl restart --no-block passband-monitor.service
 # --- Tailscale: operator access to the Bifrost and Grafana UIs ---------------
 # Kept apart from the stack on purpose: no key, or a failed join, never stops
 # monitoring. The box joins the tailnet as tag:passband-aws and serves:
-#   https://<host>.<tailnet>.ts.net/       -> Bifrost UI (via the ALB; this
-#                                             box's NAT egress is allow-listed)
+#   https://<host>.<tailnet>.ts.net/       -> Bifrost UI (local nginx -> ALB;
+#                                             this box's NAT egress is allow-listed)
 #   https://<host>.<tailnet>.ts.net:8443/  -> Grafana (local)
 # The auth key is read from a tmpfs file, never argv, and removed after use.
 # Tailscale keeps its identity in /var/lib/tailscale, so this runs once per box.
 dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo
-dnf install -y tailscale
+dnf install -y tailscale nginx
 systemctl enable --now tailscaled
+# The ALB routes on Host, and serve forwards the tailnet name, so Bifrost goes
+# through a loopback-only nginx that presents bifrost.passband.app (Host + SNI).
+cat >/etc/nginx/conf.d/bifrost-tailnet.conf <<'NGX'
+map $http_upgrade $conn_upgrade { default upgrade; '' close; }
+server {
+  listen 127.0.0.1:8081;
+  location / {
+    proxy_pass https://bifrost.passband.app;
+    proxy_set_header Host bifrost.passband.app;
+    proxy_ssl_server_name on;
+    proxy_ssl_name bifrost.passband.app;
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate /etc/pki/tls/certs/ca-bundle.crt;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $conn_upgrade;
+    proxy_read_timeout 300s;
+  }
+}
+NGX
+systemctl enable --now nginx
 if tailscale status >/dev/null 2>&1; then
   log "tailscale already joined"
 elif TS_KEY=$(aws secretsmanager get-secret-value --region "$REGION" \
@@ -336,7 +357,7 @@ elif TS_KEY=$(aws secretsmanager get-secret-value --region "$REGION" \
   unset TS_KEY
   if tailscale up --auth-key=file:/run/passband-monitor/ts-authkey \
       --hostname=passband-monitor --advertise-tags=tag:passband-aws; then
-    tailscale serve --bg --https=443 https://bifrost.passband.app
+    tailscale serve --bg --https=443 http://127.0.0.1:8081
     tailscale serve --bg --https=8443 http://127.0.0.1:3000
     log "tailscale joined; serving Bifrost on :443 and Grafana on :8443"
   else

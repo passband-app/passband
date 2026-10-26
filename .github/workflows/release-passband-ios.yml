@@ -57,8 +57,10 @@ concurrency:
 jobs:
   testflight:
     runs-on: macos-26
-    # Waits for an approval in the GitHub environment, which holds the
-    # signing and publishing secrets, so a pushed tag alone cannot ship.
+    # The signing and publishing secrets live in this GitHub environment,
+    # which only this workflow's own release tags may deploy to, and only
+    # admins may push those tags (tag ruleset). Another workflow or branch
+    # cannot read them.
     environment: release-ios
     timeout-minutes: 45
     steps:

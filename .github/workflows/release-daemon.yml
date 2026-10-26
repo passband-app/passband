@@ -56,8 +56,10 @@ jobs:
 
   squelchd-image:
     runs-on: ubuntu-latest
-    # Waits for an approval in the release-daemon environment, so a pushed
-    # tag alone cannot publish an image every tenant pod will pull.
+    # Deploys to the release-daemon environment, limited to daemon-* tags,
+    # which only admins may push (tag ruleset). Holds no secrets today; it
+    # is where any future publishing secret goes, and the deployment log
+    # records every image publish.
     environment: release-daemon
     needs: verify
     steps:
@@ -101,8 +103,10 @@ jobs:
   # registry gap was.
   warden-image:
     runs-on: ubuntu-latest
-    # Waits for an approval in the release-daemon environment, so a pushed
-    # tag alone cannot publish an image every tenant pod will pull.
+    # Deploys to the release-daemon environment, limited to daemon-* tags,
+    # which only admins may push (tag ruleset). Holds no secrets today; it
+    # is where any future publishing secret goes, and the deployment log
+    # records every image publish.
     environment: release-daemon
     needs: verify
     steps:
@@ -143,8 +147,10 @@ jobs:
   # somewhere Railway is not.
   control-image:
     runs-on: ubuntu-latest
-    # Waits for an approval in the release-daemon environment, so a pushed
-    # tag alone cannot publish an image every tenant pod will pull.
+    # Deploys to the release-daemon environment, limited to daemon-* tags,
+    # which only admins may push (tag ruleset). Holds no secrets today; it
+    # is where any future publishing secret goes, and the deployment log
+    # records every image publish.
     environment: release-daemon
     needs: verify
     steps:

@@ -1,0 +1,47 @@
+# Version and security updates for every pinned dependency. Actions are pinned
+# by commit SHA and Dockerfile base images by digest, so this file is the thing
+# that moves those pins: without it, pinning would freeze security fixes out.
+#
+# Volume control, because agents and a human both review these:
+# - one grouped PR per ecosystem per run for minor and patch bumps;
+# - majors arrive as separate PRs, since they are the ones that break;
+# - security updates are not limited by schedule or group (GitHub opens them as
+#   soon as an advisory lands, when Dependabot security updates are enabled).
+#
+# Not covered: passband-site. Its lockfile is the binary bun.lockb, which
+# Dependabot's bun support does not read; moving it to the text bun.lock
+# (`bun install --save-text-lockfile`) would let a "bun" entry here cover it.
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /squelchd
+      - /passband-site
+      - /deploy/aws/docker
+      - /deploy/aws/monitor
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      docker-minor-patch:
+        update-types: [minor, patch]

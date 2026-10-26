@@ -121,7 +121,53 @@ impl MatchExcerpt {
     }
 }
 
-/// The envelope columns both hit-producing SELECTs share, in SELECT order.
+/// Everyone a message named, as one string over alias `m`: To, Cc and, ON THE
+/// ACCOUNT'S OWN MAIL ONLY, Bcc. ONE EXPRESSION for the `to:` predicate in SQL
+/// and the [`SearchHit::recipients`] the recall legs match it against
+/// afterwards, so the two cannot disagree on who a message went to.
+///
+/// The Bcc gate is the reader's (`thread_view` in messages.rs): a SENT-walk
+/// sighting of inbound mail can store the sender's leaked or forged `Bcc:`
+/// before INBOX pins `is_sent` to 0, so the stored column alone is not "who
+/// the owner blind-copied".
+///
+/// HUMAN DOOR ONLY in effect: recipients are human-door data (SECURITY.md
+/// section 4), and both agent doors refuse `to:`.
+macro_rules! recipients_sql {
+    () => {
+        concat!(
+            "(COALESCE(m.to_addrs, '') || ', ' || COALESCE(m.cc_addrs, '') || ', ' || \
+             CASE WHEN ",
+            own_mail_sql!(),
+            " THEN COALESCE(m.bcc_addrs, '') ELSE '' END)"
+        )
+    };
+}
+
+/// The envelope columns EVERY hit-producing SELECT starts with, in the order
+/// [`map_search_hit`] reads them. A macro so a `prepare_cached` literal can
+/// `concat!` it; one list, so no query hands back a hit whose `from_me` or
+/// recipients were never selected.
+///
+/// AN ARCHIVE ROW READS AS DONE (column 7): see [`push_filter_clauses`].
+macro_rules! hit_columns_sql {
+    () => {
+        concat!(
+            "m.id, m.thread_id, m.from_addr, m.from_name, m.subject, m.received_at, m.snippet,
+             (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1), ",
+            own_mail_sql!(),
+            ", ",
+            recipients_sql!()
+        )
+    };
+}
+const HIT_COLUMNS: &str = hit_columns_sql!();
+
+/// Columns [`HIT_COLUMNS`] fills, so a SELECT that appends its own can say
+/// where they start.
+const HIT_COLUMN_COUNT: usize = 10;
+
+/// The envelope columns ([`HIT_COLUMNS`]), in SELECT order.
 fn map_search_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
     Ok(SearchHit {
         id: r.get(0)?,
@@ -134,6 +180,8 @@ fn map_search_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
         is_done: r.get(7)?,
         subject_matches: Vec::new(),
         snippet_matches: Vec::new(),
+        from_me: r.get(8)?,
+        recipients: r.get(9)?,
     })
 }
 
@@ -141,8 +189,8 @@ fn map_search_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
 /// Keep the stored snippet unless the returned body window carries a marker.
 fn map_search_hit_with_window(r: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
     let mut hit = map_search_hit(r)?;
-    hit.subject_matches = matched_words(&r.get::<_, String>(8)?);
-    let raw: Option<String> = r.get(9)?;
+    hit.subject_matches = matched_words(&r.get::<_, String>(HIT_COLUMN_COUNT)?);
+    let raw: Option<String> = r.get(HIT_COLUMN_COUNT + 1)?;
     if let Some(window) = body_window(raw.clone()) {
         hit.snippet = window;
         hit.snippet_matches = raw.as_deref().map(matched_words).unwrap_or_default();
@@ -193,6 +241,20 @@ fn push_filter_clauses(sql: &mut String, args: &mut Vec<Value>, filter: &SearchF
         let pattern = format!("%{}%", escape_like(from));
         args.push(Value::Text(pattern.clone()));
         args.push(Value::Text(pattern));
+    }
+    if filter.from_me {
+        // Authorship, not the stored `is_sent`: see `own_mail_sql!`. No bound
+        // parameter, so it sits anywhere among the anonymous `?`s.
+        sql.push_str(concat!(" AND ", own_mail_sql!()));
+    }
+    if let Some(to) = &filter.to {
+        // Same reading as `from:`: a literal, case-insensitive substring.
+        sql.push_str(concat!(
+            " AND ",
+            recipients_sql!(),
+            " COLLATE NOCASE LIKE ? ESCAPE '\\'"
+        ));
+        args.push(Value::Text(format!("%{}%", escape_like(to))));
     }
     if let Some(after) = filter.after {
         // INCLUSIVE: 00:00:00 UTC of the named day is in range. Timestamps are
@@ -389,10 +451,12 @@ impl SqliteStore {
             }
             let hit = conn
                 .query_row(
-                    "SELECT m.id,m.thread_id,m.from_addr,m.from_name,m.subject,m.received_at,m.snippet,
-                        (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
-                 FROM messages m LEFT JOIN triage t ON t.message_id=m.id
-                 WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0",
+                    concat!(
+                        "SELECT ",
+                        hit_columns_sql!(),
+                        " FROM messages m LEFT JOIN triage t ON t.message_id=m.id
+                         WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0"
+                    ),
                     params![account_id, id],
                     map_search_hit,
                 )
@@ -464,7 +528,7 @@ impl SqliteStore {
                 );
                 args.push(Value::Text(exclude.to_string()));
             }
-            if !include_sent {
+            if !include_sent && !filter.searches_sent() {
                 sql.push_str(" AND m.is_sent = 0");
             }
             push_filter_clauses(&mut sql, &mut args, filter);
@@ -1347,14 +1411,14 @@ impl SqliteStore {
         id: i64,
     ) -> Result<Option<SearchHit>> {
         let row = conn
-            .prepare_cached(
-                "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                        m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
-                 FROM messages m
+            .prepare_cached(concat!(
+                "SELECT ",
+                hit_columns_sql!(),
+                " FROM messages m
                  LEFT JOIN triage t ON t.message_id = m.id
                  WHERE m.account_id = ?1 AND m.id = ?2
                        AND m.is_spam = 0",
-            )?
+            ))?
             .query_row(params![account_id, id], map_search_hit)
             .optional()?;
         Ok(row)
@@ -1410,8 +1474,7 @@ impl SqliteStore {
         // matched (see `body_window`) — a subject-only hit keeps the curated
         // snippet.
         let mut sql = format!(
-            "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1),
+            "SELECT {HIT_COLUMNS},
                     highlight(messages_fts, 0, char(1), char(2)), {BODY_WINDOW}
              FROM messages_fts f
              CROSS JOIN messages m ON m.id = f.rowid
@@ -1432,7 +1495,7 @@ impl SqliteStore {
             );
             args.push(Value::Text(exclude.to_string()));
         }
-        if !filter.include_sent {
+        if !filter.searches_sent() {
             sql.push_str(" AND m.is_sent = 0");
         }
         push_filter_clauses(&mut sql, &mut args, filter);
@@ -1511,7 +1574,7 @@ impl SqliteStore {
         );
         sql.push_str(audience.clause());
         let mut args = vec![Value::Integer(account_id), Value::Text(expr.to_string())];
-        if !filter.include_sent {
+        if !filter.searches_sent() {
             sql.push_str(" AND m.is_sent = 0");
         }
         push_filter_clauses(&mut sql, &mut args, filter);
@@ -1606,7 +1669,7 @@ impl SqliteStore {
                 "SELECT COUNT(*) FROM messages m LEFT JOIN triage t ON t.message_id = m.id WHERE m.account_id = ? AND m.is_spam = 0",
             );
             let mut args = vec![Value::Integer(account_id)];
-            if !group.include_sent {
+            if !group.searches_sent() {
                 sql.push_str(" AND m.is_sent = 0");
             }
             push_filter_clauses(&mut sql, &mut args, &group);
@@ -1958,17 +2021,16 @@ impl SqliteStore {
         offset: u32,
         audience: Audience,
     ) -> Result<Vec<SearchHit>> {
-        let mut sql = String::from(
-            "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
+        let mut sql = format!(
+            "SELECT {HIT_COLUMNS}
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id
              WHERE m.account_id = ?
-               AND m.is_spam = 0",
+               AND m.is_spam = 0"
         );
         sql.push_str(audience.clause());
         let mut args = vec![Value::Integer(account_id)];
-        if !filter.include_sent {
+        if !filter.searches_sent() {
             sql.push_str(" AND m.is_sent = 0");
         }
         push_filter_clauses(&mut sql, &mut args, filter);

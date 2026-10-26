@@ -545,6 +545,7 @@ enum ProductGuide {
         Operators:
         - from: narrows to a sender. Typing from: opens a menu of the people who write to the user; the arrows pick and Enter or Tab accepts.
         - after: and before: narrow by date.
+        - in:sent (or from:me) narrows to mail the user wrote, and to: narrows to mail addressed to someone, by name or address. "in:sent to:dan" is everything the user sent Dan.
 
         Order:
         - A switch in the panel, also at Settings > Mail > Search. "Relevance + recency" ranks newer mail higher when matches are close. "Best match" ranks on the words alone.

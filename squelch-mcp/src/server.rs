@@ -24,7 +24,9 @@ use squelch_core::store::archive_surface::{
     ArchiveHorizon, ArchiveSurfacing, KeywordMatch, SurfaceWait, await_thread_access,
     search_with_surfacing,
 };
-use squelch_core::store::{NewAuditEntry, SearchSort, SqliteStore, Store};
+use squelch_core::store::{
+    ExternalSearchMode, NewAuditEntry, SearchSort, SqliteStore, Store, parse_search_query,
+};
 use squelch_core::triage::agent_config::RankingConfig;
 use squelch_core::triage::decision::{
     EmailKind, MessageDestination, ReadingKind, RecordProposal, SupportedTime,
@@ -103,8 +105,16 @@ pub struct GetThreadParams {
 /// Parameters for `search_mail`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchMailParams {
-    /// Free-text query. Matched with hybrid keyword + semantic recall.
+    /// Free-text query, matched with hybrid keyword + semantic recall. May
+    /// carry operators: from:<name or address>, in:sent (mail the owner
+    /// wrote; from:me means the same), after:YYYY-MM-DD, before:YYYY-MM-DD.
+    /// May be empty when `from_me` is set, which lists the owner's sent mail
+    /// newest first.
     pub query: String,
+    /// true: only mail the mailbox owner wrote themselves (their sent mail).
+    /// Same as putting in:sent in the query.
+    #[serde(default)]
+    pub from_me: Option<bool>,
     /// Max number of summaries to return (1-50). Defaults to 10.
     #[serde(default)]
     pub k: Option<u8>,
@@ -130,6 +140,9 @@ pub struct SearchMailHit {
     /// `sort` ran. NOT "most textually similar" under the default sort, which
     /// blends recency in.
     pub relevance: u32,
+    /// The mailbox owner wrote this message (it is their sent mail), so
+    /// `sender` is the owner and not someone who wrote to them.
+    pub from_me: bool,
 }
 
 /// The whole `search_mail` result. An OBJECT, not a bare list, because the
@@ -1295,9 +1308,18 @@ impl SquelchServer {
         description = "Search the mailbox (hybrid keyword + semantic recall). \
                        Ranked with a tilt toward recent mail by default; pass \
                        sort=\"best_match\" to rank on relevance alone when \
-                       hunting an older thread. Returns SUMMARIES ONLY (sender, \
-                       one-line subject, received_at, thread_id, relevance), \
-                       never message bodies, in `results`. To read a result, pass its \
+                       hunting an older thread. The owner's own SENT mail is \
+                       searched too: pass from_me=true (or put in:sent in the \
+                       query) for only mail they wrote, plus words about it, \
+                       e.g. from_me=true, query=\"dan lease\" for what they told \
+                       Dan about the lease. The query also accepts from:, \
+                       after:YYYY-MM-DD and before:YYYY-MM-DD, and may be empty \
+                       when from_me is set (their sent mail, newest first). \
+                       Recipients are not searchable here. \
+                       Returns SUMMARIES ONLY (sender, one-line subject, \
+                       received_at, thread_id, relevance, from_me), never message \
+                       bodies, in `results`. from_me=true on a result means the \
+                       owner wrote it. To read a result, pass its \
                        `thread_id` to get_thread. Auth/verification emails are \
                        structurally absent. SEARCH ONLY COVERS MAIL SINCE \
                        `indexed_since`: when nothing matches, tell the user that \
@@ -1316,9 +1338,28 @@ impl SquelchServer {
         &self,
         Parameters(params): Parameters<SearchMailParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let query = params.query.trim();
-        if query.is_empty() {
-            return Err(ErrorData::invalid_params("query must not be empty", None));
+        // Operators are lifted out of the text exactly as the HTTP agent
+        // door and the human search box lift them; the two arguments are the
+        // same operators for a model that reaches for a parameter first.
+        let (text, mut filter) = parse_search_query(params.query.trim());
+        let text = text.trim().to_owned();
+        if params.from_me == Some(true) {
+            filter.from_me = true;
+        }
+        // RECIPIENTS ARE HUMAN-DOOR DATA (SECURITY.md section 4): a `to:`
+        // filter rebuilds To, Cc and the owner's Bcc one fragment at a time.
+        // Refused, so the agent does not read an unfiltered page as filtered.
+        if filter.to.is_some() {
+            return Err(ErrorData::invalid_params(
+                "to: is not available here; recipients are not searchable",
+                None,
+            ));
+        }
+        if text.is_empty() && filter.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "query must not be empty unless from_me is set",
+                None,
+            ));
         }
         // Default 10, clamp to 1..=50 (u8 default `10` when omitted).
         let k = params.k.unwrap_or(10).clamp(1, 50) as usize;
@@ -1343,23 +1384,33 @@ impl SquelchServer {
         // search then runs once. What is still unchecked is not reported in
         // any form: this door never learns it.
         let account_id = self.account_id;
-        let query = query.to_string();
+        // Operators with no words are a newest-first listing, which only the
+        // keyword leg serves: there is nothing to embed.
+        let mode = if text.is_empty() {
+            ExternalSearchMode::Keyword
+        } else {
+            ExternalSearchMode::Hybrid
+        };
         let surfacing = self
             .archive_surfacing
             .clone()
             .capped(SurfaceWait::MCP_DEADLINE);
-        let keyword = KeywordMatch {
-            text: query.clone(),
-            filter: Default::default(),
+        // A KEYWORD MATCH OR NOTHING: operators alone buy no archive checks,
+        // the same rule the HTTP agent door keeps.
+        let keyword = (!text.is_empty()).then(|| KeywordMatch {
+            text: text.clone(),
+            filter: filter.clone(),
             // The hybrid keyword leg recalls the owner's sent mail too.
             include_sent: true,
-        };
+        });
         let (hits, horizon) = search_with_surfacing(
             &self.store,
             account_id,
             &surfacing,
-            Some(keyword),
-            move |store: &SqliteStore| store.external_search(account_id, &query, sort, k),
+            keyword,
+            move |store: &SqliteStore| {
+                store.external_search_filtered(account_id, &text, &filter, sort, mode, k)
+            },
         )
         .await
         .map_err(Self::map_err)?;
@@ -1379,6 +1430,7 @@ impl SquelchServer {
                 received_at: hit.received_at,
                 thread_id: hit.thread_id,
                 relevance: (out.len() as u32) + 1,
+                from_me: hit.from_me,
             });
         }
         Self::ok_json(SearchMailResult {
@@ -2174,11 +2226,14 @@ mod tests {
         store
             .enqueue_agent_triage(account, id, "test", false)
             .unwrap();
-        // Ingest may have already queued an arrival; finish all jobs for this message.
-        while let Some(job) = store
-            .claim_agent_job(account, "triage", Utc::now(), 120)
-            .unwrap()
-        {
+        // Ingest may have already queued an arrival; finish all jobs for this
+        // message. The owner's own mail (and spam) is queued as an `access`
+        // job, which only decides external access.
+        while let Some(job) = ["triage", "access"].into_iter().find_map(|kind| {
+            store
+                .claim_agent_job(account, kind, Utc::now(), 120)
+                .unwrap()
+        }) {
             assert_eq!(
                 job.message_id, id,
                 "test fixtures assess one message at a time"
@@ -3141,10 +3196,132 @@ mod tests {
                     query: query.into(),
                     k: Some(50),
                     sort: None,
+                    from_me: None,
                 }))
                 .await
                 .unwrap(),
         )
+    }
+
+    /// The owner's own send, through the real ingest, so `to_addrs` is what
+    /// the parser stores.
+    fn seed_sent(store: &SqliteStore, account: i64, thread: &str, to: &str, text: &str) -> i64 {
+        use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
+        let now = Utc::now();
+        let raw = RawFetched {
+            account_id: account,
+            gmail_msg_id: format!("{thread}-{text}"),
+            gmail_thread_id: Some(thread.into()),
+            raw: format!(
+                "From: me@localhost\r\nTo: {to}\r\nSubject: {text}\r\nDate: {}\r\n\r\n{text}",
+                now.to_rfc2822()
+            )
+            .into_bytes(),
+            internal_date: Some(now),
+            is_sent: true,
+            is_spam: false,
+            account_addr: "me@localhost".into(),
+        };
+        let message = ingest_with_rules(&raw, &Default::default(), now, &[], |_| false);
+        store.ingest_message(&message).unwrap()
+    }
+
+    async fn search_with(
+        server: &SquelchServer,
+        query: &str,
+        from_me: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorData> {
+        Ok(values(
+            &server
+                .search_mail(Parameters(SearchMailParams {
+                    query: query.into(),
+                    k: Some(50),
+                    sort: None,
+                    from_me,
+                }))
+                .await?,
+        )["results"]
+            .clone())
+    }
+
+    /// The bug this exists for: an agent asked for the owner's sent mail and
+    /// got mail containing the WORD "sent". `in:sent` and `from_me` now scope
+    /// the search, each hit says whether the owner wrote it, and `to:` is
+    /// refused because recipients are human-door data.
+    #[tokio::test]
+    async fn search_mail_scopes_to_mail_the_owner_wrote() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let to_dan = seed_sent(
+            &store,
+            account,
+            "t-dan",
+            "Dan Smith <dan@landlord.test>",
+            "lease renewal",
+        );
+        decide(&store, account, to_dan, false, None);
+        let to_amy = seed_sent(
+            &store,
+            account,
+            "t-amy",
+            "amy@friend.test",
+            "lease question",
+        );
+        decide(&store, account, to_amy, false, None);
+        let received = seed(&store, account, "t-in", "we sent you lease tips");
+        decide(&store, account, received, false, None);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        let threads = |v: &serde_json::Value| -> Vec<String> {
+            let mut t: Vec<String> = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["thread_id"].as_str().unwrap().to_string())
+                .collect();
+            t.sort();
+            t
+        };
+
+        // Unscoped: everything, and the owner's own mail is marked.
+        let all = search_with(&server, "lease", None).await.unwrap();
+        assert_eq!(threads(&all), ["t-amy", "t-dan", "t-in"]);
+        for hit in all.as_array().unwrap() {
+            assert_eq!(
+                hit["from_me"],
+                serde_json::json!(hit["thread_id"] != "t-in"),
+                "{hit}"
+            );
+        }
+
+        // The operator and the argument mean the same thing.
+        for (q, from_me) in [
+            ("lease in:sent", None),
+            ("lease", Some(true)),
+            ("in:sent sent", None),
+        ] {
+            let hits = search_with(&server, q, from_me).await.unwrap();
+            let expect: &[&str] = if q.ends_with("sent sent") {
+                &[]
+            } else {
+                &["t-amy", "t-dan"]
+            };
+            assert_eq!(threads(&hits), expect, "{q} {from_me:?}");
+        }
+
+        // A filter-only search with no words: the owner's sends, newest first.
+        let listing = search_with(&server, "", Some(true)).await.unwrap();
+        assert_eq!(threads(&listing), ["t-amy", "t-dan"]);
+
+        // Recipients are not a filter an agent may run, with or without words:
+        // "did this go to d", "da", "dan" would rebuild every To/Cc/Bcc.
+        for q in ["lease to:dan", "to:dan", "in:sent to:d"] {
+            let error = search_with(&server, q, None).await.unwrap_err();
+            assert_eq!(error.code, ErrorData::invalid_params("x", None).code, "{q}");
+        }
+
+        // Nothing to search for and nothing to scope by is still refused.
+        assert!(search_with(&server, "  ", None).await.is_err());
+        assert!(search_with(&server, "", Some(false)).await.is_err());
     }
 
     #[tokio::test]
@@ -3746,6 +3923,7 @@ mod tests {
                                     query: (*query).into(),
                                     k: Some(k),
                                     sort: sort.map(str::to_string),
+                                    from_me: None,
                                 }))
                                 .await
                                 .unwrap(),

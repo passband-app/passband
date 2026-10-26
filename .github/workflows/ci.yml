@@ -33,6 +33,9 @@ name: ci
 
 on:
   pull_request:
+    # ready_for_review: a draft skips the job below, so marking it ready has
+    # to start a run. See "Draft PRs" in CLAUDE.md.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "squelch-*/**"
       - "squelchd/**"
@@ -63,6 +66,7 @@ permissions:
 
 jobs:
   rust:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     # squelch-control's store tests run against a real Postgres — the store IS
     # Postgres now, and a fake would test the fake. The container boots in

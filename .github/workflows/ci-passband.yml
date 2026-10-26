@@ -12,6 +12,9 @@ name: ci-passband
 
 on:
   pull_request:
+    # ready_for_review: a draft skips the job below, so marking it ready has
+    # to start a run. See "Draft PRs" in CLAUDE.md.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "passband/**"
       - "docs/CHANGELOG.md"
@@ -32,6 +35,7 @@ permissions:
 
 jobs:
   test:
+    if: ${{ !github.event.pull_request.draft }}
     # macos-26 defaults to Xcode 26.x — the same major the project builds with
     # locally. macos-15 tops out at Xcode 16 / Swift 6.1 and is too old.
     runs-on: macos-26

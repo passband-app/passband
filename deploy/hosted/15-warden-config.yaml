@@ -202,7 +202,7 @@ data:
   # image itself has to be new enough to know these names: an older warden
   # ignores them and renders no relay env at all.
   SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
-  SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
+  SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay-2"
   SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
   # The automatic unsubscribe's browser rung needs NO entry here. Every tenant
   # pod references the Secret `browserbase` (key `api-key`) in the tenant

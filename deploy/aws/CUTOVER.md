@@ -833,7 +833,7 @@ price of a dump that nothing can write behind.
    ```sh
    # ctl <tool> <args…>: run a libpq tool as the app role over the tunnel.
    ctl() { local tool=$1; shift
-     PGHOST=$RDS_HOST PGHOSTADDR=127.0.0.1 PGPORT=15432 PGDATABASE=control PGUSER=control \
+     PGHOST=$RDS_HOST PGHOSTADDR=127.0.0.1 PGPORT=15432 PGDATABASE=passband PGUSER=control \
      PGPASSWORD=$(sget passband/control/SQUELCH_CONTROL_DATABASE_URL | sed -E 's#^postgres://control:([^@]+)@.*#\1#') \
      "$tool" "$@"; }
    printf 'DROP SCHEMA public CASCADE;\nCREATE SCHEMA public AUTHORIZATION control;\n' | ctl psql -X -v ON_ERROR_STOP=1

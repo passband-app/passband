@@ -160,6 +160,7 @@ struct SettingsView: View {
         case .mail:
             MailSection()
             SearchSection()
+            TranslationSection()
             SignatureSection()
             ReadTrackingSection()
         case .rules:
@@ -391,6 +392,7 @@ struct SettingsCardView: View {
         case .you: YouSection()
         case .mail: MailSection()
         case .search: SearchSection()
+        case .translation: TranslationSection()
         case .signature: SignatureSection()
         case .readTracking: ReadTrackingSection()
         // THE TWO EXCEPTIONS to "a result is the real control". Rules and
@@ -1074,6 +1076,123 @@ struct SearchSection: View {
             ) {
                 SearchSortPicker()
             }
+        }
+    }
+}
+
+/// THE LANGUAGES THE OWNER READS, which the daemon leaves as written. Held by
+/// the daemon, because the daemon is what decides whether to translate, on
+/// mail that arrives while no app is open.
+///
+/// Saves the way ReadTrackingSection does: fire and wait, and the chips show
+/// the daemon's answer, so a failed write leaves the set where it really is.
+/// A daemon older than the setting draws a quiet hint, never an error.
+struct TranslationSection: View {
+    @Environment(AppStore.self) private var store
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        SectionCard(label: "Translation") {
+            switch store.translateConfig {
+            case .loaded(let config) where config.active:
+                languages(config)
+            case .loaded:
+                SettingsHint(
+                    "Off. Translation needs the assistant's model configured on the daemon, so all mail is shown as written."
+                )
+            case .notOffered:
+                SettingsHint("Choosing languages needs a newer server.")
+            case .unreadable:
+                SettingsHint("Could not read this setting from the server.")
+                Button("try again") {
+                    Task { await store.refreshTranslateConfig() }
+                }
+                .buttonStyle(.plain)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.accent)
+            case .unknown:
+                SettingsHint("checking the server…")
+            }
+            if let error {
+                Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
+            }
+        }
+        // Keyed on the account, so a switch with the pane open reads the new
+        // daemon's set instead of leaving the card on "checking".
+        .task(id: store.epoch) { await store.refreshTranslateConfig() }
+    }
+
+    @ViewBuilder private func languages(_ config: TranslateConfig) -> some View {
+        SettingsRow(
+            title: "Languages I read",
+            detail: "Mail in these languages is shown as written. Everything else is translated to English."
+        ) {
+            addMenu(config)
+        }
+        if config.read_languages.isEmpty {
+            SettingsHint("None. Everything not in English is translated.")
+        } else {
+            FlowLayout(spacing: Space.s6) {
+                ForEach(config.read_languages, id: \.self) { code in
+                    chip(code, config)
+                }
+            }
+            // Adding a language is about mail to come; what was already
+            // translated keeps its strip, and saying so heads off "it didn't work".
+            SettingsHint("Mail already translated stays that way, with show original above it.")
+        }
+    }
+
+    private func addMenu(_ config: TranslateConfig) -> some View {
+        let addable = config.addable
+        return Menu {
+            ForEach(addable) { lang in
+                Button(lang.name) { save(config.read_languages + [lang.code]) }
+            }
+        } label: {
+            Label("Add language", systemImage: "plus")
+                .font(Typo.chip)
+        }
+        .menuStyle(.button)
+        .menuIndicator(.hidden)
+        .buttonStyle(.glass)
+        .controlSize(.small)
+        .fixedSize()
+        .disabled(busy || addable.isEmpty)
+    }
+
+    /// One chosen language. The whole chip is the remove button: the x says
+    /// what a tap does, and a separate tiny target would be a miss on the phone.
+    private func chip(_ code: String, _ config: TranslateConfig) -> some View {
+        let name = config.name(of: code)
+        return ChromeChip(
+            tone: Palette.ink,
+            help: "Remove \(name). Mail in it is translated when you open it.",
+            action: { save(config.read_languages.filter { $0 != code }) }
+        ) {
+            HStack(spacing: Space.s4) {
+                Text(name).font(Typo.chip)
+                Image(systemName: "xmark")
+                    .font(Typo.ui(8, weight: .bold))
+                    .foregroundStyle(Palette.inkFaint)
+            }
+        }
+        .disabled(busy)
+        .accessibilityLabel("Remove \(name)")
+    }
+
+    private func save(_ codes: [String]) {
+        guard !busy else { return }
+        busy = true
+        error = nil
+        Task {
+            do {
+                try await store.setReadLanguages(codes)
+            } catch {
+                self.error = errText(error, "could not save")
+            }
+            busy = false
         }
     }
 }

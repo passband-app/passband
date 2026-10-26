@@ -19,6 +19,41 @@ import WebKit
     import UIKit
 #endif
 
+/// WHAT THE READER OPENED UP IN A MESSAGE'S BODY: the remote images they let
+/// in, the quoted history they unfolded. Held per reader and keyed by message
+/// id, so a body view that is REBUILT for the same message (the reader's "show
+/// original" flip swaps one document for the other, and a fresh frame is the
+/// only way to load a different document) comes back the way the reader left
+/// it rather than shut again. Not observed: nothing redraws when it changes,
+/// it is only read when a body is built.
+@MainActor
+final class BodyDisclosures {
+    private var images: Set<Int> = []
+    private var quotes: Set<Int> = []
+
+    func imagesLoaded(_ id: Int?) -> Bool { id.map { images.contains($0) } ?? false }
+    func quotesOpen(_ id: Int?) -> Bool { id.map { quotes.contains($0) } ?? false }
+    func setImagesLoaded(_ id: Int?) {
+        if let id { images.insert(id) }
+    }
+    func setQuotesOpen(_ open: Bool, _ id: Int?) {
+        guard let id else { return }
+        if open { quotes.insert(id) } else { quotes.remove(id) }
+    }
+}
+
+private struct BodyDisclosuresKey: EnvironmentKey {
+    static let defaultValue: BodyDisclosures? = nil
+}
+
+extension EnvironmentValues {
+    /// The open reader's `BodyDisclosures`, nil anywhere else.
+    var bodyDisclosures: BodyDisclosures? {
+        get { self[BodyDisclosuresKey.self] }
+        set { self[BodyDisclosuresKey.self] = newValue }
+    }
+}
+
 struct EmailWebView: View {
     let html: String
     /// Stable id (message id) for the height memory.
@@ -53,6 +88,11 @@ struct EmailWebView: View {
     /// The message this body is, for the reader's find (ReaderFind). nil for a
     /// body no find reaches: a preview, a reveal, the forward composer.
     let findID: Int?
+    /// What the reader already opened up in this message (its remote images,
+    /// its quoted history), kept by message id across a rebuild of this view.
+    /// Keyed by `findID`, which is the message id in the reader and nil
+    /// everywhere a body has no message to remember for. nil outside a reader.
+    let disclosures: BodyDisclosures?
 
     @Environment(Prefs.self) private var prefs
     @Environment(AppStore.self) private var store
@@ -120,7 +160,8 @@ struct EmailWebView: View {
     init(
         html: String, cacheKey: String? = nil, allowTrackers: Bool = false,
         attachments: [Attachment] = [], textHeight: CGFloat = 0,
-        bubble: Bool = false, mine: Bool = false, findID: Int? = nil
+        bubble: Bool = false, mine: Bool = false, findID: Int? = nil,
+        disclosures: BodyDisclosures? = nil
     ) {
         self.html = html
         self.cacheKey = cacheKey
@@ -130,6 +171,16 @@ struct EmailWebView: View {
         self.bubble = bubble
         self.mine = mine
         self.findID = findID
+        self.disclosures = disclosures
+        // Seeded HERE, not on appear: a frame that mounted collapsed and then
+        // unfolded would be a visible second layout of the same message.
+        let imagesIn = disclosures?.imagesLoaded(findID) ?? false
+        let quotesOpen = disclosures?.quotesOpen(findID) ?? false
+        _optedIn = State(initialValue: imagesIn)
+        _quotedHidden = State(initialValue: !quotesOpen)
+        // And sized as the reader's own document, not the measured default:
+        // the pass measured it shut and without the images (see `apply`).
+        _sizingIsUserDriven = State(initialValue: imagesIn || quotesOpen)
         _prepared = State(
             initialValue: PreparedBodies.shared.get(
                 PreparedKeyMemo.shared.key(
@@ -399,7 +450,10 @@ struct EmailWebView: View {
         // remote images in are the two things that legitimately change what
         // this message is; everything else that reaches the frame is the frame
         // talking to itself.
-        .onChange(of: quotedHidden) { _, _ in restartSizing(userDriven: true) }
+        .onChange(of: quotedHidden) { _, hidden in
+            disclosures?.setQuotesOpen(!hidden, findID)
+            restartSizing(userDriven: true)
+        }
         .onChange(of: allowRemote) { _, _ in restartSizing(userDriven: true) }
         // And a different BODY in the same frame, which is not a user action
         // but is still a new document to size: the cold path finishing its
@@ -639,6 +693,7 @@ struct EmailWebView: View {
         if !allowRemote && prepared.hasRemoteCandidates {
             Button {
                 optedIn = true
+                disclosures?.setImagesLoaded(findID)
             } label: {
                 Label("remote images blocked — load for this email", systemImage: "photo")
                     .font(Typo.micro)
@@ -2444,7 +2499,7 @@ final class FramePrewarmer {
         guard !ThreadPrefetch.shared.isWithheld(threadId) else { return }
         guard let view = try? await ThreadPrefetch.shared.fetch(threadId),
             gen == generation, view.cache_allowed == true,
-            let message = view.messages.last, let html = message.html, !html.isEmpty
+            let message = view.messages.last, let html = message.presented().html, !html.isEmpty
         else { return }
         let style = ThreadViewer.resolveStyle(
             threadId: threadId, messages: view.messages,
@@ -2458,7 +2513,9 @@ final class FramePrewarmer {
     private func render(
         _ message: ClientMessage, style: ThreadStyle, width: CGFloat, prerendered: Bool, gen: Int
     ) async {
-        guard let html = message.html, !html.isEmpty else { return }
+        // The document the card will draw (the translation, when there is one)
+        // under the key the card will ask for it by.
+        guard let html = message.presented().html, !html.isEmpty else { return }
         let bubble = style == .bubbles
         let allowRemote = Prefs.shared.loadRemoteImages
 
@@ -2478,7 +2535,7 @@ final class FramePrewarmer {
         }
         guard gen == generation, !prepared.html.isEmpty else { return }
 
-        let poolKey = style.frameKey(message.id)
+        let poolKey = style.frameKey(for: message)
         guard
             let renderKey = EmailFrame.renderKey(
                 poolKey: poolKey, html: prepared.html, source: prepared.sourceHash,

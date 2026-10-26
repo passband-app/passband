@@ -44,6 +44,14 @@ enum ThreadStyle: String, CaseIterable, Sendable {
     func frameKey(_ messageId: Int) -> String {
         self == .classic ? String(messageId) : "\(messageId).chat"
     }
+
+    /// The same, for a message drawn IN TRANSLATION. A different document from
+    /// the original, so a different key: the pool handing the French frame to
+    /// a card asking for the English one (or a height measured for one painting
+    /// the other) is exactly the wrong-mail bug the key exists to prevent.
+    func frameKey(_ messageId: Int, translated: Bool) -> String {
+        translated ? frameKey(messageId) + ".tr" : frameKey(messageId)
+    }
 }
 
 /// WHAT SETTINGS HOLDS: the two styles as standing orders, plus Automatic,

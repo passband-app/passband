@@ -12,6 +12,7 @@ struct ClientMessage: Sendable {
     var html: String?
     var allowsTrackers = false
     var attachmentList: [Int] = []
+    func presented(original: Bool = false) -> ClientMessage { self }
 }
 @MainActor final class APIClient {
     static let shared = APIClient()
@@ -26,6 +27,7 @@ enum EmailWebView {
 enum ThreadStyle: CaseIterable {
     case classic, bubbles
     func frameKey(_ id: Int) -> String { "\(self):\(id)" }
+    func frameKey(_ id: Int, translated: Bool) -> String { frameKey(id) + (translated ? ".tr" : "") }
 }
 
 @MainActor private final class Requests {

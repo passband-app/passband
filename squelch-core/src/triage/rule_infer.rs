@@ -261,6 +261,8 @@ pub async fn classify_at(
         // The usual retry budget: this is one interactive call, but its caller
         // has no second lane to fall back on, so a 429 is worth waiting out.
         max_tries: llm::MAX_TRIES,
+        max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(
         http,

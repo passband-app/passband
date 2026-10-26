@@ -311,7 +311,9 @@ final class ThreadPrefetch {
     /// ImageRepeats are pure, so only the hand-back needs the main actor.
     private func warmBodies(_ view: ClientThreadView) {
         Task.detached(priority: .utility) {
-            for message in view.messages {
+            // THE VERSION THE READER WILL DRAW, which for mail in another
+            // language is the translation (ClientMessage.presented).
+            for message in view.messages.map({ $0.presented() }) {
                 guard let html = message.html, !html.isEmpty else { continue }
                 // The tracker policy is part of the prepared identity, so the
                 // warmer must key on the SAME one the card will render under or
@@ -531,13 +533,16 @@ final class FrameHeights {
     /// nothing on screen is using. The loop lives here so no caller has to know
     /// there are two.
     func clear(messageId: Int) {
+        // And in both versions of the document, original and translated.
         for style in ThreadStyle.allCases {
-            let key = style.frameKey(messageId)
-            if let cell = cells[key] {
-                if cell.known != nil { cell.known = nil }
-                if cell.hugWidth != nil { cell.hugWidth = nil }
+            for translated in [false, true] {
+                let key = style.frameKey(messageId, translated: translated)
+                if let cell = cells[key] {
+                    if cell.known != nil { cell.known = nil }
+                    if cell.hugWidth != nil { cell.hugWidth = nil }
+                }
+                guesses.removeValue(forKey: key)
             }
-            guesses.removeValue(forKey: key)
         }
     }
 

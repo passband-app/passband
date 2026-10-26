@@ -314,4 +314,36 @@ systemctl enable passband-monitor.service
 # --no-block: on first boot the images may not exist yet, and user data must
 # finish regardless; the unit keeps retrying until the first deploy lands.
 systemctl restart --no-block passband-monitor.service
+
+# --- Tailscale: operator access to the Bifrost and Grafana UIs ---------------
+# Kept apart from the stack on purpose: no key, or a failed join, never stops
+# monitoring. The box joins the tailnet as tag:passband-aws and serves:
+#   https://<host>.<tailnet>.ts.net/       -> Bifrost UI (via the ALB; this
+#                                             box's NAT egress is allow-listed)
+#   https://<host>.<tailnet>.ts.net:8443/  -> Grafana (local)
+# The auth key is read from a tmpfs file, never argv, and removed after use.
+# Tailscale keeps its identity in /var/lib/tailscale, so this runs once per box.
+dnf config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo
+dnf install -y tailscale
+systemctl enable --now tailscaled
+if tailscale status >/dev/null 2>&1; then
+  log "tailscale already joined"
+elif TS_KEY=$(aws secretsmanager get-secret-value --region "$REGION" \
+      --secret-id passband/monitor/TS_AUTHKEY --query SecretString --output text 2>/dev/null) \
+    && [ -n "$TS_KEY" ] && [ "$TS_KEY" != None ]; then
+  install -d -m 0700 /run/passband-monitor
+  (umask 077; printf '%s' "$TS_KEY" >/run/passband-monitor/ts-authkey)
+  unset TS_KEY
+  if tailscale up --auth-key=file:/run/passband-monitor/ts-authkey \
+      --hostname=passband-monitor --advertise-tags=tag:passband-aws; then
+    tailscale serve --bg --https=443 https://bifrost.passband.app
+    tailscale serve --bg --https=8443 http://127.0.0.1:3000
+    log "tailscale joined; serving Bifrost on :443 and Grafana on :8443"
+  else
+    log "tailscale up failed; monitoring is unaffected"
+  fi
+  rm -f /run/passband-monitor/ts-authkey
+else
+  log "no passband/monitor/TS_AUTHKEY; skipping tailscale"
+fi
 log "done; follow with: journalctl -u passband-monitor -f"

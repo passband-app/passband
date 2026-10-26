@@ -419,7 +419,10 @@ final class Notifier {
                 do {
                     let event = try await APIClient.shared.getEvent(eventId)
                     guard store.isCurrent(epoch) else { return }
-                    store.openMessage(event.message_id, from: .notification)
+                    // An event on auth mail opens the reveal, never the reader.
+                    store.openMessage(
+                        event.message_id, from: .notification,
+                        auth: event.isAuth ? AuthPolicy.authMeta(for: event) : nil)
                 } catch {
                     guard store.isCurrent(epoch) else { return }
                     store.pushToast("Could not open this notification. Please try again.", .error)

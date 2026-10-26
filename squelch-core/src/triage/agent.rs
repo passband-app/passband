@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v12";
+pub const PROMPT_VERSION: &str = "agent-triage-v13";
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -1677,7 +1677,7 @@ mod tests {
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v12")
+            (2_000, "agent-triage-v13")
         );
     }
     #[test]
@@ -1824,6 +1824,8 @@ mod tests {
             "app_grant, a third-party app was granted access",
             "signin_receipt, a notice that the recipient used one account",
             "Set auth.critical true only with account_change",
+            "a look-alike or unrelated domain claiming such a change is phishing",
+            "it is not itself an equivalent access grant",
             "a fraud or transaction confirmation",
             "an app's request for new or updated permissions",
             "a privacy reminder, such as location sharing",

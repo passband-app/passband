@@ -39,8 +39,9 @@ struct AuthView: View {
     @State private var codes: [Int: String?] = [:]
     /// Ids archived from this page, hidden optimistically (the list is a poll).
     @State private var archived: Set<Int> = []
-    /// Bursts the owner asked to "Review each", laid out as their members.
-    @State private var expandedBursts: Set<String> = []
+    /// Member ids of bursts the owner asked to "Review each": keyed by member,
+    /// so a burst stays laid out as its members are answered or age out.
+    @State private var expandedBursts: Set<Int> = []
 
     private var decisions = AuthDecisions.shared
 

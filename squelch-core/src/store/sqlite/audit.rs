@@ -32,15 +32,22 @@ impl SqliteStore {
         // Currently assessed actionable auth older than cutoff, not yet shredded. OLDEST
         // FIRST so a capped pass makes monotonic progress across runs, and
         // `gmail_msg_id <> ''` because an unaddressable row cannot be trashed.
-        let mut stmt = conn.prepare(
+        // EVIDENCE IS KEPT: a message the owner ruled "Not me", and a
+        // critical account change still waiting in FYE for a ruling, are
+        // never trashed (the same `auth_fye_sql!` that holds them in FYE).
+        let mut stmt = conn.prepare(concat!(
             "SELECT m.id, m.gmail_msg_id, m.from_addr, json_extract(d.decision_json,'$.auth'), m.received_at
              FROM messages m
              JOIN agent_message_state a ON a.message_id=m.id AND a.account_id=m.account_id
              JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id
                AND d.revision=a.revision
              LEFT JOIN shred_log s
-               ON s.message_id = m.id AND s.account_id = m.account_id
-             WHERE m.account_id = ?1
+               ON s.message_id = m.id AND s.account_id = m.account_id",
+            auth_verdict_join_sql!(),
+            "WHERE m.account_id = ?1
+               AND NOT ",
+            auth_fye_sql!(),
+            "
                AND a.access='restricted'
                AND EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.auth.kinds')
                  WHERE value IN ('otp','password_reset','sign_in_link','verification'))
@@ -48,8 +55,8 @@ impl SqliteStore {
                AND m.gmail_msg_id IS NOT NULL AND m.gmail_msg_id <> ''
                AND s.id IS NULL
              ORDER BY m.received_at ASC
-             LIMIT ?3",
-        )?;
+             LIMIT ?3"
+        ))?;
         let out = stmt
             .query_map(params![account_id, cutoff.to_rfc3339(), limit], |r| {
                 Ok(ShredCandidate {
@@ -82,20 +89,26 @@ impl SqliteStore {
     ) -> Result<i64> {
         let conn = self.lock()?;
         let n: i64 = conn.query_row(
-            "SELECT COUNT(*)
+            concat!(
+                "SELECT COUNT(*)
              FROM messages m
              JOIN agent_message_state a ON a.message_id=m.id AND a.account_id=m.account_id
              JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id
                AND d.revision=a.revision
              LEFT JOIN shred_log s
-               ON s.message_id = m.id AND s.account_id = m.account_id
-             WHERE m.account_id = ?1
+               ON s.message_id = m.id AND s.account_id = m.account_id",
+                auth_verdict_join_sql!(),
+                "WHERE m.account_id = ?1
+               AND NOT ",
+                auth_fye_sql!(),
+                "
                AND a.access='restricted'
                AND EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.auth.kinds')
                  WHERE value IN ('otp','password_reset','sign_in_link','verification'))
                AND m.received_at <= ?2
                AND m.gmail_msg_id IS NOT NULL AND m.gmail_msg_id <> ''
-               AND s.id IS NULL",
+               AND s.id IS NULL"
+            ),
             params![account_id, cutoff.to_rfc3339()],
             |r| r.get(0),
         )?;

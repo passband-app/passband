@@ -55,9 +55,10 @@ enum AuthPolicy {
         .loginAlert, .accountChange, .appGrant, .securityAlert, .passwordReset, .magicLink,
     ]
 
-    /// The "sign-in or change" kinds a burst gathers. Resets, links and app
-    /// grants keep cards of their own: their buttons say different things.
-    static let burstKinds: Set<SealedKind> = [.loginAlert, .securityAlert, .accountChange]
+    /// The kinds a burst gathers: sign-ins ONLY. An account change, a grant or
+    /// a security alert is what an attacker leaves behind to stay in, and an
+    /// "All me" over a pile of sign-ins must never wave one of those through.
+    static let burstKinds: Set<SealedKind> = [.loginAlert]
 
     /// How long an unruled question stays open. A sign-in from three weeks ago
     /// is history, not a decision, and counting it would pin the rail badge on
@@ -107,9 +108,17 @@ enum AuthPolicy {
 
     // MARK: - services
 
+    /// Second-level labels that sit under a two-letter country code as a
+    /// registry, not a service (`co.uk`, `com.au`): the service is one label
+    /// further in. The daemon's pairing uses the same list.
+    static let countryRegistries: Set<String> = [
+        "co", "com", "net", "org", "gov", "ac", "edu", "ne", "or",
+    ]
+
     /// The registrable domain of a sender, as the daemon's pairing reads it:
-    /// the last two labels of the address's domain, lowercased. nil for
-    /// anything that is not an address.
+    /// the last two labels of the address's domain, lowercased, or three under
+    /// a country registry (`amazon.co.uk`). nil for anything that is not an
+    /// address, and for Apple's private relay, which is every service at once.
     static func service(_ sender: String) -> String? {
         var addr = sender
         if let open = addr.lastIndex(of: "<"), let close = addr.lastIndex(of: ">"), open < close {
@@ -121,22 +130,33 @@ enum AuthPolicy {
             .lowercased()
             .split(separator: ".")
             .filter { !$0.isEmpty }
+            .map(String.init)
         guard labels.count >= 2 else { return nil }
-        return labels.suffix(2).joined(separator: ".")
+        let domain = labels.joined(separator: ".")
+        if domain == "privaterelay.appleid.com" || domain.hasSuffix(".privaterelay.appleid.com") {
+            return nil
+        }
+        let take =
+            labels.count >= 3 && labels[labels.count - 1].count == 2
+                && countryRegistries.contains(labels[labels.count - 2])
+            ? 3 : 2
+        return labels.suffix(take).joined(separator: ".")
     }
 
     // MARK: - cards
 
-    /// Several open sign-in or change alerts from different services close
-    /// together: what a new phone or laptop looks like from the inbox.
+    /// Several open sign-in alerts from different services close together:
+    /// what a new phone or laptop looks like from the inbox.
     struct Burst: Sendable, Hashable, Identifiable {
         /// Newest first.
         var items: [SealedMeta]
         /// Distinct services among `items`.
         var services: Int
-        /// Keyed on the OLDEST member, which a newer arrival joining the burst
-        /// does not change, so "Review each" stays open as the burst grows.
+        /// A view identity only. "Review each" is NOT remembered by this id,
+        /// which changes as members are answered or age out; it is remembered
+        /// by member ids (see `cards(_:expanded:)`).
         var id: String { "burst-\(items.map(\.id).min() ?? 0)" }
+        var memberIds: Set<Int> { Set(items.map(\.id)) }
         var newest: Date? { items.compactMap { Fmt.date($0.received_at) }.max() }
         var allSignIns: Bool { items.allSatisfy { $0.kind == .loginAlert } }
     }
@@ -188,14 +208,22 @@ enum AuthPolicy {
         return (out, open.filter { !grouped.contains($0.id) })
     }
 
-    /// The rail's cards, in order: critical first, then newest first. A burst
-    /// whose id is in `expanded` ("Review each") is laid out as its members.
-    static func cards(_ open: [SealedMeta], expanded: Set<String> = []) -> [Card] {
+    /// The rail's cards, in order: critical first, then newest first.
+    /// `expanded` holds the MEMBER ids of every burst the owner asked to
+    /// "Review each"; a burst holding any of them is laid out as its members.
+    /// Keyed by members rather than by the burst, so the burst stays open as
+    /// its members are answered (it shrinks), age out, or a newer sign-in
+    /// joins it (it grows).
+    static func cards(_ open: [SealedMeta], expanded: Set<Int> = []) -> [Card] {
         let (bursts, rest) = bursts(open)
         var singles = rest
         var cards: [Card] = []
         for b in bursts {
-            if expanded.contains(b.id) { singles += b.items } else { cards.append(.burst(b)) }
+            if !b.memberIds.isDisjoint(with: expanded) {
+                singles += b.items
+            } else {
+                cards.append(.burst(b))
+            }
         }
         cards += singles.map(Card.single)
         func critical(_ c: Card) -> Bool {
@@ -232,9 +260,7 @@ enum AuthPolicy {
 
     /// The burst card's line under "New device?".
     static func burstLine(_ b: Burst) -> String {
-        b.allSignIns
-            ? "\(b.services) services saw a new sign-in"
-            : "\(b.services) services saw a sign-in or a change"
+        "\(b.services) services saw a new sign-in"
     }
 
     /// The quiet note on an explained row. `explainer` is the message that
@@ -256,9 +282,13 @@ enum AuthPolicy {
     // MARK: - ledger migration
 
     /// What to do with the old device-local ledger once the daemon keeps
-    /// verdicts: upload the rulings on listed messages the server has none for,
-    /// and drop every other entry (the server already has its own answer, or
-    /// the message is no longer listed and nothing will ask about it again).
+    /// verdicts: upload the rulings on listed messages the server has none for
+    /// AND that would still be an open question without the ruling, and drop
+    /// every other entry. Dropped: the server already has an answer; the
+    /// message is no longer listed; it is past its window (a months-old "Not
+    /// me" uploaded now would land in For your eyes on the daemon roll); or it
+    /// is a critical change ruled "mine" on the old build, which asks again
+    /// rather than quietly taking a takeover-class change out of FYE.
     struct Migration: Sendable, Equatable {
         /// Sorted by id, so the order is deterministic.
         var upload: [Upload]
@@ -272,18 +302,114 @@ enum AuthPolicy {
 
     /// nil when there is nothing to migrate yet: an empty ledger, or a daemon
     /// that does not keep verdicts (then the ledger IS the store).
-    static func migration(local: [Int: AuthVerdict], rows: [SealedMeta]) -> Migration? {
+    static func migration(
+        local: [Int: AuthVerdict], rows: [SealedMeta], now: Date = Date()
+    ) -> Migration? {
         guard !local.isEmpty, rows.contains(where: \.speaksVerdicts) else { return nil }
         let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var upload: [Migration.Upload] = []
         var drop: [Int] = []
         for (id, verdict) in local.sorted(by: { $0.key < $1.key }) {
-            if let row = byId[id], row.speaksVerdicts, row.serverVerdict == nil {
+            if let row = byId[id], row.speaksVerdicts, row.serverVerdict == nil,
+                isOpen(row, verdict: nil, now: now),
+                !(row.isCritical && verdict == .mine)
+            {
                 upload.append(.init(id: id, verdict: verdict))
             } else {
                 drop.append(id)
             }
         }
         return Migration(upload: upload, drop: drop)
+    }
+}
+
+// MARK: - feed rows and events
+
+extension AuthPolicy {
+    /// The one kind a client shows, picked by priority across a decision's
+    /// raw `auth.kinds` exactly as the daemon picks a sealed row's kind. The
+    /// decision says `sign_in_link`; the sealed wire calls it `magic_link`.
+    static func pickKind(_ raw: [String]) -> SealedKind? {
+        let order = [
+            "otp", "sign_in_link", "password_reset", "verification", "account_change",
+            "app_grant", "login_alert", "security_alert", "signin_receipt",
+        ]
+        let known = raw.compactMap { order.firstIndex(of: $0) }
+        if let best = known.min() {
+            let name = order[best]
+            return SealedKind(rawValue: name == "sign_in_link" ? "magic_link" : name)
+        }
+        return raw.first.map { SealedKind(rawValue: $0) }
+    }
+
+    /// The auth metadata a For-your-eyes row is drawn and revealed with, or
+    /// nil when the row is not auth mail. The row's own decision decides first,
+    /// so a blank or stale sealed list (the board snapshot an account switch
+    /// paints) never turns it into a normal row; the sealed row, when listed,
+    /// is the second signal and the better source (it carries the verdict).
+    static func authMeta(for update: AttentionUpdate, sealed: SealedMeta?) -> SealedMeta? {
+        if let sealed { return sealed }
+        guard update.isAuthRow else { return nil }
+        return SealedMeta(
+            id: update.id, thread_id: update.thread_id, sender: update.sender,
+            subject: update.subject ?? "", kind: pickKind(update.auth_kinds ?? []),
+            received_at: update.received_at ?? update.surfaced_at ?? "",
+            critical: (update.auth_critical ?? false)
+                && (update.auth_kinds ?? []).contains("account_change"))
+    }
+
+    /// The same for a notification event marked `is_auth`, which carries no
+    /// subject (its `one_line` is a fixed phrase, never body text).
+    static func authMeta(for event: Event) -> SealedMeta {
+        SealedMeta(
+            id: event.message_id, thread_id: event.thread_id, sender: event.sender,
+            subject: event.one_line, kind: event.sealed_kind, received_at: event.created_at)
+    }
+
+    /// Threads holding auth mail by either signal: nothing warms, prefetches
+    /// or caches them (`ThreadPrefetch.refuses`).
+    static func authThreadIds(standing: [AttentionUpdate], sealed: [SealedMeta]) -> Set<String> {
+        var ids = Set(sealed.map(\.thread_id))
+        for u in standing where u.isAuthRow { ids.insert(u.thread_id) }
+        ids.remove("")
+        return ids
+    }
+}
+
+// MARK: - verdict writes in flight
+
+extension AuthPolicy {
+    /// A verdict written (or being written) but not yet seen in a sealed list.
+    struct PendingWrite: Sendable, Equatable {
+        /// nil = a clear.
+        var verdict: AuthVerdict?
+        /// The newest list fetch that had STARTED when the PUT came back; only
+        /// a list whose fetch started after that can confirm the write. nil
+        /// while the PUT is still in flight.
+        var acceptedAfterFetch: Int?
+    }
+
+    /// Settle pending writes against a list whose fetch was number `fetch`.
+    /// A write is dropped (the list now speaks for it) once the PUT has come
+    /// back AND a list fetched after that agrees with it or no longer lists
+    /// the message. A list that was already in flight when the PUT landed can
+    /// still carry the old answer, and must not reopen the card.
+    static func settle(
+        _ pending: [Int: PendingWrite], rows: [SealedMeta], fetch: Int
+    ) -> [Int: PendingWrite] {
+        let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return pending.filter { id, write in
+            guard let after = write.acceptedAfterFetch, fetch > after else { return true }
+            guard let row = byId[id] else { return false }
+            return row.serverVerdict != write.verdict
+        }
+    }
+
+    /// Whether a failed verdict PUT means "this daemon has no verdict route,
+    /// keep it on the device" (quietly), rather than an error to roll back.
+    /// A 404 or 405 for a message still listed as auth mail can only be a
+    /// missing route: an older daemon, including one rolled back mid-session.
+    static func fallsBackToLedger(status: Int, stillListed: Bool) -> Bool {
+        (status == 404 || status == 405) && stillListed
     }
 }

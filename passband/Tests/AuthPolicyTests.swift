@@ -35,6 +35,12 @@ struct AuthPolicyTests {
         answersAndNotesSayTheRightThing()
         theLedgerMigratesOnlyToADaemonThatKeepsVerdicts()
         theLedgerReadsBothSpellings()
+        reviewEachSurvivesAShrinkingBurst()
+        migrationSkipsClosedAndCriticalMine()
+        aStaleListCannotSettleAWrite()
+        aMissingRouteFallsBackQuietly()
+        feedRowsAreAuthByTheirOwnDecision()
+        eventsBecomeRevealableMeta()
 
         print("\(checks - failures)/\(checks) checks passed")
         if failures > 0 { exit(1) }
@@ -195,10 +201,16 @@ struct AuthPolicyTests {
         expect(rest.map(\.id) == [4], "a reset never joins a burst")
         expect(AuthPolicy.burstLine(bursts[0]) == "3 services saw a new sign-in", "the line")
 
-        let mixed = open.prefix(2) + [meta(5, .accountChange, from: "x@dropbox.com", age: 2 * hour)]
-        let b = AuthPolicy.bursts(Array(mixed)).bursts.first
-        expect(b?.allSignIns == false, "a change in the burst")
-        expect(b.map(AuthPolicy.burstLine) == "3 services saw a sign-in or a change", "says so")
+        // Changes, grants and security alerts never make up a burst, however many.
+        for k in [SealedKind.accountChange, .appGrant, .securityAlert] {
+            let mixed = Array(open.prefix(2)) + [meta(5, k, from: "x@dropbox.com", age: 2 * hour)]
+            expect(AuthPolicy.bursts(mixed).bursts.isEmpty, "\(k.rawValue) is not the third service")
+            let only = [
+                meta(6, k, from: "a@x.com", age: 3 * hour), meta(7, k, from: "b@y.com", age: 2 * hour),
+                meta(8, k, from: "c@z.com", age: 1 * hour),
+            ]
+            expect(AuthPolicy.bursts(only).bursts.isEmpty, "three \(k.rawValue)s never group")
+        }
 
         // A newer arrival from a fourth service joins, and the id holds.
         let grown = open + [meta(6, .loginAlert, from: "x@apple.com", age: 0.5 * hour)]
@@ -254,7 +266,8 @@ struct AuthPolicyTests {
         expect(cards.first?.id == "m-5", "critical first, however old")
         expect(cards[1].id == "m-4", "then newest first")
         if case .burst = cards[2] {} else { expect(false, "the burst is the third card") }
-        let expanded = AuthPolicy.cards(open, expanded: [cards[2].id])
+        guard case .burst(let burst) = cards[2] else { return }
+        let expanded = AuthPolicy.cards(open, expanded: burst.memberIds)
         expect(expanded.count == 5, "Review each lays the burst out as its members")
         expect(expanded.map(\.id) == ["m-5", "m-4", "m-3", "m-2", "m-1"], "in the same order")
     }
@@ -264,6 +277,11 @@ struct AuthPolicyTests {
         expect(AuthPolicy.service("Google <no-reply@accounts.google.com>") == "google.com", "a display form")
         expect(AuthPolicy.service("NoReply@GitHub.COM") == "github.com", "lowercased")
         expect(AuthPolicy.service("not an address") == nil, "not an address")
+        expect(AuthPolicy.service("orders@amazon.co.uk") == "amazon.co.uk", "a country registry keeps three")
+        expect(AuthPolicy.service("news@bbc.co.uk") != AuthPolicy.service("orders@amazon.co.uk"), "two co.uk services differ")
+        expect(AuthPolicy.service("x@mail.example.com.au") == "example.com.au", "com.au")
+        expect(AuthPolicy.service("x@example.io") == "example.io", "a plain two-letter TLD keeps two")
+        expect(AuthPolicy.service("abc@privaterelay.appleid.com") == nil, "a relay is no service")
     }
 
     // MARK: - copy
@@ -299,7 +317,7 @@ struct AuthPolicyTests {
             meta(3, .loginAlert, verdict: "not_mine"),  // the server already has one: drop
             // 4 is no longer listed: drop
         ]
-        let plan = AuthPolicy.migration(local: local, rows: rows)
+        let plan = AuthPolicy.migration(local: local, rows: rows, now: now)
         expect(plan?.upload == [.init(id: 1, verdict: .mine), .init(id: 2, verdict: .notMine)], "uploads the unruled")
         expect(plan?.drop == [3, 4], "drops what the server has or no longer lists")
     }
@@ -313,6 +331,109 @@ struct AuthPolicyTests {
         for v in [AuthVerdict.mine, .notMine] {
             expect(AuthVerdict(stored: v.stored) == v, "\(v) round-trips the ledger")
         }
+    }
+
+    // MARK: - fix round
+
+    static func reviewEachSurvivesAShrinkingBurst() {
+        var open = [
+            meta(1, .loginAlert, from: "a@google.com", age: 6 * hour),
+            meta(2, .loginAlert, from: "b@github.com", age: 5 * hour),
+            meta(3, .loginAlert, from: "c@slack.com", age: 4 * hour),
+            meta(4, .loginAlert, from: "d@apple.com", age: 3 * hour),
+        ]
+        guard case .burst(let b)? = AuthPolicy.cards(open).first else {
+            expect(false, "four sign-ins are a burst")
+            return
+        }
+        var expanded = b.memberIds  // "Review each"
+        expect(AuthPolicy.cards(open, expanded: expanded).count == 4, "laid out as members")
+        // Answer the oldest: still 3 services, the old burst id changes.
+        open.removeFirst()
+        expect(AuthPolicy.cards(open, expanded: expanded).count == 3, "stays expanded after answering the oldest")
+        expect(AuthPolicy.cards(open).count == 1, "the same three collapse without the review")
+        // A newer sign-in joins: still expanded, newcomer laid out too.
+        open.append(meta(5, .loginAlert, from: "e@dropbox.com", age: 1 * hour))
+        expect(AuthPolicy.cards(open, expanded: expanded).count == 4, "stays expanded as it grows")
+        // Answer down to below a burst: plain singles either way.
+        open = Array(open.suffix(2))
+        expect(AuthPolicy.cards(open, expanded: expanded).count == 2, "below a burst, singles")
+        expanded = []
+        expect(AuthPolicy.cards(open).count == 2, "and without review too")
+    }
+
+    static func migrationSkipsClosedAndCriticalMine() {
+        let local: [Int: AuthVerdict] = [1: .notMine, 2: .mine, 3: .notMine, 4: .mine]
+        let rows = [
+            meta(1, .loginAlert, age: 40 * day),  // past its window: drop
+            meta(2, .accountChange, age: 3 * day, critical: true),  // critical "mine": drop, asks again
+            meta(3, .accountChange, age: 3 * day, critical: true),  // critical "not mine": upload
+            meta(4, .otp, age: hour),  // never a question: drop
+        ]
+        let plan = AuthPolicy.migration(local: local, rows: rows, now: now)
+        expect(plan?.upload == [.init(id: 3, verdict: .notMine)], "only the still-open, non-mine-critical one")
+        expect(plan?.drop == [1, 2, 4], "the rest are dropped")
+    }
+
+    static func aStaleListCannotSettleAWrite() {
+        typealias W = AuthPolicy.PendingWrite
+        let inFlight: [Int: W] = [1: W(verdict: .mine, acceptedAfterFetch: nil)]
+        let agrees = [meta(1, .loginAlert, verdict: "mine")]
+        let stale = [meta(1, .loginAlert, verdict: nil)]
+        expect(AuthPolicy.settle(inFlight, rows: agrees, fetch: 9) == inFlight, "a PUT still in flight is never settled")
+        let accepted: [Int: W] = [1: W(verdict: .mine, acceptedAfterFetch: 4)]
+        expect(AuthPolicy.settle(accepted, rows: agrees, fetch: 4) == accepted, "a list already in flight cannot confirm")
+        expect(AuthPolicy.settle(accepted, rows: stale, fetch: 5) == accepted, "a later list that disagrees keeps it")
+        expect(AuthPolicy.settle(accepted, rows: agrees, fetch: 5).isEmpty, "a later list that agrees settles it")
+        expect(AuthPolicy.settle(accepted, rows: [], fetch: 5).isEmpty, "a later list without the message settles it")
+        let clear: [Int: W] = [1: W(verdict: nil, acceptedAfterFetch: 4)]
+        expect(AuthPolicy.settle(clear, rows: stale, fetch: 5).isEmpty, "a clear settles on a null verdict")
+    }
+
+    static func aMissingRouteFallsBackQuietly() {
+        expect(AuthPolicy.fallsBackToLedger(status: 404, stillListed: true), "404 on a listed auth row: no route")
+        expect(AuthPolicy.fallsBackToLedger(status: 405, stillListed: true), "405 too")
+        expect(!AuthPolicy.fallsBackToLedger(status: 404, stillListed: false), "404 on a message no longer listed is a real refusal")
+        expect(!AuthPolicy.fallsBackToLedger(status: 500, stillListed: true), "a server error rolls back")
+    }
+
+    static func feedRowsAreAuthByTheirOwnDecision() {
+        expect(AuthPolicy.pickKind(["login_alert", "otp"]) == .otp, "priority, not order")
+        expect(AuthPolicy.pickKind(["sign_in_link", "password_reset"]) == .magicLink, "sign_in_link is the sealed magic_link")
+        expect(AuthPolicy.pickKind(["signin_receipt", "account_change"]) == .accountChange, "change before receipt")
+        expect(AuthPolicy.pickKind(["brand_new"]) == .unknown("brand_new"), "unknown stays unknown")
+        expect(AuthPolicy.pickKind([]) == nil, "none")
+
+        let json = """
+            {"message_id":42,"thread_id":"t42","from_addr":"no-reply@accounts.google.com","subject":"Recovery phone changed","received_at":"2026-10-26T10:00:00Z",
+             "decision":{"kinds":["authentication_security"],"destinations":[],"summary":"s","reason":"r","auth":{"kinds":["account_change"],"evidence":[],"critical":true}},
+             "attention":{"show_in_fye":true,"state":"needs_user","summary":"Google says your recovery phone changed.","factors":{"urgency":1,"action_need":1,"personal_relevance":1,"importance":1}},"score":1}
+            """
+        let item = try? JSONDecoder().decode(AgentFeedItem.self, from: Data(json.utf8))
+        let row = item?.row
+        expect(row?.isAuthRow == true, "decision.auth.kinds marks the row")
+        let m = row.flatMap { AuthPolicy.authMeta(for: $0, sealed: nil) }
+        expect(m?.id == 42 && m?.kind == .accountChange && m?.isCritical == true, "an empty sealed list still yields auth meta")
+        let listed = meta(42, .accountChange, critical: true, verdict: "not_mine")
+        expect(row.flatMap { AuthPolicy.authMeta(for: $0, sealed: listed) }?.serverVerdict == .notMine, "the sealed row wins when listed")
+        expect(row.map { AuthPolicy.authThreadIds(standing: [$0], sealed: []) } == ["t42"], "its thread is refused for prefetch")
+
+        let weird = json.replacingOccurrences(
+            of: #""auth":{"kinds":["account_change"],"evidence":[],"critical":true}"#, with: #""auth":"???""#)
+        let tolerant = try? JSONDecoder().decode(AgentFeedItem.self, from: Data(weird.utf8))
+        expect(tolerant != nil && tolerant?.row.isAuthRow == false, "a malformed auth block does not fail the feed row")
+        let plain = json.replacingOccurrences(
+            of: #","auth":{"kinds":["account_change"],"evidence":[],"critical":true}"#, with: "")
+        let p = try? JSONDecoder().decode(AgentFeedItem.self, from: Data(plain.utf8))
+        expect(p != nil && p.map { AuthPolicy.authMeta(for: $0.row, sealed: nil) } == .some(nil), "no auth block, not auth")
+    }
+
+    static func eventsBecomeRevealableMeta() {
+        let event = try? JSONDecoder().decode(Event.self, from: Data("""
+            {"id":9,"message_id":77,"thread_id":"t77","kind":"surfaced","tier":"signal","importance":0,"sender":"no-reply@github.com","one_line":"Sign-in alert","created_at":"2026-10-26T10:00:00Z","is_auth":true}
+            """.utf8))
+        let m = event.map(AuthPolicy.authMeta(for:))
+        expect(m?.id == 77 && m?.thread_id == "t77" && m?.subject == "Sign-in alert", "an auth event reveals message 77")
     }
 
     // MARK: -

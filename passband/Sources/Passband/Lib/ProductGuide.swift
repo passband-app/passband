@@ -577,11 +577,11 @@ enum ProductGuide {
 
         Needs a decision (the right of the Auth page; the top of the phone's login-codes page):
         - Sign-in alerts, account changes (a new recovery phone, 2FA changed, a new SSH key or access token, a card added to a wallet), app access grants, password resets and sign-in links ask whether it was the user. Resets and sign-in links answer "I asked" or "I did not", app access "I allowed it" or "I didn't", and the rest "That was me" or "Not me".
-        - A question stays open for 7 days, or 14 for account changes and app access.
-        - A critical change (recovery email or phone changed or removed, 2FA turned off or moved to a new device, password or account email changed, a phone number or SIM moved) is marked Critical, sorts first and stays open until answered. It also sits in For your eyes until "That was me".
+        - A question stays open for 7 days, or 14 for account changes, app access and security alerts.
+        - A critical change (recovery email or phone changed or removed, 2FA turned off or moved to a new device, password or account email changed, a phone number or SIM moved) is marked Critical, sorts first and stays open until it is answered or marked done. Once the user's Passband server is updated, it also sits in For your eyes until "That was me".
         - A sign-in alert that arrived within minutes of a code, sign-in link or sign-in receipt from the same service asks nothing; its row says what explains it. A critical change is never explained away.
-        - When three or more services see a new sign-in within three days, they share one "New device?" card with "All me" and "Review each".
-        - "Not me" opens the message and puts it in For your eyes. An answer given on one device shows on the others.
+        - When three or more services see a new sign-in within three days, they share one "New device?" card with "All me" and "Review each". Only sign-ins group this way: account changes and app access always get a card of their own.
+        - "Not me" opens the message. Once the user's Passband server is updated, it also puts the message in For your eyes, and an answer given on one device shows on the others; until then, answers stay on the device where they were given.
         - Login codes, verifications and sign-in receipts ("you shared Google Account data with X") never ask: they are proof of something the user just did.
         - Auth mail in For your eyes shows its summary and a lock. Opening it reveals it once in the same panel, with the same audit entry.
 

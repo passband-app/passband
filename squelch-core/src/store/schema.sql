@@ -963,6 +963,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_account_ts ON audit_log(account_id, ts);
+-- The Auth page asks whether the owner revealed a message (an explained
+-- sign-in alert needs the code it pairs with to have been used).
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(account_id, action, target);
 
 -- NOTIFICATION EVENT LOG. The source of truth for "something worth interrupting
 -- the user happened", written by the SYNC ENGINE at each triage verdict — never
@@ -2067,11 +2070,16 @@ CREATE TABLE IF NOT EXISTS archive_walk (
 );
 
 -- THE OWNER'S RULING ON AUTH MAIL ("That was me" / "Not me"), one row per
--- message. Human door only (`PUT /client/sealed/{id}/verdict`); the agent door
--- never reads or writes it. It moves FYE membership: `not_mine` puts the
--- message there, and `mine` takes a critical account change back out (see
--- `auth_fye_sql!`). No row is no ruling. It outlives re-triage on purpose:
--- the owner ruled on the message, not on one model run's reading of it.
+-- message. Written only by the human door (`PUT /client/sealed/{id}/verdict`,
+-- audited) and served only there; no agent-door path returns a verdict. It
+-- moves FYE membership: `not_mine` puts the message there, and `mine` takes a
+-- critical account change back out (see `auth_fye_sql!`). The FYE list is
+-- shared with the agent door, so an UNRESTRICTED message's presence there can
+-- reflect a ruling; restricted mail never reaches the agent wherever it sits.
+-- It also keeps evidence from the shredder. No row is no ruling. It outlives
+-- re-triage on purpose: the owner ruled on the message, not on one model
+-- run's reading of it. A ruling on a legacy sealed row (no agent decision) is
+-- kept and served but never moves FYE.
 CREATE TABLE IF NOT EXISTS auth_verdicts (
     account_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,

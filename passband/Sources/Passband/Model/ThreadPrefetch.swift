@@ -32,9 +32,11 @@ final class ThreadPrefetch {
     private let inflight = AsyncMemo<String, Result<ClientThreadView, Error>>(
         limit: 1, keep: { _ in false })
     private let loader: @MainActor (String) async throws -> ClientThreadView
-    /// Thread ids this cache must never fetch: threads holding sealed (auth)
-    /// mail, which the daemon refuses to serve. Injected by the store, so this
-    /// file still builds without it.
+    /// Thread ids this cache must never fetch or hold: threads holding auth
+    /// mail, whose body is meant to arrive through the audited reveal (or a
+    /// reader the human opened on purpose, which fetches for itself), never a
+    /// hover or a warm. Injected by the store (`AppStore.authThreadIds`), so
+    /// this file still builds without it.
     var refuses: @MainActor (String) -> Bool = { _ in false }
     /// Bumped by `wipe()`. Every fetch this class starts captures it and files
     /// nothing once it no longer matches: a thread fetched for the old account
@@ -134,6 +136,7 @@ final class ThreadPrefetch {
     /// reopen is instant too. Synchronous, so the live generation is by
     /// definition the one this view was fetched under.
     func note(_ threadId: String, _ view: ClientThreadView) {
+        guard !refuses(threadId) else { return }
         put(threadId, view, fresh: Self.freshDefault, gen: generation)
     }
 

@@ -2830,10 +2830,12 @@ fn list_items_with_query(
 ) -> Result<Vec<AgentListItem>> {
     // AUTH MAIL does not take the model's FYE pick: it lives on the Auth
     // page's decision rail, and listing every sign-in alert in both places
-    // means ruling on it twice. It is in FYE only when the owner said "Not
-    // me" or it is a critical account change still unruled (`auth_fye_sql!`,
-    // shared with the sitrep's placement). An explicit thread preference (the
-    // human pinned it) and a fired reminder still win.
+    // means ruling on it twice. A thread is in FYE for its auth mail only when
+    // one of its not-done auth messages was ruled "Not me" or is a critical
+    // account change still unruled (`auth_thread_fye_sql!`, shared with the
+    // sitrep's placement and the stats), and that message is the row shown,
+    // whichever message represents the thread. An explicit thread preference
+    // (the human pinned it) and a fired reminder still win.
     //
     // THE USER'S OWN MAIL gets the same treatment for a plainer reason: they
     // wrote it. A thread whose representative is theirs (see `OWN_MAIL` for how
@@ -2847,12 +2849,14 @@ fn list_items_with_query(
              m.id,m.thread_id,m.from_addr,m.subject,
              strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(a.relevant_activity),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,a.decision_message_id,m.from_name
              FROM agent_thread_attention a JOIN messages m ON m.account_id=a.account_id AND
-             m.id=a.message_id LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND
+             m.id=COALESCE(",auth_thread_fye_sql!("a.account_id","a.thread_id","a.message_id"),",a.message_id)
+             LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND
              t.message_id=m.id LEFT JOIN agent_thread_preferences pref ON pref.account_id=a.account_id AND
-             pref.thread_id=a.thread_id",auth_verdict_join_sql!(),"WHERE a.account_id=?1 AND ?3='fye' AND
-             (COALESCE(pref.show_in_fye,CASE WHEN ",own_mail_sql!()," THEN 0 WHEN ",auth_mail_sql!(),"
-             THEN ",auth_fye_sql!()," ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND ",archive_listable_sql!()," AND COALESCE(t.status,'new')!='done' AND
+             pref.thread_id=a.thread_id WHERE a.account_id=?1 AND ?3='fye' AND
+             (COALESCE(pref.show_in_fye,CASE WHEN ",own_mail_sql!()," THEN 0
+             WHEN ",auth_thread_fye_sql!("a.account_id","a.thread_id","a.message_id")," IS NOT NULL THEN 1
+             WHEN ",auth_mail_sql!()," THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND ",archive_listable_sql!()," AND COALESCE(t.status,'new')!='done' AND
              (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5")
     } else if destination == "records" {
         concat!("SELECT m.id,m.thread_id,m.from_addr,m.subject,
@@ -4052,17 +4056,31 @@ mod tests {
         auth: crate::triage::decision::AuthAssessment,
         restricted: bool,
     ) {
+        seed_auth_in(store, id, &format!("t{id}"), 0, auth, restricted);
+    }
+
+    /// [`seed_auth`] into `thread`, arriving `offset` seconds from now (so a
+    /// thread's messages arrive in order and the last one represents it).
+    fn seed_auth_in(
+        store: &SqliteStore,
+        id: i64,
+        thread: &str,
+        offset: i64,
+        auth: crate::triage::decision::AuthAssessment,
+        restricted: bool,
+    ) {
         {
             let conn = store.lock().unwrap();
+            let at = (Utc::now() + chrono::Duration::seconds(offset)).to_rfc3339();
             conn.execute(
                 "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
                  VALUES(?1,1,?2,?3,'security@bank.test','subject',?4,'snippet','body')",
-                params![id, id.to_string(), format!("t{id}"), Utc::now().to_rfc3339()],
+                params![id, id.to_string(), thread, at],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO triage(account_id,message_id,created_at,sensitivity) VALUES(1,?1,?2,'normal')",
-                params![id, Utc::now().to_rfc3339()],
+                params![id, at],
             )
             .unwrap();
         }
@@ -4160,10 +4178,32 @@ mod tests {
                 std::slice::from_ref(&context.message.source),
             )
             .unwrap();
+        // FYE IS THREAD-LEVEL. Gmail threads Google's "Security alert" mail,
+        // so a critical change is often not its thread's newest message.
+        // A critical change, then a sign-in alert after it: the thread is in
+        // FYE, and the row shown is the change.
+        seed_auth_in(&store, 30, "ta", -120, auth(&[AccountChange], true), false);
+        seed_auth_in(&store, 31, "ta", -60, auth(&[LoginAlert], false), false);
+        // "Not me" on the OLDER message holds the thread too.
+        seed_auth_in(&store, 32, "tb", -120, auth(&[LoginAlert], false), false);
+        seed_auth_in(&store, 33, "tb", -60, auth(&[LoginAlert], false), false);
+        store
+            .set_auth_verdict(1, 32, Some(NotMine), Utc::now())
+            .unwrap();
+        // A ruled change behind an alert: nothing holds the thread.
+        seed_auth_in(&store, 34, "tc", -120, auth(&[AccountChange], true), false);
+        seed_auth_in(&store, 35, "tc", -60, auth(&[LoginAlert], false), false);
+        store
+            .set_auth_verdict(1, 34, Some(Mine), Utc::now())
+            .unwrap();
 
+        // The row each qualifying thread shows, and every message placed in it.
         let mut expected: Vec<i64> = cases.iter().filter(|c| c.5).map(|c| c.0).collect();
-        expected.push(2);
+        expected.extend([2, 30, 32]);
         expected.sort();
+        let mut placed = expected.clone();
+        placed.extend([31, 33]);
+        placed.sort();
         let mut listed: Vec<i64> = store
             .agent_fye(1, 100, &RankingConfig::default(), Utc::now())
             .unwrap()
@@ -4179,7 +4219,24 @@ mod tests {
             .map(|item| item.update.id)
             .collect();
         eyes.sort();
-        assert_eq!(eyes, expected, "the sitrep placement");
+        assert_eq!(eyes, placed, "the sitrep placement");
+        // The stats tiers, message by message, off the CTE every count reads.
+        let mut signal: Vec<i64> = {
+            let conn = store.lock().unwrap();
+            let mut statement = conn
+                .prepare(&format!(
+                    "{} SELECT id FROM classified WHERE account_id=1 AND display_tier='signal'",
+                    super::super::attention::CANONICAL_MAIL_CTE
+                ))
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        signal.sort();
+        assert_eq!(signal, placed, "the stats tiers");
         let mut standing: Vec<i64> = store
             .human_agent_updates(1, &inventory(Some(crate::store::SitrepBand::Standing)))
             .unwrap()
@@ -4240,41 +4297,223 @@ mod tests {
     }
 
     /// The Auth page's `explained_by`, read off stored rows: a code the owner
-    /// archived after using it still explains the sign-in beside it, and is
-    /// itself gone from the list.
+    /// revealed and then archived still explains the sign-in beside it, and
+    /// is itself gone from the list. An unrevealed code, an unauthenticated
+    /// one, a disowned one and one outside the window explain nothing.
     #[test]
     fn sealed_rows_carry_their_explanation() {
         use crate::triage::decision::AuthKind::*;
         let store = fixture();
-        seed_auth(&store, 10, auth(&[LoginAlert], false), false);
-        seed_auth(&store, 11, auth(&[Otp], false), true);
-        seed_auth(&store, 12, auth(&[LoginAlert], false), false);
         let base = Utc::now() - chrono::Duration::hours(1);
-        {
+        // (id, kinds, from, offset seconds, auth_pass, revealed, done)
+        let rows: &[(
+            i64,
+            crate::triage::decision::AuthKind,
+            &str,
+            i64,
+            bool,
+            bool,
+            bool,
+        )] = &[
+            (
+                10,
+                LoginAlert,
+                "alerts@accounts.example.com",
+                30,
+                true,
+                false,
+                false,
+            ),
+            (11, Otp, "codes@example.com", 0, true, true, true),
+            (
+                12,
+                LoginAlert,
+                "alerts@elsewhere.test",
+                1000,
+                true,
+                false,
+                false,
+            ),
+            (13, Otp, "codes@elsewhere.test", 990, true, false, false),
+            (
+                14,
+                LoginAlert,
+                "alerts@third.test",
+                2000,
+                true,
+                false,
+                false,
+            ),
+            (15, Otp, "codes@third.test", 1990, false, true, false),
+            (
+                16,
+                LoginAlert,
+                "alerts@fourth.test",
+                3000,
+                true,
+                false,
+                false,
+            ),
+            (17, Otp, "codes@fourth.test", 2990, true, true, false),
+            (
+                18,
+                LoginAlert,
+                "alerts@fifth.test",
+                4000,
+                true,
+                false,
+                false,
+            ),
+            (19, Otp, "codes@fifth.test", 4000 - 301, true, true, true),
+        ];
+        for &(id, kind, from, offset, pass, revealed, done) in rows {
+            seed_auth(&store, id, auth(&[kind], false), kind == Otp);
             let conn = store.lock().unwrap();
-            for (id, from, offset) in [
-                (10, "alerts@accounts.example.com", 30),
-                (11, "codes@example.com", 0),
-                (12, "alerts@elsewhere.test", 10),
-            ] {
-                conn.execute(
-                    "UPDATE messages SET from_addr=?2, received_at=?3 WHERE id=?1",
-                    params![
-                        id,
-                        from,
-                        (base + chrono::Duration::seconds(offset)).to_rfc3339()
-                    ],
-                )
-                .unwrap();
+            conn.execute(
+                "UPDATE messages SET from_addr=?2, received_at=?3, auth_pass=?4 WHERE id=?1",
+                params![
+                    id,
+                    from,
+                    (base + chrono::Duration::seconds(offset)).to_rfc3339(),
+                    pass
+                ],
+            )
+            .unwrap();
+            if done {
+                conn.execute("UPDATE triage SET status='done' WHERE message_id=?1", [id])
+                    .unwrap();
             }
-            conn.execute("UPDATE triage SET status='done' WHERE message_id=11", [])
-                .unwrap();
+            drop(conn);
+            if revealed {
+                store
+                    .append_audit(
+                        1,
+                        &crate::store::NewAuditEntry {
+                            actor: "human".into(),
+                            action: "reveal_sealed".into(),
+                            target: Some(id.to_string()),
+                            detail: None,
+                        },
+                    )
+                    .unwrap();
+            }
         }
+        store
+            .set_auth_verdict(1, 17, Some(crate::types::AuthVerdict::NotMine), Utc::now())
+            .unwrap();
         let sealed = store.sealed_messages(1).unwrap();
-        let ids: Vec<i64> = sealed.iter().map(|row| row.id).collect();
-        assert_eq!(ids, vec![10, 12]);
-        assert_eq!(sealed[0].explained_by, Some(11));
-        assert_eq!(sealed[1].explained_by, None);
+        let explained = |id: i64| sealed.iter().find(|row| row.id == id).unwrap().explained_by;
+        assert!(
+            sealed.iter().all(|row| row.id != 11 && row.id != 19),
+            "done rows leave the list"
+        );
+        assert_eq!(explained(10), Some(11), "a revealed, archived code");
+        assert_eq!(explained(12), None, "an unrevealed code");
+        assert_eq!(explained(14), None, "an unauthenticated code");
+        assert_eq!(explained(16), None, "a disowned code");
+        assert_eq!(explained(18), None, "a done code outside the window");
+    }
+
+    /// ARCHIVING ONE AUTH MESSAGE NEVER CLEARS AN UNRULED CRITICAL SIBLING.
+    /// The Auth page archives the sign-in alert it used ("Used it, archive"),
+    /// and Done is thread-wide; the recovery-phone change Gmail threaded with
+    /// it must hold until the owner rules. Done on the change itself applies.
+    #[test]
+    fn done_on_a_sibling_spares_an_unruled_critical_change() {
+        use crate::triage::decision::AuthKind::*;
+        let fye = |store: &SqliteStore| {
+            store
+                .agent_fye(1, 100, &RankingConfig::default(), Utc::now())
+                .unwrap()
+                .into_iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>()
+        };
+        let sealed = |store: &SqliteStore| {
+            store
+                .sealed_messages(1)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>()
+        };
+        let store = fixture();
+        seed_auth_in(&store, 40, "t", -120, auth(&[AccountChange], true), false);
+        seed_auth_in(&store, 41, "t", -60, auth(&[LoginAlert], false), false);
+        assert!(
+            store
+                .set_attention_status(1, 41, crate::types::AttentionStatus::Done)
+                .unwrap()
+        );
+        assert_eq!(sealed(&store), vec![40]);
+        assert_eq!(fye(&store), vec![40]);
+        // A reminder on the sibling, or an unsubscribe from the sender, is
+        // no ruling either.
+        store
+            .set_reminder(1, 41, Utc::now() + chrono::Duration::days(1))
+            .unwrap();
+        store.resolve_sender(1, "security@bank.test").unwrap();
+        assert_eq!(sealed(&store), vec![40]);
+        // The owner marking the change itself done is their own act.
+        assert!(
+            store
+                .set_attention_status(1, 40, crate::types::AttentionStatus::Done)
+                .unwrap()
+        );
+        assert!(sealed(&store).is_empty());
+        assert!(fye(&store).is_empty());
+
+        // Once ruled, the change goes with its thread like any message.
+        let store = fixture();
+        seed_auth_in(&store, 40, "t", -120, auth(&[AccountChange], true), false);
+        seed_auth_in(&store, 41, "t", -60, auth(&[LoginAlert], false), false);
+        store
+            .set_auth_verdict(1, 40, Some(crate::types::AuthVerdict::Mine), Utc::now())
+            .unwrap();
+        assert!(
+            store
+                .set_attention_status(1, 41, crate::types::AttentionStatus::Done)
+                .unwrap()
+        );
+        assert!(sealed(&store).is_empty());
+    }
+
+    /// The shredder keeps evidence: never a message ruled "Not me", never a
+    /// critical change still waiting for a ruling.
+    #[test]
+    fn the_shredder_keeps_disowned_mail_and_unruled_critical_changes() {
+        use crate::triage::decision::AuthKind::*;
+        let store = fixture();
+        seed_auth(&store, 50, auth(&[Otp], false), true);
+        seed_auth(
+            &store,
+            51,
+            auth(&[PasswordReset, AccountChange], true),
+            true,
+        );
+        seed_auth(&store, 52, auth(&[Otp], false), true);
+        store
+            .set_auth_verdict(1, 52, Some(crate::types::AuthVerdict::NotMine), Utc::now())
+            .unwrap();
+        let cutoff = Utc::now() + chrono::Duration::hours(1);
+        let candidates = |store: &SqliteStore| {
+            store
+                .shred_candidates(1, cutoff, 10)
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.message_id, c.kind))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(candidates(&store), vec![(50, Some("otp".to_string()))]);
+        assert_eq!(store.shred_pending_count(1, cutoff).unwrap(), 1);
+        // Ruled "That was me", the change is ordinary auth mail again.
+        store
+            .set_auth_verdict(1, 51, Some(crate::types::AuthVerdict::Mine), Utc::now())
+            .unwrap();
+        let ids: Vec<i64> = candidates(&store).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&50) && ids.contains(&51));
+        assert_eq!(store.shred_pending_count(1, cutoff).unwrap(), 2);
     }
 
     /// FYE placement never opens the agent door: a restricted critical change
@@ -6155,20 +6394,22 @@ fn human_inventory(
         attention: Option<String>,
         representative: Option<i64>,
         own: bool,
-        /// `auth_fye_sql!` for this row: whether auth mail is the owner's to
-        /// see in FYE (a "Not me", or an unruled critical change).
+        /// `auth_thread_fye_sql!` for this row's thread: one of its auth
+        /// messages is the owner's to see in FYE (a "Not me", or an unruled
+        /// critical change). The representative is then that message.
         auth_fye: bool,
     }
     let mut statement=conn.prepare(concat!(
         "SELECT m.id,m.thread_id,m.from_addr,m.from_name,m.subject,m.snippet,m.received_at,
              COALESCE(t.status,'new'),t.surfaced_at,t.resolved_at,t.remind_at,t.reminded_at,
              EXISTS(SELECT 1 FROM attachments at WHERE at.account_id=m.account_id AND at.message_id=m.id),
-             d.decision_json,a.attention_json,a.message_id,",own_mail_sql!(),",",auth_fye_sql!(),"
+             d.decision_json,a.attention_json,
+             COALESCE(",auth_thread_fye_sql!("m.account_id","m.thread_id","m.id"),",a.message_id),",own_mail_sql!(),",
+             ",auth_thread_fye_sql!("m.account_id","m.thread_id","m.id")," IS NOT NULL
          FROM messages m
          LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
          LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
-        ",auth_verdict_join_sql!(),"
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
            AND (m.is_archive=0 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
@@ -6240,13 +6481,14 @@ fn human_inventory(
         }
         // Same rule as the `fye` list in `list_items_with_query`: auth mail
         // lives on the Auth page, so the model's FYE pick does not count for
-        // it; it is picked by `auth_fye_sql!` (a "Not me", or an unruled
-        // critical change) unless the human pinned the thread either way.
-        // Nothing picks mail the user wrote themselves.
+        // it. A thread is picked for its auth mail by `auth_thread_fye_sql!`
+        // (a "Not me", or an unruled critical change, anywhere in it), and
+        // the human's pin either way still wins. Nothing picks mail the user
+        // wrote themselves.
         let wants_fye = attention.as_ref().is_some_and(|a| a.show_in_fye);
         let is_auth = decision.as_ref().is_some_and(|d| d.auth.is_auth());
         let pinned = thread_fye_override(conn, account, &row.thread)?;
-        let models_pick = !row.own && if is_auth { row.auth_fye } else { wants_fye };
+        let models_pick = !row.own && (row.auth_fye || (!is_auth && wants_fye));
         let selected = models_pick || (wants_fye && pinned == Some(true));
         let is_standing = ((selected && row.representative == Some(row.id))
             || row.reminded.is_some())

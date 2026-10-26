@@ -211,8 +211,17 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     /// what re-enters the standing band regardless of tier: a reminder is the
     /// user declaring the mail owed attention, and that outranks a verdict.
     var reminded_at: String?
+    /// The auth kinds triage gave this message (`decision.auth.kinds` on the v2
+    /// feed row, raw strings). Set only by the feed adapter (`AgentFeedItem.row`);
+    /// nil on every other listing. Non-empty means auth mail, which a For-your-
+    /// eyes row shows sealed and opens in the reveal (Lib/AuthPolicy.swift).
+    var auth_kinds: [String]? = nil
+    /// The decision's own `auth.critical`, beside `auth_kinds`.
+    var auth_critical: Bool? = nil
 
     var hasAttachments: Bool { has_attachments ?? false }
+    /// Auth mail by the row's own decision.
+    var isAuthRow: Bool { !(auth_kinds ?? []).isEmpty }
 
     /// The stamp a mail list dates and sorts this row by: arrival, or first
     /// listing when the daemon is too old to say when it arrived.
@@ -2612,7 +2621,7 @@ struct AgentFeedItem: Codable, Sendable {
     /// Adapter for shared row/reader controls while those controls still use
     /// AttentionUpdate. The neutral legacy tier is never used for membership.
     var row: AttentionUpdate {
-        AttentionUpdate(
+        var row = AttentionUpdate(
             id: message_id, thread_id: thread_id, tier: .signal,
             importance: Int((attention.factors.importance * 100).rounded()),
             sender: from_addr,
@@ -2621,6 +2630,9 @@ struct AgentFeedItem: Codable, Sendable {
             deadline: attention.factors.attention_at?.value,
             from_name: from_name,
             subject: subject, status: .new, surfaced_at: received_at)
+        row.auth_kinds = decision.auth?.kinds
+        row.auth_critical = decision.auth?.critical
+        return row
     }
 
     var readingRow: AttentionUpdate {
@@ -2648,6 +2660,33 @@ struct AgentMessageDecision: Codable, Sendable {
     var summary: String
     var reason: String
     var records: [AgentRecordProposal]?
+    /// `auth`: which auth kinds triage found. Optional throughout so a
+    /// decision shaped any other way still decodes.
+    var auth: AgentAuthAssessment? = nil
+}
+
+/// core::triage::decision::AuthAssessment, the two fields a client reads.
+/// Kinds stay raw strings (`sign_in_link`, not the sealed `magic_link`).
+struct AgentAuthAssessment: Codable, Sendable {
+    var kinds: [String]?
+    var critical: Bool?
+
+    init(kinds: [String]? = nil, critical: Bool? = nil) {
+        self.kinds = kinds
+        self.critical = critical
+    }
+
+    /// Field by field and forgiving: a feed whose consumer cannot decode one
+    /// row loses the whole page, and this block is presentation, not membership.
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            kinds = nil
+            critical = nil
+            return
+        }
+        kinds = (try? c.decodeIfPresent([String].self, forKey: .kinds)) ?? nil
+        critical = (try? c.decodeIfPresent(Bool.self, forKey: .critical)) ?? nil
+    }
 }
 
 /// Presentation consumes explicit record facts; it never infers kinds from copy.

@@ -111,7 +111,7 @@ struct MobileSitrepView: View {
                     // one-time reveal, never in the reader.
                     forYourEyes(
                         visible: visible, overflow: overflow,
-                        queue: ranked.filter { store.sealedMeta(message: $0.id) == nil })
+                        queue: ranked.filter { store.authMeta(for: $0) == nil })
                 } else if isClear {
                     // An empty board is the best state this app has, and it
                     // should not look like a broken one.
@@ -284,11 +284,12 @@ struct MobileSitrepView: View {
             VStack(spacing: 2) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { _, u in
                     let verbs = UpdateVerbs(update: u, queue: queue, surface: .sitrep)
-                    if let meta = store.sealedMeta(message: u.id) {
+                    if let meta = store.authMeta(for: u) {
                         // Sealed: summary and a lock, a tap opens the audited
-                        // reveal, and the only swipe is Done. Reply, remind and
-                        // archive all start from a reader this mail never opens in.
-                        SwipeRow(leading: [], trailing: verbs.trailingVerbs) {
+                        // reveal, and the only swipe is Done. Reply, remind,
+                        // archive and tune all start from somewhere this row
+                        // does not send auth mail.
+                        SwipeRow(leading: [], trailing: verbs.doneVerbs) {
                             MobileAuthEyesRow(update: u, meta: meta) { store.requestReveal(meta) }
                         }
                     } else {

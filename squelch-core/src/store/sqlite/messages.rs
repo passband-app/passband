@@ -827,8 +827,11 @@ impl SqliteStore {
         drop(stmt);
 
         for m in &mut messages {
-            // ALWAYS present on the wire ([] when none). No sealed guard needed:
-            // the whole view 404s any thread containing a sealed message.
+            // ALWAYS present on the wire ([] when none). No sealed guard: this
+            // is the HUMAN thread view, which serves sealed and restricted
+            // threads to their owner by design
+            // (`human_can_read_restricted_thread_with_html`). The audited
+            // reveal is the Auth page's door, not this view's gate.
             m.attachments = load_client_attachments_conn(&conn, account_id, m.id)?;
         }
         if messages.is_empty() {
@@ -1717,67 +1720,49 @@ impl SqliteStore {
         // still exactly what the Auth page's decision rail exists for.
         // Done (archived from the Auth page, or marked done anywhere) leaves the
         // list: it is how the page and its rail badge let go of dealt-with mail.
-        // Done rows are still READ, for pairing only: the code the owner
-        // archived a minute after using it still explains the sign-in alert.
+        use crate::triage::auth_pairing::{AuthMailRow, explained_by, explainer_window};
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(concat!(
-            "SELECT m.id, m.account_id, m.thread_id, m.from_addr, m.subject, m.received_at,
-                    s.message_id IS NOT NULL, json_extract(d.decision_json,'$.auth'), t.sealed_kind,
-                    COALESCE(t.status,'new')='done', v.verdict
-             FROM messages m
-             LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
-             LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
-             LEFT JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id",
-            auth_verdict_join_sql!(),
-            "WHERE m.account_id = ?1 AND ",
-            sealed_membership_sql!(),
-            " ORDER BY m.received_at DESC, m.id DESC"
-        ))?;
-        let rows = stmt
-            .query_map(params![account_id], |r| {
-                let auth = SealedAuth::read(
-                    r.get(6)?,
-                    r.get::<_, Option<String>>(7)?.as_deref(),
-                    r.get(8)?,
-                );
-                Ok((
-                    SealedMessage {
-                        id: r.get(0)?,
-                        account_id: r.get(1)?,
-                        thread_id: r.get(2)?,
-                        from_addr: r.get(3)?,
-                        subject: r.get(4)?,
-                        received_at: dt(r, 5)?,
-                        sealed_kind: auth.wire_kind.clone(),
-                        critical: auth.critical,
-                        verdict: r
-                            .get::<_, Option<String>>(10)?
-                            .as_deref()
-                            .and_then(crate::types::AuthVerdict::parse),
-                        explained_by: None,
-                    },
-                    auth,
-                    r.get::<_, bool>(9)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let pairing: Vec<crate::triage::auth_pairing::AuthMailRow> = rows
+        let open = sealed_rows(&conn, account_id, "COALESCE(t.status,'new')!='done'", &[])?;
+        // Done rows are read for pairing only, and only inside the window of
+        // an open alert that could be explained: the code the owner archived
+        // a minute after using it still explains the sign-in beside it. The
+        // windows are merged so a burst costs one query, not one per alert.
+        let mut windows: Vec<(DateTime<Utc>, DateTime<Utc>)> = open
             .iter()
-            .map(|(m, auth, _)| crate::triage::auth_pairing::AuthMailRow {
-                id: m.id,
-                from_addr: m.from_addr.clone(),
-                subject: m.subject.clone(),
-                received_at: m.received_at,
-                kinds: auth.kinds.clone(),
-                critical: auth.critical,
-            })
+            .filter(|(_, row)| row.explainable())
+            .map(|(_, row)| explainer_window(row.received_at))
             .collect();
-        let explained = crate::triage::auth_pairing::explained_by(&pairing);
-        Ok(rows
+        windows.sort();
+        let mut merged: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
+        for (from, to) in windows {
+            match merged.last_mut() {
+                Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                _ => merged.push((from, to)),
+            }
+        }
+        let mut done: Vec<AuthMailRow> = Vec::new();
+        for (from, to) in merged {
+            done.extend(
+                sealed_rows(
+                    &conn,
+                    account_id,
+                    "COALESCE(t.status,'new')='done' AND m.received_at BETWEEN ?2 AND ?3",
+                    &[from.to_rfc3339(), to.to_rfc3339()],
+                )?
+                .into_iter()
+                .map(|(_, row)| row),
+            );
+        }
+        let pairing: Vec<AuthMailRow> = open
+            .iter()
+            .map(|(_, row)| row.clone())
+            .chain(done)
+            .collect();
+        let explained = explained_by(&pairing);
+        Ok(open
             .into_iter()
             .zip(explained)
-            .filter(|((_, _, done), _)| !done)
-            .map(|((mut m, _, _), explained_by)| {
+            .map(|((mut m, _), explained_by)| {
                 m.explained_by = explained_by;
                 m
             })
@@ -2139,4 +2124,73 @@ impl SealedAuth {
             wire_kind,
         }
     }
+}
+
+/// The Auth page's rows (`sealed_membership_sql!`) matching `filter`, newest
+/// first, each with what the pairing reads off it. `filter` is SQL over the
+/// same aliases; `extra` binds from `?2`.
+fn sealed_rows(
+    conn: &rusqlite::Connection,
+    account_id: AccountId,
+    filter: &str,
+    extra: &[String],
+) -> Result<Vec<(SealedMessage, crate::triage::auth_pairing::AuthMailRow)>> {
+    let sql = format!(
+        "{} AND {filter} ORDER BY m.received_at DESC, m.id DESC",
+        concat!(
+            "SELECT m.id, m.account_id, m.thread_id, m.from_addr, m.subject, m.received_at,
+                    s.message_id IS NOT NULL, json_extract(d.decision_json,'$.auth'), t.sealed_kind,
+                    v.verdict, COALESCE(m.auth_pass,0)=1,
+                    EXISTS(SELECT 1 FROM audit_log al WHERE al.account_id=m.account_id
+                           AND al.action='reveal_sealed' AND al.target=CAST(m.id AS TEXT))
+             FROM messages m
+             LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
+             LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
+             LEFT JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id",
+            auth_verdict_join_sql!(),
+            "WHERE m.account_id = ?1 AND ",
+            sealed_membership_sql!()
+        )
+    );
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&account_id];
+    params.extend(extra.iter().map(|value| value as &dyn rusqlite::ToSql));
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params.as_slice(), |r| {
+            let auth = SealedAuth::read(
+                r.get(6)?,
+                r.get::<_, Option<String>>(7)?.as_deref(),
+                r.get(8)?,
+            );
+            let verdict = r
+                .get::<_, Option<String>>(9)?
+                .as_deref()
+                .and_then(crate::types::AuthVerdict::parse);
+            let message = SealedMessage {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                thread_id: r.get(2)?,
+                from_addr: r.get(3)?,
+                subject: r.get(4)?,
+                received_at: dt(r, 5)?,
+                sealed_kind: auth.wire_kind,
+                critical: auth.critical,
+                verdict,
+                explained_by: None,
+            };
+            let pairing = crate::triage::auth_pairing::AuthMailRow {
+                id: message.id,
+                from_addr: message.from_addr.clone(),
+                subject: message.subject.clone(),
+                received_at: message.received_at,
+                kinds: auth.kinds,
+                critical: auth.critical,
+                auth_pass: r.get(10)?,
+                revealed: r.get(11)?,
+                not_mine: verdict == Some(crate::types::AuthVerdict::NotMine),
+            };
+            Ok((message, pairing))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
 }

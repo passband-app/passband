@@ -23,13 +23,12 @@ private let eyesVisible = 10
 /// which is the cost `SitrepCursor` exists to keep out of the render path.
 ///
 /// AUTH MAIL IS NOT ON THE WALK. It sits in this band when it needs a ruling
-/// (critical, or "Not me"), but it opens in the one-time reveal panel, never in
-/// the reader, so a walk that stepped onto it would have nowhere to show it.
+/// (critical, or "Not me"), and from here it opens in the audited one-time
+/// reveal, not the reader, so a walk that stepped onto it would leave the walk.
+/// Detected by the row's own decision first (`AppStore.authMeta(for:)`).
 @MainActor
 private func eyesWalk(_ store: AppStore) -> [AttentionUpdate] {
-    let sealed = Set(store.sitrep.sealed.map(\.id))
-    guard !sealed.isEmpty else { return store.sitrep.standing }
-    return store.sitrep.standing.filter { !sealed.contains($0.id) }
+    store.sitrep.standing.filter { store.authMeta(for: $0) == nil }
 }
 
 /// The sitrep's hover + keyboard cursor, in an `@Observable` box rather than
@@ -478,14 +477,12 @@ struct SitrepView: View {
                         store.startWalk(first.thread_id, queue: walk)
                     })
         ) {
-            let sealed = Dictionary(
-                store.sitrep.sealed.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             VStack(spacing: 1) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { i, u in
                     // No closures passed down: a stored closure is never equal to
                     // last render's, so handing rows their actions that way meant
                     // SwiftUI could not skip a single one when the parent redrew.
-                    if let meta = sealed[u.id] {
+                    if let meta = store.authMeta(for: u) {
                         AuthEyesRow(update: u, meta: meta, index: i, cursor: cursor)
                     } else if RehearsalMode.isEnabled && u.id == 1 {
                         ObligationRow(update: u, index: i, cursor: cursor)
@@ -573,6 +570,11 @@ struct SitrepView: View {
             },
             KeyBinding("Enter", "open email") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Auth mail opens in the audited one-time reveal.
+                if let meta = store.authMeta(for: u) {
+                    store.requestReveal(meta)
+                    return
+                }
                 store.openThread(u.thread_id, queue: eyesWalk(store), from: .sitrep)
             },
             // Space STARTS the walk: no highlight needed, so it is the one key
@@ -583,8 +585,8 @@ struct SitrepView: View {
                 let walk = eyesWalk(store)
                 let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
                 guard let u else { return false }
-                // A highlighted auth row has no reader to walk into.
-                if let meta = store.sealedMeta(message: u.id) {
+                // A highlighted auth row opens the reveal, not a walk.
+                if let meta = store.authMeta(for: u) {
                     store.requestReveal(meta)
                     return true
                 }
@@ -597,6 +599,9 @@ struct SitrepView: View {
             // inside the reader once the reply is away.
             KeyBinding("r", "reply") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Replying opens the reader on the sealed body; from here, an
+                // auth row only ever opens the reveal.
+                guard store.authMeta(for: u) == nil else { return }
                 Actions.reply(u, queue: eyesWalk(store))
             },
             KeyBinding("v", "fix triage") {
@@ -1009,8 +1014,9 @@ private struct BoardWarmKeeper: View {
 
 /// Auth mail in For your eyes: a critical account change nobody has ruled on,
 /// or one the owner said was not them. Its body is sealed, so this row shows
-/// the model's one-line summary and a lock, never fetches or prefetches the
-/// thread (the daemon 404s it), and opens the audited one-time reveal.
+/// the model's one-line summary and a lock, never prefetches the thread
+/// (`ThreadPrefetch.refuses`), and opens the audited one-time reveal. The
+/// human thread view would serve it; this row simply never asks.
 private struct AuthEyesRow: View {
     @Environment(AppStore.self) private var store
     let update: AttentionUpdate

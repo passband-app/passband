@@ -118,11 +118,12 @@ extension AuthCopy {
 /// SERVER-BACKED where the daemon can be (docs/AUTH-MAIL-HANDLING.md,
 /// "Verdicts"): a verdict is read off the `/client/sealed` row and written with
 /// `PUT /client/sealed/{id}/verdict`, optimistically, and rolled back if the
-/// write fails. A daemon older than that route keeps the old behaviour: the
-/// verdict lives in this device's UserDefaults, per ACCOUNT (the map is keyed by
-/// message id, which is one daemon's SQLite int). The first sealed list from a
-/// daemon that keeps verdicts uploads whatever the local ledger holds for
-/// listed messages the server has no ruling on, then empties the ledger.
+/// write fails. A daemon without that route (older, or rolled back) keeps the
+/// old behaviour: the verdict lives in this device's UserDefaults, per ACCOUNT
+/// (the map is keyed by message id, which is one daemon's SQLite int). The
+/// first sealed list from a daemon that keeps verdicts uploads what the local
+/// ledger holds for still-open listed messages, then empties the ledger. The
+/// rules themselves are pure and tested (Lib/AuthPolicy.swift).
 @MainActor
 @Observable
 final class AuthDecisions {
@@ -147,13 +148,16 @@ final class AuthDecisions {
     /// The device-local ledger: the whole store on an old daemon, and on a new
     /// one only what is still waiting to be uploaded.
     private var local: [Int: AuthVerdict] = [:]
-    /// Writes the server has not confirmed in a sealed list yet, by message id.
-    /// An inner nil is a CLEAR in flight. Shown in place of the row's own
-    /// verdict, so a card does not flicker back between the PUT and the poll.
-    private var pending: [Int: AuthVerdict?] = [:]
-    /// Pending writes the server accepted; dropped from `pending` once a
-    /// sealed list agrees (or stops listing the message).
-    @ObservationIgnored private var accepted: Set<Int> = []
+    /// Writes no sealed list has confirmed yet, shown in place of the row's
+    /// own verdict so a card does not flicker back between the PUT and the
+    /// list that carries it (`AuthPolicy.settle`).
+    private var pending: [Int: AuthPolicy.PendingWrite] = [:]
+    /// The last sealed list, for the "still listed?" test a failed PUT needs.
+    @ObservationIgnored private var lastRows: [SealedMeta] = []
+    /// Numbers every sealed-list fetch as it STARTS (`beginListFetch`).
+    @ObservationIgnored private var fetchSeq = 0
+    /// The newest fetch number whose list was applied.
+    @ObservationIgnored private var appliedFetch = 0
     /// Ids the migration already tried this session, so a refusal is not
     /// retried on every poll.
     @ObservationIgnored private var migrationTried: Set<Int> = []
@@ -175,14 +179,14 @@ final class AuthDecisions {
         }
         local = next
         pending = [:]
-        accepted = []
+        lastRows = []
         migrationTried = []
         migrating = false
     }
 
     /// The verdict for a message, or nil while it is still open.
     func decision(_ m: SealedMeta) -> AuthVerdict? {
-        if let p = pending[m.id] { return p }
+        if let p = pending[m.id] { return p.verdict }
         if m.speaksVerdicts, let v = m.serverVerdict { return v }
         // On a new daemon this is a verdict still waiting to be uploaded; on an
         // old one it is the only copy there is.
@@ -194,22 +198,30 @@ final class AuthDecisions {
     /// caller opens the message.
     func set(_ m: SealedMeta, _ verdict: AuthVerdict?) {
         guard Self.key != nil else { return }
-        pending[m.id] = .some(verdict)
-        accepted.remove(m.id)
         let epoch = AppStore.shared.epoch
+        pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: nil)
         Task { @MainActor in
+            // BEFORE the send as well as after it: an account switch between
+            // the tap and this task would hand the old daemon's message id to
+            // the new one, a verdict on an unrelated message there.
+            guard AppStore.shared.isCurrent(epoch) else { return }
             do {
                 try await APIClient.shared.putSealedVerdict(m.id, verdict: verdict?.rawValue)
                 guard AppStore.shared.isCurrent(epoch) else { return }
-                // Kept in `pending` until a list shows it; any local copy is
-                // now superseded by the server's.
-                accepted.insert(m.id)
+                // Only a list fetched from here on can confirm it.
+                if pending[m.id]?.verdict == verdict {
+                    pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: fetchSeq)
+                }
+                // Any local copy is superseded by the server's.
                 writeLocal { $0.removeValue(forKey: m.id) }
                 await SitrepPoller.shared.refreshSealed()
             } catch let error as APIError
-                where (error.status == 404 || error.status == 405) && !m.speaksVerdicts
+                where AuthPolicy.fallsBackToLedger(
+                    status: error.status,
+                    stillListed: !m.speaksVerdicts || lastRows.contains { $0.id == m.id })
             {
-                // A daemon with no verdict route: this device keeps it.
+                // No verdict route (an older daemon, or one rolled back under
+                // us): this device keeps it, quietly.
                 guard AppStore.shared.isCurrent(epoch) else { return }
                 writeLocal { map in
                     if let verdict { map[m.id] = verdict } else { map.removeValue(forKey: m.id) }
@@ -218,27 +230,31 @@ final class AuthDecisions {
             } catch {
                 guard AppStore.shared.isCurrent(epoch) else { return }
                 pending.removeValue(forKey: m.id)
-                accepted.remove(m.id)
                 AppStore.shared.pushToast(errText(error, "could not save that answer"), .error)
             }
         }
     }
 
-    /// Fed every sealed list the store takes in (`AppStore.sitrep`'s didSet):
+    /// Number a sealed-list fetch as it starts. The poller calls this before
+    /// the request and hands the number back with the rows (`listed`).
+    func beginListFetch() -> Int {
+        fetchSeq += 1
+        return fetchSeq
+    }
+
+    /// Whether a list from fetch number `fetch` is newer than the last one
+    /// applied. The poller drops a stale one rather than painting it.
+    func isFresh(_ fetch: Int) -> Bool { fetch > appliedFetch }
+
+    /// Every sealed list the poller takes in, with the number its fetch got:
     /// settles confirmed writes and, on a daemon that keeps verdicts, moves the
     /// local ledger up to it.
-    func sync(_ rows: [SealedMeta]) {
-        if !accepted.isEmpty {
-            let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            for id in accepted {
-                guard let want = pending[id] else {
-                    accepted.remove(id)
-                    continue
-                }
-                if let row = byId[id], row.serverVerdict != want { continue }
-                pending.removeValue(forKey: id)
-                accepted.remove(id)
-            }
+    func listed(_ rows: [SealedMeta], fetch: Int) {
+        appliedFetch = max(appliedFetch, fetch)
+        lastRows = rows
+        if !pending.isEmpty {
+            let next = AuthPolicy.settle(pending, rows: rows, fetch: fetch)
+            if next != pending { pending = next }
         }
         guard !migrating,
             let plan = AuthPolicy.migration(
@@ -260,10 +276,8 @@ final class AuthDecisions {
                     continue
                 }
                 guard AppStore.shared.isCurrent(epoch) else { return }
-                // Shown from `pending` until the next list carries it, so the
-                // card does not reopen for a poll.
-                pending[item.id] = .some(item.verdict)
-                accepted.insert(item.id)
+                // Shown from `pending` until a later list carries it.
+                pending[item.id] = .init(verdict: item.verdict, acceptedAfterFetch: fetchSeq)
                 writeLocal { $0.removeValue(forKey: item.id) }
             }
             await SitrepPoller.shared.refreshSealed()

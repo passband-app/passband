@@ -2209,7 +2209,8 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// HUMAN-DOOR-ONLY (`PUT /client/sealed/{id}/verdict`): record the owner's
     /// ruling on one auth message, or clear it with `None`. `NotFound` when the
     /// message does not exist or is not auth mail (the membership
-    /// [`Store::sealed_body`] uses). MUST NOT be reachable from MCP.
+    /// [`Store::sealed_body`] uses). A legacy sealed row (no agent decision)
+    /// takes a ruling but never moves FYE. MUST NOT be reachable from MCP.
     fn set_auth_verdict(
         &self,
         account_id: AccountId,

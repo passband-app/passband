@@ -3566,7 +3566,10 @@ pub struct AuthVerdictBody {
 /// The owner's ruling on one auth message ("That was me" / "Not me"), kept
 /// on the server so every client sees it. `null` clears it. A `not_mine`
 /// puts the message in FYE; a `mine` takes a critical change back out.
-/// 404 for a message that is not auth mail. HUMAN DOOR ONLY.
+/// 404 for a message that is not auth mail. A legacy sealed row (sealed by
+/// the old pipeline, no agent decision) takes a ruling and serves it back,
+/// but it never moves FYE: it has no decision or attention to place.
+/// Every write is audited. HUMAN DOOR ONLY.
 pub async fn put_sealed_verdict(
     State(state): State<ApiState>,
     Path(message_id): Path<i64>,
@@ -3577,6 +3580,15 @@ pub async fn put_sealed_verdict(
         store.set_auth_verdict(account_id, message_id, verdict, Utc::now())
     })
     .await?;
+    // A ruling moves FYE and the shredder, so it leaves a row like a reveal
+    // does: the message id and the ruling, nothing from the mail.
+    audit_action(
+        &state,
+        "auth_verdict",
+        Some(message_id.to_string()),
+        verdict.map_or("cleared", |verdict| verdict.as_str()),
+    )
+    .await;
     Ok(Json(json!({ "id": message_id, "verdict": verdict })))
 }
 

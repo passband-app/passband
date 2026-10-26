@@ -803,6 +803,24 @@ async fn sealed_verdict_round_trips_and_moves_fye() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(sealed(h.app.clone()).await[0]["verdict"].is_null());
 
+    // Every ruling that landed left an audit row naming the message, and
+    // the two that were refused left none.
+    let rulings: Vec<Option<String>> = h
+        .store
+        .list_audit(h.acct, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.action == "auth_verdict")
+        .map(|entry| {
+            assert_eq!(entry.target.as_deref(), Some(id.to_string().as_str()));
+            entry.detail
+        })
+        .collect();
+    assert_eq!(rulings.len(), 3);
+    for detail in ["not_mine", "mine", "cleared"] {
+        assert!(rulings.contains(&Some(detail.to_string())), "{detail}");
+    }
+
     // Not auth mail, or no such message: 404.
     for target in [other, other + 1000] {
         let response = put(

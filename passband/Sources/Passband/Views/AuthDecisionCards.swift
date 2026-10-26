@@ -11,13 +11,13 @@ import SwiftUI
 struct AuthDecisionStack: View {
     let open: [SealedMeta]
     let limit: Int
-    @Binding var expanded: Set<String>
+    @Binding var expanded: Set<Int>
     let onNotMine: (SealedMeta) -> Void
 
     private var decisions = AuthDecisions.shared
 
     init(
-        open: [SealedMeta], limit: Int, expanded: Binding<Set<String>>,
+        open: [SealedMeta], limit: Int, expanded: Binding<Set<Int>>,
         onNotMine: @escaping (SealedMeta) -> Void
     ) {
         self.open = open
@@ -45,7 +45,7 @@ struct AuthDecisionStack: View {
                     burst: b,
                     onAllMine: { for m in b.items { decisions.set(m, .mine) } },
                     onReviewEach: {
-                        withAnimation(Motion.disclose) { _ = expanded.insert(b.id) }
+                        withAnimation(Motion.disclose) { expanded.formUnion(b.memberIds) }
                     })
             }
         }

@@ -61,20 +61,82 @@ macro_rules! auth_mail_sql {
     };
 }
 
-/// THE MODEL-AND-VERDICT HALF OF FYE MEMBERSHIP FOR AUTH MAIL, over aliases
-/// `d` (decision) and `v` (`auth_verdicts`, LEFT JOINed on the same message).
+/// A takeover-class account change, over alias `d`: `critical` beside
+/// `account_change`. The Rust form is `AuthAssessment::is_critical`.
+macro_rules! auth_critical_sql {
+    () => {
+        "(json_extract(d.decision_json,'$.auth.critical')=1 AND EXISTS(SELECT 1 FROM \
+           json_each(d.decision_json,'$.auth.kinds') WHERE value='account_change'))"
+    };
+}
+
+/// THE MESSAGE HALF OF FYE MEMBERSHIP FOR AUTH MAIL, over aliases `d`
+/// (decision) and `v` (`auth_verdicts`, LEFT JOINed on the same message).
 /// Auth mail does not take the model's FYE pick: it is in FYE when the owner
 /// said "Not me", or when it is a critical account change they have not
-/// ruled on; a "That was me" takes it out. The owner's thread pin and a fired
-/// reminder still win, and are applied around this by each caller exactly as
-/// for all FYE mail. One definition for every list and every placement that
-/// asks, so they cannot drift (`auth_fye_list_and_placement_agree` pins
-/// that they do). Only meaningful where `auth_mail_sql!` holds.
+/// ruled on; a "That was me" takes it out. Only meaningful where
+/// `auth_mail_sql!` holds. Callers ask it through
+/// [`auth_thread_fye_sql!`], since FYE is thread-level.
 macro_rules! auth_fye_sql {
     () => {
-        "(COALESCE(v.verdict='not_mine',\
-           json_extract(d.decision_json,'$.auth.critical')=1 AND EXISTS(SELECT 1 FROM \
-             json_each(d.decision_json,'$.auth.kinds') WHERE value='account_change'),0))"
+        concat!(
+            "(COALESCE(v.verdict='not_mine',",
+            auth_critical_sql!(),
+            ",0))"
+        )
+    };
+}
+
+/// THE AUTH ARM OF FYE MEMBERSHIP, thread-level: the newest not-done auth
+/// message in the thread that [`auth_fye_sql!`] holds for, or NULL. A thread
+/// qualifies when ANY of its auth messages does, so a critical change is not
+/// lost behind the sign-in alert Gmail threads after it, and the qualifying
+/// message is the one the FYE row shows. `$account` / `$thread` are the outer
+/// query's columns; `$id` is the outer message, which stands alone when it
+/// has no thread id. The owner's thread pin and a fired reminder still win,
+/// applied around this by each caller exactly as for all FYE mail.
+///
+/// ONE DEFINITION for the FYE list, the sitrep's placement and Standing
+/// band, and the stats tiers, so they cannot drift
+/// (`auth_fye_list_and_placement_agree` pins that they do). Its aliases
+/// (`fm`, `ft`, and its own `d` / `v`) shadow the outer query's.
+macro_rules! auth_thread_fye_sql {
+    ($account:literal, $thread:literal, $id:literal) => {
+        concat!(
+            "(SELECT fm.id FROM messages fm \
+               JOIN agent_message_decisions d ON d.account_id=fm.account_id AND d.message_id=fm.id \
+               LEFT JOIN auth_verdicts v ON v.account_id=fm.account_id AND v.message_id=fm.id \
+               LEFT JOIN triage ft ON ft.account_id=fm.account_id AND ft.message_id=fm.id \
+             WHERE fm.account_id=",
+            $account,
+            " AND fm.thread_id=",
+            $thread,
+            " AND (fm.thread_id!='' OR fm.id=",
+            $id,
+            ") AND fm.is_sent=0 AND fm.is_spam=0 AND COALESCE(ft.status,'new')!='done' AND ",
+            auth_mail_sql!(),
+            " AND ",
+            auth_fye_sql!(),
+            " ORDER BY fm.received_at DESC, fm.id DESC LIMIT 1)"
+        )
+    };
+}
+
+/// A message that holds its place against thread-wide sweeps: a critical
+/// account change nobody has ruled on, correlated to the `triage` row being
+/// updated. Done on ANOTHER message of the thread (the Auth page archiving
+/// the sign-in alert beside it, a reminder, an unsubscribe) must not clear
+/// it; only a ruling, or done on the message itself, does.
+macro_rules! unruled_critical_triage_sql {
+    () => {
+        concat!(
+            "EXISTS(SELECT 1 FROM agent_message_decisions d \
+               LEFT JOIN auth_verdicts v ON v.account_id=d.account_id AND v.message_id=d.message_id \
+             WHERE d.account_id=triage.account_id AND d.message_id=triage.message_id \
+               AND v.verdict IS NULL AND ",
+            auth_critical_sql!(),
+            ")"
+        )
     };
 }
 

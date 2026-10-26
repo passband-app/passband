@@ -389,9 +389,9 @@ private struct MobileShell: View {
             if !store.authQueue.isEmpty { AuthCodeModal() }
         }
         // AUTH MAIL OPENED FROM OUTSIDE THE LOGIN-CODES PAGE: an auth row in
-        // For your eyes, or any open that landed on a sealed thread (the
-        // daemon's thread view 404s those). The same one-time panel, as the
-        // same full-screen cover the page uses.
+        // For your eyes, or a notification tap on auth mail. The same audited
+        // one-time panel, as the same full-screen cover the page uses.
+        // Everything else (search, mail lists, mixed threads) opens the reader.
         .fullScreenCover(item: revealOpen) { meta in
             RevealPanel(meta: meta) { store.revealRequest = nil }
                 .background(Palette.canvas.ignoresSafeArea())
@@ -567,13 +567,14 @@ private struct MobileShell: View {
             set: { store.addAccountSheetOpen = $0 })
     }
 
-    /// Presented-ness derived from the store's own `triageFix`, so dismissing the
-    /// sheet by dragging it down runs the same `closeTriageFix()` the palette's
-    /// cancel does and the state can never disagree with what is on screen.
+    /// The reveal cover, off `store.revealRequest` (cleared on dismiss).
     private var revealOpen: Binding<SealedMeta?> {
         Binding(get: { store.revealRequest }, set: { store.revealRequest = $0 })
     }
 
+    /// Presented-ness derived from the store's own `triageFix`, so dismissing the
+    /// sheet by dragging it down runs the same `closeTriageFix()` the palette's
+    /// cancel does and the state can never disagree with what is on screen.
     private var triageFixOpen: Binding<Bool> {
         Binding(
             get: { store.triageFix != nil },

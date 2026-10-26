@@ -91,7 +91,7 @@ struct MobileAuthView: View {
     @State private var busy: Int?
     @State private var revealing: SealedMeta?
     /// Bursts the owner asked to "Review each".
-    @State private var expandedBursts: Set<String> = []
+    @State private var expandedBursts: Set<Int> = []
 
     /// Open questions, by THE definition the Mac's rail and badge use.
     private var openDecisions: [SealedMeta] {

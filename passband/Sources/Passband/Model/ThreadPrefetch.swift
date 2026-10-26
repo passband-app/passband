@@ -32,6 +32,10 @@ final class ThreadPrefetch {
     private let inflight = AsyncMemo<String, Result<ClientThreadView, Error>>(
         limit: 1, keep: { _ in false })
     private let loader: @MainActor (String) async throws -> ClientThreadView
+    /// Thread ids this cache must never fetch: threads holding sealed (auth)
+    /// mail, which the daemon refuses to serve. Injected by the store, so this
+    /// file still builds without it.
+    var refuses: @MainActor (String) -> Bool = { _ in false }
     /// Bumped by `wipe()`. Every fetch this class starts captures it and files
     /// nothing once it no longer matches: a thread fetched for the old account
     /// must not land in the new account's cache, and the trickle of a batch
@@ -69,7 +73,7 @@ final class ThreadPrefetch {
     /// no-op. `fresh` is a per-entry TTL (right-rail records outlive the 60s
     /// default), and a repeat prefetch may EXTEND a TTL, never shorten it.
     func prefetch(_ threadId: String, fresh: TimeInterval? = nil) {
-        guard !threadId.isEmpty else { return }
+        guard !threadId.isEmpty, !refuses(threadId) else { return }
         let ttl = fresh ?? Self.freshDefault
         if var hit = cache.get(threadId), Date().timeIntervalSince(hit.ts) < max(hit.fresh, ttl) {
             if ttl > hit.fresh {
@@ -97,6 +101,7 @@ final class ThreadPrefetch {
     func fetch(_ threadId: String, fresh: TimeInterval? = nil) async throws -> ClientThreadView {
         let ttl = fresh ?? Self.freshDefault
         try Task.checkCancellation()
+        if refuses(threadId) { throw CancellationError() }
         if var hit = cache.get(threadId), Date().timeIntervalSince(hit.ts) < max(hit.fresh, ttl) {
             hit.fresh = max(hit.fresh, ttl)
             cache.set(threadId, hit)

@@ -2828,9 +2828,12 @@ fn list_items_with_query(
     now: DateTime<Utc>,
     query: &AgentListQuery,
 ) -> Result<Vec<AgentListItem>> {
-    // FYE skips auth mail: it lives on the Auth page's decision rail, and
-    // listing it in both places means ruling on it twice. An explicit thread
-    // preference (the human pinned it) and a fired reminder still win.
+    // AUTH MAIL does not take the model's FYE pick: it lives on the Auth
+    // page's decision rail, and listing every sign-in alert in both places
+    // means ruling on it twice. It is in FYE only when the owner said "Not
+    // me" or it is a critical account change still unruled (`auth_fye_sql!`,
+    // shared with the sitrep's placement). An explicit thread preference (the
+    // human pinned it) and a fired reminder still win.
     //
     // THE USER'S OWN MAIL gets the same treatment for a plainer reason: they
     // wrote it. A thread whose representative is theirs (see `OWN_MAIL` for how
@@ -2847,9 +2850,9 @@ fn list_items_with_query(
              m.id=a.message_id LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND
              t.message_id=m.id LEFT JOIN agent_thread_preferences pref ON pref.account_id=a.account_id AND
-             pref.thread_id=a.thread_id WHERE a.account_id=?1 AND ?3='fye' AND
-             (COALESCE(pref.show_in_fye,CASE WHEN json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0
-             OR ",own_mail_sql!()," THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND ",archive_listable_sql!()," AND COALESCE(t.status,'new')!='done' AND
+             pref.thread_id=a.thread_id",auth_verdict_join_sql!(),"WHERE a.account_id=?1 AND ?3='fye' AND
+             (COALESCE(pref.show_in_fye,CASE WHEN ",own_mail_sql!()," THEN 0 WHEN ",auth_mail_sql!(),"
+             THEN ",auth_fye_sql!()," ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND ",archive_listable_sql!()," AND COALESCE(t.status,'new')!='done' AND
              (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5")
     } else if destination == "records" {
         concat!("SELECT m.id,m.thread_id,m.from_addr,m.subject,
@@ -3934,6 +3937,7 @@ mod tests {
         alert.auth = AuthAssessment {
             kinds: vec![AuthKind::LoginAlert],
             evidence: vec![],
+            critical: false,
         };
         assert!(!alert.external_access.restricted);
         assert!(alert.attention.show_in_fye);
@@ -4037,6 +4041,271 @@ mod tests {
             .unwrap();
         assert!(store.sealed_messages(1).unwrap().is_empty());
         assert!(store.sealed_body(1, 1).is_ok());
+    }
+
+    /// Seeds one single-message thread per id in account 1, triaged with
+    /// `sensitivity='normal'` (the agent pipeline never writes `sealed`, so
+    /// nothing here may lean on it), and commits `auth` on it.
+    fn seed_auth(
+        store: &SqliteStore,
+        id: i64,
+        auth: crate::triage::decision::AuthAssessment,
+        restricted: bool,
+    ) {
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                 VALUES(?1,1,?2,?3,'security@bank.test','subject',?4,'snippet','body')",
+                params![id, id.to_string(), format!("t{id}"), Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO triage(account_id,message_id,created_at,sensitivity) VALUES(1,?1,?2,'normal')",
+                params![id, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+        let (job, context) = claim(store, id);
+        let mut decision = decision(id);
+        decision.auth = auth;
+        decision.external_access.restricted = restricted;
+        // The model's own FYE pick, which auth mail must NOT take.
+        decision.attention.show_in_fye = true;
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &decision,
+                std::slice::from_ref(&context.message.source),
+            )
+            .unwrap();
+    }
+
+    fn auth(
+        kinds: &[crate::triage::decision::AuthKind],
+        critical: bool,
+    ) -> crate::triage::decision::AuthAssessment {
+        crate::triage::decision::AuthAssessment {
+            kinds: kinds.to_vec(),
+            evidence: vec![],
+            critical,
+        }
+    }
+
+    fn inventory(band: Option<crate::store::SitrepBand>) -> AgentInventoryQuery {
+        AgentInventoryQuery {
+            before: None,
+            limit: None,
+            since: Utc::now() - chrono::Duration::days(30),
+            min_importance: None,
+            status: None,
+            band,
+            pending_reminders: false,
+            spam: crate::store::SpamScope::Exclude,
+            ranking: RankingConfig::default(),
+        }
+    }
+
+    /// FYE MEMBERSHIP FOR AUTH MAIL, and the pin that the FYE list and the
+    /// sitrep's placement read it the same way. Auth mail ignores the model's
+    /// FYE pick; it is in FYE on a "Not me", or as a critical change nobody
+    /// has ruled on; "That was me" takes it out; the owner's thread pin wins
+    /// either way.
+    #[test]
+    fn auth_fye_list_and_placement_agree() {
+        use crate::triage::decision::AuthKind::*;
+        use crate::types::AuthVerdict::*;
+        let store = fixture();
+        // (id, kinds, critical, verdict, pin, expected in FYE)
+        type Case = (
+            i64,
+            &'static [crate::triage::decision::AuthKind],
+            bool,
+            Option<crate::types::AuthVerdict>,
+            Option<bool>,
+            bool,
+        );
+        let cases: &[Case] = &[
+            (10, &[LoginAlert], false, None, None, false),
+            (11, &[LoginAlert], false, Some(NotMine), None, true),
+            (12, &[AccountChange], true, None, None, true),
+            (13, &[AccountChange], true, Some(Mine), None, false),
+            (14, &[AccountChange], true, Some(Mine), Some(true), true),
+            (15, &[AccountChange], false, None, None, false),
+            // A stray flag beside another kind means nothing.
+            (16, &[LoginAlert], true, None, None, false),
+            (17, &[Otp], false, Some(NotMine), Some(false), false),
+            (18, &[SigninReceipt], false, Some(Mine), None, false),
+            (19, &[Otp, AccountChange], true, None, None, true),
+        ];
+        for &(id, kinds, critical, verdict, pin, _) in cases {
+            seed_auth(&store, id, auth(kinds, critical), false);
+            if verdict.is_some() {
+                store.set_auth_verdict(1, id, verdict, Utc::now()).unwrap();
+            }
+            if let Some(pin) = pin {
+                store
+                    .correct_agent_triage(1, id, "show_in_fye", &serde_json::json!(pin), Utc::now())
+                    .unwrap();
+            }
+        }
+        // A control: ordinary mail the model picked is in FYE as ever.
+        let (job, context) = claim(&store, 2);
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &decision(2),
+                std::slice::from_ref(&context.message.source),
+            )
+            .unwrap();
+
+        let mut expected: Vec<i64> = cases.iter().filter(|c| c.5).map(|c| c.0).collect();
+        expected.push(2);
+        expected.sort();
+        let mut listed: Vec<i64> = store
+            .agent_fye(1, 100, &RankingConfig::default(), Utc::now())
+            .unwrap()
+            .into_iter()
+            .map(|item| item.message_id)
+            .collect();
+        listed.sort();
+        assert_eq!(listed, expected, "the FYE list");
+        let all = store.human_agent_updates(1, &inventory(None)).unwrap();
+        let mut eyes: Vec<i64> = all
+            .iter()
+            .filter(|item| item.placement.as_deref() == Some("eyes"))
+            .map(|item| item.update.id)
+            .collect();
+        eyes.sort();
+        assert_eq!(eyes, expected, "the sitrep placement");
+        let mut standing: Vec<i64> = store
+            .human_agent_updates(1, &inventory(Some(crate::store::SitrepBand::Standing)))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.update.id)
+            .collect();
+        standing.sort();
+        assert_eq!(standing, expected, "the standing band");
+        // Auth mail out of FYE still sits on the Auth page.
+        for &(id, ..) in cases.iter().filter(|c| !c.5 && c.4 != Some(false)) {
+            let item = all.iter().find(|item| item.update.id == id).unwrap();
+            assert_eq!(item.placement.as_deref(), Some("auth"), "message {id}");
+        }
+        // And the Auth page reads the same flags back.
+        let sealed = store.sealed_messages(1).unwrap();
+        for &(id, kinds, critical, verdict, ..) in cases {
+            let row = sealed.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(
+                row.critical,
+                critical && kinds.contains(&AccountChange),
+                "message {id}"
+            );
+            assert_eq!(row.verdict, verdict, "message {id}");
+        }
+        assert_eq!(
+            sealed
+                .iter()
+                .find(|row| row.id == 19)
+                .unwrap()
+                .sealed_kind
+                .as_deref(),
+            Some("otp"),
+            "the priority pick, not kinds[0]"
+        );
+
+        // Clearing a ruling puts a critical change back.
+        store.set_auth_verdict(1, 13, None, Utc::now()).unwrap();
+        assert!(
+            store
+                .agent_fye(1, 100, &RankingConfig::default(), Utc::now())
+                .unwrap()
+                .iter()
+                .any(|item| item.message_id == 13)
+        );
+        // A verdict is only for auth mail, and only in its own account.
+        assert!(matches!(
+            store.set_auth_verdict(1, 2, Some(NotMine), Utc::now()),
+            Err(CoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_auth_verdict(1, 3, Some(NotMine), Utc::now()),
+            Err(CoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_auth_verdict(2, 12, Some(Mine), Utc::now()),
+            Err(CoreError::NotFound)
+        ));
+    }
+
+    /// The Auth page's `explained_by`, read off stored rows: a code the owner
+    /// archived after using it still explains the sign-in beside it, and is
+    /// itself gone from the list.
+    #[test]
+    fn sealed_rows_carry_their_explanation() {
+        use crate::triage::decision::AuthKind::*;
+        let store = fixture();
+        seed_auth(&store, 10, auth(&[LoginAlert], false), false);
+        seed_auth(&store, 11, auth(&[Otp], false), true);
+        seed_auth(&store, 12, auth(&[LoginAlert], false), false);
+        let base = Utc::now() - chrono::Duration::hours(1);
+        {
+            let conn = store.lock().unwrap();
+            for (id, from, offset) in [
+                (10, "alerts@accounts.example.com", 30),
+                (11, "codes@example.com", 0),
+                (12, "alerts@elsewhere.test", 10),
+            ] {
+                conn.execute(
+                    "UPDATE messages SET from_addr=?2, received_at=?3 WHERE id=?1",
+                    params![
+                        id,
+                        from,
+                        (base + chrono::Duration::seconds(offset)).to_rfc3339()
+                    ],
+                )
+                .unwrap();
+            }
+            conn.execute("UPDATE triage SET status='done' WHERE message_id=11", [])
+                .unwrap();
+        }
+        let sealed = store.sealed_messages(1).unwrap();
+        let ids: Vec<i64> = sealed.iter().map(|row| row.id).collect();
+        assert_eq!(ids, vec![10, 12]);
+        assert_eq!(sealed[0].explained_by, Some(11));
+        assert_eq!(sealed[1].explained_by, None);
+    }
+
+    /// FYE placement never opens the agent door: a restricted critical change
+    /// with no ruling is in the owner's FYE and absent from the agent's.
+    #[test]
+    fn restricted_critical_auth_is_in_human_fye_but_not_the_agent_door() {
+        use crate::triage::decision::AuthKind::*;
+        let store = fixture();
+        seed_auth(&store, 10, auth(&[AccountChange], true), true);
+        seed_auth(&store, 11, auth(&[AccountChange], true), false);
+        let human: Vec<i64> = store
+            .agent_fye(1, 100, &RankingConfig::default(), Utc::now())
+            .unwrap()
+            .into_iter()
+            .map(|item| item.message_id)
+            .collect();
+        assert!(human.contains(&10) && human.contains(&11));
+        let agent: Vec<i64> = store
+            .external_agent_fye(1, 100, &RankingConfig::default(), Utc::now())
+            .unwrap()
+            .into_iter()
+            .map(|item| item.message_id)
+            .collect();
+        assert!(
+            !agent.contains(&10),
+            "restricted auth reached the agent door"
+        );
+        // The unrestricted one is mail the agent may already read, and its
+        // placement is all that changed.
+        assert!(agent.contains(&11));
+        assert!(!store.agent_access_allowed(1, 10).unwrap());
     }
 
     #[test]
@@ -5886,16 +6155,20 @@ fn human_inventory(
         attention: Option<String>,
         representative: Option<i64>,
         own: bool,
+        /// `auth_fye_sql!` for this row: whether auth mail is the owner's to
+        /// see in FYE (a "Not me", or an unruled critical change).
+        auth_fye: bool,
     }
     let mut statement=conn.prepare(concat!(
         "SELECT m.id,m.thread_id,m.from_addr,m.from_name,m.subject,m.snippet,m.received_at,
              COALESCE(t.status,'new'),t.surfaced_at,t.resolved_at,t.remind_at,t.reminded_at,
              EXISTS(SELECT 1 FROM attachments at WHERE at.account_id=m.account_id AND at.message_id=m.id),
-             d.decision_json,a.attention_json,a.message_id,",own_mail_sql!(),"
+             d.decision_json,a.attention_json,a.message_id,",own_mail_sql!(),",",auth_fye_sql!(),"
          FROM messages m
          LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
          LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
+        ",auth_verdict_join_sql!(),"
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
            AND (m.is_archive=0 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
@@ -5932,6 +6205,7 @@ fn human_inventory(
                 attention: row.get(14)?,
                 representative: row.get(15)?,
                 own: row.get(16)?,
+                auth_fye: row.get(17)?,
             })
         },
     )?;
@@ -5966,12 +6240,13 @@ fn human_inventory(
         }
         // Same rule as the `fye` list in `list_items_with_query`: auth mail
         // lives on the Auth page, so the model's FYE pick does not count for
-        // it unless the human pinned the thread. Nor does it count for mail
-        // the user wrote themselves.
+        // it; it is picked by `auth_fye_sql!` (a "Not me", or an unruled
+        // critical change) unless the human pinned the thread either way.
+        // Nothing picks mail the user wrote themselves.
         let wants_fye = attention.as_ref().is_some_and(|a| a.show_in_fye);
         let is_auth = decision.as_ref().is_some_and(|d| d.auth.is_auth());
         let pinned = thread_fye_override(conn, account, &row.thread)?;
-        let models_pick = wants_fye && !is_auth && !row.own;
+        let models_pick = !row.own && if is_auth { row.auth_fye } else { wants_fye };
         let selected = models_pick || (wants_fye && pinned == Some(true));
         let is_standing = ((selected && row.representative == Some(row.id))
             || row.reminded.is_some())

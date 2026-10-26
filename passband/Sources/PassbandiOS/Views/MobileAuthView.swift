@@ -30,6 +30,11 @@
 // Anything that is not a code kind (a sign-in alert, a magic link) has no digits
 // to present, so it opens the one-time RevealPanel instead — the same view the
 // Mac's auth page opens for the same kinds.
+//
+// THE QUESTIONS SIT ABOVE THE CODES. A sign-in, an account change or an app
+// grant nobody has ruled on gets the Mac rail's own cards (AuthDecisionStack):
+// same open rule, same bursts, same buttons, and the verdict is the server's,
+// so answering on either device answers on both.
 
 import SwiftUI
 
@@ -85,6 +90,22 @@ struct MobileAuthView: View {
 
     @State private var busy: Int?
     @State private var revealing: SealedMeta?
+    /// Bursts the owner asked to "Review each".
+    @State private var expandedBursts: Set<String> = []
+
+    /// Open questions, by THE definition the Mac's rail and badge use.
+    private var openDecisions: [SealedMeta] {
+        store.sitrep.sealed.filter { AuthDecisions.shared.isOpen($0) }
+    }
+
+    /// "explained by your GitHub code", on an alert that needs no ruling.
+    private func explainedNote(_ m: SealedMeta) -> String? {
+        guard AuthPolicy.isExplained(m), let by = m.explained_by else { return nil }
+        let explainer = store.sitrep.sealed.first { $0.id == by }
+        return AuthPolicy.explainedNote(
+            explainer: explainer,
+            service: explainer.map { SenderCache.resolved($0.sender).displayName })
+    }
 
     /// EVERY sealed message, newest first. The zone this grew out of stopped at
     /// five because a card on a shared column is a glance; a page is the whole
@@ -99,6 +120,7 @@ struct MobileAuthView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 masthead
+                decisionsPane
                 codes
             }
             .padding(.horizontal, 16)
@@ -143,6 +165,32 @@ struct MobileAuthView: View {
         .padding(.top, 4)
     }
 
+    /// The questions, when there are any. Nothing drawn when there are none:
+    /// this page's first job is the code you came for.
+    @ViewBuilder
+    private var decisionsPane: some View {
+        let open = openDecisions
+        if !open.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Needs a decision")
+                        .font(Typo.zoneTitle)
+                        .foregroundStyle(Palette.ink)
+                    Spacer()
+                    Text("\(AuthPolicy.cards(open, expanded: expandedBursts).count) open")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+                AuthDecisionStack(
+                    open: open, limit: 12, expanded: $expandedBursts,
+                    onNotMine: { m in revealing = m })
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .passbandGlass(.pane, cornerRadius: 18, tint: Palette.lockSoft.opacity(0.7))
+        }
+    }
+
     /// One glass pane holding the rows, rather than the `ZoneCard` the zone
     /// used: a card's header earns its space by naming its contents while three
     /// other cards sit beside it, and this screen has no beside. The nav title
@@ -165,6 +213,7 @@ struct MobileAuthView: View {
                         meta: meta,
                         live: Self.isLive(meta),
                         busy: busy == meta.id,
+                        explained: explainedNote(meta),
                         onReveal: { Task { await reveal(meta) } })
                 }
             }
@@ -204,6 +253,8 @@ struct AuthRow: View {
     let meta: SealedMeta
     let live: Bool
     let busy: Bool
+    /// "explained by your GitHub code", on an alert that needs no ruling.
+    var explained: String? = nil
     let onReveal: () -> Void
 
     /// The store's own countdown ring for this id, if the arrival flow armed one.
@@ -227,9 +278,13 @@ struct AuthRow: View {
                         .foregroundStyle(Palette.ink)
                         .lineLimit(1)
                     HStack(spacing: 6) {
-                        Label(AuthCopy.label(meta.kind), systemImage: AuthCopy.symbol(meta.kind))
-                            .font(Typo.micro)
-                            .foregroundStyle(Palette.lock)
+                        Label(
+                            AuthCopy.label(meta.kind),
+                            systemImage: meta.isCritical
+                                ? "exclamationmark.triangle.fill" : AuthCopy.symbol(meta.kind)
+                        )
+                        .font(Typo.micro)
+                        .foregroundStyle(meta.isCritical ? Palette.danger : Palette.lock)
                         Text(Fmt.relAge(meta.received_at))
                             .font(Typo.num(11))
                             .foregroundStyle(Palette.inkFaintest)
@@ -238,6 +293,12 @@ struct AuthRow: View {
                                 .font(Typo.micro)
                                 .foregroundStyle(Palette.positive)
                         }
+                    }
+                    if let explained {
+                        Label(explained, systemImage: "checkmark.circle")
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                            .lineLimit(1)
                     }
                 }
 

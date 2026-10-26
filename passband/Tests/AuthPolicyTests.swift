@@ -1,0 +1,327 @@
+// What a piece of auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md,
+// "Clients"): the sealed row decoded from both daemon versions, which kinds
+// put a question up and for how long, which alerts the code beside them
+// explains, how new-device alerts collapse into one burst, and how the old
+// device-local ledger moves up to a daemon that keeps verdicts.
+//
+// Every one of these is only ever wrong quietly: a question that never opens
+// is an account takeover nobody was asked about, and one that never closes is
+// a badge nobody can work down.
+
+import Foundation
+
+@main
+@MainActor
+struct AuthPolicyTests {
+    static var failures = 0
+    static var checks = 0
+
+    static func main() {
+        anOldDaemonsRowDecodesWithoutTheNewKeys()
+        aNewDaemonsRowCarriesCriticalVerdictAndExplainer()
+        anUnreadableVerdictIsNoVerdictNotAFailedList()
+        newKindsDecodeAndUnknownOnesKeepTheirString()
+        newKindsHaveLabelsWithoutDashes()
+        clearingAVerdictPutsAnExplicitNull()
+        questionsOpenByKindAndWindow()
+        criticalStaysOpenAndIsNeverExplained()
+        aVerdictClosesTheQuestion()
+        threeServicesInThreeDaysAreABurst()
+        twoServicesAreNot()
+        criticalNeverGroups()
+        aBurstMustFitInsideItsWindow()
+        cardsPutCriticalFirstAndExpandOnRequest()
+        servicesAreRegistrableDomains()
+        answersAndNotesSayTheRightThing()
+        theLedgerMigratesOnlyToADaemonThatKeepsVerdicts()
+        theLedgerReadsBothSpellings()
+
+        print("\(checks - failures)/\(checks) checks passed")
+        if failures > 0 { exit(1) }
+    }
+
+    // MARK: - fixtures
+
+    static let now = Fmt.date("2026-10-26T12:00:00Z")!
+
+    static func ago(_ seconds: TimeInterval) -> String {
+        ISO8601DateFormatter().string(from: now.addingTimeInterval(-seconds))
+    }
+
+    static let hour: TimeInterval = 3600
+    static let day: TimeInterval = 24 * 3600
+
+    static func meta(
+        _ id: Int, _ kind: SealedKind?, from sender: String = "alerts@github.com",
+        age: TimeInterval = 3600, critical: Bool? = false, verdict: String? = nil,
+        explainedBy: Int? = nil
+    ) -> SealedMeta {
+        SealedMeta(
+            id: id, thread_id: "t\(id)", sender: sender, subject: "subject \(id)", kind: kind,
+            received_at: ago(age), critical: critical, verdict: verdict, explained_by: explainedBy)
+    }
+
+    static func decode(_ json: String) -> [SealedMeta]? {
+        try? JSONDecoder().decode([SealedMeta].self, from: Data(json.utf8))
+    }
+
+    // MARK: - decoding
+
+    static func anOldDaemonsRowDecodesWithoutTheNewKeys() {
+        let rows = decode("""
+            [{"id":1,"thread_id":"a","sender":"no-reply@github.com","subject":"New sign-in","kind":"login_alert","received_at":"2026-10-26T10:00:00Z"}]
+            """)
+        expect(rows?.count == 1, "the old row shape still decodes")
+        let m = rows?.first
+        expect(m?.critical == nil && m?.verdict == nil && m?.explained_by == nil, "absent keys are nil")
+        expect(m?.speaksVerdicts == false, "an old daemon does not keep verdicts")
+        expect(m?.isCritical == false, "absent critical is not critical")
+    }
+
+    static func aNewDaemonsRowCarriesCriticalVerdictAndExplainer() {
+        let rows = decode("""
+            [{"id":2,"thread_id":"b","sender":"no-reply@accounts.google.com","subject":"Recovery phone changed","kind":"account_change","received_at":"2026-10-26T10:00:00Z","critical":true,"verdict":"not_mine","explained_by":null},
+             {"id":3,"thread_id":"c","sender":"noreply@github.com","subject":"New sign-in","kind":"login_alert","received_at":"2026-10-26T10:00:00Z","critical":false,"verdict":null,"explained_by":9}]
+            """)
+        expect(rows?.count == 2, "the new row shape decodes")
+        expect(rows?[0].isCritical == true && rows?[0].speaksVerdicts == true, "critical row")
+        expect(rows?[0].serverVerdict == .notMine, "not_mine reads as notMine")
+        expect(rows?[1].speaksVerdicts == true, "critical:false still says the daemon keeps verdicts")
+        expect(rows?[1].serverVerdict == nil && rows?[1].explained_by == 9, "explainer id survives")
+    }
+
+    static func anUnreadableVerdictIsNoVerdictNotAFailedList() {
+        let rows = decode("""
+            [{"id":4,"thread_id":"d","sender":"a@b.com","subject":"s","kind":"login_alert","received_at":"2026-10-26T10:00:00Z","critical":false,"verdict":"maybe"}]
+            """)
+        expect(rows?.count == 1, "a verdict this build has never heard of does not fail the list")
+        expect(rows?.first?.serverVerdict == nil, "and reads as no verdict")
+    }
+
+    static func newKindsDecodeAndUnknownOnesKeepTheirString() {
+        expect(SealedKind(rawValue: "account_change") == .accountChange, "account_change")
+        expect(SealedKind(rawValue: "app_grant") == .appGrant, "app_grant")
+        expect(SealedKind(rawValue: "signin_receipt") == .signinReceipt, "signin_receipt")
+        for k in [SealedKind.accountChange, .appGrant, .signinReceipt] {
+            expect(SealedKind(rawValue: k.rawValue) == k, "\(k.rawValue) round-trips")
+        }
+        let rows = decode("""
+            [{"id":5,"thread_id":"e","sender":"a@b.com","subject":"s","kind":"wallet_card","received_at":"2026-10-26T10:00:00Z"}]
+            """)
+        expect(rows?.first?.kind == .unknown("wallet_card"), "an unknown kind keeps its raw string")
+        expect(rows?.first?.kind?.rawValue == "wallet_card", "and re-encodes verbatim")
+        expect(AuthCopy.label(.unknown("wallet_card")) == "Auth message", "and is labelled generically")
+        expect(!AuthPolicy.isOpen(meta(5, .unknown("wallet_card")), verdict: nil, now: now), "an unknown kind asks nothing")
+    }
+
+    static func newKindsHaveLabelsWithoutDashes() {
+        expect(AuthCopy.label(.accountChange) == "Account change", "account change label")
+        expect(AuthCopy.label(.appGrant) == "App access", "app grant label")
+        expect(AuthCopy.label(.signinReceipt) == "Sign-in receipt", "receipt label")
+        let b = AuthPolicy.Burst(items: [], services: 4)
+        let copy = [
+            AuthCopy.label(.accountChange), AuthCopy.label(.appGrant), AuthCopy.label(.signinReceipt),
+            AuthPolicy.burstLine(b),
+            AuthPolicy.explainedNote(explainer: nil, service: nil),
+            AuthPolicy.explainedNote(explainer: meta(1, .otp), service: "GitHub"),
+        ] + [SealedKind.loginAlert, .appGrant, .passwordReset].flatMap { k in
+            let a = AuthPolicy.answers(meta(1, k))
+            return [a.mine, a.notMine]
+        }
+        for s in copy {
+            expect(!s.contains("\u{2014}") && !s.contains("\u{2013}"), "no em or en dash: \(s)")
+        }
+    }
+
+    static func clearingAVerdictPutsAnExplicitNull() {
+        let clear = try? JSONEncoder().encode(SealedVerdictBody(verdict: nil))
+        expect(clear.map { String(decoding: $0, as: UTF8.self) } == #"{"verdict":null}"#, "null is on the wire")
+        let mine = try? JSONEncoder().encode(SealedVerdictBody(verdict: AuthVerdict.notMine.rawValue))
+        expect(mine.map { String(decoding: $0, as: UTF8.self) } == #"{"verdict":"not_mine"}"#, "not_mine is the wire spelling")
+    }
+
+    // MARK: - isOpen
+
+    static func open(_ m: SealedMeta, _ verdict: AuthVerdict? = nil) -> Bool {
+        AuthPolicy.isOpen(m, verdict: verdict, now: now)
+    }
+
+    static func questionsOpenByKindAndWindow() {
+        expect(open(meta(1, .loginAlert, age: 3 * day)), "a 3-day sign-in alert is open")
+        expect(!open(meta(1, .loginAlert, age: 8 * day)), "an 8-day sign-in alert is history")
+        expect(!open(meta(1, .passwordReset, age: 8 * day)), "resets keep the 7-day window")
+        expect(open(meta(1, .magicLink, age: 6 * day)), "sign-in links ask")
+        for k in [SealedKind.accountChange, .appGrant, .securityAlert] {
+            expect(open(meta(1, k, age: 10 * day)), "\(k.rawValue) waits 14 days")
+            expect(!open(meta(1, k, age: 15 * day)), "\(k.rawValue) closes after 14")
+        }
+        for k in [SealedKind.otp, .verification, .signinReceipt] {
+            expect(!open(meta(1, k, age: hour)), "\(k.rawValue) never asks")
+        }
+        expect(!open(meta(1, nil, age: hour)), "no kind asks nothing")
+        expect(!open(meta(1, .loginAlert, age: hour, explainedBy: 2)), "an explained alert asks nothing")
+        var bad = meta(1, .loginAlert)
+        bad.received_at = "yesterday-ish"
+        expect(!open(bad), "an unreadable stamp is not an open question")
+    }
+
+    static func criticalStaysOpenAndIsNeverExplained() {
+        expect(open(meta(1, .accountChange, age: 60 * day, critical: true)), "critical has no window")
+        expect(open(meta(1, .accountChange, critical: true, explainedBy: 2)), "critical is never explained")
+        expect(open(meta(1, .otp, critical: true)), "critical asks even under a code's kind")
+        expect(!AuthPolicy.isExplained(meta(1, .accountChange, critical: true, explainedBy: 2)), "isExplained agrees")
+    }
+
+    static func aVerdictClosesTheQuestion() {
+        expect(!open(meta(1, .loginAlert), .mine), "mine closes")
+        expect(!open(meta(1, .loginAlert), .notMine), "not mine closes the card too (it moves to FYE)")
+        expect(!open(meta(1, .accountChange, critical: true), .mine), "even a critical one")
+    }
+
+    // MARK: - bursts
+
+    static func threeServicesInThreeDaysAreABurst() {
+        let open = [
+            meta(1, .loginAlert, from: "no-reply@accounts.google.com", age: 60 * hour),
+            meta(2, .loginAlert, from: "noreply@github.com", age: 30 * hour),
+            meta(3, .loginAlert, from: "security@mail.slack.com", age: 1 * hour),
+            meta(4, .passwordReset, from: "noreply@stripe.com", age: 2 * hour),
+        ]
+        let (bursts, rest) = AuthPolicy.bursts(open)
+        expect(bursts.count == 1, "three services within 72h are one burst")
+        expect(bursts.first?.services == 3, "counting services")
+        expect(bursts.first?.items.map(\.id) == [3, 2, 1], "newest first")
+        expect(bursts.first?.allSignIns == true, "all sign-ins")
+        expect(rest.map(\.id) == [4], "a reset never joins a burst")
+        expect(AuthPolicy.burstLine(bursts[0]) == "3 services saw a new sign-in", "the line")
+
+        let mixed = open.prefix(2) + [meta(5, .accountChange, from: "x@dropbox.com", age: 2 * hour)]
+        let b = AuthPolicy.bursts(Array(mixed)).bursts.first
+        expect(b?.allSignIns == false, "a change in the burst")
+        expect(b.map(AuthPolicy.burstLine) == "3 services saw a sign-in or a change", "says so")
+
+        // A newer arrival from a fourth service joins, and the id holds.
+        let grown = open + [meta(6, .loginAlert, from: "x@apple.com", age: 0.5 * hour)]
+        let g = AuthPolicy.bursts(grown).bursts.first
+        expect(g?.services == 4 && g?.id == bursts.first?.id, "a growing burst keeps its id")
+    }
+
+    static func twoServicesAreNot() {
+        let open = [
+            meta(1, .loginAlert, from: "a@google.com", age: 5 * hour),
+            meta(2, .loginAlert, from: "b@google.com", age: 4 * hour),
+            meta(3, .loginAlert, from: "c@github.com", age: 3 * hour),
+        ]
+        let (bursts, rest) = AuthPolicy.bursts(open)
+        expect(bursts.isEmpty, "three alerts from two services are not a burst")
+        expect(rest.count == 3, "and stay single")
+    }
+
+    static func criticalNeverGroups() {
+        let open = [
+            meta(1, .loginAlert, from: "a@google.com", age: 5 * hour),
+            meta(2, .loginAlert, from: "c@github.com", age: 3 * hour),
+            meta(3, .accountChange, from: "d@apple.com", age: 2 * hour, critical: true),
+        ]
+        let (bursts, rest) = AuthPolicy.bursts(open)
+        expect(bursts.isEmpty, "a critical change does not make up the third service")
+        expect(rest.count == 3, "everything stays single")
+        let four = open + [meta(4, .loginAlert, from: "e@slack.com", age: 1 * hour)]
+        let r = AuthPolicy.bursts(four)
+        expect(r.bursts.count == 1 && !r.bursts[0].items.contains { $0.isCritical }, "critical stays out of a burst")
+        expect(r.rest.map(\.id) == [3], "and keeps its own card")
+    }
+
+    static func aBurstMustFitInsideItsWindow() {
+        let open = [
+            meta(1, .loginAlert, from: "a@google.com", age: 6 * day),
+            meta(2, .loginAlert, from: "b@github.com", age: 3 * day),
+            meta(3, .loginAlert, from: "c@slack.com", age: 1 * hour),
+        ]
+        expect(AuthPolicy.bursts(open).bursts.isEmpty, "three services across six days are not a burst")
+    }
+
+    static func cardsPutCriticalFirstAndExpandOnRequest() {
+        let open = [
+            meta(1, .loginAlert, from: "a@google.com", age: 5 * hour),
+            meta(2, .loginAlert, from: "b@github.com", age: 4 * hour),
+            meta(3, .loginAlert, from: "c@slack.com", age: 3 * hour),
+            meta(4, .appGrant, from: "d@google.com", age: 1 * hour),
+            meta(5, .accountChange, from: "e@apple.com", age: 9 * day, critical: true),
+        ]
+        let cards = AuthPolicy.cards(open)
+        expect(cards.count == 3, "critical + app grant + one burst")
+        expect(cards.first?.id == "m-5", "critical first, however old")
+        expect(cards[1].id == "m-4", "then newest first")
+        if case .burst = cards[2] {} else { expect(false, "the burst is the third card") }
+        let expanded = AuthPolicy.cards(open, expanded: [cards[2].id])
+        expect(expanded.count == 5, "Review each lays the burst out as its members")
+        expect(expanded.map(\.id) == ["m-5", "m-4", "m-3", "m-2", "m-1"], "in the same order")
+    }
+
+    static func servicesAreRegistrableDomains() {
+        expect(AuthPolicy.service("no-reply@accounts.google.com") == "google.com", "last two labels")
+        expect(AuthPolicy.service("Google <no-reply@accounts.google.com>") == "google.com", "a display form")
+        expect(AuthPolicy.service("NoReply@GitHub.COM") == "github.com", "lowercased")
+        expect(AuthPolicy.service("not an address") == nil, "not an address")
+    }
+
+    // MARK: - copy
+
+    static func answersAndNotesSayTheRightThing() {
+        expect(AuthPolicy.answers(meta(1, .passwordReset)) == ("I asked", "I did not"), "reset")
+        expect(AuthPolicy.answers(meta(1, .magicLink)) == ("I asked", "I did not"), "sign-in link")
+        expect(AuthPolicy.answers(meta(1, .appGrant)) == ("I allowed it", "I didn't"), "app grant")
+        expect(AuthPolicy.answers(meta(1, .loginAlert)) == ("That was me", "Not me"), "sign-in")
+        expect(AuthPolicy.answers(meta(1, .accountChange, critical: true)) == ("That was me", "Not me"), "critical")
+        expect(
+            AuthPolicy.explainedNote(explainer: meta(9, .otp), service: "GitHub")
+                == "explained by your GitHub code", "a code")
+        expect(
+            AuthPolicy.explainedNote(explainer: meta(9, .signinReceipt), service: "Google")
+                == "explained by your Google sign-in", "a receipt")
+        expect(
+            AuthPolicy.explainedNote(explainer: meta(9, .magicLink), service: nil)
+                == "explained by your sign-in link", "no name")
+    }
+
+    // MARK: - ledger migration
+
+    static func theLedgerMigratesOnlyToADaemonThatKeepsVerdicts() {
+        let local: [Int: AuthVerdict] = [1: .mine, 2: .notMine, 3: .mine, 4: .mine]
+        let oldRows = [meta(1, .loginAlert, critical: nil), meta(2, .loginAlert, critical: nil)]
+        expect(AuthPolicy.migration(local: local, rows: oldRows) == nil, "an old daemon: the ledger stays the store")
+        expect(AuthPolicy.migration(local: [:], rows: [meta(1, .loginAlert)]) == nil, "nothing to move")
+
+        let rows = [
+            meta(1, .loginAlert),  // listed, unruled: upload
+            meta(2, .accountChange, critical: true),  // listed, unruled: upload
+            meta(3, .loginAlert, verdict: "not_mine"),  // the server already has one: drop
+            // 4 is no longer listed: drop
+        ]
+        let plan = AuthPolicy.migration(local: local, rows: rows)
+        expect(plan?.upload == [.init(id: 1, verdict: .mine), .init(id: 2, verdict: .notMine)], "uploads the unruled")
+        expect(plan?.drop == [3, 4], "drops what the server has or no longer lists")
+    }
+
+    static func theLedgerReadsBothSpellings() {
+        expect(AuthVerdict(stored: "not-mine") == .notMine, "the old ledger's spelling")
+        expect(AuthVerdict(stored: "not_mine") == .notMine, "the wire spelling")
+        expect(AuthVerdict(stored: "mine") == .mine, "mine")
+        expect(AuthVerdict(stored: "nope") == nil, "garbage")
+        expect(AuthVerdict.notMine.stored == "not-mine", "writes the spelling an older build reads")
+        for v in [AuthVerdict.mine, .notMine] {
+            expect(AuthVerdict(stored: v.stored) == v, "\(v) round-trips the ledger")
+        }
+    }
+
+    // MARK: -
+
+    static func expect(_ ok: Bool, _ what: String) {
+        checks += 1
+        if !ok {
+            failures += 1
+            print("FAIL: \(what)")
+        }
+    }
+}

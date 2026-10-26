@@ -388,6 +388,14 @@ private struct MobileShell: View {
         .overlay {
             if !store.authQueue.isEmpty { AuthCodeModal() }
         }
+        // AUTH MAIL OPENED FROM OUTSIDE THE LOGIN-CODES PAGE: an auth row in
+        // For your eyes, or any open that landed on a sealed thread (the
+        // daemon's thread view 404s those). The same one-time panel, as the
+        // same full-screen cover the page uses.
+        .fullScreenCover(item: revealOpen) { meta in
+            RevealPanel(meta: meta) { store.revealRequest = nil }
+                .background(Palette.canvas.ignoresSafeArea())
+        }
         // Which Google account to pick, said before the browser opens: the
         // sitrep's disconnected banner raises it.
         .overlay {
@@ -562,6 +570,10 @@ private struct MobileShell: View {
     /// Presented-ness derived from the store's own `triageFix`, so dismissing the
     /// sheet by dragging it down runs the same `closeTriageFix()` the palette's
     /// cancel does and the state can never disagree with what is on screen.
+    private var revealOpen: Binding<SealedMeta?> {
+        Binding(get: { store.revealRequest }, set: { store.revealRequest = $0 })
+    }
+
     private var triageFixOpen: Binding<Bool> {
         Binding(
             get: { store.triageFix != nil },

@@ -1139,6 +1139,7 @@ mod tests {
                 auth: AuthAssessment {
                     kinds,
                     evidence: vec![],
+                    critical: false,
                 },
                 ..Default::default()
             })

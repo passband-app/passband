@@ -42,14 +42,58 @@ decision_enum!(ActionKind {
     Attend,
     Other
 });
+// `security_alert` is no longer offered to the model (agent-triage-v12 split
+// it into `account_change`, `app_grant` and `signin_receipt`); it stays so
+// stored decisions still deserialize.
 decision_enum!(AuthKind {
     Otp,
     PasswordReset,
     SignInLink,
     Verification,
     LoginAlert,
-    SecurityAlert
+    SecurityAlert,
+    AccountChange,
+    AppGrant,
+    SigninReceipt
 });
+impl AuthKind {
+    /// The one kind a client sees for a message, picked by priority across
+    /// `auth.kinds` (never `kinds[0]`). Codes and links the owner asked for
+    /// win, then setup, then the alerts, receipts last. Every place that
+    /// reads a sealed kind goes through this.
+    pub fn priority_pick(kinds: &[AuthKind]) -> Option<AuthKind> {
+        kinds.iter().copied().min_by_key(|kind| kind.priority())
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            AuthKind::Otp => 0,
+            AuthKind::SignInLink => 1,
+            AuthKind::PasswordReset => 2,
+            AuthKind::Verification => 3,
+            AuthKind::AccountChange => 4,
+            AuthKind::AppGrant => 5,
+            AuthKind::LoginAlert => 6,
+            AuthKind::SecurityAlert => 7,
+            AuthKind::SigninReceipt => 8,
+        }
+    }
+
+    /// The snake_case name stored in decision JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthKind::Otp => "otp",
+            AuthKind::PasswordReset => "password_reset",
+            AuthKind::SignInLink => "sign_in_link",
+            AuthKind::Verification => "verification",
+            AuthKind::LoginAlert => "login_alert",
+            AuthKind::SecurityAlert => "security_alert",
+            AuthKind::AccountChange => "account_change",
+            AuthKind::AppGrant => "app_grant",
+            AuthKind::SigninReceipt => "signin_receipt",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceRef {
@@ -61,10 +105,21 @@ pub struct EvidenceRef {
 pub struct AuthAssessment {
     pub kinds: Vec<AuthKind>,
     pub evidence: Vec<EvidenceRef>,
+    /// A takeover-class `account_change` (recovery email or phone, SIM or
+    /// number, 2FA off or moved, password, account email). Only meaningful
+    /// with `account_change`; validation normalizes it to false otherwise.
+    #[serde(default)]
+    pub critical: bool,
 }
 impl AuthAssessment {
     pub fn is_auth(&self) -> bool {
         !self.kinds.is_empty()
+    }
+    /// A takeover-class account change. `critical` is normalized at decision
+    /// time, and read through this so a stray flag beside another kind still
+    /// means nothing. `auth_fye_sql!` is the SQL form.
+    pub fn is_critical(&self) -> bool {
+        self.critical && self.kinds.contains(&AuthKind::AccountChange)
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -279,6 +334,49 @@ pub struct MessageDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One kind per message, by priority, never `kinds[0]`.
+    #[test]
+    fn the_client_kind_is_the_priority_pick() {
+        use AuthKind::*;
+        let order = [
+            Otp,
+            SignInLink,
+            PasswordReset,
+            Verification,
+            AccountChange,
+            AppGrant,
+            LoginAlert,
+            SecurityAlert,
+            SigninReceipt,
+        ];
+        for (i, &high) in order.iter().enumerate() {
+            for &low in &order[i + 1..] {
+                assert_eq!(AuthKind::priority_pick(&[low, high]), Some(high));
+                assert_eq!(AuthKind::priority_pick(&[high, low]), Some(high));
+            }
+        }
+        assert_eq!(AuthKind::priority_pick(&[]), None);
+        for kind in order {
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::json!(kind.as_str())
+            );
+        }
+    }
+
+    /// Stored v11 decisions carry `security_alert` and no `critical`.
+    #[test]
+    fn a_v11_auth_assessment_still_deserializes() {
+        let stored: AuthAssessment = serde_json::from_value(serde_json::json!({
+            "kinds": ["security_alert"],
+            "evidence": [{"message_id": 7, "location": "body"}],
+        }))
+        .unwrap();
+        assert_eq!(stored.kinds, vec![AuthKind::SecurityAlert]);
+        assert!(!stored.critical);
+        assert!(!stored.is_critical());
+    }
 
     /// Reconcile re-reads every stored decision_json, so an `event` record
     /// written before the calendar fields existed must still deserialize, with

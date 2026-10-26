@@ -22,7 +22,11 @@ const CANONICAL_MAIL_CTE: &str = concat!(
     " THEN 'noise'
       WHEN a.message_id IS NULL THEN COALESCE(t.tier,'pending')
       WHEN d.message_id IS NULL THEN 'pending'
-      WHEN COALESCE(pref.show_in_fye,CASE WHEN json_array_length(d.decision_json,'$.auth.kinds')>0 THEN 0
+      WHEN COALESCE(pref.show_in_fye,CASE WHEN ",
+    auth_mail_sql!(),
+    " THEN ",
+    auth_fye_sql!(),
+    "
         ELSE json_extract(att.attention_json,'$.show_in_fye') END,0)=1 THEN 'signal'
       ELSE 'noise' END AS display_tier
     FROM messages m
@@ -30,8 +34,9 @@ const CANONICAL_MAIL_CTE: &str = concat!(
     LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
     LEFT JOIN agent_message_decisions d ON d.account_id=a.account_id AND d.message_id=a.message_id AND d.revision=a.revision
     LEFT JOIN agent_thread_attention att ON att.account_id=m.account_id AND att.thread_id=m.thread_id
-    LEFT JOIN agent_thread_preferences pref ON pref.account_id=m.account_id AND pref.thread_id=m.thread_id
-    WHERE m.is_archive=0
+    LEFT JOIN agent_thread_preferences pref ON pref.account_id=m.account_id AND pref.thread_id=m.thread_id",
+    auth_verdict_join_sql!(),
+    "WHERE m.is_archive=0
 )"
 );
 

@@ -21,9 +21,15 @@ private let eyesVisible = 10
 ///
 /// Computed at KEY-PRESS AND CLICK TIME ONLY. It re-ranks the standing list,
 /// which is the cost `SitrepCursor` exists to keep out of the render path.
+///
+/// AUTH MAIL IS NOT ON THE WALK. It sits in this band when it needs a ruling
+/// (critical, or "Not me"), but it opens in the one-time reveal panel, never in
+/// the reader, so a walk that stepped onto it would have nowhere to show it.
 @MainActor
 private func eyesWalk(_ store: AppStore) -> [AttentionUpdate] {
-    store.sitrep.standing
+    let sealed = Set(store.sitrep.sealed.map(\.id))
+    guard !sealed.isEmpty else { return store.sitrep.standing }
+    return store.sitrep.standing.filter { !sealed.contains($0.id) }
 }
 
 /// The sitrep's hover + keyboard cursor, in an `@Observable` box rather than
@@ -472,12 +478,16 @@ struct SitrepView: View {
                         store.startWalk(first.thread_id, queue: walk)
                     })
         ) {
+            let sealed = Dictionary(
+                store.sitrep.sealed.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             VStack(spacing: 1) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { i, u in
                     // No closures passed down: a stored closure is never equal to
                     // last render's, so handing rows their actions that way meant
                     // SwiftUI could not skip a single one when the parent redrew.
-                    if RehearsalMode.isEnabled && u.id == 1 {
+                    if let meta = sealed[u.id] {
+                        AuthEyesRow(update: u, meta: meta, index: i, cursor: cursor)
+                    } else if RehearsalMode.isEnabled && u.id == 1 {
                         ObligationRow(update: u, index: i, cursor: cursor)
                             .tourTarget(.maya)
                     } else if RehearsalMode.isEnabled && u.id == 11 {
@@ -573,6 +583,11 @@ struct SitrepView: View {
                 let walk = eyesWalk(store)
                 let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
                 guard let u else { return false }
+                // A highlighted auth row has no reader to walk into.
+                if let meta = store.sealedMeta(message: u.id) {
+                    store.requestReveal(meta)
+                    return true
+                }
                 store.startWalk(u.thread_id, queue: walk)
                 return true
             },
@@ -987,6 +1002,70 @@ private struct BoardWarmKeeper: View {
             .onChange(of: store.lastRefresh) { _, _ in
                 SitrepView.warmBoard(Array(threadIds.prefix(eyesVisible)))
             }
+    }
+}
+
+// MARK: - auth row
+
+/// Auth mail in For your eyes: a critical account change nobody has ruled on,
+/// or one the owner said was not them. Its body is sealed, so this row shows
+/// the model's one-line summary and a lock, never fetches or prefetches the
+/// thread (the daemon 404s it), and opens the audited one-time reveal.
+private struct AuthEyesRow: View {
+    @Environment(AppStore.self) private var store
+    let update: AttentionUpdate
+    let meta: SealedMeta
+    let index: Int
+    let cursor: SitrepCursor
+
+    @State private var hover = RowHover()
+
+    private var tone: Color { meta.isCritical ? Palette.danger : Palette.lock }
+
+    var body: some View {
+        Button {
+            cursor.index = index
+            store.requestReveal(meta)
+        } label: {
+            HStack(spacing: Space.scaled(9)) {
+                Avatar(sender: update.senderString, size: 22)
+                Text(SenderCache.resolved(update.senderString).displayName)
+                    .font(Typo.ui(12, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(1)
+                    .layoutPriority(2)
+                Image(systemName: "lock.fill")
+                    .font(Typo.ui(10))
+                    .foregroundStyle(tone)
+                    .help("Sealed. Opening it reveals it once and writes an audit entry.")
+                Text(update.one_line.isEmpty ? AuthCopy.label(meta.kind) : update.one_line)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkDim)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Chip(
+                    text: meta.isCritical ? "Critical" : AuthCopy.label(meta.kind),
+                    tone: tone,
+                    symbol: meta.isCritical ? "exclamationmark.triangle.fill" : AuthCopy.symbol(meta.kind),
+                    filled: meta.isCritical
+                )
+                .layoutPriority(3)
+            }
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.scaled(7))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background {
+            ObligationWash(index: index, cursor: cursor, hover: hover, tint: tone)
+        }
+        .onHover { over in
+            hover.on = over
+            if over { cursor.hover(index) }
+        }
+        .accessibilityLabel(
+            "\(AuthCopy.label(meta.kind)) from \(SenderCache.resolved(update.senderString).displayName), sealed")
     }
 }
 

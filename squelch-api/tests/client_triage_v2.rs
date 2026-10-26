@@ -33,6 +33,7 @@ fn assess(store: &squelch_core::store::SqliteStore, account: i64, id: i64, restr
             AuthAssessment {
                 kinds: vec![AuthKind::Otp],
                 evidence: evidence.clone(),
+                critical: false,
             }
         } else {
             AuthAssessment::default()
@@ -709,4 +710,107 @@ async fn a_human_opens_an_archive_message_and_no_model_work_is_queued() {
         serde_json::json!([]),
         "opening old mail must not buy an assessment of it"
     );
+}
+
+/// The owner's ruling lives on the server: `GET /client/sealed` serves it
+/// beside `critical` and `explained_by` (always present), the PUT sets and
+/// clears it, and a "Not me" puts the message in the FYE feed.
+#[tokio::test]
+async fn sealed_verdict_round_trips_and_moves_fye() {
+    let h = harness(|_, _| {});
+    let id = h
+        .store
+        .upsert_message(&msg(
+            h.acct,
+            "auth",
+            "auth-thread",
+            "Sign in",
+            "Code 123456",
+        ))
+        .unwrap();
+    assess(&h.store, h.acct, id, true);
+    let other = h
+        .store
+        .upsert_message(&msg(h.acct, "offer", "offers", "A sale", "An offer"))
+        .unwrap();
+    assess(&h.store, h.acct, other, false);
+
+    let sealed = |app: axum::Router| async move {
+        body_json(app.oneshot(authed("GET", "/client/sealed")).await.unwrap()).await
+    };
+    let in_fye = |app: axum::Router| async move {
+        let body = body_json(
+            app.oneshot(authed("GET", "/client/v2/feed?destination=fye"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["message_id"] == id)
+    };
+    let put = |app: axum::Router, target: i64, body: serde_json::Value| async move {
+        app.oneshot(authed_json(
+            "PUT",
+            &format!("/client/sealed/{target}/verdict"),
+            body,
+        ))
+        .await
+        .unwrap()
+    };
+
+    let body = sealed(h.app.clone()).await;
+    let row = body[0].as_object().unwrap();
+    assert_eq!(row["id"], id);
+    assert_eq!(row["critical"], false);
+    assert!(row.contains_key("verdict") && row["verdict"].is_null());
+    assert!(row.contains_key("explained_by") && row["explained_by"].is_null());
+    // The model asked for FYE; auth mail does not take that pick.
+    assert!(!in_fye(h.app.clone()).await);
+
+    let response = put(
+        h.app.clone(),
+        id,
+        serde_json::json!({"verdict": "not_mine"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(response).await,
+        serde_json::json!({"id": id, "verdict": "not_mine"})
+    );
+    assert_eq!(sealed(h.app.clone()).await[0]["verdict"], "not_mine");
+    assert!(in_fye(h.app.clone()).await);
+
+    let response = put(h.app.clone(), id, serde_json::json!({"verdict": "mine"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(sealed(h.app.clone()).await[0]["verdict"], "mine");
+    assert!(!in_fye(h.app.clone()).await);
+
+    // A body that forgot the key, or names no verdict, changes nothing.
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({"verdict": "maybe"}),
+    ] {
+        let response = put(h.app.clone(), id, bad).await;
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert_eq!(sealed(h.app.clone()).await[0]["verdict"], "mine");
+    }
+
+    let response = put(h.app.clone(), id, serde_json::json!({"verdict": null})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(sealed(h.app.clone()).await[0]["verdict"].is_null());
+
+    // Not auth mail, or no such message: 404.
+    for target in [other, other + 1000] {
+        let response = put(
+            h.app.clone(),
+            target,
+            serde_json::json!({"verdict": "not_mine"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }

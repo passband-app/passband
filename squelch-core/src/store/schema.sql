@@ -2065,3 +2065,17 @@ CREATE TABLE IF NOT EXISTS archive_walk (
     updated_at TEXT NOT NULL,
     covered_to TEXT
 );
+
+-- THE OWNER'S RULING ON AUTH MAIL ("That was me" / "Not me"), one row per
+-- message. Human door only (`PUT /client/sealed/{id}/verdict`); the agent door
+-- never reads or writes it. It moves FYE membership: `not_mine` puts the
+-- message there, and `mine` takes a critical account change back out (see
+-- `auth_fye_sql!`). No row is no ruling. It outlives re-triage on purpose:
+-- the owner ruled on the message, not on one model run's reading of it.
+CREATE TABLE IF NOT EXISTS auth_verdicts (
+    account_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    verdict    TEXT NOT NULL CHECK(verdict IN ('mine','not_mine')),
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, message_id)
+);

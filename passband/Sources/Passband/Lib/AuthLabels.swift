@@ -24,6 +24,9 @@ enum AuthCopy {
         case .loginAlert: "Sign-in alert"
         case .securityAlert: "Security alert"
         case .verification: "Verification"
+        case .accountChange: "Account change"
+        case .appGrant: "App access"
+        case .signinReceipt: "Sign-in receipt"
         // A kind we don't know stays generic — its raw string is never shown.
         case .unknown, nil: "Auth message"
         }

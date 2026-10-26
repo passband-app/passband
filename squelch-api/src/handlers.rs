@@ -3513,6 +3513,11 @@ pub async fn markdown_preview(
 // --- GET /client/sealed ------------------------------------------------------
 
 /// Sealed METADATA only. No bodies here, ever.
+///
+/// `kind` is the one kind a client sees, picked by priority across the
+/// decision's kinds. `critical`, `verdict` and `explained_by` are always
+/// present (`false` / `null` when there is nothing to say), so a client can
+/// tell this daemon from one without verdicts by the key alone.
 #[derive(Debug, Serialize)]
 struct SealedMeta {
     id: i64,
@@ -3521,6 +3526,9 @@ struct SealedMeta {
     subject: String,
     kind: Option<String>,
     received_at: DateTime<Utc>,
+    critical: bool,
+    verdict: Option<squelch_core::types::AuthVerdict>,
+    explained_by: Option<i64>,
 }
 
 pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
@@ -3537,9 +3545,39 @@ pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoRespo
             subject: m.subject,
             kind: m.sealed_kind,
             received_at: m.received_at,
+            critical: m.critical,
+            verdict: m.verdict,
+            explained_by: m.explained_by,
         })
         .collect();
     Ok(Json(items))
+}
+
+// --- PUT /client/sealed/{message_id}/verdict --------------------------------
+
+/// `{"verdict": "mine" | "not_mine" | null}`. The key is required: a body
+/// that forgot it must not read as "clear my ruling".
+#[derive(Debug, Deserialize)]
+pub struct AuthVerdictBody {
+    #[serde(deserialize_with = "required_nullable")]
+    verdict: Option<squelch_core::types::AuthVerdict>,
+}
+
+/// The owner's ruling on one auth message ("That was me" / "Not me"), kept
+/// on the server so every client sees it. `null` clears it. A `not_mine`
+/// puts the message in FYE; a `mine` takes a critical change back out.
+/// 404 for a message that is not auth mail. HUMAN DOOR ONLY.
+pub async fn put_sealed_verdict(
+    State(state): State<ApiState>,
+    Path(message_id): Path<i64>,
+    Json(body): Json<AuthVerdictBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let verdict = body.verdict;
+    store_call(&state, move |store, account_id| {
+        store.set_auth_verdict(account_id, message_id, verdict, Utc::now())
+    })
+    .await?;
+    Ok(Json(json!({ "id": message_id, "verdict": verdict })))
 }
 
 // --- POST /client/sealed/{message_id}/reveal --------------------------------

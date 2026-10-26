@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v11";
+pub const PROMPT_VERSION: &str = "agent-triage-v12";
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -258,12 +258,7 @@ async fn run_bounded(
                 {
                     Ok(()) => {
                         let mut decision = *decision;
-                        // reading_kind only means something on Reading mail; a
-                        // stale one would colour the card if Reading is added
-                        // by a correction later.
-                        if !decision.destinations.contains(&MessageDestination::Reading) {
-                            decision.reading_kind = None;
-                        }
+                        normalize_decision(&mut decision);
                         return Ok(AgentRun {
                             decision,
                             source_message_ids: sources.into_iter().collect(),
@@ -738,6 +733,22 @@ impl ObservedDecisionContext {
     }
 }
 
+/// Clears fields that only mean something beside another one. These are
+/// normalized rather than failed: the rest of the decision is sound, and a
+/// repair turn would cost a model call to drop a flag.
+pub fn normalize_decision(decision: &mut MessageDecision) {
+    // reading_kind only means something on Reading mail; a stale one would
+    // colour the card if Reading is added by a correction later.
+    if !decision.destinations.contains(&MessageDestination::Reading) {
+        decision.reading_kind = None;
+    }
+    // `critical` grades an account change; on anything else it would put
+    // a sign-in alert or a code in FYE with no question to answer.
+    if !decision.auth.kinds.contains(&AuthKind::AccountChange) {
+        decision.auth.critical = false;
+    }
+}
+
 pub fn validate_decision(
     decision: &MessageDecision,
     sources: &BTreeSet<i64>,
@@ -1083,9 +1094,12 @@ fn decision_schema_body() -> Value {
                         "sign_in_link",
                         "verification",
                         "login_alert",
-                        "security_alert",
+                        "account_change",
+                        "app_grant",
+                        "signin_receipt",
                     ])),
                 ),
+                ("critical", boolean()),
                 ("evidence", reference("evidence")),
             ]),
         ),
@@ -1663,7 +1677,7 @@ mod tests {
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v11")
+            (2_000, "agent-triage-v12")
         );
     }
     #[test]
@@ -1672,6 +1686,7 @@ mod tests {
         decision.auth = AuthAssessment {
             kinds: vec![AuthKind::LoginAlert],
             evidence: decision.attention.evidence.clone(),
+            critical: false,
         };
         assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
         assert!(!decision.external_access.restricted);
@@ -1765,6 +1780,77 @@ mod tests {
                 "schema status must be pollable or explicitly unknown: {value}"
             );
         }
+    }
+    /// The v12 auth kinds: the set the model is offered, `security_alert`
+    /// withdrawn, and `critical` required beside them like every field.
+    #[test]
+    fn auth_kinds_and_critical_are_offered() {
+        let schema = decision_schema();
+        let auth = &schema["properties"]["auth"];
+        assert_eq!(
+            auth["properties"]["kinds"],
+            array(enumeration(&[
+                "otp",
+                "password_reset",
+                "sign_in_link",
+                "verification",
+                "login_alert",
+                "account_change",
+                "app_grant",
+                "signin_receipt",
+            ]))
+        );
+        assert_eq!(auth["properties"]["critical"], boolean());
+        assert!(
+            auth["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("critical"))
+        );
+        // Every offered kind is one the decision decodes.
+        for kind in auth["properties"]["kinds"]["items"]["enum"]
+            .as_array()
+            .unwrap()
+        {
+            assert!(
+                serde_json::from_value::<AuthKind>(kind.clone()).is_ok(),
+                "{kind}"
+            );
+        }
+        // The prompt defines each new kind and the flag, and re-routes the
+        // security-flavoured mail that is not authentication.
+        for phrase in [
+            "account_change, a security setting",
+            "app_grant, a third-party app was granted access",
+            "signin_receipt, a notice that the recipient used one account",
+            "Set auth.critical true only with account_change",
+            "a fraud or transaction confirmation",
+            "an app's request for new or updated permissions",
+            "a privacy reminder, such as location sharing",
+            "A security incident is not authentication mail",
+        ] {
+            assert!(SYSTEM.contains(phrase), "{phrase}");
+        }
+        assert!(!SYSTEM.contains("security_alert"));
+    }
+    /// `critical` grades an account change and nothing else: on any other
+    /// kind it is cleared, not failed (the rest of the decision is sound).
+    #[test]
+    fn critical_is_normalized_away_without_an_account_change() {
+        let mut decision = valid();
+        decision.auth = AuthAssessment {
+            kinds: vec![AuthKind::LoginAlert],
+            evidence: decision.attention.evidence.clone(),
+            critical: true,
+        };
+        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
+        normalize_decision(&mut decision);
+        assert!(!decision.auth.critical);
+        decision.auth.kinds = vec![AuthKind::LoginAlert, AuthKind::AccountChange];
+        decision.auth.critical = true;
+        normalize_decision(&mut decision);
+        assert!(decision.auth.critical);
+        assert!(decision.auth.is_critical());
     }
     #[test]
     fn reading_kind_is_offered_and_defaults_on_stored_rows() {

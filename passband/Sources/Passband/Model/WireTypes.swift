@@ -1763,6 +1763,15 @@ enum SealedKind: LenientRawEnum {
     case loginAlert
     case securityAlert
     case verification
+    /// A security setting on the owner's account changed (recovery phone, 2FA,
+    /// password, SSH key, a card added to a wallet...). The serious ones also
+    /// carry `SealedMeta.critical`.
+    case accountChange
+    /// A third-party app was granted access to the account.
+    case appGrant
+    /// Proof the owner used one account to sign in to another service ("You
+    /// shared some Google Account data with X"). Never asks a question.
+    case signinReceipt
     case unknown(String)
 
     var rawValue: String {
@@ -1773,6 +1782,9 @@ enum SealedKind: LenientRawEnum {
         case .loginAlert: "login_alert"
         case .securityAlert: "security_alert"
         case .verification: "verification"
+        case .accountChange: "account_change"
+        case .appGrant: "app_grant"
+        case .signinReceipt: "signin_receipt"
         case .unknown(let raw): raw
         }
     }
@@ -1787,6 +1799,9 @@ enum SealedKind: LenientRawEnum {
         case "login_alert": self = .loginAlert
         case "security_alert": self = .securityAlert
         case "verification": self = .verification
+        case "account_change": self = .accountChange
+        case "app_grant": self = .appGrant
+        case "signin_receipt": self = .signinReceipt
         default: self = .unknown(rawValue)
         }
     }
@@ -1807,6 +1822,33 @@ struct SealedMeta: Codable, Sendable, Identifiable, Hashable {
     var subject: String
     var kind: SealedKind?
     var received_at: String
+    /// A takeover-class account change (recovery phone moved, 2FA off, password
+    /// changed...). ABSENT from a daemon older than server-side verdicts, and
+    /// that absence is how the client tells the two apart: a daemon that
+    /// serves this key also serves `verdict` and the PUT that writes it (see
+    /// Lib/AuthPolicy.swift, `speaksVerdicts`).
+    var critical: Bool? = nil
+    /// The owner's ruling, "mine" or "not_mine", or null while unruled. Kept as
+    /// the raw string so a value this build has never heard of decodes as
+    /// "no verdict" instead of failing the whole list.
+    var verdict: String? = nil
+    /// The message id of the code, link or receipt that explains this alert
+    /// (the same service, within minutes). Never set on a critical change.
+    var explained_by: Int? = nil
+}
+
+/// PUT /client/sealed/{id}/verdict. `verdict` nil CLEARS the ruling, and the
+/// key must still be on the wire as an explicit null: the shared encoder drops
+/// nil optionals, so this one encodes by hand.
+struct SealedVerdictBody: Encodable, Sendable {
+    var verdict: String?
+
+    private enum CodingKeys: String, CodingKey { case verdict }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(verdict, forKey: .verdict)
+    }
 }
 
 /// POST /client/sealed/{id}/reveal. `body` is a sensitive one-time reveal:

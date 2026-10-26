@@ -283,6 +283,14 @@ actor APIClient {
         return try decode(T.self, from: data)
     }
 
+    private func putNoContent(_ path: String, body: Encodable? = nil) async throws {
+        var payload: Data? = nil
+        if let body { payload = try Self.encoder.encode(AnyEncodable(body)) }
+        let req = try buildRequest(
+            path: path, method: .PUT, query: [:], body: payload, timeout: Self.requestTimeout)
+        _ = try await perform(req)
+    }
+
     private func postNoContent(_ path: String, body: Encodable? = nil) async throws {
         var payload: Data? = nil
         if let body { payload = try Self.encoder.encode(AnyEncodable(body)) }
@@ -865,6 +873,17 @@ actor APIClient {
     /// returned body must live in view state only — see docs/SECURITY.md §4.
     func revealSealed(_ id: Int) async throws -> RevealedSealed {
         try await post("/client/sealed/\(id)/reveal")
+    }
+
+    /// Record (or, with nil, clear) the owner's ruling on one piece of auth
+    /// mail: "mine" or "not_mine". Human door only. A daemon older than the
+    /// route answers 404 or 405, which `AuthDecisions` reads as "keep the
+    /// ruling in this Mac's ledger"; a new daemon 404s a message that is not
+    /// auth mail. The wire string rather than `AuthVerdict` so this file stays
+    /// compilable in the test suites that build it without the auth policy.
+    func putSealedVerdict(_ id: Int, verdict: String?) async throws {
+        try await putNoContent(
+            "/client/sealed/\(id)/verdict", body: SealedVerdictBody(verdict: verdict))
     }
 
     // MARK: - lifecycle / actions

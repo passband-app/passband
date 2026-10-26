@@ -33,7 +33,7 @@ impl SqliteStore {
         // FIRST so a capped pass makes monotonic progress across runs, and
         // `gmail_msg_id <> ''` because an unaddressable row cannot be trashed.
         let mut stmt = conn.prepare(
-            "SELECT m.id, m.gmail_msg_id, m.from_addr, (SELECT value FROM json_each(d.decision_json,'$.auth.kinds') WHERE value IN ('otp','password_reset','sign_in_link','verification') LIMIT 1), m.received_at
+            "SELECT m.id, m.gmail_msg_id, m.from_addr, json_extract(d.decision_json,'$.auth'), m.received_at
              FROM messages m
              JOIN agent_message_state a ON a.message_id=m.id AND a.account_id=m.account_id
              JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id
@@ -56,7 +56,18 @@ impl SqliteStore {
                     message_id: r.get(0)?,
                     gmail_msg_id: r.get(1)?,
                     sender: r.get(2)?,
-                    kind: r.get(3)?,
+                    // The priority pick, in the decision's own spelling (the
+                    // log has always said `sign_in_link`). Every candidate
+                    // holds an actionable kind, and those outrank the rest.
+                    kind: crate::triage::decision::AuthKind::priority_pick(
+                        &super::messages::SealedAuth::read(
+                            true,
+                            r.get::<_, Option<String>>(3)?.as_deref(),
+                            None,
+                        )
+                        .kinds,
+                    )
+                    .map(|kind| kind.as_str().to_owned()),
                     received_at: dt(r, 4)?,
                 })
             })?

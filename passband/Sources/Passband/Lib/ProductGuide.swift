@@ -561,7 +561,7 @@ enum ProductGuide {
         """
 
     private static let loginCodes = """
-        Login codes, password resets, sign-in links and security alerts are kept \
+        Login codes, password resets, sign-in links, account changes, app access grants, sign-in receipts and security alerts are kept \
         apart from the rest of the mail, on the Auth page (key {key:auth}, or g on the Emails \
         page).
 
@@ -573,8 +573,17 @@ enum ProductGuide {
         - j / k move through the list. Filters: Everything, Last hour, Codes only, Risk.
         - r or Enter reveals. A login code shows its digits right there, and c copies it. Other kinds open a one-time reveal panel that is cleared when it closes.
         - Clicking a row opens the whole message in that reveal panel.
-        - Sign-in alerts and resets from the last week ask for a decision: "That was me" or "Not me".
         - The auto-shredder card can move old auth mail to Gmail's trash after a set number of days.
+
+        Needs a decision (the right of the Auth page; the top of the phone's login-codes page):
+        - Sign-in alerts, account changes (a new recovery phone, 2FA changed, a new SSH key or access token, a card added to a wallet), app access grants, password resets and sign-in links ask whether it was the user. Resets and sign-in links answer "I asked" or "I did not", app access "I allowed it" or "I didn't", and the rest "That was me" or "Not me".
+        - A question stays open for 7 days, or 14 for account changes and app access.
+        - A critical change (recovery email or phone changed or removed, 2FA turned off or moved to a new device, password or account email changed, a phone number or SIM moved) is marked Critical, sorts first and stays open until answered. It also sits in For your eyes until "That was me".
+        - A sign-in alert that arrived within minutes of a code, sign-in link or sign-in receipt from the same service asks nothing; its row says what explains it. A critical change is never explained away.
+        - When three or more services see a new sign-in within three days, they share one "New device?" card with "All me" and "Review each".
+        - "Not me" opens the message and puts it in For your eyes. An answer given on one device shows on the others.
+        - Login codes, verifications and sign-in receipts ("you shared Google Account data with X") never ask: they are proof of something the user just did.
+        - Auth mail in For your eyes shows its summary and a lock. Opening it reveals it once in the same panel, with the same audit entry.
 
         Arrival:
         - Auth mail shows up within seconds, without waiting for triage. The Auth icon on the rail shows live codes counting down.

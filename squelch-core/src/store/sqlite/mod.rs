@@ -52,6 +52,50 @@ macro_rules! own_mail_sql {
 }
 const OWN_MAIL: &str = own_mail_sql!();
 
+/// Auth mail, over alias `d` (the message's `agent_message_decisions` row,
+/// LEFT JOINed): its decision names an auth kind. The Rust form is
+/// `AuthAssessment::is_auth`.
+macro_rules! auth_mail_sql {
+    () => {
+        "(COALESCE(json_array_length(d.decision_json,'$.auth.kinds'),0)>0)"
+    };
+}
+
+/// THE MODEL-AND-VERDICT HALF OF FYE MEMBERSHIP FOR AUTH MAIL, over aliases
+/// `d` (decision) and `v` (`auth_verdicts`, LEFT JOINed on the same message).
+/// Auth mail does not take the model's FYE pick: it is in FYE when the owner
+/// said "Not me", or when it is a critical account change they have not
+/// ruled on; a "That was me" takes it out. The owner's thread pin and a fired
+/// reminder still win, and are applied around this by each caller exactly as
+/// for all FYE mail. One definition for every list and every placement that
+/// asks, so they cannot drift (`auth_fye_list_and_placement_agree` pins
+/// that they do). Only meaningful where `auth_mail_sql!` holds.
+macro_rules! auth_fye_sql {
+    () => {
+        "(COALESCE(v.verdict='not_mine',\
+           json_extract(d.decision_json,'$.auth.critical')=1 AND EXISTS(SELECT 1 FROM \
+             json_each(d.decision_json,'$.auth.kinds') WHERE value='account_change'),0))"
+    };
+}
+
+/// Auth Page membership, over `m`, `t` (triage), `s` (agent_message_state)
+/// and `d`: the agent classified it as auth, or it is an unmigrated legacy
+/// row the old pipeline sealed. `triage.sensitivity` alone is never the
+/// test: the agent pipeline no longer writes it.
+macro_rules! sealed_membership_sql {
+    () => {
+        "(json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0 \
+          OR (s.message_id IS NULL AND t.sensitivity='sealed'))"
+    };
+}
+
+/// The `auth_verdicts` join [`auth_fye_sql!`] reads, onto messages `m`.
+macro_rules! auth_verdict_join_sql {
+    () => {
+        " LEFT JOIN auth_verdicts v ON v.account_id=m.account_id AND v.message_id=m.id "
+    };
+}
+
 pub(crate) mod agent_budget;
 /// An archive row nobody has assessed, over aliases `m` (messages) and `a`
 /// (its `agent_message_state`, LEFT JOINed): stored to be found, never
@@ -1399,6 +1443,16 @@ impl Store for SqliteStore {
 
     fn sealed_body(&self, account_id: AccountId, message_id: i64) -> Result<SealedBody> {
         self.sealed_body(account_id, message_id)
+    }
+
+    fn set_auth_verdict(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        verdict: Option<crate::types::AuthVerdict>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.set_auth_verdict(account_id, message_id, verdict, now)
     }
 
     fn sent_listing(

@@ -612,6 +612,10 @@ final class AppStore {
     /// Model/Badge.swift.
     var sitrep = SitrepData() {
         didSet {
+            // Every sealed list lands here (the full pull and the sealed-only
+            // refresh alike), which is what settles verdict writes and moves
+            // the old device-local ledger up to a daemon that keeps verdicts.
+            if sitrep.sealed != oldValue.sealed { AuthDecisions.shared.sync(sitrep.sealed) }
             guard sitrep.standing != oldValue.standing else { return }
             Badge.refresh(sitrep.standing)
         }
@@ -851,6 +855,11 @@ final class AppStore {
     /// Space on the sitrep: open the first row with the whole band as the
     /// queue, and start counting.
     func startWalk(_ threadId: String, queue: [AttentionUpdate]) {
+        // Auth mail opens in the reveal panel, so there is no walk to start.
+        if let sealed = sealedMeta(thread: threadId) {
+            requestReveal(sealed)
+            return
+        }
         openThread(threadId, queue: queue, from: .sitrep)
         walk = Walk()
         // Built now, off the main thread, so the end of the walk does not
@@ -1128,6 +1137,32 @@ final class AppStore {
     /// The phone's shell has opened the page `requestAuthPage` asked for.
     func consumeAuthPage() { pendingAuthPage = false }
 
+    /// A sealed message to open in the one-time reveal panel from somewhere that
+    /// is not an auth page: an auth row in For your eyes, or any thread open
+    /// that turned out to hold sealed mail. Mounted by ActionLayer on the Mac
+    /// and by the phone's shell; the Auth pages keep their own.
+    var revealRequest: SealedMeta?
+
+    /// The sealed metadata for one message id, when it is auth mail.
+    func sealedMeta(message id: Int) -> SealedMeta? {
+        sitrep.sealed.first { $0.id == id }
+    }
+
+    /// The newest sealed message in a thread, when the thread holds any. The
+    /// daemon's thread view 404s such a thread, so the reader must never be
+    /// pointed at it: `openThread` routes it to the reveal panel instead.
+    func sealedMeta(thread threadId: String) -> SealedMeta? {
+        guard !threadId.isEmpty else { return nil }
+        return sitrep.sealed
+            .filter { $0.thread_id == threadId }
+            .max { (Fmt.date($0.received_at) ?? .distantPast) < (Fmt.date($1.received_at) ?? .distantPast) }
+    }
+
+    /// Open auth mail the only way it can be opened: the audited one-time reveal.
+    func requestReveal(_ meta: SealedMeta) {
+        revealRequest = meta
+    }
+
     // MARK: read tracking
     /// The daemon's tracking answer, fetched once on connect. nil = never
     /// asked (or the daemon did not answer), which reads exactly like
@@ -1251,7 +1286,12 @@ final class AppStore {
         }
     }
 
-    private init() {}
+    private init() {
+        // A thread holding sealed mail is one the daemon refuses to serve (404),
+        // and its body is not the cache's to hold in any case: nothing warms,
+        // prefetches or hover-fetches one. See `sealedMeta(thread:)`.
+        ThreadPrefetch.shared.refuses = { AppStore.shared.sealedMeta(thread: $0) != nil }
+    }
 
     // MARK: - settings
 
@@ -2628,6 +2668,13 @@ final class AppStore {
         entering edge: ThreadEdge? = nil, focusMessage: Int? = nil, readingMail: Bool = false,
         from source: OpenSource
     ) {
+        // AUTH MAIL NEVER REACHES THE READER. The daemon 404s a thread holding a
+        // sealed message, so whatever asked (an auth row in For your eyes, a
+        // reply verb, a notification) gets the one-time reveal instead.
+        if let sealed = sealedMeta(thread: threadId) {
+            requestReveal(sealed)
+            return
+        }
         // from_noise: an open from below the squelch line — someone digging for
         // mail the triage muted, which is the false-negative signal. source:
         // which surface earned the open (see OpenSource).

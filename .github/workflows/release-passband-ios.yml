@@ -59,7 +59,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # App Store Connect rejects a marketing version that ever goes
       # backwards, so keep the tag pinned to project.yml's iOS target — the

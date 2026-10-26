@@ -118,7 +118,7 @@ jobs:
             echo "$d: $(( $(date +%s) - start ))s, $(df -h / | tail -1 | awk '{print $4}') free"
           done
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # No-arg install reads rust-toolchain.toml — the pinned channel and its
       # clippy/rustfmt components — so the workflow never states a version the
@@ -130,7 +130,7 @@ jobs:
       # Caches ~/.cargo and target/ keyed on the lockfile; the ONNX (ort)
       # build under fastembed is the expensive part, and this is what keeps
       # it from recompiling on every PR.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # `cargo test` links one binary per test target (fifty-odd here), each
       # carrying the whole dependency tree, ONNX included. mold links them in a
@@ -138,7 +138,7 @@ jobs:
       # of a ~3.5 min step, inside run-to-run noise, and costs 2 s to install.
       # make-default (the action's default) puts it on PATH as `ld`, so no
       # RUSTFLAGS change and the rust-cache key stays what it was.
-      - uses: rui314/setup-mold@v1
+      - uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
 
       # BEFORE clippy on purpose: a formatting diff is the cheapest possible
       # failure and there is no reason to spend a compile discovering it. The

@@ -717,6 +717,23 @@ Phase 8; with `operator_cidrs = []` it only ever reaches the ALB's 404.
 
 ---
 
+### Operator access to the Bifrost and Grafana UIs (tailnet)
+
+Added 2026-10-26, after the cutover. The monitor box joins the Passband
+tailnet as `tag:passband-aws` (key: `passband/monitor/TS_AUTHKEY`, reusable,
+tagged) and serves, tailnet-only:
+
+- `https://passband-monitor.<tailnet>.ts.net/`: the Bifrost UI, through a
+  loopback nginx that presents `Host: bifrost.passband.app` to the ALB
+- `https://passband-monitor.<tailnet>.ts.net:8443/`: Grafana
+
+So `operator_cidrs` stays `[]`; nobody's laptop goes on the ALB allow-list.
+A new tailnet needs the tag in `tagOwners` before a key can carry it, and
+Serve/HTTPS enabled once (DNS → HTTPS Certificates), or `tailscale serve`
+stops at a consent link and leaves no config.
+
+---
+
 ## Phase 5: monitoring
 
 **Preconditions.** Phase 3's monitor deploy succeeded; Phase 4 step 7 done.
@@ -1000,8 +1017,11 @@ Phase 6's `drift` already proved it.
 **Order: DNS first, then mint.** A mint creates the key on whichever gateway
 control resolves. Against Railway's it fails loudly (the new admin credential
 is refused there), never silently, but it fails; so wait until control
-resolves the ALB. Tenants keep working on their old keys against Railway until
-their own mint, so there is no gap before a tenant's turn.
+resolves the ALB. **There IS a gap, so mint everyone straight away:** tenants
+reach Bifrost by hostname, so the moment the CNAME flips, a tenant still on
+its Railway key calls the AWS gateway, which does not know that key, and its
+LLM calls fail (`llm_config_failures`) until its own mint. On 2026-10-26 the
+seven mints took about two minutes and the failures stopped with them.
 
 0. **Last check that tenants will be admitted.** After the flip, every
    tenant's triage reaches the ALB from carrier's egress address, and a wrong

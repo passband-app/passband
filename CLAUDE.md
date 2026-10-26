@@ -72,6 +72,11 @@ That makes the draft stage your own responsibility to keep green:
   check work in progress. If CI then fails, fix it on the ready PR. Do not flip
   it back to draft to dodge runs.
 - Pushes to `main` always run CI. Only PR runs are gated on draft state.
+- The checks branch protection requires are the two `gate` jobs (`ci / gate`,
+  `ci-passband / gate`). They always report, pass when the real jobs passed or
+  were correctly skipped, and fail otherwise. `deny` (cargo-deny, `deny.toml`)
+  runs with the Rust job: a new advisory or license fails it, and an ignore
+  needs a written reason.
 
 Human contributors can open non-draft PRs whenever they like; the rule exists
 for agents, which push often.

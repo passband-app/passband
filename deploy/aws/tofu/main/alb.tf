@@ -231,6 +231,8 @@ resource "aws_lb_listener_rule" "host" {
 #            first-run config, so this rule is what keeps that window closed;
 #            operator_cidrs opens it to the operator for that step only.
 #   metrics: Prometheus remote-write from carrier's prometheus-agent only.
+#   grafana: tailnet-only. Tailnet devices reach it through the monitor box's
+#            Tailscale app connector, which egresses from the NAT EIP.
 #
 # ALB limits: one source-ip condition per rule, at most 3 values per
 # condition, at most 5 match evaluations per rule (docs: "Condition types
@@ -240,10 +242,11 @@ locals {
   source_restricted = {
     bifrost = concat(["${aws_eip.nat.public_ip}/32"], var.carrier_egress_cidrs, var.operator_cidrs)
     metrics = var.carrier_egress_cidrs
+    grafana = concat(["${aws_eip.nat.public_ip}/32"], var.operator_cidrs)
   }
 
   restricted_rules = merge([
-    for svc, base in { bifrost = 100, metrics = 200 } : {
+    for svc, base in { bifrost = 100, metrics = 200, grafana = 300 } : {
       for i in range(ceil(length(local.source_restricted[svc]) / 3)) : "${svc}-${i}" => {
         service  = svc
         priority = base + i

@@ -23,7 +23,7 @@ rusqlite = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
 oauth2 = { workspace = true }
-keyring = { workspace = true }
+keyring-core = { workspace = true }
 age = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
@@ -67,6 +67,13 @@ whatlang = { workspace = true }
 # included. So the dependency is scoped to unix rather than to glibc.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+# The one OS keyring the `keyring` credential backend has: the macOS keychain.
+# Elsewhere the backend is refused up front and `file` is the backend
+# (`credentials::ensure_backend`); see the workspace manifest for what linking
+# a Linux store cost.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { workspace = true }
 
 [dev-dependencies]
 # The APNs pusher's tests bind a MOCK RELAY on an ephemeral loopback port and

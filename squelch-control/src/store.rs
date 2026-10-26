@@ -61,6 +61,7 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::{IsolationLevel, NoTls, Row, Transaction};
 
 use crate::invites::DEFAULT_TTL_DAYS;
+use crate::pg_tls::TlsChoice;
 
 /// Connections the pool will open. Four, because the reason it exists is
 /// surviving a dropped connection rather than serving load: the hosted tier is
@@ -411,6 +412,11 @@ pub enum StoreError {
     /// This mailbox already has a daemon.
     #[error("that Google account already has a Passband mailbox")]
     AccountTaken,
+    /// The database URL's `sslmode` (or the string itself) would not parse, or
+    /// the built-in CA bundle would not load. Names at most the `sslmode`
+    /// value, never the URL: see [`crate::pg_tls`].
+    #[error(transparent)]
+    Tls(#[from] crate::pg_tls::PgTlsError),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -550,28 +556,31 @@ impl ControlStore {
     /// unreachable" into a startup failure rather than a 500 on the first
     /// signup.
     ///
-    /// `NoTls`, and that is a deployment fact rather than a shortcut: this
-    /// travels Railway's private network (`postgres.railway.internal`) and
-    /// never leaves the project. Pointing it at the PUBLIC proxy means adding
-    /// `tokio-postgres-rustls` and handing a `MakeTlsConnector` to the manager
-    /// here; nothing else in this file would change.
+    /// TLS IS THE URL'S CHOICE, read from its `sslmode` by [`crate::pg_tls`]:
+    /// absent or `disable` is `NoTls` (Railway's private network, where the
+    /// URL carries no `sslmode` and this is byte-for-byte the path it always
+    /// was); `require` and `verify-full` are rustls against the AWS RDS CA
+    /// bundle with the hostname checked and plaintext refused; anything else
+    /// fails here, naming the value and never the URL.
     pub async fn connect(database_url: &str) -> Result<Self> {
         // Parsed here rather than handed to deadpool's own config type, so a
         // malformed URL fails before a pool exists. The error is
         // `invalid connection string` and carries no part of the string, which
         // matters because the string carries the password.
-        let pg_config: tokio_postgres::Config = database_url.parse()?;
-        let manager = Manager::from_config(
-            pg_config,
-            NoTls,
-            ManagerConfig {
-                // `Fast` checks `is_closed()` on the way out of the pool and
-                // runs no test query. The statements here are all one round
-                // trip, so a connection that died between checkout and use
-                // costs one retriable error rather than a corrupted write.
-                recycling_method: RecyclingMethod::Fast,
-            },
-        );
+        let (pg_config, tls) = crate::pg_tls::parse(database_url)?;
+        // `Fast` checks `is_closed()` on the way out of the pool and runs no
+        // test query. The statements here are all one round trip, so a
+        // connection that died between checkout and use costs one retriable
+        // error rather than a corrupted write.
+        let manager_config = || ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        };
+        let manager = match tls {
+            TlsChoice::Plain => Manager::from_config(pg_config, NoTls, manager_config()),
+            TlsChoice::Verified => {
+                Manager::from_config(pg_config, crate::pg_tls::rds_connector()?, manager_config())
+            }
+        };
         let store = Self {
             pool: Pool::builder(manager).max_size(POOL_MAX_SIZE).build()?,
         };
@@ -2579,6 +2588,84 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
             .await
             .unwrap();
         (row.get(0), row.get(1))
+    }
+
+    /// The `sslmode` switch, through the real connect path against the test
+    /// server (which speaks no TLS): `disable` connects plainly, and the two
+    /// TLS modes REFUSE rather than falling back to plaintext — the downgrade
+    /// `prefer` would allow. The error names no part of the URL.
+    #[tokio::test]
+    async fn sslmode_picks_the_connector_and_tls_never_falls_back() {
+        let url = fresh_schema().await;
+        ControlStore::connect(&format!("{url}&sslmode=disable"))
+            .await
+            .expect("sslmode=disable is the plain path");
+        let password = url
+            .parse::<tokio_postgres::Config>()
+            .unwrap()
+            .get_password()
+            .map(|p| String::from_utf8_lossy(p).into_owned());
+        for mode in ["require", "verify-full"] {
+            let err = match ControlStore::connect(&format!("{url}&sslmode={mode}")).await {
+                Ok(_) => panic!("sslmode={mode} connected in plaintext"),
+                Err(e) => e.to_string(),
+            };
+            if let Some(pw) = password.as_deref().filter(|p| p.len() >= 4) {
+                assert!(!err.contains(pw), "{err}");
+            }
+        }
+    }
+
+    /// Whether [`ControlStore::connect`] actually STARTS A TLS HANDSHAKE for a
+    /// given URL tail, against a fake server that says yes to TLS.
+    ///
+    /// A fake server rather than the real one, because the real test server
+    /// declines TLS, and against that every path looks alike: a rustls
+    /// connector under tokio-postgres's default `prefer` falls back to
+    /// plaintext, and even `NoTls` sends the SSLRequest under `require` (it
+    /// only fails once the server answers `S`). So this answers `S` and looks
+    /// at the next byte: a TLS record (0x16) means a real TLS connector was
+    /// handed to the pool. Plain StartupMessage first, or nothing after the
+    /// `S`, means it was not.
+    async fn starts_a_tls_handshake(tail: &str) -> bool {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let wait = std::time::Duration::from_secs(5);
+            let Ok(Ok((mut sock, _))) = tokio::time::timeout(wait, listener.accept()).await else {
+                return false;
+            };
+            let mut head = [0u8; 8];
+            sock.read_exact(&mut head).await.unwrap();
+            // Length 8, then the SSLRequest code 1234.5679 (80877103).
+            if head != [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f] {
+                return false;
+            }
+            sock.write_all(b"S").await.unwrap();
+            let mut next = [0u8; 1];
+            // Dropping the socket afterwards fails the connect, which is fine.
+            matches!(
+                tokio::time::timeout(wait, sock.read_exact(&mut next)).await,
+                Ok(Ok(_)) if next[0] == 0x16
+            )
+        });
+        let url = format!("postgres://u:p@127.0.0.1:{port}/db{tail}");
+        assert!(ControlStore::connect(&url).await.is_err());
+        server.await.unwrap()
+    }
+
+    /// THE CONNECTOR WIRING, with no database: no `sslmode` (today's Railway
+    /// URL) and `disable` never start TLS, and `require`/`verify-full` do.
+    #[tokio::test]
+    async fn only_the_tls_modes_start_a_tls_handshake() {
+        assert!(
+            !starts_a_tls_handshake("").await,
+            "absent sslmode started TLS"
+        );
+        assert!(!starts_a_tls_handshake("?sslmode=disable").await);
+        assert!(starts_a_tls_handshake("?sslmode=require").await);
+        assert!(starts_a_tls_handshake("?sslmode=verify-full").await);
     }
 
     #[tokio::test]

@@ -154,8 +154,8 @@ pub struct Update {
     pub reason: String,
     pub deadline: Option<DateTime<Utc>>,
     pub matched_rule: Option<i64>,
-    /// HUMAN-DOOR ONLY: set by [`crate::store::Store::attention_updates`], left
-    /// `None` by the MCP path so no key reaches the agent door.
+    /// HUMAN-DOOR ONLY: set by the human door's listing, left `None` by the
+    /// MCP path so no key reaches the agent door.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_reasons: Option<FieldReasons>,
     /// Whether the message carries stored attachments (the paperclip glyph).
@@ -910,6 +910,18 @@ pub struct SearchHit {
     pub subject_matches: Vec<String>,
     #[serde(default)]
     pub snippet_matches: Vec<String>,
+    /// Written by the account itself (`own_mail_sql!`): the owner's own sent
+    /// mail, including a send Gmail also labelled INBOX. Lets a reader of the
+    /// results, an agent especially, tell "you wrote this" from mail received,
+    /// without knowing the owner's addresses.
+    #[serde(default)]
+    pub from_me: bool,
+    /// To, Cc and (on the owner's own sends) Bcc as stored, comma-joined. Kept
+    /// so the recall legs can apply `to:` after ranking exactly as the keyword
+    /// leg applies it in SQL. NEVER SERIALIZED: a result is a summary, and the
+    /// recipient list is not part of it.
+    #[serde(skip)]
+    pub recipients: String,
 }
 
 /// One row of the human-door audit log. Human-door-only; never crosses MCP.

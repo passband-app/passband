@@ -132,24 +132,28 @@ impl crate::translate::TranslateBackend for Scripted {
                 return Err(ClassifyError {
                     kind: "http_529".into(),
                     retryable: true,
+                    retry_after: None,
                 });
             }
             Answer::TimesOutOn(marker) if user.contains(marker) => {
                 return Err(ClassifyError {
                     kind: "transport".into(),
                     retryable: true,
+                    retry_after: None,
                 });
             }
             Answer::RateLimitedOn(marker) if user.contains(marker) => {
                 return Err(ClassifyError {
                     kind: "http_429".into(),
                     retryable: true,
+                    retry_after: None,
                 });
             }
             Answer::DownAfter(n) if call >= n => {
                 return Err(ClassifyError {
                     kind: "transport".into(),
                     retryable: true,
+                    retry_after: None,
                 });
             }
             Answer::TimesOutOn(_)
@@ -354,6 +358,7 @@ async fn french_mail_is_translated_indexed_and_served_to_both_doors() {
         attempts: 0,
         arrival_eligible: false,
         foreground: false,
+        last_error: None,
     };
     let context =
         crate::store::agent_triage::AgentTriageStore::load_agent_context(store.as_ref(), &job)

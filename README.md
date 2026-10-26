@@ -52,8 +52,8 @@ flowchart LR
 ```
 
 - **Sync**: polls Gmail every 5s with a read-only token. Sent mail seeds a "people I know" contact list, the strongest cheap triage signal.
-- **Triage**: seal detection runs before anything else, so auth mail never reaches any LLM. Everything else gets a real model verdict: heuristics (bills, known contacts, alerts, newsletters, cold sales) write provisional seed values at ingest, then Stage-1 (default `claude-opus-5` at low effort) scores importance, tier, deadline, category, and a one-liner with a per-property "why". Those heuristics never stand as the answer unless the API is unreachable, and they never fire a notification on their own; what they do instead is act as a witness, because a model verdict that contradicts them is one of the strongest signals that a row needs a second look.
-- **Escalation**: a router, not the model's own confidence, decides what gets that second look. It reads the settled verdict plus facts the model cannot see: what the deterministic detectors found, whether you have corrected this sender before, and where the score fell against the surface line. Stage-2 runs the *same* model at `xhigh` effort with more context (why it was flagged, the sender's track record, the rest of the thread) — escalation buys thinking and information, not a bigger brain. Your squelch/surface rules still settle visibility outright, applied over the verdict rather than instead of it.
+- **Triage**: seal detection runs before anything else, so auth mail never reaches any LLM. Everything else gets a real model verdict: heuristics (bills, known contacts, alerts, newsletters, cold sales) write provisional seed values at ingest, then Stage-1 (default `claude-opus-5-5` at low effort) scores importance, tier, deadline, category, and a one-liner with a per-property "why". Those heuristics never stand as the answer unless the API is unreachable, and they never fire a notification on their own; what they do instead is act as a witness, because a model verdict that contradicts them is one of the strongest signals that a row needs a second look.
+- **Escalation**: a router, not the model's own confidence, decides what gets that second look. It reads the settled verdict plus facts the model cannot see: what the deterministic detectors found, whether you have corrected this sender before, and where the score fell against the surface line. Stage-2 runs the *same* model at the same `low` effort (an eval found `low` matching `xhigh` on every placement metric; a new account's first five days run the mail its user is waiting on at `xhigh`, see `Stage2Config::onboarding_effort`) with more context (why it was flagged, the sender's track record, the rest of the thread) — escalation buys information, not a bigger brain. Your squelch/surface rules still settle visibility outright, applied over the verdict rather than instead of it.
 - **Re-triage**: relevance expires. Alongside each verdict the model lists dates to look again ("this reservation is dead the morning after"), anything with a deadline schedules itself regardless, and anything sitting unactioned in the standing band gets swept. Verdicts you have corrected by hand are never re-evaluated. Every model pass also has an age horizon (7 days for Stage-1, 14 for Stage-2) so a fresh install cannot spend a day's cap on a decade of backlog, and a re-triage you ask for by hand outranks that horizon for 24 hours and jumps the queue ahead of the backlog: asking is the one thing the cutoff exists to wait for.
 - Each stage has its own daily budget caps and cost ledger; no API key or an exhausted budget just means rows keep their heuristic values.
 - **Two doors**: agents connect to `/mcp` and get ranked summaries, and they cannot send, archive, delete, or see auth-related mail. Your own clients connect to `/client` with a bearer token and get search, threads, sender rules, the sitrep lifecycle, and gated actions (archive, label, send) backed by a separate write-scoped credential that only the action handlers can load.
@@ -105,7 +105,7 @@ trades for one, and `squelchd token list` / `squelchd token revoke <id>` manage
 them one device at a time. Keep a master token if you want a way in that survives
 revoking every device.
 
-Optional: `SQUELCH_DB_PATH` (default `~/.local/share/squelch/squelch.db`), `SQUELCH_BIND` (default `127.0.0.1:8848`), `SQUELCH_POLL_SECS` (default 45), `SQUELCH_MCP_ALLOWED_HOSTS` if you front the server with a proxy like `tailscale serve`, `SQUELCH_CRED_BACKEND` (`keyring` on macOS, `file` on Linux) and `SQUELCH_CREDENTIALS_PATH` (default `~/.config/squelch/credentials.json`) for the file backend.
+Optional: `SQUELCH_DB_PATH` (default `~/.local/share/squelch/squelch.db`), `SQUELCH_BIND` (default `127.0.0.1:8848`), `SQUELCH_POLL_SECS` (default 45), `SQUELCH_MCP_ALLOWED_HOSTS` if you front the server with a proxy like `tailscale serve`, `SQUELCH_CRED_BACKEND` (`keyring`, the macOS keychain, on macOS only, and the default there; `file` anywhere, and the default elsewhere) and `SQUELCH_CREDENTIALS_PATH` (default `~/.config/squelch/credentials.json`) for the file backend.
 
 `SQUELCH_METRICS_BIND` (unset by default, e.g. `127.0.0.1:9464`) opens a second listener serving Prometheus text metrics at `/metrics`: sync timestamps, Gmail error counts, LLM spend, store sizes. **That listener is plaintext and unauthenticated**, by design, because a scrape credential in a Prometheus config is its own problem. Bind it to loopback or to a private interface and let your collector reach it there; never bind it to a public one. Leave it unset and the daemon opens no such port at all.
 
@@ -225,11 +225,12 @@ cargo run --bin squelch-tui    # ranked digest, squelch line, sender rule tuning
 
 ## The agent door
 
-Seven tools plus drafts, nothing sent unless you turn that on, sealed mail structurally absent:
+Eight tools plus drafts, nothing sent unless you turn that on, sealed mail structurally absent:
 
 | Tool | What it returns |
 |---|---|
 | `get_inbox_updates` | ranked updates since a timestamp, with importance, a one-line "why", and the sender's standing instruction |
+| `get_reading` | the Reading band (newsletters and longer reads) since a timestamp, newest first: one-line summaries and thread ids |
 | `get_thread` | a full thread by id, with the standing instructions covering the people in it |
 | `search_mail` | full-text search over synced mail |
 | `get_deadlines` | upcoming deadlines extracted during triage |

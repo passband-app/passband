@@ -294,7 +294,7 @@ final class EventStream {
             // somebody is reading is the one event with somewhere to go besides
             // a banner — and the banner is suppressed in exactly that case, so
             // without this the reply lands silently and stays invisible until
-            // the 10s poll finds it. The account is HANDED OVER rather than
+            // the poll finds it. The account is HANDED OVER rather than
             // read: the store takes it as an argument and refuses anything that
             // is not the mailbox on screen (see AppStore.noteLiveEvent), which
             // is what keeps this stream from having an opinion about which

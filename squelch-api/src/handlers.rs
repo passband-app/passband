@@ -99,16 +99,47 @@ struct Page<T> {
     next_cursor: Option<String>,
 }
 
-/// Run a synchronous store closure off the async runtime. A panic inside it
-/// surfaces as an opaque 500.
-pub(crate) async fn blocking<T, F>(f: F) -> Result<T, ApiError>
+/// Why [`blocking_on`] could not run its closure: the permit never came (a
+/// closed semaphore, which nothing here closes) or the closure panicked.
+/// Opaque to every caller, which answers its own uniform failure.
+pub(crate) struct Blocked;
+
+/// Run `f` on a blocking thread holding one permit of `slots` for as long
+/// as the thread runs. The permit is taken HERE, on the async side, where a
+/// caller cut at its ceiling (`limits`), or whose client hung up, gives up
+/// its place without a thread having been taken; and it is MOVED INTO the
+/// closure, so a call already on a thread keeps its permit until the store
+/// answers, whatever became of the caller. Every semaphore in `ApiState`
+/// that bounds store work is taken this way, through here: the store-call
+/// slots, the device-token lookups' permits, the pairing claims'.
+pub(crate) async fn blocking_on<T, F>(
+    slots: &std::sync::Arc<tokio::sync::Semaphore>,
+    f: F,
+) -> Result<T, Blocked>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = slots.clone().acquire_owned().await.map_err(|_| Blocked)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
+    .map_err(|_| Blocked)
+}
+
+/// Run a synchronous store closure off the async runtime, on one of the
+/// door's [`crate::limits::STORE_CALL_SLOTS`] ([`blocking_on`] for how the
+/// slot rides the thread). A panic inside it surfaces as an opaque 500.
+pub(crate) async fn blocking<T, F>(state: &ApiState, f: F) -> Result<T, ApiError>
 where
     F: FnOnce() -> Result<T, squelch_core::CoreError> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
+    blocking_on(&state.store_call_slots, f)
         .await
-        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?
+        .map_err(|Blocked| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?
         .map_err(ApiError::from)
 }
 
@@ -123,7 +154,7 @@ where
 {
     let store = state.store.clone();
     let account_id = state.account_id;
-    blocking(move || f(&store, account_id)).await
+    blocking(state, move || f(&store, account_id)).await
 }
 
 /// [`store_call`] for the common read shape: whatever the store returns IS the
@@ -1750,7 +1781,7 @@ pub async fn search(
             account_id,
             &term,
             partial,
-            filter.include_sent,
+            filter.searches_sent(),
             counted_strict,
         )?;
         if queued_at.elapsed().as_millis() >= 250 {
@@ -4168,9 +4199,7 @@ pub async fn get_usage(
     // is neither, and folding it into the arm below would bill a Haiku call at
     // Opus rates and overstate the cheapest pass in the pipeline by ~25x.
     // EVERYTHING ELSE — Stage-1 and every extractor — runs the stage-1 small
-    // model and shares its config, so it costs at stage-1 rates. See
-    // `extract_pass`: "Extractors run on the STAGE-1 (small) model and share its
-    // config + cap."
+    // model and shares its config, so it costs at stage-1 rates.
     //
     // The two STAGES are always present, empty or not: they are permanent parts
     // of the pipeline, and a reader who spent nothing on escalations today is
@@ -4373,7 +4402,9 @@ async fn triage_config_body(state: &ApiState) -> Result<serde_json::Value, ApiEr
             "effective_daily_run_cap": state.triage_config.agent.daily_run_cap,
             "background_daily_run_cap": state.triage_config.agent.background_daily_run_cap,
             "effective_background_daily_run_cap": state.triage_config.agent.effective_background_daily_run_cap(),
-            "reserved_arrival_runs": state.triage_config.agent.daily_run_cap - state.triage_config.agent.effective_background_daily_run_cap(),
+            "access_daily_run_cap": state.triage_config.agent.access_daily_run_cap,
+            "effective_access_daily_run_cap": state.triage_config.agent.effective_access_daily_run_cap(),
+            "reserved_arrival_runs": state.triage_config.agent.reserved_arrival_runs(),
             "max_model_turns": state.triage_config.agent.max_model_turns,
             "legacy_stage_caps_are_active_ceilings": false,
         },

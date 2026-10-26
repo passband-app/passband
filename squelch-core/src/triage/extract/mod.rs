@@ -258,10 +258,8 @@ mod tests {
     }
 
     #[test]
-    fn extractor_for_category_maps_every_stage1_category() {
-        use crate::triage::stage1_llm::{CATEGORIES as STAGE1, RECORD_CATEGORIES};
-
-        for cat in RECORD_CATEGORIES {
+    fn extractor_for_category_maps_every_category() {
+        for cat in banking::CATEGORIES {
             assert_eq!(
                 extractor_for_category(cat),
                 Some(CategoryExtractor::Banking),
@@ -275,18 +273,6 @@ mod tests {
         assert_eq!(extractor_for_category("general"), None);
         assert_eq!(extractor_for_category("invoice"), None);
         assert_eq!(extractor_for_category("not_a_category"), None);
-
-        // Every stage-1 category is accounted for, so adding one to the enum
-        // without deciding its owner fails here.
-        assert_eq!(STAGE1.len(), 6, "six stage-1 categories");
-        assert_eq!(
-            STAGE1
-                .iter()
-                .filter(|c| extractor_for_category(c).is_some())
-                .count(),
-            4,
-            "four of the six have a specialist"
-        );
     }
 
     #[test]

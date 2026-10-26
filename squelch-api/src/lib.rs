@@ -22,9 +22,11 @@ pub mod guard;
 mod handlers;
 mod http_metrics;
 mod invite_mail;
+pub mod limits;
 mod markdown;
 mod pair;
 mod scheduled_send;
+mod serve;
 mod sharing;
 mod state;
 pub mod tracking;
@@ -37,15 +39,25 @@ mod unsub_job;
 pub mod unsubscribe;
 
 pub use assistant::AssistantRelay;
-pub use auth::require_bearer;
+pub use auth::{DEVICE_AUTH_CONCURRENCY, require_bearer};
 pub use error::ApiError;
 /// The auth-mail retention pass. Exported for the daemon's timer: it uses the
 /// WRITE credential, which the readonly-bound sync loop must never touch.
 pub use handlers::run_shred_pass;
 pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
-/// The scheduled-send worker's pass. Exported for the daemon's timer for the
+/// The ceilings a `/client/*` request runs under and the store-call cap.
+pub use limits::{
+    LONG_REQUEST_TIMEOUT, REQUEST_TIMEOUT, ROUTE_CEILINGS, RequestCeiling, RequestTimeouts,
+    STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
+};
+/// The scheduled-send worker and its pass. Exported for the daemon for the
 /// same reason as the shredder: it sends on the WRITE credential.
-pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
+pub use scheduled_send::{
+    ScheduledPassReport, ScheduledWorkerTiming, run_scheduled_send_pass, scheduled_send_worker,
+};
+/// The accept loop every daemon door runs on: `axum::serve` with a live
+/// hyper timer.
+pub use serve::{HEADER_READ_TIMEOUT, serve, serve_with_header_timeout};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
 pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
@@ -224,7 +236,7 @@ fn client_router(state: ApiState) -> Router {
         // learns the table exists. POST schedules (running every check a send
         // runs, guard included, while the user is there to answer), GET lists
         // what is still owed an outcome, DELETE pulls one back into the
-        // composer, and /now sends one on the next tick. Its own router so
+        // composer, and /now wakes the worker to send one. Its own router so
         // one `no-store` layer covers every response on it, an extractor's
         // rejection included.
         .merge(scheduled_send::routes())
@@ -360,7 +372,16 @@ fn client_router(state: ApiState) -> Router {
             state.clone(),
             auth::require_bearer,
         ))
-        // CORS wraps auth (outermost) so credential-less OPTIONS preflights are
+        // The per-route ceiling, over auth: a request that has not produced
+        // its response head by its ceiling is answered 504, the bearer check
+        // and any wait for a store-call slot included. Inside CORS, so the
+        // 504 carries the headers a browser caller needs to read it. See
+        // `limits` for why it never touches a streaming body.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            limits::request_timeout,
+        ))
+        // CORS wraps both (outermost) so credential-less OPTIONS preflights are
         // answered instead of 401ing. Permissive by design: bearer auth is the
         // security boundary and no cookies are involved.
         .layer(

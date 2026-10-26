@@ -29,6 +29,11 @@ struct ClientIdentityTests {
         var request = URLRequest(url: URL(string: "https://daemon.example/client/stats")!)
         request.identifyClient()
         precondition(request.value(forHTTPHeaderField: "X-Passband-Client") == "macos/0.0.12")
+        // The device zone rides along, as the IANA name the daemon validates.
+        precondition(
+            request.value(forHTTPHeaderField: "X-Passband-Timezone") == TimeZone.current.identifier,
+            "The device zone is sent with the client tag")
+        precondition(TimeZone(identifier: ClientIdentity.zone) != nil, "The zone is an IANA identifier")
 
         print("client-identity: ok")
     }

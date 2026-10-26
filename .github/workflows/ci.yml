@@ -7,10 +7,15 @@
 # The filter is the workspace's real input set: every member crate (all named
 # squelch-* or squelchd; the glob also catches a crate added later without
 # anyone editing this list, and would catch any squelch-* directory, crate or
-# not), the two Cargo manifests, and the toolchain pin.
-# Nothing under deploy/, docs/, scripts/ or passband/ reaches a Rust build —
-# every include_str! points inside its own crate and there is no build.rs —
-# so a change there is correctly not a reason to run this.
+# not), the two Cargo manifests, the toolchain pin, and the hosted deploy
+# directory (squelch-warden's quota test reads six of its manifests with
+# include_str!, and is the one gate on a quota line that would refuse a
+# signup, so a PR that edits only one of those files has to run it; the glob
+# is the whole directory, its docs included, so the list here cannot fall
+# behind the test's, at the price of one Rust job for a hosted-docs PR).
+# Nothing else under deploy/, docs/, scripts/ or passband/ reaches a Rust
+# build — every other include_str! points inside its own crate and there is
+# no build.rs — so a change there is correctly not a reason to run this.
 #
 # Consequence, same as ci-passband: do NOT mark this check required in branch
 # protection. A path-skipped workflow reports no status at all, and a
@@ -35,6 +40,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - ".github/workflows/ci.yml"
+      - "deploy/hosted/**"
   push:
     branches: [main]
     paths:
@@ -44,6 +50,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - ".github/workflows/ci.yml"
+      - "deploy/hosted/**"
 
 # A force-push or rapid follow-up commit obsoletes the previous run; cancel it
 # rather than queue behind it. On main, never cancel — every merge gets a run.

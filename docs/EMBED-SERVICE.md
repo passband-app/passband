@@ -34,8 +34,9 @@ from:
 
 **Two gates decide the tenant count, and conflating them is how the box got
 OOM-killed.** The ResourceQuota in `deploy/hosted/70-tenant-limits.yaml` is
-admission control at the API server: `requests.memory`, and separately `pods:
-"25"` and `persistentvolumeclaims: "25"` (lines 79 and 82). The **node** is the
+admission control at the API server: `requests.memory`, and separately `pods`
+and `persistentvolumeclaims` (10 each in the file's 4 GB-floor example, 40 on
+`carrier`). The **node** is the
 scheduler, admitting a pod only if its request fits allocatable, which today is
 the whole 3.72 GiB because k3s reserves nothing and which PR #151 takes to **~2.4
 GiB** (`PRODUCTION.md:22` on that branch). `requests.memory: 5Gi` on a box with
@@ -53,8 +54,9 @@ the count: **down**.
   active case cheaper.
 - **With one shared session**, a tenant pod is 40-50 MB including the HTTP
   client, against one 300-400 MB service on the node: `(2400 - 400) / 50` is
-  about forty. Memory stops being the gate and `pods: "25"` and
-  `persistentvolumeclaims: "25"` become it, which is a one-line edit §9 carries.
+  about forty. Memory stops being the gate and `pods` and
+  `persistentvolumeclaims` (10 each in the floor example) become it, which is
+  a one-line edit §9 carries.
 
 The win survives every one of those numbers moving: today the ONNX cost is `N x
 300-500 MB`, after this it is one service plus a few MB per tenant, so **the ONNX
@@ -78,7 +80,7 @@ loses:
    should have a one-sentence description. `squelch-embed` opens no store,
    mounts no credential, and has no Gmail or LLM client on any route. It
    therefore does **not** link `squelch-core`, which pulls `rusqlite`,
-   `sqlite-vec`, `keyring`, `age`, `oauth2`, `mail-parser`, `ammonia` and
+   `sqlite-vec`, `keyring-core`, `age`, `oauth2`, `mail-parser`, `ammonia` and
    `reqwest` (`squelch-core/Cargo.toml:13-49`) and makes that sentence
    unprovable to whoever audits it. Depend on `fastembed` directly, or put the
    `Embedder` trait in a leaf crate both sides use. Linking is not reachability,
@@ -386,9 +388,9 @@ typed `k8s-openapi` struct.
   ServiceAccount in `warden`. A service in an `embed` namespace of its own needs
   a **second Role and RoleBinding there**, widening the warden's token, which
   includes `pods/exec`, to a second namespace. All that buys is tidier
-  bookkeeping for `pods: "25"`, whose comment calls itself the tenant count.
+  bookkeeping for `pods`, whose comment calls itself the tenant count.
   Trade a comment for a wider token and the comment wins: the service lives in
-  `tenants`, that comment says one of the 25 pods and 320Mi of `requests.memory`
+  `tenants`, that comment says one of the pods and 320Mi of `requests.memory`
   are the embedder, and the RBAC file is untouched. If anyone later moves it to
   its own namespace, the same PR adds the Role and RoleBinding.
 - **NetworkPolicy delta on every tenant**: one more egress rule, to the embed
@@ -545,8 +547,9 @@ behaviour until the last:
    which belongs here because it is only reachable once an embedder can fail
    transiently.
 4. **Quota and monitoring.** In `70-tenant-limits.yaml`, raise `pods` and
-   `persistentvolumeclaims` past 25, which become the binding gate once memory
-   stops being it (§1), and account for the embed pod in the comments. In
+   `persistentvolumeclaims` (40 today), which become the binding gate once
+   memory stops being it (§1), and account for the embed pod in the comments
+   and in the warden's quota test. In
    `80-monitoring.yaml`, a scrape job for the service: the `squelchd` job cannot
    find it, being scoped to `namespaces: names: [tenants]` (lines 273-274) and
    then keeping only pods labelled `app.kubernetes.io/name: squelchd`. Applying

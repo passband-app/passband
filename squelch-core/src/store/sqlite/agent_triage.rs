@@ -15,9 +15,10 @@ use sha2::{Digest, Sha256};
 // is waiting on the answer, so it must not queue behind a cutover. ONLY WHILE
 // IT HAS NEVER BEEN PUSHED BACK: `last_error` is written by every deferral and
 // retry and cleared by neither a claim nor the passing of time, so a check
-// parked on a spent budget comes back at midnight as ordinary background work
-// instead of at the head of the queue, ahead of the owner's own sent mail.
-const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arrival_eligible,j.kind,COALESCE(lane.foreground,0)
+// parked on a spent budget comes back at midnight (or on a grant within its
+// sub-cap's room) as ordinary work on the access lane instead of at the head
+// of the queue, ahead of the owner's own sent mail.
+const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arrival_eligible,j.kind,COALESCE(lane.foreground,0),j.last_error
              FROM agent_triage_jobs j INDEXED BY idx_agent_jobs_pending_claim JOIN messages candidate ON candidate.account_id=j.account_id AND candidate.id=j.message_id
              LEFT JOIN agent_job_lanes lane ON lane.job_id=j.id
              WHERE j.account_id=?1 AND j.state IN ('queued','leased') AND (j.kind=?2 OR (?2 IN ('investigation','initial_investigation') AND j.kind IN ('triage','access')))
@@ -55,6 +56,7 @@ const MESSAGE_COLUMNS: &str = concat!(
              revision FROM agent_thread_attention a WHERE a.account_id=m.account_id AND
              a.thread_id=m.thread_id),0),COALESCE((SELECT group_concat(field || value_json || revision)
              FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),''),
+    m.is_sent,
     (SELECT tr.subject FROM message_translations tr WHERE tr.message_id=m.id
              AND tr.status IN ('done','incomplete')),
     (SELECT tr.body FROM message_translations tr WHERE tr.message_id=m.id
@@ -76,6 +78,7 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
         received_at: row.get(5)?,
         is_sent: row.get(6)?,
         is_spam: row.get(7)?,
+        labelled_sent: row.get(14)?,
         status: row.get(8)?,
         opened_at: row.get(9)?,
         remind_at: row.get(10)?,
@@ -84,8 +87,8 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
         // IS in `content_snapshot` below (docs/TRANSLATION.md, Pipeline): the
         // access assessment must cover what the agent door will serve, so a
         // translation landing after triage re-triages the message once.
-        translated_subject: row.get(14)?,
-        translated_body: row.get(15)?,
+        translated_subject: row.get(15)?,
+        translated_body: row.get(16)?,
     };
     // Only serde primitives are hashed, so serialization cannot fail here.
     message.source.content = content_snapshot(&message).expect("serializable message");
@@ -707,6 +710,50 @@ fn queue_investigation(
     Ok(())
 }
 
+/// The `last_error` a job may carry: a bounded machine code, never provider
+/// errors or body text.
+fn job_error_code(error_code: &str) -> String {
+    error_code
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect()
+}
+
+/// The one way a leased job goes back to the queue (a retry, a deferral, a
+/// hand-back): the lease cleared, `last_error` written when the caller has
+/// a code and kept when it has none, this lease's attempt refunded when the
+/// job never ran (a deferral) and kept when it did. Once, by the lease's
+/// owner: a stale worker cannot change the attempt count or the schedule
+/// after another worker has claimed the job.
+fn requeue(
+    conn: &Connection,
+    job: &AgentJob,
+    available_at: DateTime<Utc>,
+    last_error: Option<&str>,
+    refund_attempt: bool,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE agent_triage_jobs SET state='queued',available_at=?1,
+             last_error=COALESCE(?2,last_error),
+             attempts=CASE WHEN ?6 THEN MAX(attempts-1,0) ELSE attempts END,
+             lease_token=NULL,lease_until=NULL
+         WHERE id=?3 AND account_id=?4 AND state='leased' AND lease_token=?5",
+        params![
+            available_at.to_rfc3339(),
+            last_error,
+            job.id,
+            job.account_id,
+            job.lease_token,
+            refund_attempt
+        ],
+    )? == 1;
+    if changed {
+        absorb_followup(conn, job)?;
+    }
+    Ok(changed)
+}
+
 fn absorb_followup(conn: &Connection, job: &AgentJob) -> Result<()> {
     // The job goes back to the queue carrying the follow-up. A human's
     // one-message request makes it foreground, and, exactly as a re-ask on a
@@ -1187,8 +1234,8 @@ fn schedule_revisit(
     let Some(revisit) = decision.revisit.as_ref().filter(|_| policy.enabled) else {
         return Ok(());
     };
-    let earliest = now + Duration::hours(policy.min_lead_hours.max(0));
-    let latest = now + Duration::days(policy.max_horizon_days.max(0));
+    let earliest = now + policy.min_lead();
+    let latest = now + policy.max_horizon();
     let at = revisit.at.max(earliest);
     if at > latest || policy.max_per_message == 0 || policy.max_per_message_lifetime == 0 {
         return Ok(());
@@ -1203,7 +1250,7 @@ fn schedule_revisit(
     {
         return Ok(());
     }
-    let radius = Duration::hours(policy.dedupe_window_hours.max(0));
+    let radius = policy.dedupe_window();
     let duplicate: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
          AND trigger LIKE 'revisit:%' AND available_at>=?3 AND available_at<=?4)",
@@ -1732,20 +1779,20 @@ impl AgentTriageStore for SqliteStore {
         tx.commit()?;
         Ok(())
     }
-    fn claim_agent_job(
+    fn claim_agent_job_sized(
         &self,
         account: AccountId,
         kind: &str,
         now: DateTime<Utc>,
         lease_seconds: i64,
+        access_lease_seconds: i64,
     ) -> Result<Option<AgentJob>> {
-        if lease_seconds <= 0 {
+        if lease_seconds <= 0 || access_lease_seconds <= 0 {
             return Err(CoreError::InvalidInput("lease must be positive".into()));
         }
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let token: String = tx.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
-        let until = (now + Duration::seconds(lease_seconds)).to_rfc3339();
         let row = tx
             .query_row(
                 CLAIM_JOB_SQL,
@@ -1759,15 +1806,30 @@ impl AgentTriageStore for SqliteStore {
                         r.get::<_, bool>(4)?,
                         r.get::<_, String>(5)?,
                         r.get::<_, bool>(6)?,
+                        r.get::<_, Option<String>>(7)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((id, message_id, trigger, attempts, arrival_eligible, claimed_kind, foreground)) =
-            row
+        let Some((
+            id,
+            message_id,
+            trigger,
+            attempts,
+            arrival_eligible,
+            claimed_kind,
+            foreground,
+            last_error,
+        )) = row
         else {
             return Ok(None);
         };
+        let lease = if claimed_kind == "access" {
+            access_lease_seconds
+        } else {
+            lease_seconds
+        };
+        let until = (now + Duration::seconds(lease)).to_rfc3339();
         tx.execute(
             "UPDATE agent_triage_jobs SET
              state='leased',lease_token=?1,lease_until=?2,attempts=attempts+1 WHERE id=?3",
@@ -1782,6 +1844,7 @@ impl AgentTriageStore for SqliteStore {
             trigger,
             lease_token: token,
             attempts: attempts + 1,
+            last_error,
             arrival_eligible,
             foreground,
         }))
@@ -1867,11 +1930,7 @@ impl AgentTriageStore for SqliteStore {
         Ok(true)
     }
     fn fail_agent_job(&self, job: &AgentJob, error_code: &str) -> Result<bool> {
-        let code: String = error_code
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(64)
-            .collect();
+        let code = job_error_code(error_code);
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let changed = tx.execute("UPDATE agent_triage_jobs SET state='failed',last_error=?1,lease_token=NULL,lease_until=NULL
@@ -1892,21 +1951,10 @@ impl AgentTriageStore for SqliteStore {
         retry_at: DateTime<Utc>,
         error_code: &str,
     ) -> Result<bool> {
-        // Persist only a bounded machine code, never provider errors/body text.
-        let code: String = error_code
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(64)
-            .collect();
+        let code = job_error_code(error_code);
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let changed = tx.execute("UPDATE agent_triage_jobs SET
-             state='queued',available_at=?1,last_error=?2,lease_token=NULL,lease_until=NULL WHERE id=?3
-             AND account_id=?4 AND state='leased' AND lease_token=?5",
-        params![retry_at.to_rfc3339(),code,job.id,job.account_id,job.lease_token])? == 1;
-        if changed {
-            absorb_followup(&tx, job)?;
-        }
+        let changed = requeue(&tx, job, retry_at, Some(&code), false)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -1916,30 +1964,17 @@ impl AgentTriageStore for SqliteStore {
         available_at: DateTime<Utc>,
         error_code: &str,
     ) -> Result<bool> {
-        let code: String = error_code
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(64)
-            .collect();
+        let code = job_error_code(error_code);
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        // A lease may be refunded only once. A stale worker cannot change the
-        // attempt count or schedule after another worker has claimed the job.
-        let changed = tx.execute(
-            "UPDATE agent_triage_jobs SET state='queued',available_at=?1,last_error=?2,
-                 attempts=MAX(attempts-1,0),lease_token=NULL,lease_until=NULL
-             WHERE id=?3 AND account_id=?4 AND state='leased' AND lease_token=?5",
-            params![
-                available_at.to_rfc3339(),
-                code,
-                job.id,
-                job.account_id,
-                job.lease_token
-            ],
-        )? == 1;
-        if changed {
-            absorb_followup(&tx, job)?;
-        }
+        let changed = requeue(&tx, job, available_at, Some(&code), true)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+    fn release_agent_job(&self, job: &AgentJob, available_at: DateTime<Utc>) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let changed = requeue(&tx, job, available_at, None, false)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -2387,9 +2422,9 @@ pub const ARCHIVE_SURFACE_CAP: usize = 10;
 /// that outlives the day it was made in.
 pub const ARCHIVE_ACCESS_OUTSTANDING_MAX: u32 = 20;
 /// The daily sub-cap's key in `wake_budget`, charged by the worker for every
-/// `archive_access` job on top of the global and background budgets.
+/// `archive_access` job on top of the global and access-lane budgets.
 pub const ARCHIVE_ACCESS_BUDGET_KEY: &str = "__agent_archive_access__";
-pub use crate::triage::agent_config::BACKGROUND_BUDGET_KEY;
+pub use crate::triage::agent_config::{ACCESS_BUDGET_KEY, BACKGROUND_BUDGET_KEY};
 /// A failed access check on an archive row may be asked for again this long
 /// after it was last scheduled, so a row is not pending for good.
 const ARCHIVE_ACCESS_RETRY_HOURS: i64 = 24;
@@ -2399,15 +2434,19 @@ const ARCHIVE_ACCESS_RETRY_HOURS: i64 = 24;
 pub struct ArchiveAccessCaps {
     /// `triage.agent.archive_access_daily_cap`.
     pub daily: u32,
-    /// The effective background cap; once today's is spent nothing is queued.
-    pub background_daily: u32,
+    /// The effective access-lane cap; once today's is spent nothing is
+    /// queued, since every check would park.
+    pub access_daily: u32,
+    /// `triage.agent.daily_run_cap`, the same way.
+    pub total_daily: u32,
 }
 
 impl From<&crate::triage::agent_config::AgentConfig> for ArchiveAccessCaps {
     fn from(config: &crate::triage::agent_config::AgentConfig) -> Self {
         Self {
             daily: config.archive_access_daily_cap,
-            background_daily: config.effective_background_daily_run_cap(),
+            access_daily: config.effective_access_daily_run_cap(),
+            total_daily: config.daily_run_cap,
         }
     }
 }
@@ -2513,7 +2552,7 @@ fn revive_failed_archive_access(
 /// at most `limit` (never over [`ARCHIVE_SURFACE_CAP`]) per call; never more
 /// than [`ARCHIVE_ACCESS_OUTSTANDING_MAX`] outstanding for the account; never
 /// more than today's `caps.daily` can still pay for, counting what is already
-/// outstanding. And nothing at all once today's background budget is spent,
+/// outstanding. And nothing at all once today's access budget, or the total, is spent,
 /// because every one of these would park.
 pub(super) fn request_archive_access_conn(
     conn: &Connection,
@@ -2524,15 +2563,20 @@ pub(super) fn request_archive_access_conn(
     now: DateTime<Utc>,
 ) -> Result<Vec<i64>> {
     let day = now.format("%Y-%m-%d").to_string();
-    let used = |key: &str| -> Result<u32> {
-        Ok(conn.query_row(
-            "SELECT COALESCE((SELECT model_calls FROM wake_budget
-                 WHERE account_id=?1 AND thread_id=?2 AND day=?3),0)",
-            params![account, key, day],
-            |row| row.get(0),
-        )?)
+    // Nothing is queued once a cap every one of these checks would park on
+    // is spent, the lane's or the total's, as the worker will reserve
+    // against (the budget module's own rule, today's grant included): a
+    // `squelchd triage grant` on either reopens surfacing too.
+    let spent = |key: &str, configured: u32| -> Result<bool> {
+        Ok(super::agent_budget::runs(conn, account, key, &day)?
+            >= super::agent_budget::cap(conn, account, key, configured, &day)?)
     };
-    if used(BACKGROUND_BUDGET_KEY)? >= caps.background_daily {
+    if spent(ACCESS_BUDGET_KEY, caps.access_daily)?
+        || spent(
+            crate::triage::agent_config::TOTAL_BUDGET_KEY,
+            caps.total_daily,
+        )?
+    {
         return Ok(Vec::new());
     }
     let outstanding: u32 = conn.query_row(
@@ -2546,7 +2590,12 @@ pub(super) fn request_archive_access_conn(
         .min(ARCHIVE_ACCESS_OUTSTANDING_MAX.saturating_sub(outstanding) as usize)
         .min(
             caps.daily
-                .saturating_sub(used(ARCHIVE_ACCESS_BUDGET_KEY)?)
+                .saturating_sub(super::agent_budget::runs(
+                    conn,
+                    account,
+                    ARCHIVE_ACCESS_BUDGET_KEY,
+                    &day,
+                )?)
                 .saturating_sub(outstanding) as usize,
         );
     let mut queued = Vec::new();
@@ -5346,6 +5395,90 @@ mod tests {
         );
         assert!(!store.complete_agent_job(&job).unwrap());
         assert!(!store.retry_agent_job(&job, Utc::now(), "timeout").unwrap());
+    }
+    /// A release puts the job back queued with `last_error` untouched (NULL
+    /// here, so the row still reads as never pushed back) and the attempt
+    /// it took kept; a second claim gets the same job, and the old lease
+    /// can no longer release it.
+    #[test]
+    fn a_release_hands_the_lease_back_untouched() {
+        let store = fixture();
+        let (job, _context) = claim(&store, 1);
+        assert_eq!(job.attempts, 1);
+        assert!(store.release_agent_job(&job, Utc::now()).unwrap());
+        let (state, attempts, last_error): (String, i64, Option<String>) = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT state,attempts,last_error FROM agent_triage_jobs WHERE id=?1",
+                [job.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((state.as_str(), attempts, last_error), ("queued", 1, None));
+        let again = store
+            .claim_agent_job(1, "triage", Utc::now(), 60)
+            .unwrap()
+            .expect("claimable again at once");
+        assert_eq!(again.id, job.id);
+        assert_eq!(again.attempts, 2, "the interrupted attempt counted");
+        assert_ne!(again.lease_token, job.lease_token);
+        assert!(
+            !store.release_agent_job(&job, Utc::now()).unwrap(),
+            "a stale lease"
+        );
+        assert!(store.release_agent_job(&again, Utc::now()).unwrap());
+    }
+    /// An `access` job is one call under the short access deadline, so it
+    /// gets the lease the claim was given for it, where an investigation's
+    /// covers a whole run; the plain claim leases every kind alike.
+    #[test]
+    fn an_access_job_is_leased_for_its_own_deadline() {
+        let store = fixture();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_triage_jobs
+                (account_id,message_id,kind,trigger,input_revision,state,available_at)
+                VALUES(1,1,'access','source_access',1,'queued','2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        store.enqueue_agent_triage(1, 2, "ingest", true).unwrap();
+        let lease_of = |id: i64| -> i64 {
+            let until: String = store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT lease_until FROM agent_triage_jobs WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let until: DateTime<Utc> = until.parse().unwrap();
+            (until - Utc::now()).num_seconds()
+        };
+        let now = Utc::now();
+        let mut leases = std::collections::BTreeMap::new();
+        for _ in 0..2 {
+            let job = store
+                .claim_agent_job_sized(1, "investigation", now, 480, 60)
+                .unwrap()
+                .expect("two due jobs on two threads");
+            leases.insert(job.kind.clone(), lease_of(job.id));
+        }
+        assert!((58..=60).contains(&leases["access"]), "{leases:?}");
+        assert!((478..=480).contains(&leases["triage"]), "{leases:?}");
+        for job in leases.keys() {
+            assert!(job == "access" || job == "triage", "{job}");
+        }
+        assert!(
+            store
+                .claim_agent_job_sized(1, "investigation", now, 480, 0)
+                .is_err(),
+            "both leases are validated"
+        );
     }
     #[test]
     fn explicit_delivery_proposals_enter_carrier_polling_and_retract_atomically() {

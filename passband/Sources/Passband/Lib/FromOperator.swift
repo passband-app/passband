@@ -64,8 +64,13 @@ enum FromOperator {
 
     // MARK: - a sender typed as plain words
 
-    /// The three operators the daemon parses, lowercased.
-    private static let operators = ["from:", "after:", "before:"]
+    /// The operators the daemon parses that take a value, lowercased.
+    private static let operators = ["from:", "to:", "after:", "before:"]
+
+    /// The daemon's one operator that carries its own value: complete as
+    /// typed, so never "awaiting" one. `from:me` means the same.
+    private static let scopeOperator = "in:sent"
+
 
     /// Past this many words the reader is describing mail, not naming a person.
     private static let senderWords = 3
@@ -110,13 +115,14 @@ enum FromOperator {
         guard !tokens.isEmpty else { return false }
         return tokens.allSatisfy { token in
             let lower = token.lowercased()
-            return operators.contains { lower.hasPrefix($0) && lower.count > $0.count }
+            return lower == scopeOperator
+                || operators.contains { lower.hasPrefix($0) && lower.count > $0.count }
         }
     }
 
     private static func isOperator(_ token: Substring) -> Bool {
         let lower = token.lowercased()
-        return operators.contains { lower.hasPrefix($0) }
+        return lower == scopeOperator || operators.contains { lower.hasPrefix($0) }
     }
 
     /// The last whitespace-separated token, or nil when the text is empty or

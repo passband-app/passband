@@ -1368,7 +1368,11 @@ final class AssistantSession {
     /// part of it too, but it arrives as the RUN's copy rather than off the
     /// live property — the pin may move between requests, the question may not.
     private func system(_ pin: PinnedContext) -> String {
-        let today = Date().formatted(.dateTime.month(.wide).day().year())
+        // The weekday, the time and the zone too, not just the date: "tonight",
+        // "this Friday" and "in 3 hours" need all three, and they match what
+        // the daemon's agents are told (#526).
+        let today = Date().formatted(.dateTime.weekday(.wide).month(.wide).day().year().hour().minute())
+            + " (\(TimeZone.current.identifier))"
         let year = Calendar.current.component(.year, from: Date())
         // The search lane's prompt lives in a pure file so its two properties
         // that cannot be seen on screen — no dash the house style forbids, and
@@ -1424,9 +1428,12 @@ final class AssistantSession {
               drop a word, search only the rarest word, try the sender's name or company,
               and raise the limit to 20.
             - search_mail takes operators alongside the words: from:<name or address
-              fragment>, after:YYYY-MM-DD, before:YYYY-MM-DD. "The invoice Dan sent in
-              March" is "invoice from:dan after:\(year)-03-01 before:\(year)-04-01", and
-              "from:dan" alone lists everything Dan sent, newest first.
+              fragment>, in:sent, after:YYYY-MM-DD, before:YYYY-MM-DD. "The invoice Dan
+              sent in March" is "invoice from:dan after:\(year)-03-01
+              before:\(year)-04-01", and "from:dan" alone lists everything Dan sent,
+              newest first. in:sent (or from:me) is mail the user wrote: "what did I tell
+              Dan about the lease" is "dan lease in:sent". There is no to: operator.
+              A result with from_me true is the user's own message.
             - get_records is a shortcut, never the whole story. It holds only what Passband
               extracted from mail RECEIVED in its window, 30 days unless you widen it, 90
               at most. Empty means "nothing extracted lately", not "not in the mailbox":

@@ -9,8 +9,7 @@
 //! that installs the warden itself is YAML, and it lives in `deploy/hosted/`
 //! where no tenant value ever appears.
 //!
-//! A tenant is seven objects in the `tenants` namespace, plus one optional
-//! eighth:
+//! A tenant is up to nine objects in the `tenants` namespace:
 //!
 //! | Object | Name | Lifetime |
 //! |---|---|---|
@@ -18,14 +17,21 @@
 //! | Secret (credential) | `<label>-credential` | forever; the sealed blob |
 //! | PersistentVolumeClaim | `<label>-data` | forever; the mailbox index |
 //! | Secret (LLM key) | `<label>-llm` | while the control plane keeps one minted |
+//! | Secret (share token) | `<label>-control` | while the control plane keeps one minted |
 //! | NetworkPolicy | `<label>` | while provisioned |
 //! | Service | `<label>` | while provisioned |
 //! | Deployment | `<label>` | while provisioned |
 //! | Ingress | `<label>` | while provisioned |
 //!
-//! DELETE removes the bottom five and keeps the top three, which is what
-//! "cancel my account, do not destroy my mail" means: the LLM Secret goes with
-//! the workload because it is a gateway credential, not tenant data.
+//! DELETE removes the bottom six and keeps the top three, which is what
+//! "cancel my account, do not destroy my mail" means: the LLM Secret and the
+//! share token go with the workload because they are live credentials against
+//! shared services, not tenant data.
+//!
+//! The namespace's ResourceQuota (`deploy/hosted/70-tenant-limits.yaml`)
+//! counts Secrets, pods and claims, so the number of each a tenant holds is
+//! what sizes its `count/*` lines: the Secrets are the one that is not one,
+//! and the tests here (`SECRETS_PER_TENANT`) hold the committed file to it.
 
 use std::collections::BTreeMap;
 
@@ -1589,6 +1595,8 @@ mod tests {
     use super::*;
     use crate::config::DEFAULT_MIN_READY_SECS;
     use crate::testing::test_config;
+    use k8s_openapi::api::batch::v1::CronJob;
+    use k8s_openapi::api::core::v1::{ConfigMap, LimitRange, LimitRangeItem, Pod, ResourceQuota};
 
     fn name() -> TenantName {
         TenantName::parse("alice").unwrap()
@@ -3451,5 +3459,517 @@ mod tests {
         c.pull_secret = Some("ghcr".to_string());
         let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
         assert_eq!(pod.image_pull_secrets.unwrap()[0].name, "ghcr");
+    }
+
+    /// How many Secrets one tenant holds at most: identity, credential, LLM key
+    /// and share token (the four `-> Secret` builders below, under the four names
+    /// [`TenantName`] gives them). The tenants ResourceQuota's `count/secrets` has
+    /// to be at least this many times its `pods`, plus two for every claim slot
+    /// beyond the pod slots (a cancelled tenant keeps its identity and credential
+    /// with its claim), plus the namespace's shared Secrets, or it is the line
+    /// that refuses a signup first; the test
+    /// `the_committed_quota_lets_memory_bind_before_any_count_line` holds the
+    /// committed file to that.
+    const SECRETS_PER_TENANT: u32 = 4;
+
+    #[test]
+    fn a_tenant_holds_four_secrets_under_four_names() {
+        let n = name();
+        let names = [
+            n.identity_secret(),
+            n.credential_secret(),
+            n.llm_secret(),
+            n.control_secret(),
+        ];
+        let distinct: std::collections::BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(distinct.len(), names.len());
+        assert_eq!(names.len() as u32, SECRETS_PER_TENANT);
+    }
+
+    /// The committed tenants ResourceQuota, `deploy/hosted/70-tenant-limits.yaml`.
+    const TENANT_LIMITS: &str = include_str!("../../deploy/hosted/70-tenant-limits.yaml");
+    /// The committed warden ConfigMap, `deploy/hosted/15-warden-config.yaml`:
+    /// what a tenant pod asks for on carrier is what this sets, not the
+    /// defaults in `config.rs`.
+    const WARDEN_CONFIG: &str = include_str!("../../deploy/hosted/15-warden-config.yaml");
+    /// The warden's Deployment, `deploy/hosted/20-warden.yaml`, and the fleet
+    /// roller's CronJob, `deploy/hosted/90-warden-roller.yaml`, which renders
+    /// the same tenant pods: both take the ConfigMap by `envFrom`, and an
+    /// `env:` entry of their own would outrank the same name silently.
+    const WARDEN_DEPLOYMENT: &str = include_str!("../../deploy/hosted/20-warden.yaml");
+    const WARDEN_ROLLER: &str = include_str!("../../deploy/hosted/90-warden-roller.yaml");
+    /// The model volume and its seed pod, `deploy/hosted/60-models.yaml`: the
+    /// one claim and the one pod in the namespace that are not a tenant's.
+    const MODELS: &str = include_str!("../../deploy/hosted/60-models.yaml");
+    /// The certificates, `deploy/hosted/40-wildcard-certificate.yaml`: each
+    /// one in the tenant namespace is a Secret there, plus a private key
+    /// beside it while cert-manager renews.
+    const CERTIFICATES: &str = include_str!("../../deploy/hosted/40-wildcard-certificate.yaml");
+
+    /// Every document of a committed manifest, as the API server would read
+    /// it. The YAML reader is the one `kube` already links; nothing here
+    /// renders YAML. It refuses a run of more than 32 comment lines, and these
+    /// files explain themselves at length, so comment lines, which YAML
+    /// drops, are dropped first. That is blind to a `#` line that is text,
+    /// which only a block scalar or a quoted scalar continued over lines can
+    /// hold (a plain scalar's `#` line is a comment), so both are refused.
+    fn documents(manifest: &str) -> Vec<serde_json::Value> {
+        let uncommented: Vec<&str> = manifest
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect();
+        for line in &uncommented {
+            let last = line.split_whitespace().last().unwrap_or("");
+            assert!(
+                !last.starts_with(['|', '>']),
+                "a block scalar; comment lines can no longer be dropped blind: {line:?}"
+            );
+            if let Some((_, value)) = line.split_once(": ") {
+                let value = value.trim();
+                if let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+                    assert!(
+                        value[1..].contains(quote),
+                        "a quoted scalar continued over lines; comment lines can no longer be \
+                         dropped blind: {line:?}"
+                    );
+                }
+            }
+        }
+        serde_saphyr::from_multiple(&uncommented.join("\n")).expect("the manifest parses")
+    }
+
+    /// The documents of one kind, as the typed objects the API server would
+    /// make of them.
+    fn of_kind<T: serde::de::DeserializeOwned>(
+        documents: &[serde_json::Value],
+        kind: &str,
+    ) -> Vec<T> {
+        documents
+            .iter()
+            .filter(|document| document["kind"].as_str() == Some(kind))
+            .map(|document| {
+                serde_json::from_value(document.clone())
+                    .unwrap_or_else(|e| panic!("not a {kind}: {e}"))
+            })
+            .collect()
+    }
+
+    /// The one document of that kind in a manifest.
+    fn committed<T: serde::de::DeserializeOwned>(manifest: &str, kind: &str) -> T {
+        one(&documents(manifest), kind)
+    }
+
+    /// The one document of that kind among those read.
+    fn one<T: serde::de::DeserializeOwned>(documents: &[serde_json::Value], kind: &str) -> T {
+        let mut all = of_kind(documents, kind);
+        assert_eq!(all.len(), 1, "exactly one {kind} in the manifest");
+        all.pop().unwrap()
+    }
+
+    /// How many Secrets the namespace can hold that are no running tenant's,
+    /// which the quota's `count/secrets` has to leave room for on top of what
+    /// the tenants take: the ones the config carries a name for, set in the
+    /// ConfigMap or defaulted in `config.rs` (the wildcard TLS, the OAuth
+    /// client, the APNs relay, the Browserbase key, and a pull secret if one
+    /// is set) and the TLS Secret of every certificate in the namespace; a
+    /// successor beside each of the three that rotate under a new name
+    /// (`google-oauth-client.example.yaml`, `apns-relay.example.yaml`,
+    /// `15-warden-config.yaml`); and the private key cert-manager keeps
+    /// beside each certificate while it renews. A pending signup's identity
+    /// Secret, held for up to a day with no pod or claim, is what the slack
+    /// above this floor is for.
+    fn shared_secrets(config: &Config) -> u64 {
+        let certificates: Vec<serde_json::Value> = documents(CERTIFICATES)
+            .into_iter()
+            .filter(|document| {
+                document["kind"].as_str() == Some("Certificate")
+                    && document["metadata"]["namespace"].as_str() == Some(&config.namespace)
+            })
+            .collect();
+        let rotating = [
+            config.oauth_secret_name.as_str(),
+            config.relay_secret_name.as_str(),
+            config.browserbase_secret_name.as_str(),
+        ];
+        let named: std::collections::BTreeSet<&str> = rotating
+            .into_iter()
+            .chain([config.tls_secret.as_str()])
+            .chain(config.pull_secret.as_deref())
+            .chain(certificates.iter().map(|certificate| {
+                certificate["spec"]["secretName"]
+                    .as_str()
+                    .expect("a Certificate names its Secret")
+            }))
+            .collect();
+        let rotating: std::collections::BTreeSet<&str> = rotating.into_iter().collect();
+        (named.len() + rotating.len() + certificates.len()) as u64
+    }
+
+    /// The warden's config as the committed ConfigMap sets it, through the
+    /// real loader, with the one value the ConfigMap does not carry (the
+    /// token, which is a Secret). Each pod spec that runs the warden is held
+    /// to take that ConfigMap, by name, as its only `envFrom`, with an `env:`
+    /// naming the token and nothing else of the warden's (both files say so),
+    /// so what the loader sees here is what those pods see.
+    fn committed_config() -> Config {
+        let config_map: ConfigMap = committed(WARDEN_CONFIG, "ConfigMap");
+        let name = config_map.metadata.name.expect("the ConfigMap is named");
+        let deployment: Deployment = committed(WARDEN_DEPLOYMENT, "Deployment");
+        let roller: CronJob = committed(WARDEN_ROLLER, "CronJob");
+        for (file, pod) in [
+            (
+                "20-warden.yaml",
+                deployment.spec.unwrap().template.spec.unwrap(),
+            ),
+            (
+                "90-warden-roller.yaml",
+                roller
+                    .spec
+                    .unwrap()
+                    .job_template
+                    .spec
+                    .unwrap()
+                    .template
+                    .spec
+                    .unwrap(),
+            ),
+        ] {
+            for container in pod.init_containers.iter().flatten().chain(&pod.containers) {
+                let sources = container.env_from.as_deref().unwrap_or_default();
+                assert_eq!(sources.len(), 1, "{file}: one envFrom source");
+                assert!(
+                    sources[0].secret_ref.is_none() && sources[0].prefix.is_none(),
+                    "{file}"
+                );
+                assert_eq!(
+                    sources[0]
+                        .config_map_ref
+                        .as_ref()
+                        .map(|source| source.name.as_str()),
+                    Some(name.as_str()),
+                    "{file} takes a ConfigMap that is not the committed one"
+                );
+                let restated: Vec<&str> = container
+                    .env
+                    .iter()
+                    .flatten()
+                    .map(|entry| entry.name.as_str())
+                    .filter(|name| {
+                        name.starts_with("SQUELCH_WARDEN_") && *name != "SQUELCH_WARDEN_TOKEN"
+                    })
+                    .collect();
+                assert!(
+                    restated.is_empty(),
+                    "{file} restates {restated:?} as env: entries, which outrank the ConfigMap"
+                );
+            }
+        }
+        let data = config_map.data.unwrap_or_default();
+        Config::from_source(&|name| match name {
+            "SQUELCH_WARDEN_TOKEN" => Some(crate::testing::TEST_TOKEN.to_string()),
+            _ => data.get(name).cloned(),
+        })
+        .expect("the committed ConfigMap loads")
+    }
+
+    /// A memory or storage quantity in MiB: bytes, or any of the binary and
+    /// decimal suffixes Kubernetes takes; a decimal is rounded.
+    fn mebibytes(quantity: &str) -> u64 {
+        const SUFFIXES: [(&str, f64); 12] = [
+            ("Ki", 1024.0),
+            ("Mi", 1024.0 * 1024.0),
+            ("Gi", 1024.0 * 1024.0 * 1024.0),
+            ("Ti", 1024.0 * 1024.0 * 1024.0 * 1024.0),
+            ("Pi", 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0),
+            ("Ei", 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0),
+            ("k", 1e3),
+            ("M", 1e6),
+            ("G", 1e9),
+            ("T", 1e12),
+            ("P", 1e15),
+            ("E", 1e18),
+        ];
+        let (number, scale) = SUFFIXES
+            .iter()
+            .find_map(|(suffix, scale)| quantity.strip_suffix(suffix).map(|n| (n, *scale)))
+            .unwrap_or((quantity, 1.0));
+        let number: f64 = number
+            .parse()
+            .unwrap_or_else(|_| panic!("not a byte quantity: {quantity:?}"));
+        (number * scale / (1024.0 * 1024.0)).round() as u64
+    }
+
+    /// A CPU quantity in millicores: `100m`, or cores, whole or decimal.
+    fn millicores(quantity: &str) -> u64 {
+        let (number, scale) = match quantity.strip_suffix('m') {
+            Some(m) => (m, 1.0),
+            None => (quantity, 1000.0),
+        };
+        let number: f64 = number
+            .parse()
+            .unwrap_or_else(|_| panic!("not a CPU quantity: {quantity:?}"));
+        (number * scale).round() as u64
+    }
+
+    /// One resource's quantity out of a requests, limits or bounds map.
+    fn quantity(
+        map: Option<&BTreeMap<String, Quantity>>,
+        name: &str,
+        parse: fn(&str) -> u64,
+    ) -> Option<u64> {
+        map.and_then(|map| map.get(name))
+            .map(|quantity| parse(&quantity.0))
+    }
+
+    /// A container's request and limit for one resource as the API server
+    /// settles them before any bound or quota is applied: a missing limit is
+    /// the LimitRange's Container default, itself defaulted to the entry's
+    /// max; a missing request is the limit if one was given, else the entry's
+    /// default request, itself defaulted to the limit, then to the entry's
+    /// min.
+    fn settled(
+        container: &Container,
+        entry: &LimitRangeItem,
+        name: &str,
+        parse: fn(&str) -> u64,
+    ) -> (Option<u64>, Option<u64>) {
+        let requirements = container.resources.as_ref();
+        let own_limit = quantity(requirements.and_then(|r| r.limits.as_ref()), name, parse);
+        let own_request = quantity(requirements.and_then(|r| r.requests.as_ref()), name, parse);
+        let limit = own_limit
+            .or_else(|| quantity(entry.default.as_ref(), name, parse))
+            .or_else(|| quantity(entry.max.as_ref(), name, parse));
+        let request = own_request
+            .or(own_limit)
+            .or_else(|| quantity(entry.default_request.as_ref(), name, parse))
+            .or(limit)
+            .or_else(|| quantity(entry.min.as_ref(), name, parse));
+        (request, limit)
+    }
+
+    /// What a pod charges a quota line for one resource, the way the API
+    /// server computes it: the larger of its init containers' largest and
+    /// its other containers' sum, each settled as above.
+    fn charge(
+        pod: &PodSpec,
+        entry: &LimitRangeItem,
+        limits: bool,
+        name: &str,
+        parse: fn(&str) -> u64,
+    ) -> u64 {
+        let of = |container: &Container| {
+            let (request, limit) = settled(container, entry, name, parse);
+            if limits { limit } else { request }.unwrap_or(0)
+        };
+        let init = pod
+            .init_containers
+            .iter()
+            .flatten()
+            .map(of)
+            .max()
+            .unwrap_or(0);
+        let main: u64 = pod.containers.iter().map(of).sum();
+        init.max(main)
+    }
+
+    /// `requests.memory` is the line that is meant to refuse a signup, because
+    /// it is the one sized to the box (the file says why). Every other line
+    /// has to admit more tenants than it does (more, not as many: a tie is
+    /// lost to the first pod shaped unlike a tenant, and the model seed is
+    /// one), or a full quota stops meaning a full box: 2026-09-28, memory was
+    /// raised alone and cpu, ephemeral storage, pods and PVCs all bound first;
+    /// and the patch that fixed it carried `limits.cpu: "12"`,
+    /// `requests.storage: 200Gi` and `count/secrets: "100"` on a `pods` of 40,
+    /// which would have refused the thirteenth, the twentieth and the
+    /// twenty-fourth tenant while memory still had room for thirty.
+    ///
+    /// What one tenant charges each line is read off the pod the warden
+    /// renders from the committed ConfigMap ([`charge`]), a claim is
+    /// `SQUELCH_WARDEN_STORAGE_SIZE`, and the Secrets are
+    /// [`SECRETS_PER_TENANT`]. The namespace's own pod and claim, the model
+    /// seed's, are charged to every line they touch while the seed runs, and
+    /// its own Secrets ([`shared_secrets`]) to the secrets line.
+    ///
+    /// The same file's LimitRange is checked first: a container the ConfigMap
+    /// sizes past its `max`, or under its `min`, or a claim outside its
+    /// bounds, is refused at admission before any quota is consulted,
+    /// fleet-wide on the next roll.
+    #[test]
+    fn the_committed_quota_lets_memory_bind_before_any_count_line() {
+        let c = committed_config();
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let limits = documents(TENANT_LIMITS);
+        let limit_range: LimitRange = one(&limits, "LimitRange");
+        let quota: ResourceQuota = one(&limits, "ResourceQuota");
+        let models = documents(MODELS);
+        let other_pods: Vec<Pod> = of_kind(&models, "Pod");
+        let other_claims: Vec<PersistentVolumeClaim> = of_kind(&models, "PersistentVolumeClaim");
+
+        // The LimitRange: every container of the pod inside the Container
+        // entry's bounds with its request under its limit, and the claim
+        // inside the PersistentVolumeClaim entry's.
+        let items = limit_range.spec.unwrap().limits;
+        let entry = |type_: &str| -> &LimitRangeItem {
+            items
+                .iter()
+                .find(|item| item.type_ == type_)
+                .unwrap_or_else(|| panic!("the LimitRange has no {type_} entry"))
+        };
+        let container_entry = entry("Container");
+        let resources = [
+            ("cpu", millicores as fn(&str) -> u64),
+            ("memory", mebibytes),
+            ("ephemeral-storage", mebibytes),
+        ];
+        for (name, parse) in resources {
+            let floor = quantity(container_entry.min.as_ref(), name, parse).unwrap_or(0);
+            let ceiling = quantity(container_entry.max.as_ref(), name, parse).unwrap_or(u64::MAX);
+            for container in pod.init_containers.iter().flatten().chain(&pod.containers) {
+                let (request, limit) = settled(container, container_entry, name, parse);
+                let (request, limit) = (request.unwrap_or(0), limit.unwrap_or(u64::MAX));
+                assert!(
+                    floor <= request && request <= limit && limit <= ceiling,
+                    "the {} container's {name} {request}..{limit} is outside the LimitRange's \
+                     {floor}..{ceiling} or inverted",
+                    container.name
+                );
+            }
+        }
+        let claim_entry = entry("PersistentVolumeClaim");
+        let claim = mebibytes(&c.storage_size);
+        assert!(
+            quantity(claim_entry.min.as_ref(), "storage", mebibytes).unwrap_or(0) <= claim
+                && claim
+                    <= quantity(claim_entry.max.as_ref(), "storage", mebibytes).unwrap_or(u64::MAX),
+            "a tenant's {} claim is outside the LimitRange",
+            c.storage_size
+        );
+
+        // The quota.
+        let hard = quota.spec.unwrap().hard.unwrap_or_default();
+        let line = |key: &str| -> &str {
+            &hard
+                .get(key)
+                .unwrap_or_else(|| panic!("the quota has no `{key}` line"))
+                .0
+        };
+        let count = |key: &str| line(key).parse::<u64>().unwrap();
+        // What the namespace's own pods and claims take off each line.
+        let others = |limits: bool, name: &str, parse: fn(&str) -> u64| -> u64 {
+            other_pods
+                .iter()
+                .map(|other| {
+                    charge(
+                        other.spec.as_ref().unwrap(),
+                        container_entry,
+                        limits,
+                        name,
+                        parse,
+                    )
+                })
+                .sum()
+        };
+        let other_claim_count = other_claims.len() as u64;
+        let other_claims_storage: u64 = other_claims
+            .into_iter()
+            .map(|claim| {
+                mebibytes(&claim.spec.unwrap().resources.unwrap().requests.unwrap()["storage"].0)
+            })
+            .sum();
+        let other_pods = other_pods.len() as u64;
+        let shared_secrets = shared_secrets(&c);
+        // What each line admits, with the seed pod running. Printed so
+        // `--nocapture` shows the table the file's comment describes.
+        let admits = |key: &str, limits: bool, name: &str, parse: fn(&str) -> u64| -> u64 {
+            parse(line(key)).saturating_sub(others(limits, name, parse))
+                / charge(&pod, container_entry, limits, name, parse)
+        };
+        let by_memory = admits("requests.memory", false, "memory", mebibytes);
+        let admitted = [
+            (
+                "requests.cpu",
+                admits("requests.cpu", false, "cpu", millicores),
+            ),
+            (
+                "requests.ephemeral-storage",
+                admits(
+                    "requests.ephemeral-storage",
+                    false,
+                    "ephemeral-storage",
+                    mebibytes,
+                ),
+            ),
+            ("limits.cpu", admits("limits.cpu", true, "cpu", millicores)),
+            (
+                "limits.memory",
+                admits("limits.memory", true, "memory", mebibytes),
+            ),
+            (
+                "limits.ephemeral-storage",
+                admits(
+                    "limits.ephemeral-storage",
+                    true,
+                    "ephemeral-storage",
+                    mebibytes,
+                ),
+            ),
+            (
+                "requests.storage",
+                mebibytes(line("requests.storage")).saturating_sub(other_claims_storage) / claim,
+            ),
+            ("pods", count("pods").saturating_sub(other_pods)),
+            (
+                "persistentvolumeclaims",
+                count("persistentvolumeclaims").saturating_sub(other_claim_count),
+            ),
+            (
+                "count/secrets",
+                count("count/secrets").saturating_sub(shared_secrets)
+                    / u64::from(SECRETS_PER_TENANT),
+            ),
+        ];
+        // Every line of the file is one of these, or the test is not holding
+        // it: a new line is a new row here, with its charge per tenant.
+        let known: std::collections::BTreeSet<&str> = ["requests.memory"]
+            .into_iter()
+            .chain(admitted.iter().map(|(dimension, _)| *dimension))
+            .collect();
+        let lines: std::collections::BTreeSet<&str> = hard.keys().map(String::as_str).collect();
+        assert_eq!(lines, known, "a quota line this test does not divide");
+        println!("tenants admitted by requests.memory (the model seed pod running): {by_memory}");
+        assert!(by_memory >= 1, "the memory line admits no tenant at all");
+        for (dimension, admits) in admitted {
+            println!("tenants admitted by {dimension}: {admits}");
+            assert!(
+                admits > by_memory,
+                "`{dimension}` admits {admits} tenants, not more than the {by_memory} memory does: \
+                 it would refuse a signup while the box still has room"
+            );
+        }
+        // And the two rules the file states, whatever memory says: the secrets
+        // ceiling never binds before the pods ceiling, and the storage line
+        // never before the claims line. A cancelled tenant keeps its claim and
+        // two of its Secrets (`crate::provision::Warden::delete`), so the
+        // headroom those count lines have over the memory line is what
+        // cancellations spend, and the lines sized from them must keep pace:
+        // four Secrets for every pod slot, two more for every claim slot
+        // beyond the pod slots (a cancelled tenant, with no pod), and the
+        // namespace's own.
+        let claim_slots_beyond_pods = count("persistentvolumeclaims").saturating_sub(count("pods"));
+        assert!(
+            count("count/secrets")
+                >= u64::from(SECRETS_PER_TENANT) * count("pods")
+                    + 2 * claim_slots_beyond_pods
+                    + shared_secrets,
+            "count/secrets must be at least {SECRETS_PER_TENANT} x pods, plus 2 for each claim \
+             slot beyond pods, plus the namespace's own"
+        );
+        assert!(
+            mebibytes(line("requests.storage"))
+                >= count("persistentvolumeclaims").saturating_sub(other_claim_count) * claim
+                    + other_claims_storage,
+            "requests.storage must hold a {} claim for every claim slot but the model seed's, plus its",
+            c.storage_size
+        );
     }
 }

@@ -26,7 +26,13 @@ thiserror = { workspace = true }
 # Full-feature axum for JSON extractors, query, path, and routing. Tracks the
 # same axum 0.8 line squelch-mcp pins.
 axum = { version = "0.8" }
-tower = "0.5"
+# `util` for `ServiceExt::map_request`, which the accept loop uses to hand
+# each connection its peer address (src/serve.rs).
+tower = { version = "0.5", features = ["util"] }
+# The accept loop (src/serve.rs): hyper's connection builder with a timer, so
+# its header-read timeout exists, and its graceful shutdown. `axum::serve`
+# builds the same connections without the timer and offers no way to add one.
+hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "http1", "tokio", "service"] }
 # `ReceiverStream` only: the SSE endpoint hands axum a stream fed by a per-
 # connection pump task. Default features (no `sync`) are enough.
 tokio-stream = "0.1"
@@ -67,8 +73,10 @@ mail-parser = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # To decode what the compression layer produced, in the test that proves a
 # gzipped body is the plain one.
 flate2 = "1"
+# The door-limits probe wedges a file-backed store from a second connection
+# (`BEGIN IMMEDIATE`), the way a stuck writer would.
+rusqlite = { workspace = true }

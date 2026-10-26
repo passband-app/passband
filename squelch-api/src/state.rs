@@ -3,9 +3,7 @@
 use std::sync::Arc;
 
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
-use squelch_core::credentials::{
-    CredentialKind, CredentialStore, FileCredentialStore, KeyringCredentialStore,
-};
+use squelch_core::credentials::{CredentialKind, CredentialStore};
 use squelch_core::features::Features;
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
@@ -120,6 +118,12 @@ pub struct ApiState {
     /// `POST /client/refresh`. `None` when no sync loop is wired in, which the
     /// endpoint reports as `triggered: false` rather than faking a poke.
     pub(crate) refresh: Option<Arc<tokio::sync::Notify>>,
+    /// HOW MANY `GET /client/events` STREAMS ARE OPEN, counted by the handler
+    /// for the life of each response body and shared with the sync loop
+    /// through [`Self::with_event_listeners`], whose poll lane stays at its
+    /// fast interval while the count is nonzero. Private to this state when
+    /// nothing is wired in; the count is still kept, nobody reads it.
+    pub(crate) event_listeners: Arc<std::sync::atomic::AtomicUsize>,
     /// On-demand spam-fetch signal shared with the Gmail sync loop, fired by
     /// `POST /client/spam/refresh`. `None` when no sync loop is wired in, which
     /// the endpoint reports as `triggered: false` rather than pretending.
@@ -155,6 +159,13 @@ pub struct ApiState {
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
     pub(crate) shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    /// THE SCHEDULED-SEND WORKER'S WAKE: a row may just have been scheduled
+    /// or pulled forward. Poked by `POST /client/scheduled` and
+    /// `POST /client/scheduled/{id}/now` after their store write commits, and
+    /// awaited by [`crate::scheduled_send_worker`], which otherwise sleeps
+    /// until the next `send_at` it knows of. Always present: the worker and
+    /// the handlers share this state.
+    pub(crate) scheduled_wake: Arc<tokio::sync::Notify>,
     /// TEST HOOK: added to the wall clock the scheduled-send worker reads, so
     /// a test can step past a grace or a give-up without sleeping through it.
     /// Zero in production; nothing but the worker reads it.
@@ -210,6 +221,13 @@ pub struct ApiState {
     /// ([`crate::calendar_write::WRITE_DEADLINE`]). Past it the write is
     /// answered 504, "may have happened". Shorter only in tests.
     pub(crate) calendar_write_deadline: std::time::Duration,
+    /// The ceilings a `/client/*` request runs under, by route class
+    /// ([`crate::limits`]). The constants, except in tests.
+    pub(crate) request_timeouts: crate::limits::RequestTimeouts,
+    /// The door's store-call slots ([`crate::limits::STORE_CALL_SLOTS`]):
+    /// how many of its store calls may be on blocking threads at once.
+    /// Shared by every clone of the state.
+    pub(crate) store_call_slots: Arc<tokio::sync::Semaphore>,
     /// The creates naming their own event id that are in flight, as
     /// (account, calendar, id), shared by every clone: a second create with
     /// the same key while the first is still running is refused at once
@@ -504,7 +522,9 @@ pub fn attach_event_channel(
 /// without `SQUELCH_API_TOKEN`; it now serves and answers 401 until a credential
 /// exists, because pairing is how the first credential arrives and pairing needs
 /// a door to talk to. What is left is resolving the account, which is still a
-/// store operation and still fallible.
+/// store operation and still fallible, and, in [`ApiState::from_config`], a
+/// credential backend this build cannot use, refused where its stores are
+/// built.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error(transparent)]
@@ -572,12 +592,14 @@ impl ApiState {
                 .price_out_per_mtok,
             translate_active: true,
             refresh: None,
+            event_listeners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             spam_refresh: None,
             archive_surfacing: Default::default(),
             event_notifier: None,
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
             shutdown: None,
+            scheduled_wake: Arc::new(tokio::sync::Notify::new()),
             worker_clock_skew: chrono::Duration::zero(),
             tracking_base_url: None,
             pixel_slots: Arc::new(tokio::sync::Semaphore::new(
@@ -592,6 +614,10 @@ impl ApiState {
             calendar_refresh: CalendarRefresh::default(),
             calendar_api_base: None,
             calendar_write_deadline: crate::calendar_write::WRITE_DEADLINE,
+            request_timeouts: crate::limits::RequestTimeouts::default(),
+            store_call_slots: Arc::new(tokio::sync::Semaphore::new(
+                crate::limits::STORE_CALL_SLOTS,
+            )),
             calendar_creates_in_flight: Default::default(),
             calendar_consent: Default::default(),
             calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
@@ -632,6 +658,16 @@ impl ApiState {
     /// [`SyncEngine::with_refresh`]: squelch_core::sync::SyncEngine::with_refresh
     pub fn with_refresh(mut self, refresh: Arc<tokio::sync::Notify>) -> Self {
         self.refresh = Some(refresh);
+        self
+    }
+
+    /// Share the count of open event streams with the sync loop. Wire the
+    /// SAME handle you pass to `SyncEngine::with_event_listeners`; without it
+    /// the poll lane never learns a client has the app open, and its idle
+    /// ladder (`sync.idle_poll_secs`, off by default) runs on as if nobody
+    /// were watching.
+    pub fn with_event_listeners(mut self, listeners: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.event_listeners = listeners;
         self
     }
 
@@ -764,6 +800,12 @@ impl ApiState {
         self
     }
 
+    /// The scheduled-send worker's wake (see the field), for a test that
+    /// wants to see a handler poke it.
+    pub fn scheduled_wake(&self) -> &Arc<tokio::sync::Notify> {
+        &self.scheduled_wake
+    }
+
     /// The event-notification broadcast, if one was wired in.
     pub(crate) fn event_notifier(&self) -> Option<&tokio::sync::broadcast::Sender<i64>> {
         self.event_notifier.as_ref()
@@ -893,6 +935,26 @@ impl ApiState {
         self
     }
 
+    /// The ceilings a `/client/*` request runs under, for a test that wants
+    /// to see one fire. The daemon runs [`crate::limits::RequestTimeouts::default`].
+    pub fn with_request_timeouts(mut self, timeouts: crate::limits::RequestTimeouts) -> Self {
+        self.request_timeouts = timeouts;
+        self
+    }
+
+    /// How many of the door's store calls may be on blocking threads at
+    /// once, for a test that wants to see the cap bite. The daemon runs
+    /// [`crate::limits::STORE_CALL_SLOTS`].
+    pub fn with_store_call_slots(mut self, max: usize) -> Self {
+        self.store_call_slots = Arc::new(tokio::sync::Semaphore::new(max));
+        self
+    }
+
+    /// Store-call slots not in use right now.
+    pub fn store_call_slots_free(&self) -> usize {
+        self.store_call_slots.available_permits()
+    }
+
     /// The loopback port the self-host calendar consent's listener binds.
     /// `0` binds an ephemeral port (tests), and the consent URL then carries
     /// the port that was bound.
@@ -931,17 +993,6 @@ impl ApiState {
     /// [`crate::tracking::PIXEL_CONCURRENCY`].
     pub(crate) fn pixel_slots(&self) -> &tokio::sync::Semaphore {
         &self.pixel_slots
-    }
-
-    /// Slots for concurrent pairing claims; see [`crate::pair::PAIR_CONCURRENCY`].
-    pub(crate) fn pair_slots(&self) -> &tokio::sync::Semaphore {
-        &self.pair_slots
-    }
-
-    /// Slots for concurrent device-token verifications; see
-    /// [`crate::auth::DEVICE_AUTH_CONCURRENCY`].
-    pub(crate) fn device_auth_slots(&self) -> &tokio::sync::Semaphore {
-        &self.device_auth_slots
     }
 
     /// Attach the cheap-model handle that infers a rule's disposition from the
@@ -1172,31 +1223,25 @@ impl ApiState {
     }
 
     /// The ONLY place squelch-api constructs a write credential. Bound to
-    /// [`CredentialKind::Write`], so it can never yield the read token.
+    /// [`CredentialKind::Write`], so it can never yield the read token, and
+    /// built by the core's one constructor, so a backend this build cannot
+    /// serve is refused here rather than on the first action.
     pub fn with_write_credentials(
         self,
         backend: CredentialBackend,
         account_email: String,
         credentials_path: std::path::PathBuf,
         client: OAuthClientConfig,
-    ) -> Self {
-        let account_id = self.account_id;
-        let creds: Arc<dyn CredentialStore> = match backend {
-            CredentialBackend::Keyring => Arc::new(KeyringCredentialStore::new_with_kind(
-                account_id,
-                account_email,
-                CredentialKind::Write,
-                client,
-            )),
-            CredentialBackend::File => Arc::new(FileCredentialStore::new_with_kind(
-                account_id,
-                account_email,
-                CredentialKind::Write,
-                credentials_path,
-                client,
-            )),
-        };
-        self.with_write_store(creds)
+    ) -> Result<Self, StateError> {
+        let creds = squelch_core::credentials::store_for_backend(
+            backend,
+            self.account_id,
+            account_email,
+            CredentialKind::Write,
+            credentials_path,
+            client,
+        )?;
+        Ok(self.with_write_store(creds))
     }
 
     /// The WRITE-bound credential store, if action capability is enabled.
@@ -1376,13 +1421,13 @@ impl ApiState {
                         cfg.credential_backend,
                         cfg.resolve_credentials_path(),
                         client.clone(),
-                    ))
+                    )?)
                     .with_write_credentials(
                         cfg.credential_backend,
                         account_email.to_string(),
                         cfg.resolve_credentials_path(),
                         client,
-                    )
+                    )?
             }
             Err(_) => {
                 eprintln!(

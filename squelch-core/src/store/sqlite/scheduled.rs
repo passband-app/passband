@@ -288,6 +288,26 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// WHEN THE NEXT SEND IS DUE: the earliest `send_at` among `scheduled`
+    /// rows with attempts left, the rows [`Self::claim_due_scheduled_send_with`]
+    /// hands out once that time comes, or `None` with nothing scheduled. A
+    /// READ walking the due index in `send_at` order and stopping at the
+    /// first row with attempts left, so a worker can sleep until then
+    /// instead of claiming on a timer.
+    pub fn next_scheduled_send_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        let at: Option<String> = conn
+            .query_row(
+                "SELECT send_at FROM scheduled_sends
+                 WHERE account_id = ?1 AND state = 'scheduled' AND attempts < ?2
+                 ORDER BY send_at LIMIT 1",
+                params![account_id, SCHEDULED_MAX_ATTEMPTS],
+                |r| r.get(0),
+            )
+            .optional()?;
+        at.map(|text| parse_dt(&text)).transpose()
+    }
+
     /// THE WORKER'S CLAIM (contract §4 step 2) with a flat lease: see
     /// [`Self::claim_due_scheduled_send_with`], which the worker calls to size
     /// the lease per row.
@@ -307,7 +327,7 @@ impl SqliteStore {
     /// with attempts left moves to `sending` under a lease of `lease_for(row)`
     /// from `now`, `attempts` + 1, in ONE IMMEDIATE TRANSACTION. The pick and
     /// the move cannot be split by another claimer (the write lock is taken
-    /// before the pick), so two ticks, or two processes on one file, never
+    /// before the pick), so two rounds, or two processes on one file, never
     /// both hold a row. `None` when nothing is due. Call in a loop until
     /// `None`.
     ///
@@ -600,7 +620,7 @@ impl SqliteStore {
     /// row stays `sending`, its lease untouched (the give-up clock runs from
     /// it), `last_error` says why for the listing, and recovery does not ask
     /// again before `recover_at`. One Gmail call per row per minute, not per
-    /// tick. `false` when the row is not `sending` under claim `attempts`.
+    /// pass. `false` when the row is not `sending` under claim `attempts`.
     pub fn defer_scheduled_recovery(
         &self,
         account_id: AccountId,
@@ -682,7 +702,8 @@ impl SqliteStore {
     }
 
     /// HUMAN-DOOR ONLY (`POST /client/scheduled/{id}/now`): `scheduled` or
-    /// `failed` → `scheduled` with `send_at = now`; the next tick sends it.
+    /// `failed` → `scheduled` with `send_at = now`; the worker, poked by the
+    /// handler, sends it.
     ///
     /// A `failed` row starts a FRESH RETRY BUDGET (`attempts = 0`,
     /// `last_error` cleared): the user looked at "didn't send" and explicitly

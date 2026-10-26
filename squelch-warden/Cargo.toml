@@ -46,10 +46,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Deliberately NOT a dependency: squelch-core. The warden renders manifests and
 # execs a pairing command; it never opens a mailbox store, never parses a token,
-# and never decrypts. Linking the core would pull rusqlite, keyring, an ONNX
+# and never decrypts. Linking the core would pull rusqlite, a keyring, an ONNX
 # runtime and an embedding model onto the provisioner for no reason, and would
 # put mail code in a process that has no business with it.
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# The quota test reads the committed hosted manifests as the typed objects
+# the API server would make of them. This is the YAML reader `kube` already
+# links (its kubeconfig parser), pinned to the version kube-client requires
+# (a 0.0.x requirement is exact), so it adds no crate to the tree; a `kube`
+# bump that moves it must move this line too, or two copies are linked. It is
+# a dev-dependency because the rule above holds: nothing in the warden itself
+# reads or renders YAML.
+serde-saphyr = "0.0.29"

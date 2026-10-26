@@ -193,11 +193,19 @@ run_suite place-lookup \
   Tests/PlaceLookupTests.swift
 
 # The real poller against a cancellation-oblivious transport: mailbox switches
-# must detach old requests before the next mailbox starts warming.
+# must detach old requests before the next mailbox starts warming. Then its
+# cadence: what each presence pulls, what it lets finish, and what it shares.
 run_suite sitrep-poller \
   Sources/Passband/Lib/Concurrency.swift \
   Sources/Passband/Model/SitrepPoller.swift \
   Tests/SitrepPollerTests.swift
+
+# The launch image warm: the rows on screen at once, the rest after a quiet
+# stretch, never on Low Power Mode or a costly path, never for an old account.
+run_suite image-warmer \
+  Sources/Passband/Lib/Concurrency.swift \
+  Sources/Passband/Model/ImageWarmer.swift \
+  Tests/ImageWarmerTests.swift
 
 run_suite onboarding-rehearsal \
   Sources/Passband/Model/OnboardingRehearsal.swift \

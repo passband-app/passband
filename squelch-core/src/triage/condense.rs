@@ -23,6 +23,43 @@ const MAX_URL_CHARS: usize = 96;
 /// reader "this is a fedex.com link" versus "this is a mailer redirect".
 const URL_KEEP_CHARS: usize = 48;
 
+/// How much of a link a reading keeps: one longer than `over` characters is
+/// shown as its first `keep` and an ellipsis, which is only a shortening
+/// while `keep` is under `over`; with `path_only`, its query and fragment
+/// go first, so the path (what says what a link is for) survives a long
+/// host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Links {
+    pub over: usize,
+    pub keep: usize,
+    pub path_only: bool,
+}
+
+impl Links {
+    /// The triage context's: a mailer redirect to its origin.
+    pub const TRIAGE: Links = Links {
+        over: MAX_URL_CHARS,
+        keep: URL_KEEP_CHARS,
+        path_only: false,
+    };
+    /// The access check's: a link over 192 characters is shown up to its
+    /// query, at most its first 128 characters, host and path, which is what
+    /// tells a reset or sign-in link from a newsletter's tracking link, with
+    /// room for a long host; a shorter link is shown whole, token and all
+    /// (the check is told not to quote one).
+    pub const ACCESS: Links = Links {
+        over: 192,
+        keep: 128,
+        path_only: true,
+    };
+    /// No link shortened: a body read raw.
+    pub const RAW: Links = Links {
+        over: usize::MAX,
+        keep: 0,
+        path_only: false,
+    };
+}
+
 /// Stands in for a removed quoted tail, so the model knows text was there.
 pub const QUOTE_MARKER: &str = "[earlier quoted messages removed]";
 
@@ -44,39 +81,223 @@ const ATTRIBUTION_WINDOW: usize = 240;
 /// or one the detector cannot place) is returned with only its URLs shortened,
 /// and so is a forward: there the "quoted" part IS the message.
 pub fn condense_body(body: &str) -> String {
-    let cut = if forwarded(body) {
-        None
-    } else {
-        [
-            attribution_cut(body),
-            outlook_cut(body),
-            quoted_block_cut(body),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-    };
-    match cut {
-        Some(at)
-            if body[..at].chars().any(|c| !c.is_whitespace())
-                && body[at..].chars().any(|c| !c.is_whitespace()) =>
-        {
-            let mut kept = shorten_urls(body[..at].trim_end());
-            kept.push('\n');
-            kept.push_str(QUOTE_MARKER);
-            kept
-        }
-        _ => shorten_urls(body),
+    condense(body, quote_cut(body), usize::MAX, Links::TRIAGE).0
+}
+
+/// Long links shortened as `links` says, quoted text kept, cut to at most
+/// `cap` characters, with the stored offset where the text left out begins
+/// (`None` when nothing was): the access check's reading of a body, where a
+/// quoted tail is evidence too, because the caller the check is for reads
+/// the whole stored body, and a link's path (what tells a reset link from a
+/// newsletter's) is worth more of it than the triage context keeps. The
+/// walk is [`StoredBody::condense_within`]'s without the quote cut.
+pub fn shorten_links_within(body: &str, cap: usize, links: Links) -> (String, Option<usize>) {
+    condense(body, None, cap, links)
+}
+
+/// A stored body scanned once for its quote cut, to be condensed more than
+/// once: the context bound condenses it again for each size it tries, and
+/// the scan, which reads the whole body, is the expensive part; the walk
+/// reads only the kept text.
+pub struct StoredBody {
+    text: String,
+    quote: Option<usize>,
+}
+
+impl StoredBody {
+    pub fn new(text: String) -> Self {
+        let quote = quote_cut(&text);
+        Self { text, quote }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// [`condense_body`], cut to at most `cap` characters, and where in the
+    /// STORED body (a character offset, `read_message`'s unit) the text
+    /// left out begins; `None` when nothing was left out.
+    ///
+    /// The condenser emits pieces that each stand for a run of the stored
+    /// text: plain text (a short URL included) character for character, a
+    /// shortened URL for the whole URL. Plain text is cut wherever the cap
+    /// falls; a shortened URL is kept whole or left out, so the kept text
+    /// never shows part of a stand-in. The offset is therefore exact: the
+    /// stored text the kept pieces stand for ends there, and a page read
+    /// from there begins with what the model has not seen (a URL left out
+    /// begins the page, raw). Two things are never a cut: trailing
+    /// whitespace, kept whole when it fits and dropped when it does not (it
+    /// stands for nothing a page should fetch), and the quote marker, which
+    /// rides over the cap (34 characters standing for a tail the model is
+    /// told was removed; cut, it would only send the model paging a quote).
+    /// The walk reads the kept text and little more: the cap bounds how far
+    /// it looks for a link.
+    pub fn condense_within(&self, cap: usize) -> (String, Option<usize>) {
+        condense(&self.text, self.quote, cap, Links::TRIAGE)
     }
 }
 
-/// A condensed body cut to `chars` scalar values (marker included), for the
-/// older siblings of a thread whose gist matters but whose text rarely does.
-/// The flag says whether the cut removed anything.
+/// The walk behind [`StoredBody::condense_within`], the quote cut found and
+/// the links' shortening chosen.
+fn condense(body: &str, quote: Option<usize>, cap: usize, links: Links) -> (String, Option<usize>) {
+    debug_assert!(links.keep < links.over, "a head no shorter than its link");
+    let text = quote.map_or(body, |at| &body[..at]);
+    let content = text.trim_end();
+    let mut out = Condensed {
+        text: String::with_capacity(text.len().min(cap.saturating_mul(4))),
+        chars: 0,
+        cap,
+        stored: 0,
+    };
+    let mut rest = content;
+    loop {
+        // The cap reached with text to go: a cut, and no need to read on.
+        let room = out.cap - out.chars;
+        if room == 0 && !rest.is_empty() {
+            return (out.text, Some(out.stored));
+        }
+        // A link that starts past the cap is never reached, so the search
+        // for one stops where the cap must have fallen: `room` characters
+        // are at most four bytes each, plus a scheme's worth so a link that
+        // starts just under the cap is seen whole.
+        let reach = rest.floor_char_boundary(room.saturating_mul(4).saturating_add(8));
+        let Some(start) = url_start(&rest[..reach]) else {
+            break;
+        };
+        if let Some(resume) = out.plain(&rest[..start]) {
+            return (out.text, Some(resume));
+        }
+        let end = rest[start..]
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '<' | '>' | '"' | '\'' | ')' | ']' | '}' | '|' | '»' | '”' | '’'
+                    )
+            })
+            .map_or(rest.len(), |e| start + e);
+        let url = &rest[start..end];
+        let stands_for = url.chars().count();
+        let left_out = if stands_for > links.over {
+            let shown = if links.path_only {
+                url.find(['?', '#']).map_or(url, |at| &url[..at])
+            } else {
+                url
+            };
+            let mut head = crate::text::truncate_chars(shown, links.keep);
+            head.push('…');
+            out.whole(&head, stands_for)
+        } else {
+            out.plain(url)
+        };
+        if let Some(resume) = left_out {
+            return (out.text, Some(resume));
+        }
+        rest = &rest[end..];
+    }
+    if let Some(resume) = out.plain(rest) {
+        return (out.text, Some(resume));
+    }
+    if quote.is_some() {
+        out.text.push('\n');
+        out.text.push_str(QUOTE_MARKER);
+    } else {
+        let trailing = &text[content.len()..];
+        if trailing.chars().count() <= out.cap - out.chars {
+            out.text.push_str(trailing);
+        }
+    }
+    (out.text, None)
+}
+
+/// The condensed text being built, and how far into the stored body the
+/// pieces emitted so far reach.
+struct Condensed {
+    text: String,
+    /// Characters emitted.
+    chars: usize,
+    cap: usize,
+    /// Characters of the stored body the emitted pieces stand for.
+    stored: usize,
+}
+
+impl Condensed {
+    /// Plain text, kept character for character as far as the cap allows.
+    /// When the cap falls inside it, the stored offset to resume from. One
+    /// pass, over no more of the run than the cap admits.
+    fn plain(&mut self, run: &str) -> Option<usize> {
+        let room = self.cap - self.chars;
+        // Fewer bytes than room means fewer characters: no need to look.
+        if room < run.len()
+            && let Some((byte, _)) = run.char_indices().nth(room)
+        {
+            self.text.push_str(&run[..byte]);
+            return Some(self.stored + room);
+        }
+        let length = run.chars().count();
+        self.text.push_str(run);
+        self.chars += length;
+        self.stored += length;
+        None
+    }
+
+    /// A stand-in for `stands_for` stored characters: kept whole, or left
+    /// out with the resume at its start.
+    fn whole(&mut self, piece: &str, stands_for: usize) -> Option<usize> {
+        let length = piece.chars().count();
+        if length > self.cap - self.chars {
+            return Some(self.stored);
+        }
+        self.text.push_str(piece);
+        self.chars += length;
+        self.stored += stands_for;
+        None
+    }
+}
+
+/// The byte offset at which the body's quoted earlier messages begin, when
+/// there is new text before them and quoted text after. An empty reply, one
+/// the detector cannot place, and a forward (there the "quoted" part IS the
+/// message) have none.
+fn quote_cut(body: &str) -> Option<usize> {
+    if forwarded(body) {
+        return None;
+    }
+    [
+        attribution_cut(body),
+        outlook_cut(body),
+        quoted_block_cut(body),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .filter(|&at| {
+        body[..at].chars().any(|c| !c.is_whitespace())
+            && body[at..].chars().any(|c| !c.is_whitespace())
+    })
+}
+
+/// A condensed body cut to `chars` scalar values, for the older siblings of
+/// a thread whose gist matters but whose text rarely does. The flag says
+/// whether the cut removed anything. The quote marker is whole or absent
+/// here as everywhere: when it alone overflows the budget it goes, and the
+/// `…` stands for the quote too. The walk reads only the kept text; the
+/// quote scan still reads the body.
 pub fn excerpt(body: &str, chars: usize) -> (String, bool) {
-    let condensed = condense_body(body);
-    let cut = condensed.chars().count() > chars;
-    (crate::text::truncate_ellipsis(&condensed, chars), cut)
+    let (mut kept, resume) = condense(body, quote_cut(body), chars, Links::TRIAGE);
+    if resume.is_none() {
+        if kept.chars().count() <= chars {
+            return (kept, false);
+        }
+        let marker = format!("\n{QUOTE_MARKER}");
+        if let Some(content) = kept.strip_suffix(&marker).map(str::len) {
+            kept.truncate(content);
+        }
+    }
+    (
+        crate::text::truncate_ellipsis(&format!("{kept}…"), chars),
+        true,
+    )
 }
 
 /// Whether the body's UNQUOTED text announces a forward: Gmail's and Apple
@@ -111,10 +332,7 @@ fn attribution_cut(body: &str) -> Option<usize> {
         let mut from = 0;
         while let Some(pos) = body[from..].find(tail) {
             let tail_at = from + pos;
-            let mut window_start = tail_at.saturating_sub(ATTRIBUTION_WINDOW);
-            while !body.is_char_boundary(window_start) {
-                window_start -= 1;
-            }
+            let window_start = body.floor_char_boundary(tail_at.saturating_sub(ATTRIBUTION_WINDOW));
             let window = &body[window_start..tail_at];
             let lead_at = window.rmatch_indices(lead).find_map(|(idx, _)| {
                 let at_boundary = if idx == 0 {
@@ -151,10 +369,7 @@ fn outlook_cut(body: &str) -> Option<usize> {
     let mut from = 0;
     while let Some(pos) = body[from..].find(RULE) {
         let at = from + pos;
-        let mut end = (at + 300).min(body.len());
-        while !body.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = body.floor_char_boundary(at + 300);
         if body[at..end].contains("From:") {
             best = Some(best.map_or(at, |b| b.min(at)));
             break;
@@ -189,45 +404,28 @@ fn quoted_block_cut(body: &str) -> Option<usize> {
     cut.filter(|_| quoted_lines >= 3)
 }
 
-/// Replace each URL longer than [`MAX_URL_CHARS`] with its head plus `…`.
-fn shorten_urls(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = url_start(rest) {
-        out.push_str(&rest[..start]);
-        let end = rest[start..]
-            .find(|c: char| {
-                c.is_whitespace()
-                    || matches!(
-                        c,
-                        '<' | '>' | '"' | '\'' | ')' | ']' | '}' | '|' | '»' | '”' | '’'
-                    )
-            })
-            .map_or(rest.len(), |e| start + e);
-        let url = &rest[start..end];
-        if url.chars().count() > MAX_URL_CHARS {
-            out.push_str(&crate::text::truncate_chars(url, URL_KEEP_CHARS));
-            out.push('…');
-        } else {
-            out.push_str(url);
-        }
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
+/// The byte offset of the next `http://` or `https://`, found in one pass:
+/// a search for each scheme would read to the end of an https-only body at
+/// every link.
 fn url_start(text: &str) -> Option<usize> {
-    match (text.find("http://"), text.find("https://")) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, None) => a,
-        (None, b) => b,
+    let mut from = 0;
+    while let Some(found) = text[from..].find("http") {
+        let at = from + found;
+        if text[at..].starts_with("http://") || text[at..].starts_with("https://") {
+            return Some(at);
+        }
+        from = at + "http".len();
     }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn within(body: &str, cap: usize) -> (String, Option<usize>) {
+        StoredBody::new(body.into()).condense_within(cap)
+    }
 
     const TRACKER: &str = "https://click.mailer.example.com/ls/click?upn=u001.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz-2Fmore";
 
@@ -326,15 +524,119 @@ mod tests {
         );
         let (out, cut) = excerpt(&body, 40);
         assert!(cut);
+        // The link did not fit the budget whole, so it is left out whole.
+        assert_eq!(out, "Short note. …");
+        // Plain text fills the budget, the `…` inside it.
+        let (out, cut) = excerpt(&"word ".repeat(100), 40);
+        assert!(cut);
         assert_eq!(out.chars().count(), 40);
-        assert!(out.ends_with('…'));
-        assert!(out.starts_with("Short note. https://"));
+        assert!(out.ends_with("word word…"), "{out}");
+        assert_eq!(excerpt("anything", 0), (String::new(), true));
         // Under budget: the condensed body comes back whole, marker included.
-        let (out, cut) = excerpt(
-            "Hi\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> q",
-            200,
-        );
+        let reply = "Hi\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> q";
+        let (out, cut) = excerpt(reply, 200);
         assert!(!cut);
         assert_eq!(out, format!("Hi\n{QUOTE_MARKER}"));
+        // The marker alone over the budget: whole or absent, never a piece.
+        assert_eq!(excerpt(reply, 20), ("Hi…".into(), true));
+    }
+
+    /// The capped condenser says exactly where the stored text resumes: a
+    /// plain cut at the cap, a shortened link counted at its stored length,
+    /// and a link the cap falls inside left out whole with the resume at its
+    /// start, so the page from there begins with it, raw.
+    #[test]
+    fn a_capped_body_says_exactly_where_the_stored_text_resumes() {
+        assert_eq!(within("one two three", 7), ("one two".into(), Some(7)));
+        assert_eq!(within("one two", 7), ("one two".into(), None));
+        assert_eq!(within("one two", 100), ("one two".into(), None));
+        // A shortened link before the cut stands for its whole stored length.
+        let body = format!("see {TRACKER} then more words");
+        let (kept, resume) = within(&body, 60);
+        assert_eq!(kept.chars().count(), 60);
+        assert!(kept.ends_with("… then m"), "{kept}");
+        let resume = resume.unwrap();
+        assert_eq!(resume, 4 + TRACKER.chars().count() + 7);
+        assert_eq!(body.chars().skip(resume).collect::<String>(), "ore words");
+        // The cap inside a long link: the link is left out, the page from
+        // the offset begins with it.
+        assert_eq!(within(&body, 20), ("see ".into(), Some(4)));
+        // A short link is plain text (nothing stands in for it): cut like it.
+        assert_eq!(
+            within("go https://x.example/y now", 10),
+            ("go https:/".into(), Some(10))
+        );
+        // Trailing whitespace is kept whole or dropped, never a cut: nothing
+        // a page should fetch, and nothing to fill the context with either.
+        assert_eq!(within("Hello\n\n", 5), ("Hello".into(), None));
+        assert_eq!(within("Hello\n\n", 6), ("Hello".into(), None));
+        assert_eq!(within("Hello\n\n", 9), ("Hello\n\n".into(), None));
+        assert_eq!(condense_body("Hello\n\n"), "Hello\n\n");
+        let padded = format!("Hi{}", "\n".repeat(30_000));
+        assert_eq!(within(&padded, 16_000), ("Hi".into(), None));
+        assert_eq!(condense_body(&padded), padded);
+        // Scanned once, condensed twice: the same answers.
+        let scanned = StoredBody::new("Hello\n\n".into());
+        assert_eq!(scanned.condense_within(5), ("Hello".into(), None));
+        assert_eq!(scanned.condense_within(3), ("Hel".into(), Some(3)));
+        assert_eq!(scanned.text(), "Hello\n\n");
+        // The cap reached exactly at a link: a cut at the link, found
+        // without reading past it.
+        let body = format!("abcd {TRACKER} tail");
+        assert_eq!(within(&body, 5), ("abcd ".into(), Some(5)));
+        // "http" that is not a scheme is skipped, not stopped at.
+        let body = format!("httpx http: {TRACKER} and https://x.example/y");
+        let out = condense_body(&body);
+        assert!(out.starts_with("httpx http: https://click.mailer.example.com/"));
+        assert!(out.contains("… and https://x.example/y"), "{out}");
+        // The quote marker rides over the cap; a cut in the new text before
+        // it leaves it out, the page from the offset reaching the quote in
+        // its turn.
+        let body = "Thanks!  \n> one\n> two\n> three\n";
+        let whole = format!("Thanks!\n{QUOTE_MARKER}");
+        assert_eq!(within(body, 20), (whole.clone(), None));
+        assert_eq!(within(body, 50), (whole, None));
+        assert_eq!(within(body, 5), ("Thank".into(), Some(5)));
+        // Nothing kept: resume at the start. Nothing stored: nothing to cut.
+        assert_eq!(within("abc", 0), (String::new(), Some(0)));
+        assert_eq!(within("", 0), (String::new(), None));
+    }
+
+    /// The access check's reading: links shortened, the quote kept whole,
+    /// the cut (when there is one) placed exactly as the condenser's.
+    #[test]
+    fn links_shortened_and_quotes_kept_for_the_access_check() {
+        let reply = format!(
+            "Your code is 482913. {TRACKER}\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> earlier"
+        );
+        let (kept, cut) = shorten_links_within(&reply, 400, Links::TRIAGE);
+        assert!(cut.is_none());
+        assert!(
+            kept.starts_with(
+                "Your code is 482913. https://click.mailer.example.com/ls/click?upn=u0…"
+            )
+        );
+        assert!(kept.ends_with("wrote:\n> earlier"), "{kept}");
+        assert!(!kept.contains(QUOTE_MARKER));
+        assert_eq!(
+            shorten_links_within(&reply, 12, Links::TRIAGE),
+            ("Your code is".into(), Some(12))
+        );
+        // The access reading keeps the path that says what the link is for
+        // and drops the query, so a long host does not push the path out; a
+        // link under the threshold is shown whole, never lengthened.
+        let generous = Links::ACCESS;
+        let reset = "https://notifications.accounts.someservice.example.com/password/reset?token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(reset.chars().count() > 192);
+        assert_eq!(
+            shorten_links_within(reset, 400, generous).0,
+            "https://notifications.accounts.someservice.example.com/password/reset…"
+        );
+        let long_host = "https://email-notifications.identity.security-verification.someverylongcompanyname-accounts.example.com/auth/signin?token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let (kept, _) = shorten_links_within(long_host, 400, generous);
+        assert!(kept.ends_with("example.com/auth/signin…"), "{kept}");
+        let short = &reset[..120];
+        assert_eq!(shorten_links_within(short, 400, generous).0, short);
+        assert_eq!(shorten_links_within(reset, 400, Links::RAW).0, reset);
     }
 }

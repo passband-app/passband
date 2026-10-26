@@ -27,6 +27,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use squelch_core::owner_clock::ZONE_HEADER;
 use squelch_core::store::{CLIENT_HEADER, ClientTag};
 use squelch_httpauth::{ct_eq, parse_bearer};
 
@@ -38,8 +39,11 @@ use crate::state::ApiState;
 /// The master-token compare above it is process-local and stays unbounded, but
 /// ANY caller can put an `sqd_`-shaped guess into the branch below it, and each
 /// guess takes the store mutex the whole daemon shares. Waiting for a slot is
-/// invisible from outside: the answer is the same 401 either way.
-pub(crate) const DEVICE_AUTH_CONCURRENCY: usize = 4;
+/// invisible from outside: the answer is the same 401 either way, unless the
+/// wait outlasts the request's ceiling (`limits`), which answers 504 to any
+/// request it cuts, credentialed or not. That the store is stuck is not a
+/// secret the bare 401 was keeping: a caller can time it.
+pub const DEVICE_AUTH_CONCURRENCY: usize = 4;
 
 /// Whether a presented token authenticates, master first then device tokens.
 ///
@@ -65,20 +69,18 @@ async fn authenticates(
     }
 
     // Past this point an unauthenticated guess reaches the store, so the branch
-    // is bounded; see [`DEVICE_AUTH_CONCURRENCY`]. The permit covers the lookup
-    // and is dropped with this call, well before the request runs a handler.
-    let _permit = state
-        .device_auth_slots()
-        .acquire()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+    // is bounded; see [`DEVICE_AUTH_CONCURRENCY`]. The permit rides the
+    // lookup's thread (`blocking_on`): a request cut at its ceiling while its
+    // lookup is parked on the store leaves the lookup holding its permit
+    // until the store answers, so the next request waits for a permit rather
+    // than parking a thread beside it.
+    //
     // One point lookup per request, on the blocking pool because it takes the
     // store mutex. Uncached BY DESIGN: `squelchd token revoke` has to bite on
     // the very next request, and there is no invalidation scheme that is cheaper
     // to get right than a hash lookup on a UNIQUE index.
     let store = state.store.clone();
-    let verified = tokio::task::spawn_blocking(move || {
+    let verified = crate::handlers::blocking_on(&state.device_auth_slots, move || {
         store.verify_device_token_from(&presented, client.as_ref())
     })
     .await
@@ -109,7 +111,11 @@ pub async fn require_bearer(
         .headers()
         .get(CLIENT_HEADER)
         .and_then(|h| h.to_str().ok())
-        .and_then(ClientTag::parse);
+        .and_then(ClientTag::parse)
+        // The device zone rides on the tag: recorded only for a request that
+        // named its app, so the notification extension (which names nothing)
+        // can never move it.
+        .map(|tag| tag.with_zone(req.headers().get(ZONE_HEADER).and_then(|h| h.to_str().ok())));
 
     // Decided now, while the request is still here to ask; acted on only once
     // the response says the write happened.
@@ -127,10 +133,23 @@ pub async fn require_bearer(
     {
         // Best effort: this is a stamp for the operator's dashboard, and a
         // store that cannot take it must not turn a write that worked into a
-        // failure.
-        let store = state.store.clone();
-        let _ = tokio::task::spawn_blocking(move || store.note_client_action(&presented, platform))
+        // failure. Spawned, not awaited, for the same reason: the response
+        // head is out the moment the handler produced it, and a stamp parked
+        // behind a slow store cannot hold it past the ceiling. It takes a
+        // store-call slot like any other write, and gives up on waiting for
+        // one after the local ceiling, so a slow store cannot bank an
+        // unbounded queue of stamps.
+        let state = state.clone();
+        tokio::spawn(async move {
+            let store = state.store.clone();
+            let _ = tokio::time::timeout(
+                state.request_timeouts.local,
+                crate::handlers::blocking(&state, move || {
+                    store.note_client_action(&presented, platform)
+                }),
+            )
             .await;
+        });
     }
     Ok(resp)
 }
@@ -296,6 +315,60 @@ mod tests {
         assert_eq!(seen[0].version, "0.0.12");
     }
 
+    /// The device zone is stored with the app's tag, and never without one:
+    /// the notification extension sends a token and no tag, and must not be
+    /// able to move the zone the agents read.
+    #[tokio::test]
+    async fn the_device_zone_is_recorded_only_with_a_named_client() {
+        use squelch_core::owner_clock::OwnerZoneSource;
+
+        let (store, acct, state) = fixture("");
+        let send = async |token: &str, client: Option<&str>, zone: &str| {
+            let mut req = Request::builder()
+                .uri("/gated")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(ZONE_HEADER, zone);
+            if let Some(client) = client {
+                req = req.header(CLIENT_HEADER, client);
+            }
+            app_with(state.clone())
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        };
+
+        let extension = store.issue_device_token(acct, "phone").unwrap();
+        assert_eq!(
+            send(&extension.token, None, "Asia/Tokyo").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            store.owner_zone(acct).unwrap().source,
+            OwnerZoneSource::Default
+        );
+
+        let mac = store.issue_device_token(acct, "laptop").unwrap();
+        // A zone that is not one is dropped; the tag is still recorded.
+        assert_eq!(
+            send(&mac.token, Some("macos/0.0.15"), "Mars/Olympus").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            store.owner_zone(acct).unwrap().source,
+            OwnerZoneSource::Default
+        );
+
+        let other = store.issue_device_token(acct, "desk").unwrap();
+        assert_eq!(
+            send(&other.token, Some("macos/0.0.15"), "America/Los_Angeles").await,
+            StatusCode::OK
+        );
+        let zone = store.owner_zone(acct).unwrap();
+        assert_eq!(zone.source, OwnerZoneSource::Client);
+        assert_eq!(zone.zone.name(), "America/Los_Angeles");
+    }
+
     /// A stamp per platform, and only for what a person did: a write that
     /// worked, on the client door, from an app that named itself.
     #[tokio::test]
@@ -333,6 +406,18 @@ mod tests {
                 .status()
         };
         let ios = Some("ios/0.0.8");
+        // The stamp is spawned off the response (its latency must never
+        // reach the answer), so it lands a moment after the status does.
+        let stamped = async |want: usize| {
+            for _ in 0..200 {
+                let acted = store.client_actions_seen(acct).unwrap();
+                if acted.len() >= want {
+                    return acted;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            store.client_actions_seen(acct).unwrap()
+        };
 
         // Everything that is not a person doing something.
         assert_eq!(
@@ -356,13 +441,14 @@ mod tests {
             send(&phone.token, "POST", "/client/done", None).await,
             StatusCode::OK
         );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(store.client_actions_seen(acct).unwrap().is_empty());
 
         assert_eq!(
             send(&phone.token, "POST", "/client/done", ios).await,
             StatusCode::OK
         );
-        let acted = store.client_actions_seen(acct).unwrap();
+        let acted = stamped(1).await;
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].platform.as_str(), "ios");
 
@@ -372,7 +458,7 @@ mod tests {
             send(&mac.token, "POST", "/client/done", Some("macos/0.0.13")).await,
             StatusCode::OK
         );
-        let acted = store.client_actions_seen(acct).unwrap();
+        let acted = stamped(2).await;
         assert_eq!(
             acted
                 .iter()

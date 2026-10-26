@@ -24,6 +24,7 @@ struct SyncStatusTests {
         syncedStampIsTheDaemons()
         retriageBlockedDecodes()
         copyRules()
+        redrawsWhenTheWordsChange()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -131,6 +132,35 @@ struct SyncStatusTests {
         let tomorrow = SyncStatus.when(
             now.addingTimeInterval(86_400), now: now, calendar: utc, locale: posix)
         expect(tomorrow?.hasPrefix("tomorrow at ") == true, "tomorrow: \(tomorrow ?? "nil")")
+    }
+
+    /// The banner re-draws exactly when `detail`'s words would change: the
+    /// flip to "now" 30 s before the named time, and each midnight before it.
+    static func redrawsWhenTheWordsChange() {
+        let soon = now.addingTimeInterval(600)
+        let throttled = SyncStatus.throttled(nextTry: soon, reason: "x", waiting: 0)
+        let flip = soon.addingTimeInterval(-30 + 0.001)
+        let sameDay = utc.isDate(flip, inSameDayAs: now)
+        if sameDay {
+            equal(throttled.redrawTimes(after: now, calendar: utc), [flip], "one redraw, at the flip")
+        }
+        equal(SyncStatus.when(soon, now: flip, calendar: utc, locale: posix), "now", "the flip reads now")
+        expect(SyncStatus.when(soon, now: flip.addingTimeInterval(-1), calendar: utc, locale: posix) != "now",
+               "a second before the flip it does not")
+
+        let later = now.addingTimeInterval(2 * 86_400)
+        let paused = SyncStatus.budgetPaused(until: later, parked: 3)
+        let times = paused.redrawTimes(after: now, calendar: utc)
+        let firstMidnight = utc.date(byAdding: .day, value: 1, to: utc.startOfDay(for: now))!
+        let secondMidnight = utc.date(byAdding: .day, value: 1, to: firstMidnight)!
+        equal(times, [firstMidnight, secondMidnight, later.addingTimeInterval(-30 + 0.001)],
+              "each midnight on the way, then the flip")
+
+        equal(SyncStatus.healthy.redrawTimes(after: now, calendar: utc), [], "no clock without a time")
+        equal(SyncStatus.catchingUp(done: 1, total: 2).redrawTimes(after: now, calendar: utc), [],
+              "a catch-up's words move with stats, not the clock")
+        let passed = SyncStatus.gmailError(kind: "http", reason: "x", nextTry: now.addingTimeInterval(10), waiting: 0)
+        equal(passed.redrawTimes(after: now, calendar: utc), [], "a flip already behind us needs no redraw")
     }
 
     static func triageBlockedStates() {

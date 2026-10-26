@@ -1143,3 +1143,122 @@ fn client_actions_fold_to_the_newest_stamp_per_platform() {
     assert!(acted[1].acted_at >= first[0].acted_at);
     assert!(store.client_actions_seen(other).unwrap().is_empty());
 }
+
+// ---- the owner's zone (#526) ------------------------------------------
+
+fn zoned(header: &str, zone: &str) -> ClientTag {
+    tag(header).with_zone(Some(zone))
+}
+
+fn set_client_action(store: &SqliteStore, id: i64, at: Option<DateTime<Utc>>) {
+    let conn = store.lock().unwrap();
+    conn.execute(
+        "UPDATE device_tokens SET client_action_at = ?2 WHERE id = ?1",
+        params![id, at.map(|at| at.to_rfc3339())],
+    )
+    .unwrap();
+}
+
+fn owner_zone_name(store: &SqliteStore, acct: AccountId) -> (String, &'static str) {
+    let zone = store.owner_zone(acct).unwrap();
+    (zone.zone.name().to_string(), zone.source.as_str())
+}
+
+#[test]
+fn the_owner_zone_is_utc_until_something_reports_one() {
+    let (store, acct) = store();
+    assert_eq!(owner_zone_name(&store, acct), ("UTC".into(), "default"));
+
+    // The primary calendar's zone is the fallback, and only the primary's.
+    {
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "INSERT INTO calendar_calendars(account_id, calendar_id, is_primary, time_zone)
+             VALUES (?1, 'other', 0, 'Asia/Tokyo'), (?1, 'me', 1, 'Europe/Paris')",
+            params![acct],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        owner_zone_name(&store, acct),
+        ("Europe/Paris".into(), "calendar")
+    );
+
+    // Any app that reports a zone beats the calendar.
+    let mac = store.issue_device_token(acct, "laptop").unwrap();
+    store
+        .verify_device_token_from(&mac.token, Some(&zoned("macos/0.0.15", "America/Denver")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner_zone_name(&store, acct),
+        ("America/Denver".into(), "client")
+    );
+}
+
+#[test]
+fn the_owner_zone_follows_the_most_recently_used_app() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let mac = store.issue_device_token(acct, "laptop").unwrap();
+    let phone = store.issue_device_token(acct, "phone").unwrap();
+    store
+        .verify_device_token_from(
+            &mac.token,
+            Some(&zoned("macos/0.0.15", "America/Los_Angeles")),
+        )
+        .unwrap()
+        .unwrap();
+    store
+        .verify_device_token_from(&phone.token, Some(&zoned("ios/0.0.9", "Asia/Tokyo")))
+        .unwrap()
+        .unwrap();
+
+    // Neither has acted: the newer connection wins.
+    set_client_seen(&store, mac.id, now - Duration::hours(2));
+    set_client_seen(&store, phone.id, now - Duration::hours(1));
+    assert_eq!(owner_zone_name(&store, acct).0, "Asia/Tokyo");
+
+    // The Mac at home keeps polling (a newer connection), but the phone is the
+    // one being used abroad: its action outranks the Mac's connection.
+    set_client_seen(&store, mac.id, now);
+    set_client_action(&store, mac.id, Some(now - Duration::days(3)));
+    set_client_action(&store, phone.id, Some(now - Duration::minutes(30)));
+    assert_eq!(owner_zone_name(&store, acct).0, "Asia/Tokyo");
+
+    // Back home and using the Mac again.
+    set_client_action(&store, mac.id, Some(now - Duration::minutes(5)));
+    assert_eq!(owner_zone_name(&store, acct).0, "America/Los_Angeles");
+
+    // A signed-out device is not where the owner is.
+    assert!(store.revoke_device_token(acct, mac.id).unwrap());
+    assert_eq!(owner_zone_name(&store, acct).0, "Asia/Tokyo");
+}
+
+#[test]
+fn a_request_without_a_zone_keeps_the_stored_one_and_a_new_zone_replaces_it() {
+    let (store, acct) = store();
+    let phone = store.issue_device_token(acct, "phone").unwrap();
+    store
+        .verify_device_token_from(&phone.token, Some(&zoned("ios/0.0.9", "America/New_York")))
+        .unwrap()
+        .unwrap();
+
+    // Past the stamp throttle, an app that sends no zone (or one that does not
+    // validate) leaves the stored zone where it was.
+    set_client_seen(&store, phone.id, Utc::now() - Duration::minutes(5));
+    store
+        .verify_device_token_from(&phone.token, Some(&zoned("ios/0.0.9", "Nowhere/Land")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(owner_zone_name(&store, acct).0, "America/New_York");
+
+    // A changed zone from the same app lands on its next stamp, not an hour
+    // later: it is not a new metric series, so it takes the short throttle.
+    set_client_seen(&store, phone.id, Utc::now() - Duration::minutes(5));
+    store
+        .verify_device_token_from(&phone.token, Some(&zoned("ios/0.0.9", "Asia/Tokyo")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(owner_zone_name(&store, acct).0, "Asia/Tokyo");
+}

@@ -27,9 +27,10 @@ use axum::{
     },
 };
 use serde::Deserialize;
-use squelch_core::store::{SqliteStore, Store};
-use squelch_core::types::{AccountId, Event};
+use squelch_core::store::Store;
+use squelch_core::types::Event;
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::ApiError;
@@ -125,30 +126,34 @@ fn open_draft_frame(draft_id: i64) -> SseEvent {
 /// means the connection is over (client hung up, or a store read failed — a
 /// failed read ends the stream rather than retrying, since the client reconnects
 /// with its own cursor).
+///
+/// Its store reads go through [`blocking`], on the door's store-call slots:
+/// a pump parked behind a wedged store holds one slot, and the reconnect the
+/// client makes when the stream goes quiet waits for a slot rather than
+/// parking a second thread beside the first.
 async fn pump(
-    store: &Arc<SqliteStore>,
-    account_id: AccountId,
+    state: &ApiState,
     mut cursor: i64,
     tx: &mpsc::Sender<Result<SseEvent, Infallible>>,
 ) -> Option<i64> {
+    let account_id = state.account_id;
     loop {
-        let s = store.clone();
-        let batch =
-            tokio::task::spawn_blocking(move || s.events_after(account_id, cursor, REPLAY_BATCH))
-                .await
-                .ok()?
-                .ok()?;
+        let s = state.store.clone();
+        let batch = blocking(state, move || {
+            s.events_after(account_id, cursor, REPLAY_BATCH)
+        })
+        .await
+        .ok()?;
         let drained = batch.len() < REPLAY_BATCH;
         for ev in batch {
             // Advance FIRST: an unencodable event must not stall the cursor.
             cursor = ev.id;
-            let s = store.clone();
+            let s = state.store.clone();
             let event_id = ev.id;
-            if !tokio::task::spawn_blocking(move || {
+            if !blocking(state, move || {
                 s.notification_delivery_allowed(account_id, event_id)
             })
             .await
-            .ok()?
             .ok()?
             {
                 continue;
@@ -167,8 +172,7 @@ async fn pump(
 /// Drive one connection until the client leaves or the notifier closes.
 /// `_anchor` keeps a fallback channel alive for its duration; see [`subscribe`].
 async fn run(
-    store: Arc<SqliteStore>,
-    account_id: AccountId,
+    state: ApiState,
     start: i64,
     mut wake: broadcast::Receiver<i64>,
     _anchor: Option<broadcast::Sender<i64>>,
@@ -176,7 +180,7 @@ async fn run(
     tx: mpsc::Sender<Result<SseEvent, Infallible>>,
 ) {
     // Replay first — a no-op for a live-only connection.
-    let mut cursor = match pump(&store, account_id, start, &tx).await {
+    let mut cursor = match pump(&state, start, &tx).await {
         Some(c) => c,
         None => return,
     };
@@ -188,7 +192,7 @@ async fn run(
                 // payload is only a hint, the table is the truth, so re-reading
                 // from OUR cursor brings back everything missed.
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                    cursor = match pump(&store, account_id, cursor, &tx).await {
+                    cursor = match pump(&state, cursor, &tx).await {
                         Some(c) => c,
                         None => return,
                     };
@@ -253,11 +257,10 @@ pub async fn events_stream(
     // seam cannot drop an event.
     let (wake, anchor) = subscribe(&state);
 
-    let store = state.store.clone();
     let account_id = state.account_id;
     let latest = if q.after.is_none() {
-        let store = store.clone();
-        blocking(move || store.latest_event_id(account_id)).await?
+        let store = state.store.clone();
+        blocking(&state, move || store.latest_event_id(account_id)).await?
     } else {
         // An explicit replay cursor never uses the latest id. Avoid joining
         // the store queue just to read a value start_cursor will discard.
@@ -268,20 +271,55 @@ pub async fn events_stream(
     // Subscribed for the life of the connection, and dropped with it: the
     // receiver count IS the number of Macs listening.
     let opens = (q.opens.as_deref() == Some("1")).then(|| state.draft_opens.subscribe());
+    // ONE MORE CLIENT LISTENING, for the life of the response body: the
+    // guard rides inside the stream below, so a dropped connection is a
+    // decrement the moment the body goes, not when the pump next notices.
+    let listening = Listening::start(&state);
 
     let (tx, rx) = mpsc::channel::<Result<SseEvent, Infallible>>(CHANNEL_BUFFER);
     let shutdown = state.shutdown.clone();
+    let pump_state = state.clone();
     tokio::spawn(async move {
         // One shutdown gate over BOTH replay and follow: dropping the pump ends
-        // the response body, which is what lets axum's graceful shutdown finish.
-        // A lost in-flight frame comes back on the client's next reconnect.
+        // the response body, which is what lets the door's graceful shutdown
+        // finish. A lost in-flight frame comes back on the client's next
+        // reconnect.
         tokio::select! {
             _ = shutting_down(shutdown) => {}
-            _ = run(store, account_id, start, wake, anchor, opens, tx) => {}
+            _ = run(pump_state, start, wake, anchor, opens, tx) => {}
         }
     });
 
-    Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::new().interval(KEEPALIVE)))
+    let body = ReceiverStream::new(rx).map(move |frame| {
+        let _listening = &listening;
+        frame
+    });
+    Ok(Sse::new(body).keep_alive(KeepAlive::new().interval(KEEPALIVE)))
+}
+
+/// One open event stream, counted in [`ApiState::event_listeners`] from the
+/// moment the connection is accepted until its body is dropped. The poll
+/// lane keys its idle ladder on the count (a client with the app open is a
+/// person waiting on their mail), and THE FIRST STREAM TO OPEN ALSO POLLS
+/// NOW: an app opened against a lane that had backed off sees fresh mail at
+/// once rather than at the end of the current wait.
+struct Listening(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Listening {
+    fn start(state: &ApiState) -> Self {
+        let counter = state.event_listeners.clone();
+        let before = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let (0, Some(refresh)) = (before, &state.refresh) {
+            refresh.notify_one();
+        }
+        Self(counter)
+    }
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// `GET /client/events/{id}` — one event as JSON, scoped to the account. An
@@ -293,7 +331,7 @@ pub async fn get_event(
 ) -> Result<impl IntoResponse, ApiError> {
     let store = state.store.clone();
     let account_id = state.account_id;
-    let event = blocking(move || store.event_by_id(account_id, id)).await?;
+    let event = blocking(&state, move || store.event_by_id(account_id, id)).await?;
     event.map(Json).ok_or_else(ApiError::not_found)
 }
 

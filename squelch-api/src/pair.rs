@@ -112,20 +112,18 @@ async fn claim(
         return refused();
     };
 
-    // Held across the store call and dropped with it; see [`PAIR_CONCURRENCY`]
-    // for why this waits rather than refusing. `Err` is a closed semaphore,
-    // which nothing here closes, and it fails closed like everything else.
-    let Ok(_permit) = state.pair_slots().acquire().await else {
-        return refused();
-    };
-
     // The store owns the whole decision: match, expiry, one-shot burn, the
     // failed-attempt penalty, the name check, and the mint, all in one
     // transaction. Nothing is pre-validated here, because a cheap local reject
     // (a wrong-length code, say) would be a free guess that never cost the
     // attacker an attempt against the live code.
+    //
+    // On one of the pairing permits, held across the store call; see
+    // [`PAIR_CONCURRENCY`] for why this waits rather than refusing. A permit
+    // that never comes (a closed semaphore, which nothing here closes) fails
+    // closed like everything else.
     let store = state.store.clone();
-    let issued = tokio::task::spawn_blocking(move || {
+    let issued = crate::handlers::blocking_on(&state.pair_slots, move || {
         store.claim_pairing_code(&body.code, &body.device_name)
     })
     .await;

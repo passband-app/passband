@@ -18,6 +18,37 @@ use common::{
     Harness, TOKEN, authed, authed_json, body_json, calendar_on, harness, msg, sent_msg, state_with,
 };
 
+/// The mail list exactly as `/client/updates` reads it (`human_agent_updates`),
+/// with the same filters the handler passes. What these tests mean by "what the
+/// client sees".
+#[allow(clippy::too_many_arguments)] // the handler's filters, one per axis
+fn mail_list(
+    store: &SqliteStore,
+    acct: squelch_core::types::AccountId,
+    since: chrono::DateTime<chrono::Utc>,
+    min_importance: Option<u8>,
+    status: Option<squelch_core::types::AttentionStatus>,
+    band: Option<squelch_core::store::SitrepBand>,
+    pending_reminders: bool,
+    spam: SpamScope,
+) -> squelch_core::error::Result<Vec<squelch_core::types::AttentionUpdate>> {
+    use squelch_core::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+    store.human_agent_updates(
+        acct,
+        &AgentInventoryQuery {
+            since,
+            min_importance,
+            status,
+            band,
+            pending_reminders,
+            spam,
+            ranking: Default::default(),
+            before: None,
+            limit: None,
+        },
+    )
+}
+
 #[tokio::test]
 async fn missing_token_is_401() {
     let Harness { app, .. } = harness(|_, _| {});
@@ -4117,17 +4148,17 @@ async fn updates_stamp_once_and_carry_prestamp_surfaced_at() {
     assert_eq!(items[0]["status"], "new", "pre-stamp status is new");
 
     // Stamped as a side effect of the fetch.
-    let after = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let after = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     let first_stamp = after[0].surfaced_at.expect("surfaced_at now set");
     assert_eq!(after[0].status, AttentionStatus::Open);
 
@@ -4135,17 +4166,17 @@ async fn updates_stamp_once_and_carry_prestamp_surfaced_at() {
     let resp2 = app.oneshot(authed("GET", "/client/updates")).await.unwrap();
     let json2 = body_json(resp2).await;
     assert!(!json2["items"][0]["surfaced_at"].is_null());
-    let after2 = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let after2 = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(
         after2[0].surfaced_at,
         Some(first_stamp),
@@ -4171,9 +4202,17 @@ async fn peek_returns_the_same_rows_without_stamping_the_ledger() {
     assert_eq!(json["items"].as_array().unwrap().len(), 2);
 
     // ...and the ledger is untouched: nothing was actually shown to anyone.
-    let after_peek = store
-        .attention_updates(acct, window(), None, None, None, false, SpamScope::Exclude)
-        .unwrap();
+    let after_peek = mail_list(
+        &store,
+        acct,
+        window(),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(after_peek.len(), 2);
     for u in &after_peek {
         assert!(u.surfaced_at.is_none(), "peek must not stamp surfaced_at");
@@ -4188,9 +4227,17 @@ async fn peek_returns_the_same_rows_without_stamping_the_ledger() {
     // and not a broken fixture.
     let resp2 = app.oneshot(authed("GET", "/client/updates")).await.unwrap();
     assert_eq!(resp2.status(), StatusCode::OK);
-    let after_normal = store
-        .attention_updates(acct, window(), None, None, None, false, SpamScope::Exclude)
-        .unwrap();
+    let after_normal = mail_list(
+        &store,
+        acct,
+        window(),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     for u in &after_normal {
         assert!(u.surfaced_at.is_some(), "normal fetch stamps surfaced_at");
         assert_eq!(u.status, AttentionStatus::Open);
@@ -4341,17 +4388,17 @@ async fn dismiss_and_reopen_endpoint() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(done.len(), 1);
     assert!(done[0].resolved_at.is_some());
 
@@ -4453,17 +4500,17 @@ async fn reminder_endpoint_defers_the_thread_and_schedules_its_return() {
 
     // DEFERRING IS RESOLVING: one round trip both hides the mail and schedules
     // it, and the listing carries the pending stamp back.
-    let rows = store
-        .attention_updates(
-            acct,
-            reminder_window(),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let rows = mail_list(
+        &store,
+        acct,
+        reminder_window(),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(rows[0].status, AttentionStatus::Done);
     assert!(rows[0].resolved_at.is_some());
     assert_eq!(rows[0].remind_at.unwrap().timestamp(), due.timestamp());
@@ -4500,18 +4547,18 @@ async fn reminder_rejects_a_past_or_unparseable_date() {
     }
     // And nothing was scheduled.
     assert!(
-        store
-            .attention_updates(
-                acct,
-                reminder_window(),
-                None,
-                None,
-                None,
-                true,
-                SpamScope::Exclude
-            )
-            .unwrap()
-            .is_empty()
+        mail_list(
+            &store,
+            acct,
+            reminder_window(),
+            None,
+            None,
+            None,
+            true,
+            SpamScope::Exclude
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 
@@ -4612,18 +4659,18 @@ async fn reminder_on_the_users_own_sent_mail_is_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert!(
-        store
-            .attention_updates(
-                acct,
-                reminder_window(),
-                None,
-                None,
-                None,
-                true,
-                SpamScope::Exclude
-            )
-            .unwrap()
-            .is_empty(),
+        mail_list(
+            &store,
+            acct,
+            reminder_window(),
+            None,
+            None,
+            None,
+            true,
+            SpamScope::Exclude
+        )
+        .unwrap()
+        .is_empty(),
         "nothing was scheduled"
     );
 }
@@ -4735,17 +4782,17 @@ async fn clear_reminder_endpoint_is_idempotent() {
         assert_eq!(body["cleared"], true);
     }
 
-    let rows = store
-        .attention_updates(
-            acct,
-            reminder_window(),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let rows = mail_list(
+        &store,
+        acct,
+        reminder_window(),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(rows[0].remind_at.is_none(), "un-scheduled");
     assert_eq!(
         rows[0].status,
@@ -4805,17 +4852,17 @@ async fn pending_reminder_listing_is_soonest_first_and_never_stamps() {
 
     // AND IT NEVER STAMPS: these are deferred rows the user is reviewing the
     // schedule of, not mail being shown to them.
-    let rows = store
-        .attention_updates(
-            acct,
-            reminder_window(),
-            None,
-            None,
-            None,
-            true,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let rows = mail_list(
+        &store,
+        acct,
+        reminder_window(),
+        None,
+        None,
+        None,
+        true,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         rows.iter().all(|u| u.surfaced_at.is_none()),
         "the schedule read leaves the seen-ledger alone"
@@ -4849,17 +4896,17 @@ async fn archive_success_resolves_target_to_done() {
     let _ = handle.await.unwrap();
 
     // RESOLUTION: the target row is now done + resolved_at set.
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].update.id, message_id);
     assert!(done[0].resolved_at.is_some());
@@ -5361,17 +5408,17 @@ async fn an_inferred_squelch_never_resolves_the_senders_open_mail() {
         squelch_core::types::Disposition::Squelch
     );
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         !done.iter().any(|u| u.update.id == spam_id),
         "an INFERRED squelch resolves nothing, sweep or no sweep"
@@ -5424,17 +5471,17 @@ async fn a_literal_auto_squelch_is_inferred_and_never_resolves_open_mail() {
         squelch_core::types::Disposition::Squelch
     );
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         !done.iter().any(|u| u.update.id == spam_id),
         "an \"auto\" squelch is an inferred squelch: it resolves nothing"
@@ -6139,17 +6186,17 @@ async fn unsubscribe_resolves_the_source_email_to_done() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         done.iter().any(|u| u.update.id == mid),
         "unsubscribed email is done"
@@ -6217,17 +6264,17 @@ async fn squelch_rule_with_source_message_resolves_it_surface_does_not() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         done.iter().any(|u| u.update.id == spam_id),
         "squelch-rule source is done"
@@ -6278,17 +6325,17 @@ async fn an_explicit_squelch_without_sweep_resolves_nothing() {
         "the rule is still a squelch"
     );
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         !done.iter().any(|u| u.update.id == spam_id),
         "no sweep was asked for, so the sender's open mail stays open"
@@ -6401,17 +6448,17 @@ async fn sweep_resolves_by_sender_and_a_wildcard_resolves_only_the_source() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     let is_done = |id: i64| done.iter().any(|u| u.update.id == id);
     assert!(
         is_done(spam_a) && is_done(spam_b),
@@ -6685,7 +6732,10 @@ async fn triage_config_get_default_shape() {
     assert_eq!(json["global_daily_cap"], 120);
     assert_eq!(json["agent"]["effective_daily_run_cap"], 10_000);
     assert_eq!(json["agent"]["effective_background_daily_run_cap"], 200);
-    assert_eq!(json["agent"]["reserved_arrival_runs"], 9_800);
+    assert_eq!(json["agent"]["access_daily_run_cap"], 500);
+    assert_eq!(json["agent"]["effective_access_daily_run_cap"], 500);
+    // What is left after both lanes.
+    assert_eq!(json["agent"]["reserved_arrival_runs"], 9_300);
     assert_eq!(
         json["agent"]["legacy_stage_caps_are_active_ceilings"],
         false
@@ -8678,17 +8728,17 @@ async fn forward_success_sends_a_new_conversation_carrying_the_original() {
     );
     // FORWARDING IS NOT HANDLING: the attention row is left where it was, unlike
     // a reply, which resolves it.
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(squelch_core::types::AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(squelch_core::types::AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         done.is_empty(),
         "passing a message on can leave the user's own action outstanding"
@@ -9330,7 +9380,8 @@ fn calendar_resolver(
             client_id: "id".into(),
             client_secret: "secret".into(),
         },
-    );
+    )
+    .unwrap();
     (resolver, path)
 }
 
@@ -9849,17 +9900,17 @@ async fn not_spam_is_confirm_gated_and_needs_a_write_credential() {
     // AND THE LOCAL FLAG IS UNTOUCHED, which is the ordering guarantee: the
     // Gmail write runs first, so a refused one leaves the message exactly where
     // Gmail still has it rather than visible here and filtered everywhere else.
-    let rows = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Only,
-        )
-        .unwrap();
+    let rows = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Only,
+    )
+    .unwrap();
     assert_eq!(rows.len(), 1, "the row is still spam");
 }
 
@@ -13208,10 +13259,22 @@ async fn the_worker_sends_a_due_row_with_its_minted_message_id() {
                 .unwrap()
         }
     };
+    let poked =
+        || tokio::time::timeout(std::time::Duration::ZERO, state.scheduled_wake().notified());
+    assert!(poked().await.is_err(), "a fresh state holds no permit");
     let due = schedule(60, serde_json::json!([file])).await;
+    assert!(
+        poked().await.is_ok(),
+        "scheduling a row wakes the worker, which may be asleep until a later one"
+    );
     let not_due = schedule(120, serde_json::json!([])).await;
+    assert!(poked().await.is_ok());
     let (status, _) = outbox(&app, "POST", &format!("/client/scheduled/{due}/now"), None).await;
     assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(
+        poked().await.is_ok(),
+        "pulling a row forward wakes the worker for it"
+    );
     let msgid = store
         .scheduled_send_by_id(acct, due)
         .unwrap()
@@ -14166,17 +14229,17 @@ async fn the_worker_fires_a_reply_threaded_under_its_minted_id() {
     assert_eq!(row.sent_thread_id.as_deref(), Some("thread-77"));
     // `resolve_done`: a fired reply handles the message it answers, as a
     // reply sent now does.
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(365),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(365),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         done.iter().any(|u| u.update.id == parent),
         "the parent is handled"

@@ -265,6 +265,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // When that app last wrote something. NULL on every pre-existing row and
     // NOT backfilled: nothing recorded which app made a past write.
     add_column_if_missing(conn, "device_tokens", "client_action_at", "TEXT")?;
+    // The device zone that app last reported (#526). NULL on every
+    // pre-existing row and NOT backfilled: only the device knows where it is,
+    // and it says so on its first request after it updates.
+    add_column_if_missing(conn, "device_tokens", "client_timezone", "TEXT")?;
     // Per-property triage reasons (JSON object). NULL on pre-existing rows.
     add_column_if_missing(conn, "triage", "field_reasons", "TEXT")?;
 
@@ -284,16 +288,16 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0 CHECK(is_auth IN (0,1))",
     )?;
 
-    // Two-stage triage markers: `stage1_model_used` gates the Stage-1 LLM queue
-    // (NULL == still needs Stage-1), `needs_stage2` is the escalation flag.
+    // Markers from the retired two-stage classifier: `stage1_model_used` gated
+    // the Stage-1 queue, `needs_stage2` was the escalation flag. Kept so old
+    // rows still load.
     let added_stage1 = add_column_if_missing(conn, "triage", "stage1_model_used", "TEXT")?;
     add_column_if_missing(conn, "triage", "needs_stage2", "INTEGER NOT NULL DEFAULT 0")?;
-    // WHICH router arm set `needs_stage2` (see `crate::triage::router`). NULL
-    // means "did not escalate", and also covers every historical row, which
-    // escalated under the old self-report rule and cannot be attributed now.
+    // Which arm of the retired escalation router set `needs_stage2`. NULL
+    // means "did not escalate".
     add_column_if_missing(conn, "triage", "escalation_reason", "TEXT")?;
-    // Re-evaluation counter (see `crate::triage::revisit`). Historical rows
-    // start at 0, which is honest: they have never been revisited.
+    // Re-evaluation counter from the retired revisit planner. Agent triage
+    // counts its revisits in `agent_triage_jobs` instead.
     add_column_if_missing(
         conn,
         "triage",

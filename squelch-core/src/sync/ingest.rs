@@ -1324,7 +1324,6 @@ pub fn ingest_sent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::SpamScope;
 
     fn raw(account_id: AccountId, msgid: &str, bytes: &str, is_sent: bool) -> RawFetched {
         RawFetched {
@@ -2837,19 +2836,36 @@ mod tests {
             view.messages[0].is_sent,
             "the outbound copy is flagged for the reader's right-aligned bubble"
         );
-        let updates = store
-            .attention_updates(
-                acct,
-                now - chrono::Duration::days(1),
-                None,
-                None,
-                None,
-                false,
-                SpamScope::Exclude,
-            )
-            .unwrap();
-        assert!(
-            updates.is_empty(),
+        let listed = {
+            use crate::store::SpamScope;
+            use crate::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+            store
+                .human_agent_updates(
+                    acct,
+                    &AgentInventoryQuery {
+                        // Far enough back to reach the fixture's July `Date:`,
+                        // so the window cannot be what keeps the list empty.
+                        since: now - chrono::Duration::days(3650),
+                        min_importance: None,
+                        status: None,
+                        band: None,
+                        pending_reminders: false,
+                        spam: SpamScope::Exclude,
+                        ranking: Default::default(),
+                        before: None,
+                        limit: None,
+                    },
+                )
+                .unwrap()
+        };
+        assert!(listed.is_empty(), "sent mail never enters the mail list");
+        let bands = store
+            .stats(acct, now - chrono::Duration::days(3650))
+            .unwrap()
+            .bands;
+        assert_eq!(
+            (bands.standing, bands.new, bands.open),
+            (0, 0, 0),
             "sent mail never enters the attention bands"
         );
         // Recipients still seed contacts, and ride along on the row itself so the

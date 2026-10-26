@@ -104,7 +104,7 @@ data:
   # The Secret holding the Google web client every tenant daemon refreshes with,
   # in the tenant namespace. Without it a tenant pod exits at boot; see
   # google-oauth-client.example.yaml.
-  SQUELCH_WARDEN_OAUTH_SECRET_NAME: "google-oauth-client"
+  SQUELCH_WARDEN_OAUTH_SECRET_NAME: "google-oauth-client-2"
   # The LLM gateway, which is how a hosted tenant gets model triage at all. With
   # this set, every tenant pod sends its Anthropic-wire traffic to Bifrost's
   # /anthropic route with a per-tenant virtual key the control plane mints at
@@ -202,7 +202,7 @@ data:
   # image itself has to be new enough to know these names: an older warden
   # ignores them and renders no relay env at all.
   SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
-  SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
+  SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay-2"
   SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
   # The automatic unsubscribe's browser rung needs NO entry here. Every tenant
   # pod references the Secret `browserbase` (key `api-key`) in the tenant
@@ -251,7 +251,8 @@ data:
   # comfortable number. With it, the tenant that will not fit is refused at
   # signup instead of a running mailbox being killed for it, and on this box
   # the thing doing the refusing is the quota in 70-tenant-limits.yaml, which
-  # is sized to five tenants at this request. Change one and redo the other.
+  # is sized to thirty tenants at this request on `carrier` (five on the 4 GB
+  # floor). Change one and redo the other.
   #
   # Revisit once the daemon unloads its embedder when idle; the constant in
   # squelch-warden/src/config.rs carries the measurements.

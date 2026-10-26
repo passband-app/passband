@@ -280,17 +280,28 @@ through an incoming webhook.
 | Rule | Fires when | For |
 |---|---|---|
 | Tenants quota near full | any `tenants` ResourceQuota dimension is at 80% or more | 15m |
+| Tenants quota changed on the box | a hard line of the `tenants` ResourceQuota changed in the last hour (expected once after an apply of `70-tenant-limits.yaml`; otherwise the box was patched past the file) | 0s |
 | Tenant has no running pod | a tenant Deployment wants a pod and has none available | 10m |
 | Tenant mail sync stale | a tenant's freshest `squelchd_sync_last_success_timestamp_seconds` is over 900s old | 15m |
 | carrier memory high | the box is 85% or more used (`1 - MemAvailable / MemTotal`) | 2m |
+| carrier disk high | the tenant volume (`/mnt/tenant-data`) or the root disk is 85% or more full | 5m |
 | carrier metrics missing | no kube-state-metrics series from carrier for 10 minutes | 5m |
 
-The first two are 2026-09-28: the quota was full at five tenants and the first
-anyone heard of it was a new user stuck on a signup that timed out. The third is
-the sync alert this README recommended above, which until now nothing fired. The
-fourth is 2026-09-29: memory is the box's bottleneck, and with nothing reserved
+The first and the third are 2026-09-28: the quota was full at five tenants and
+the first anyone heard of it was a new user stuck on a signup that timed out.
+The second is what the fix to that did: the quota was raised on the box with a
+`kubectl patch` the file in git did not carry, so a hard line changing, or the
+set of lines changing, is now announced, expected once after an apply of the
+file and otherwise a patch the file does not record
+(`deploy/hosted/PRODUCTION.md`, "How many tenants fit"); the quota being deleted
+outright is the last rule's, which reads these series. The fourth is the sync
+alert this README recommended above, which until now nothing fired. The fifth
+is 2026-09-29: memory is the box's bottleneck, and with nothing reserved
 for k3s and no swap the RAM is the only wall, so this fires before a global OOM
-rather than after one. The last is what makes the others trustworthy: every rule
+rather than after one. The sixth is the disk, which the tenants quota does not
+guard: a claim is nominal on local-path (`deploy/hosted/70-tenant-limits.yaml`),
+so the volume is watched here and grown when this says so. The last is what
+makes the others trustworthy: every rule
 reads series the carrier agent remote-writes, so they go quiet together when it
 stops, and the others treat NoData as OK so that only this one says so.
 

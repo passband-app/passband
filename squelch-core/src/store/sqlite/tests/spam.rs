@@ -13,8 +13,36 @@
 
 use super::super::*;
 use super::support::*;
-use crate::store::SpamScope;
-use crate::types::{SealedKind, Tier};
+use crate::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+use crate::store::{SitrepBand, SpamScope};
+use crate::types::{AttentionUpdate, SealedKind, Tier};
+
+/// The human door's mail list (`human_agent_updates`), on one side of the spam
+/// verdict or the other.
+fn listing(
+    store: &SqliteStore,
+    acct: AccountId,
+    since: DateTime<Utc>,
+    band: Option<SitrepBand>,
+    spam: SpamScope,
+) -> Vec<AttentionUpdate> {
+    store
+        .human_agent_updates(
+            acct,
+            &AgentInventoryQuery {
+                since,
+                min_importance: None,
+                status: None,
+                band,
+                pending_reminders: false,
+                spam,
+                ranking: Default::default(),
+                before: None,
+                limit: None,
+            },
+        )
+        .unwrap()
+}
 
 /// One ordinary signal row and one spam row, in that order.
 fn inbox_and_spam(store: &SqliteStore, acct: AccountId) -> (i64, i64) {
@@ -62,9 +90,7 @@ fn spam_is_absent_from_every_listing() {
         Some(SitrepBand::New),
         Some(SitrepBand::Open),
     ] {
-        let rows = store
-            .attention_updates(acct, since, None, None, band, false, SpamScope::Exclude)
-            .unwrap();
+        let rows = listing(&store, acct, since, band, SpamScope::Exclude);
         // Standing/Open are legitimately empty for these fixtures; only the
         // spam half of the assertion applies to every band.
         assert!(
@@ -73,24 +99,11 @@ fn spam_is_absent_from_every_listing() {
         );
     }
     has(
-        store
-            .attention_updates(acct, since, None, None, None, false, SpamScope::Exclude)
-            .unwrap()
+        listing(&store, acct, since, None, SpamScope::Exclude)
             .iter()
             .map(|u| u.update.id)
             .collect(),
-        "attention_updates",
-    );
-
-    // The agent door's ranked list.
-    has(
-        store
-            .ranked_updates(acct, since, None)
-            .unwrap()
-            .iter()
-            .map(|u| u.id)
-            .collect(),
-        "ranked_updates",
+        "human_agent_updates",
     );
 
     // Keyword search, on a term BOTH messages contain.
@@ -163,10 +176,9 @@ fn stats_count_spam_on_its_own_and_keep_it_out_of_the_tiers() {
     assert_eq!(stats.spam, 1, "spam is counted on its own");
 }
 
-/// Spam never enters an LLM queue. The ingest path stamps 'n/a' markers, which
-/// is the first defense; this pins the second — the queue predicates themselves.
+/// Ingest stamps spam as never-to-be-modelled.
 #[test]
-fn spam_never_queues_for_a_model() {
+fn ingest_stamps_spam_as_never_modelled() {
     let (store, acct) = store();
     let spam = triaged(acct, "g-spam", "t-spam")
         .is_spam(true)
@@ -174,11 +186,6 @@ fn spam_never_queues_for_a_model() {
         .confident(false)
         .ingest(&store);
 
-    let queued = store.stage1_queue(acct, 50).unwrap();
-    assert!(
-        !queued.iter().any(|r| r.message_id == spam),
-        "spam must never reach Stage-1"
-    );
     assert_eq!(
         stage_markers(&store, spam).0.as_deref(),
         Some("n/a"),
@@ -204,101 +211,16 @@ fn spam_refuses_a_reminder() {
 fn the_spam_page_lists_spam_and_only_spam() {
     let (store, acct) = store();
     let (good, spam) = inbox_and_spam(&store, acct);
-    let rows = store
-        .attention_updates(
-            acct,
-            Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Only,
-        )
-        .unwrap();
+    let rows = listing(
+        &store,
+        acct,
+        Utc::now() - chrono::Duration::days(1),
+        None,
+        SpamScope::Only,
+    );
     let ids: Vec<i64> = rows.iter().map(|u| u.update.id).collect();
     assert_eq!(ids, vec![spam], "the page is exactly the spam");
     assert!(!ids.contains(&good));
-}
-
-/// THE SPAM ROW'S OWN WORDS. Nothing triaged these rows, so `one_line` is empty
-/// on every one of them and the page would be a column of senders against a
-/// blank; the subject and the stored snippet are the fill, and they are served
-/// on THIS listing alone.
-///
-/// Both halves are asserted together on purpose. "The spam page carries a
-/// subject" would still pass if the bands had quietly grown one too, and the
-/// bands paying 200 characters a row on every poll for text nothing renders is
-/// the exact accident this gate exists to catch.
-#[test]
-fn the_spam_page_carries_the_mails_own_text_and_the_bands_do_not() {
-    let (store, acct) = store();
-    let good = triaged(acct, "g-good", "t-good")
-        .subject("Lunch tomorrow")
-        .snippet("Are you free at noon?")
-        .tier(Tier::Signal)
-        .seed(&store);
-    let spam = triaged(acct, "g-spam", "t-spam")
-        .from("winner@lottery.example")
-        .subject("You have won")
-        .snippet("Claim your prize now.")
-        .is_spam(true)
-        .seed(&store);
-    let since = Utc::now() - chrono::Duration::days(1);
-
-    let page = store
-        .attention_updates(acct, since, None, None, None, false, SpamScope::Only)
-        .unwrap();
-    let row = page
-        .iter()
-        .find(|u| u.update.id == spam)
-        .expect("the spam row is on its page");
-    assert_eq!(
-        row.update.one_line, "",
-        "nothing triaged it, by construction"
-    );
-    assert_eq!(row.update.subject.as_deref(), Some("You have won"));
-    assert_eq!(row.update.preview.as_deref(), Some("Claim your prize now."));
-
-    let inbox = store
-        .attention_updates(acct, since, None, None, None, false, SpamScope::Exclude)
-        .unwrap();
-    let row = inbox
-        .iter()
-        .find(|u| u.update.id == good)
-        .expect("the ordinary row is in the inbox");
-    assert!(
-        row.update.subject.is_none() && row.update.preview.is_none(),
-        "an ordinary row has a summary and pays for no fill"
-    );
-}
-
-/// A subject of nothing but whitespace is ABSENT, not a subject. It is what a
-/// mailer that "cleared" the field sends, and a row rendering it would be a row
-/// with nothing on it — which reads as a bug rather than as blank mail. The
-/// client says "(no subject)" instead, and it can only do that if the daemon
-/// declines to send a blank.
-#[test]
-fn a_blank_spam_subject_is_absent_rather_than_empty() {
-    let (store, acct) = store();
-    let spam = triaged(acct, "g-spam", "t-spam")
-        .subject("\u{00a0} ")
-        .snippet("   ")
-        .is_spam(true)
-        .seed(&store);
-    let rows = store
-        .attention_updates(
-            acct,
-            Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Only,
-        )
-        .unwrap();
-    let row = rows.iter().find(|u| u.update.id == spam).unwrap();
-    assert!(row.update.subject.is_none(), "blank subject must be absent");
-    assert!(row.update.preview.is_none(), "blank preview must be absent");
 }
 
 /// Sealed outranks spam. A login code Gmail misfiled is still a login code, and
@@ -310,17 +232,13 @@ fn human_spam_page_includes_restricted_auth_mail() {
         .is_spam(true)
         .sealed(SealedKind::Otp)
         .seed(&store);
-    let rows = store
-        .attention_updates(
-            acct,
-            Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Only,
-        )
-        .unwrap();
+    let rows = listing(
+        &store,
+        acct,
+        Utc::now() - chrono::Duration::days(1),
+        None,
+        SpamScope::Only,
+    );
     assert!(rows.iter().any(|u| u.update.id == sealed));
 }
 
@@ -382,17 +300,13 @@ fn clearing_spam_returns_the_row_to_the_inbox_and_requeues_it() {
 
     assert!(store.clear_spam(acct, spam).unwrap());
 
-    let rows = store
-        .attention_updates(
-            acct,
-            Utc::now() - chrono::Duration::days(30),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let rows = listing(
+        &store,
+        acct,
+        Utc::now() - chrono::Duration::days(30),
+        None,
+        SpamScope::Exclude,
+    );
     assert!(
         rows.iter().any(|u| u.update.id == spam),
         "the rescued row is ordinary mail now"
@@ -419,17 +333,13 @@ fn clearing_spam_returns_the_row_to_the_inbox_and_requeues_it() {
     );
 
     // And it is off the spam page.
-    let spam_rows = store
-        .attention_updates(
-            acct,
-            Utc::now() - chrono::Duration::days(30),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Only,
-        )
-        .unwrap();
+    let spam_rows = listing(
+        &store,
+        acct,
+        Utc::now() - chrono::Duration::days(30),
+        None,
+        SpamScope::Only,
+    );
     assert!(spam_rows.is_empty());
 }
 

@@ -15,6 +15,10 @@
 import SwiftUI
 import WebKit
 
+#if os(iOS)
+    import UIKit
+#endif
+
 /// WHAT THE READER OPENED UP IN A MESSAGE'S BODY: the remote images they let
 /// in, the quoted history they unfolded. Held per reader and keyed by message
 /// id, so a body view that is REBUILT for the same message (the reader's "show
@@ -1968,8 +1972,18 @@ final class WebFramePool {
     /// SMALL ON PURPOSE: each entry is a live WebKit content-process attachment
     /// plus a whole email's retained layout tree. Six covers walking a thread back
     /// and forth and flipping between the last few messages; past that the parse
-    /// being avoided is cheaper than the residency being paid for.
-    private static let capacity = 6
+    /// being avoided is cheaper than the residency being paid for. Three on the
+    /// phone, which has a fraction of the memory.
+    #if os(iOS)
+        private static let capacity = 3
+    #else
+        private static let capacity = 6
+    #endif
+
+    /// How many of the open thread's neighbours `FramePrewarmer.ahead`
+    /// renders into the read tier: all of it but one, so the message just
+    /// left is not pushed out by the ones about to be reached.
+    static let aheadBudget = capacity - 1
 
     /// The identity of a RENDERED DOCUMENT, not of a message: all three fields
     /// must match, so a hit is showing a BYTE-IDENTICAL document under an
@@ -2008,14 +2022,104 @@ final class WebFramePool {
     /// that pre-rendering the board's top rows can never evict the message
     /// somebody just walked away from, and capped on its own — each is a
     /// live content process, and the board only ever shows a few rows a
-    /// click away.
-    private static let prerenderedCapacity = 4
+    /// click away. One on iOS, where the phone's board renders nothing ahead
+    /// and the only thing that does is an iPad pointer resting on a record.
+    #if os(iOS)
+        private static let prerenderedCapacity = 1
+    #else
+        private static let prerenderedCapacity = 4
+    #endif
     private var prerendered: Set<Key> = []
 
-    private init() {}
+    private init() {
+        #if os(iOS)
+            // THE PHONE LETS GO when memory is short or the app leaves the
+            // screen: every parked frame, spare and measuring frame is a
+            // content process held for a reopen that may not come, and a
+            // suspended app holding several is what the system reclaims first,
+            // by ending it. The Mac keeps its frames: a reopen behind a hidden
+            // window being instant is the point of the pool, and it has the
+            // memory.
+            let center = NotificationCenter.default
+            _ = center.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    let pool = WebFramePool.shared
+                    // The minute starts now, and a spare for the next open
+                    // comes back at the end of it. Nothing asked to be
+                    // rendered ahead meanwhile is kept for then: the next card
+                    // mount asks for what is next by then.
+                    pool.relief?.cancel()
+                    pool.relief = Task { @MainActor in
+                        try? await Task.sleep(for: WebFramePool.pressure)
+                        guard !Task.isCancelled else { return }
+                        WebFramePool.shared.relief = nil
+                        WebFramePool.shared.resume()
+                    }
+                    pool.drain()
+                }
+            }
+            _ = center.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { WebFramePool.shared.drain() }
+            }
+            // Back on screen, one spare again, as at launch: once active, on
+            // the next turn, not inside the resume the visible frames are
+            // drawing in. Active, not entering the foreground: UIKit posts
+            // that before the app's state moves.
+            _ = center.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { _ in
+                Task { @MainActor in WebFramePool.shared.resume() }
+            }
+        #endif
+    }
+
+    #if os(iOS)
+        /// How long a memory warning keeps the pool lean: long enough that the
+        /// next scroll does not rebuild what the warning just let go.
+        private static let pressure: Duration = .seconds(60)
+        /// The minute after a memory warning, while it runs.
+        private var relief: Task<Void, Never>?
+
+        /// Out of a pressed spell: a spare again, as at launch. Only once the
+        /// app is active: a minute that ran out while it was suspended ends
+        /// on the way back, and `didBecomeActive` seeds it after the resume.
+        private func resume() {
+            guard !isPressed, Platform.isAppActive else { return }
+            EmailWebView.warmProcess()
+        }
+
+        /// Whether the pool is holding back: in the background, or within a
+        /// minute of a memory warning. Nothing is parked, rendered ahead or
+        /// kept spare while it is, and a frame let go is simply let go. Asks
+        /// to render ahead are dropped, not queued for later. The app's state
+        /// is read as it is, not copied: the pool can first be asked for
+        /// while the app is already in the background.
+        var isPressed: Bool { !Platform.isAppOnScreen || relief != nil }
+
+        /// Let go of every frame nothing is showing: the parked ones in both
+        /// tiers, the spares, and the measurer's frame when no pass is using
+        /// it, with nothing more rendered ahead until somebody asks again.
+        /// Frames on screen are checked out, so a reader open now keeps its
+        /// mail.
+        private func drain() {
+            FramePrewarmer.shared.wipe()
+            wipeAll()
+            FrameMeasurer.shared.releaseIdleFrame()
+        }
+    #else
+        var isPressed: Bool { false }
+    #endif
 
     /// Whether a frame for this document is parked, in either tier.
     func holds(_ key: Key) -> Bool { frames[key] != nil }
+
+    /// Whether any frame of this message (a pool key) is parked, whatever
+    /// document or policy it holds.
+    func holds(message: String) -> Bool { frames.keys.contains { $0.message == message } }
 
     /// A parked frame holding exactly this document, or nil. Checkout REMOVES it,
     /// which is the whole answer to a frame being in use: two views of one message
@@ -2029,6 +2133,10 @@ final class WebFramePool {
     }
 
     func checkIn(_ entry: Entry, key: Key, prerendered: Bool = false) {
+        guard !isPressed else {
+            Self.discard(entry)
+            return
+        }
         entry.relay.owner = nil
         entry.webView.removeFromSuperview()
         // Settle back to the state a fresh open expects: a frame parked with its
@@ -2096,8 +2204,13 @@ final class WebFramePool {
     /// message needs one. Construction alone warms nothing — measured: a spare
     /// built and never loaded still pays the full seventy — so the empty load
     /// IS the warming, and it holds: a spare that has sat idle for ninety
-    /// seconds is still within a millisecond or two of a hot one.
-    private static let spareTarget = 2
+    /// seconds is still within a millisecond or two of a hot one. One on the
+    /// phone, which opens one message at a time.
+    #if os(iOS)
+        private static let spareTarget = 1
+    #else
+        private static let spareTarget = 2
+    #endif
     private var spares: [Entry] = []
     private var refilling = false
 
@@ -2105,7 +2218,7 @@ final class WebFramePool {
     /// session is not the one that waits for a content process. Does nothing
     /// once there is anything to hand out.
     func seedSpare(_ build: @MainActor () -> Entry) {
-        guard spares.isEmpty else { return }
+        guard spares.isEmpty, !isPressed else { return }
         spares.append(build())
     }
 
@@ -2121,12 +2234,12 @@ final class WebFramePool {
     /// took one. The build is only a few milliseconds, but they are the same
     /// few milliseconds the scroll is trying to use.
     func replenishSpares(_ build: @escaping @MainActor () -> Entry) {
-        guard !refilling, spares.count < Self.spareTarget else { return }
+        guard !refilling, spares.count < Self.spareTarget, !isPressed else { return }
         refilling = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.refilling = false }
-            while self.spares.count < Self.spareTarget {
+            while self.spares.count < Self.spareTarget, !self.isPressed {
                 self.spares.append(build())
                 // One per turn: two content processes starting at once, during
                 // a scroll, is the thing being avoided.
@@ -2235,8 +2348,15 @@ final class FramePrewarmer {
         let width: CGFloat
     }
     private var neighbours: [Neighbour] = []
-    private var running = false
+    /// The generation whose loop is running, if one is. One loop per
+    /// generation: a wipe's new one does not wait for the old loop to come
+    /// back from whatever it is awaiting.
+    private var runningGen: Int?
     private var inflight: Set<WebFramePool.Key> = []
+    /// Gives up on the load a render is waiting for, for a wipe: the frame is
+    /// dropped now rather than at the load deadline. Left in place after the
+    /// load lands, where calling it does nothing.
+    private var abandonLoad: (() -> Void)?
     /// Bumped by `wipe`: an account switch must abandon the queue AND refuse
     /// to park anything a render started under the old account.
     private var generation = 0
@@ -2251,6 +2371,7 @@ final class FramePrewarmer {
 
     /// The threads worth a frame, in priority order. Replaces the queue.
     func want(_ threadIds: [String]) {
+        guard !WebFramePool.shared.isPressed else { return }
         var seen = Set<String>()
         queue = threadIds.filter { !$0.isEmpty && seen.insert($0).inserted }
         kick()
@@ -2266,16 +2387,28 @@ final class FramePrewarmer {
     /// it, once per message, all the way up a long thread. Rendered here
     /// first, the mount is a pool hit and the message is simply there.
     func ahead(_ messages: [ClientMessage], style: ThreadStyle, width: CGFloat) {
-        guard width > 0 else { return }
-        neighbours = messages.map { Neighbour(message: $0, style: style, width: width) }
+        guard width > 0, !WebFramePool.shared.isPressed else { return }
+        // Only what still needs a frame counts against the budget: a
+        // plain-text message is drawn without one, and one already parked
+        // is a pool hit as it is.
+        let framed = messages.filter {
+            !($0.html ?? "").isEmpty && !WebFramePool.shared.holds(message: style.frameKey($0.id))
+        }
+        neighbours = framed.prefix(WebFramePool.aheadBudget).map {
+            Neighbour(message: $0, style: style, width: width)
+        }
         kick()
     }
 
-    /// Account switch: nothing queued belongs to the new daemon.
+    /// Account switch: nothing queued belongs to the new daemon. And a pool
+    /// drain: nothing more is rendered ahead until the board or the reader
+    /// asks again.
     func wipe() {
         generation &+= 1
         queue.removeAll()
         neighbours.removeAll()
+        abandonLoad?()
+        abandonLoad = nil
         nudged?.cancel()
         nudged = nil
     }
@@ -2288,9 +2421,15 @@ final class FramePrewarmer {
         nudged?.cancel()
         nudged = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
-            guard let self, !Task.isCancelled else { return }
-            self.queue.removeAll { $0 == threadId }
-            self.queue.insert(threadId, at: 0)
+            guard let self, !Task.isCancelled, !WebFramePool.shared.isPressed else { return }
+            #if os(iOS)
+                // One frame ahead here (an iPad pointer on a record): the record
+                // the pointer rests on now, not the ones it crossed to get there.
+                self.queue = [threadId]
+            #else
+                self.queue.removeAll { $0 == threadId }
+                self.queue.insert(threadId, at: 0)
+            #endif
             self.kick()
         }
     }
@@ -2298,19 +2437,24 @@ final class FramePrewarmer {
     /// Render these next, ahead of whatever the board wants, without
     /// replacing its queue: a lesson about to ask for a click on them.
     func prefer(_ threadIds: [String]) {
+        guard !WebFramePool.shared.isPressed else { return }
         let ids = threadIds.filter { !$0.isEmpty }
         queue.removeAll { ids.contains($0) }
         queue.insert(contentsOf: ids, at: 0)
         kick()
     }
 
+    /// Under pressure an ask is dropped at the door (`want`, `ahead`, `nudge`,
+    /// `prefer`) rather than kept: by the time the pool can hold frames again
+    /// it would be about where the reader was. The drain empties what was
+    /// queued before.
     private func kick() {
-        guard !running else { return }
-        running = true
+        guard !WebFramePool.shared.isPressed, runningGen != generation else { return }
         let gen = generation
+        runningGen = gen
         Task { @MainActor [weak self] in
-            defer { self?.running = false }
-            while let self, gen == self.generation,
+            defer { if let self, self.runningGen == gen { self.runningGen = nil } }
+            while let self, gen == self.generation, !WebFramePool.shared.isPressed,
                 !(self.queue.isEmpty && self.neighbours.isEmpty)
             {
                 if !self.neighbours.isEmpty {
@@ -2349,6 +2493,10 @@ final class FramePrewarmer {
         // out, so the pool cannot see it, and rendering a second copy would
         // only be discarded when the first comes back.
         guard store.threadId != threadId else { return }
+        // A thread the cache is leaving alone (declined, or not loading) has no
+        // frame to make. The board asks for its top rows every poll tick, and
+        // `fetch` would go to the daemon for it each time.
+        guard !ThreadPrefetch.shared.isWithheld(threadId) else { return }
         guard let view = try? await ThreadPrefetch.shared.fetch(threadId),
             gen == generation, view.cache_allowed == true,
             let message = view.messages.last, let html = message.presented().html, !html.isEmpty
@@ -2397,8 +2545,15 @@ final class FramePrewarmer {
         inflight.insert(renderKey)
         defer { inflight.remove(renderKey) }
 
-        let entry = WebFramePool.shared.takeSpare() ?? EmailWebViewRepresentable.buildFrame()
-        WebFramePool.shared.replenishSpares(EmailWebViewRepresentable.buildSpare)
+        // ON THE PHONE, NOT THE SPARE: it has one, and it is for the card that
+        // mounts next, where a cold frame is a blank box. Off screen the
+        // content process starting up costs nobody a look at anything.
+        #if os(iOS)
+            let entry = EmailWebViewRepresentable.buildFrame()
+        #else
+            let entry = WebFramePool.shared.takeSpare() ?? EmailWebViewRepresentable.buildFrame()
+            WebFramePool.shared.replenishSpares(EmailWebViewRepresentable.buildSpare)
+        #endif
         let webView = entry.webView
         webView.navigationDelegate = entry.relay
         webView.uiDelegate = entry.relay
@@ -2411,6 +2566,7 @@ final class FramePrewarmer {
             onHeight: { _ in }, onLoaded: {}, onQuotedFound: { _ in }, onLink: { _ in })
         let landed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let once = Once()
+            abandonLoad = { once.run { continuation.resume(returning: false) } }
             coordinator.onLoaded = { once.run { continuation.resume(returning: true) } }
             coordinator.attach(entry.relay)
             coordinator.load(

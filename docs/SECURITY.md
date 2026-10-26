@@ -261,8 +261,8 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   one function that keeps them (`request_archive_access_conn`): ten rows per
   call, twenty `archive_access` jobs outstanding per account, and
   `triage.agent.archive_access_daily_cap` (default 50) a day, charged on top of
-  the total and background budgets. Nothing is queued once today's background
-  budget is spent. A check that has been deferred even once loses its place
+  the total and access-lane budgets. Nothing is queued once today's access
+  budget, or the total, is spent. A check that has been deferred even once loses its place
   ahead of ordinary background work. The thread READ itself (`thread_view`,
   which is also how create_draft and send_email check a reply target) queues
   nothing for an archive row, and neither does the source repair the triage
@@ -477,9 +477,10 @@ spam it is told to distrust: everything the agent reads is text it may act on.
   silent full listing.
 - **The page's rows carry the mail's own words, and only there.** Nothing
   triaged a spam row, so its `one_line` is the empty string and the page would
-  be a column of senders against a blank. `attention_updates` fills `subject`
-  and `preview` (the stored 200-character snippet) on `SpamScope::Only` and on
-  nothing else. Both are `Option`, skipped when `None`, so the agent door's
+  be a column of senders against a blank. The human door's listing
+  (`human_agent_updates`) fills `subject` and `preview` (the stored
+  200-character snippet) on the rows it serves, spam or not. Both are
+  `Option`, skipped when `None`, so the agent door's
   `Update` never grows the keys at all — the same discipline `from_name` holds,
   for the sharper version of its reason: this is text out of the corpus written
   to talk readers into things. A person reading their own spam folder expects

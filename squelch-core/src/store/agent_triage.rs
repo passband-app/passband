@@ -6,7 +6,11 @@ use crate::{error::Result, types::AccountId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Default` is for the synthetic job the doors and the evidence reader
+/// build to call `load_agent_context` for a message: every field but the
+/// account and the message is irrelevant there, and a new column should not
+/// touch those sites.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentJob {
     pub id: i64,
     pub account_id: AccountId,
@@ -15,8 +19,22 @@ pub struct AgentJob {
     pub trigger: String,
     pub lease_token: String,
     pub attempts: i64,
+    /// What the previous attempt ended with, or what pushed the job back
+    /// since: every retry (`retry_agent_job`) and every deferral
+    /// (`defer_agent_job`: a cooldown, a spent budget) writes it, a hand-back
+    /// (`release_agent_job`) leaves it, and no claim clears it. `None` on a
+    /// first attempt. The worker reads it to tell a second consecutive
+    /// timeout from a first; a deferral between two timeouts breaks that
+    /// chain and buys the job one more try, a cheaper rule than a counter
+    /// column for an interleaving that is rare.
+    pub last_error: Option<String>,
     pub arrival_eligible: bool,
-    /// First classification of a newly ingested ordinary message; independent of push eligibility.
+    /// The store's foreground lane: the first classification of a newly
+    /// ingested ordinary message, a heal of such an arrival while it is
+    /// still unclassified, or a person's one-message request. Independent of
+    /// push eligibility. The claim serves it first, the daily budget
+    /// reserves for it, and the onboarding effort follows it
+    /// (`Stage2Config::effort_for_job`).
     pub foreground: bool,
 }
 
@@ -33,6 +51,14 @@ pub struct AgentMessage {
     /// column: it is also true of the user's own mail that landed in the inbox.
     pub is_sent: bool,
     pub is_spam: bool,
+    /// The store's `is_sent` column: Gmail's SENT label on a sighting that
+    /// is not also INBOX, so mail the owner copied to themselves reads as
+    /// received. Narrower than `is_sent` above, which also takes the owner's
+    /// mail that landed in the inbox without an authentication verdict,
+    /// which anyone can send. Not part of the model's view or the content
+    /// snapshot.
+    #[serde(skip)]
+    pub labelled_sent: bool,
     pub status: String,
     pub notify_eligible_at: Option<String>,
     pub opened_at: Option<String>,
@@ -231,13 +257,30 @@ pub trait AgentTriageStore: Send + Sync {
         arrival_eligible: bool,
     ) -> Result<()>;
     /// `investigation` claims full triage and access assessments;
-    /// `initial_investigation` excludes autonomous revisits.
+    /// `initial_investigation` excludes autonomous revisits. Every kind gets
+    /// `lease_seconds`: [`Self::claim_agent_job_sized`] with one lease.
     fn claim_agent_job(
         &self,
         account: AccountId,
         kind: &str,
         now: DateTime<Utc>,
         lease_seconds: i64,
+    ) -> Result<Option<AgentJob>> {
+        self.claim_agent_job_sized(account, kind, now, lease_seconds, lease_seconds)
+    }
+    /// The claim, with a lease of its own for an `access` job: one call
+    /// under the short access deadline, where an investigation's lease
+    /// covers a whole run, so a process that dies mid-check holds the thread
+    /// for seconds, not the run's minutes. A claim cannot know which kind it
+    /// will get before it looks, so both leases are passed and the row's
+    /// kind picks.
+    fn claim_agent_job_sized(
+        &self,
+        account: AccountId,
+        kind: &str,
+        now: DateTime<Utc>,
+        lease_seconds: i64,
+        access_lease_seconds: i64,
     ) -> Result<Option<AgentJob>>;
     /// WHEN THE NEXT JOB OF EACH OF `kinds` IS DUE: one row per kind with a
     /// pending job, carrying the time [`Self::claim_agent_job`] would first
@@ -299,6 +342,17 @@ pub trait AgentTriageStore: Send + Sync {
         available_at: DateTime<Utc>,
         error_code: &str,
     ) -> Result<bool>;
+    /// Hand a leased job back: queued, due at `available_at`, `last_error`
+    /// as it was, the attempt the lease took KEPT. A hand-back is not a push-back: an
+    /// `archive_access` check keeps its place at the head of the claim
+    /// order, which reads `last_error IS NULL` (see `CLAIM_JOB_SQL`); the
+    /// door's wait, which reads `attempts = 0` as untouched, sees it as
+    /// picked up, which it was. The attempt is kept so a job interrupted
+    /// again and again (a lane dropped on every poll failure, a run that
+    /// panics) runs out of attempts like any other rather than bouncing for
+    /// ever on a refunded one. The worker's drop guard, for a run dropped
+    /// before it decided; a stale lease changes nothing.
+    fn release_agent_job(&self, job: &AgentJob, available_at: DateTime<Utc>) -> Result<bool>;
     fn agent_fye(
         &self,
         account: AccountId,

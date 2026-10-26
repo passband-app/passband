@@ -94,12 +94,26 @@ pub async fn fye_headline(
     let Some(client) = state.fye_headline.clone() else {
         return Ok(none());
     };
-    let today = query
-        .today
-        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d (%A)").to_string())
-        .chars()
-        .take(40)
-        .collect::<String>();
+    // The app sends its own local day. Anything that does not gets the
+    // owner's day (#526), not UTC's, which is tomorrow by an American evening.
+    let today = match query.today {
+        Some(today) => today,
+        None => store_call(&state, |store, account| store.owner_zone(account))
+            .await
+            .map(|zone| squelch_core::owner_clock::OwnerClock::new(Utc::now(), zone))
+            .unwrap_or_else(|_| {
+                squelch_core::owner_clock::OwnerClock::new(
+                    Utc::now(),
+                    squelch_core::owner_clock::OwnerZone::UTC,
+                )
+            })
+            .local_now()
+            .format("%Y-%m-%d (%A)")
+            .to_string(),
+    }
+    .chars()
+    .take(40)
+    .collect::<String>();
     let ranking = state.triage_config.ranking.clone();
     let policy = state.shipment_policy;
     let now = Utc::now();
@@ -326,8 +340,8 @@ pub async fn decision(
 ) -> Result<impl IntoResponse, ApiError> {
     let view = store_call(&state, move |store, account| {
         let context = store.load_agent_context(&squelch_core::store::agent_triage::AgentJob {
-            id: 0, account_id: account, message_id, kind: "triage".into(), trigger: "inspect".into(),
-            lease_token: String::new(), attempts: 0, arrival_eligible: false, foreground: false,
+            account_id: account, message_id, kind: "triage".into(), trigger: "inspect".into(),
+            ..Default::default()
         })?;
         let diagnostics = store.agent_diagnostics(account, message_id)?;
         let fast_notification = store.latest_notification_assessment(account, message_id,

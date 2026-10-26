@@ -1613,6 +1613,13 @@ CREATE TABLE IF NOT EXISTS agent_message_decisions (
     decided_at TEXT NOT NULL,
     PRIMARY KEY(account_id,message_id)
 );
+-- The few decisions that can hold FYE on their own (`auth_fye_threads_cte!`):
+-- a partial index on EXACTLY the expression that query filters by, so FYE
+-- membership never parses every decision in the mailbox. Guarded by
+-- `json_valid` inside a CASE (evaluated lazily, unlike AND): an index
+-- expression that raised on malformed JSON would make that row's INSERT fail.
+CREATE INDEX IF NOT EXISTS idx_decisions_critical ON agent_message_decisions(account_id, message_id)
+    WHERE CASE WHEN json_valid(decision_json) THEN json_extract(decision_json,'$.auth.critical') END = 1;
 CREATE TABLE IF NOT EXISTS agent_message_destinations (
     account_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,

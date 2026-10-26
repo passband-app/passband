@@ -612,9 +612,9 @@ final class AppStore {
     /// Model/Badge.swift.
     var sitrep = SitrepData() {
         didSet {
-            // Every sealed list lands here (the full pull and the sealed-only
-            // refresh alike), which is what settles verdict writes and moves
-            // the old device-local ledger up to a daemon that keeps verdicts.
+            // The threads `ThreadPrefetch` refuses follow both signals: the
+            // sealed list and the feed rows' own decisions. (Verdict writes
+            // settle in `AuthDecisions.listed`, which the poller calls.)
             if sitrep.sealed != oldValue.sealed || sitrep.standing != oldValue.standing {
                 authThreadIds = AuthPolicy.authThreadIds(standing: sitrep.standing, sealed: sitrep.sealed)
             }

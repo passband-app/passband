@@ -67,7 +67,7 @@ Not auth (prompt re-routes, no auth kinds unless a code or link of its own):
   informational.
 - Security incidents: as v11.
 
-`PROMPT_VERSION` = `agent-triage-v12`.
+`PROMPT_VERSION` = `agent-triage-v13`.
 
 ### The kind a client sees
 
@@ -89,15 +89,20 @@ Only a NON-critical `login_alert` can be explained. `account_change`,
 when ALL hold:
 
 - E is either
-  - an `otp` or `sign_in_link` message the owner has revealed or copied
-    (an audited reveal row exists for it), from the same service as M; or
-  - a `signin_receipt` from an identity provider on a fixed allowlist
-    (google.com, apple.com, microsoft.com) whose subject names M's service as
-    a whole word;
+  - an `otp` or `sign_in_link` message the owner revealed (an audited
+    reveal row for it, dated no later than 60 seconds after M arrived), from
+    the same service as M; or
+  - Google's own sign-in receipt: sender exactly `noreply-accounts@google.com`
+    and subject exactly "You shared some Google Account data with <App>",
+    where <App> (and only <App>) names M's service. Google hosts mail other
+    people write (Docs shares, Calendar, Forms), so the domain alone proves
+    nothing. Apple and Microsoft receipts are not used (none in the survey,
+    templates unverified);
 - E passed sender authentication (`messages.auth_pass = 1`);
 - E arrived before M, or at most 60 seconds after it, and at most 5 minutes
   before it;
-- E has no `not_mine` verdict;
+- E has no `not_mine` verdict, and M has no verdict at all (a ruled alert is
+  never explained);
 - E is judged by its priority-picked kind (an alert that also lists a code
   kind does not become an explainer).
 
@@ -105,6 +110,8 @@ Same service = same registrable domain under the public suffix list (the
 `psl` crate already in Cargo.lock), so `*.firebaseapp.com`, `*.myshopify.com`
 and other shared hosts are separate services. Relay addresses never match.
 Alerts never explain alerts. Critical changes are never explained.
+Residual risk, accepted: an attacker-triggered code the owner reveals just
+before the attacker's sign-in still explains it.
 Computed at read time in Rust, reading done auth rows only within the window
 of an open alert.
 
@@ -124,10 +131,13 @@ critical message or one ruled `not_mine` (it is evidence).
 
 Replaces the blanket exclusion. Auth mail is in FYE when the owner pinned it
 or a reminder fired (unchanged), OR its verdict is `not_mine`, OR it is
-critical with no verdict. A `mine` verdict takes it out (an explicit pin
+critical with no verdict, unless its sender explicitly failed
+authentication (`auth_pass = 0`; NULL still counts). A `mine` verdict takes it out (an explicit pin
 still wins). FYE is thread-level: a thread qualifies when ANY of its not-done
 auth messages does. Archiving one auth message never clears an unruled
-critical message in the same thread. Not done, not archived, as for all FYE. One predicate shared by
+critical message, or a `not_mine` message, in the same thread. The FYE row
+shows the qualifying auth message but keeps the thread's own reminder,
+snooze and activity time. Not done, not archived, as for all FYE. One predicate shared by
 the FYE list and `placement`; a test pins that they agree. The FYE headline
 still never uses auth mail. The agent door's access rules are unchanged:
 restricted mail never reaches it, wherever it is placed.

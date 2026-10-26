@@ -606,6 +606,9 @@ struct SitrepView: View {
             },
             KeyBinding("v", "fix triage") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 store.openTriageFix(
                     TriageFixTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line))
@@ -615,10 +618,16 @@ struct SitrepView: View {
             // the list's `t` is never consulted from this page.
             KeyBinding("t", "tune sender") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 Actions.tune(sender: u.sender)
             },
             KeyBinding("h", "remind me later") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 store.openRemind(
                     RemindTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line,

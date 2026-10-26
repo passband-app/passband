@@ -821,6 +821,32 @@ async fn sealed_verdict_round_trips_and_moves_fye() {
         assert!(rulings.contains(&Some(detail.to_string())), "{detail}");
     }
 
+    // A refused reveal leaves no reveal row: the pairing reads reveal rows
+    // as "the owner used this code".
+    let response = h
+        .app
+        .clone()
+        .oneshot(authed("POST", &format!("/client/sealed/{other}/reveal")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = h
+        .app
+        .clone()
+        .oneshot(authed("POST", &format!("/client/sealed/{id}/reveal")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let reveals: Vec<Option<String>> = h
+        .store
+        .list_audit(h.acct, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.action == "reveal_sealed")
+        .map(|entry| entry.target)
+        .collect();
+    assert_eq!(reveals, vec![Some(id.to_string())]);
+
     // Not auth mail, or no such message: 404.
     for target in [other, other + 1000] {
         let response = put(

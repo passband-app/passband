@@ -46,7 +46,7 @@ impl SqliteStore {
             auth_verdict_join_sql!(),
             "WHERE m.account_id = ?1
                AND NOT ",
-            auth_fye_sql!(),
+            auth_fye_sql!("m"),
             "
                AND a.access='restricted'
                AND EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.auth.kinds')
@@ -100,7 +100,7 @@ impl SqliteStore {
                 auth_verdict_join_sql!(),
                 "WHERE m.account_id = ?1
                AND NOT ",
-                auth_fye_sql!(),
+                auth_fye_sql!("m"),
                 "
                AND a.access='restricted'
                AND EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.auth.kinds')

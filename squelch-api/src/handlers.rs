@@ -3581,14 +3581,28 @@ pub async fn put_sealed_verdict(
     })
     .await?;
     // A ruling moves FYE and the shredder, so it leaves a row like a reveal
-    // does: the message id and the ruling, nothing from the mail.
-    audit_action(
-        &state,
-        "auth_verdict",
-        Some(message_id.to_string()),
-        verdict.map_or("cleared", |verdict| verdict.as_str()),
-    )
-    .await;
+    // does: the message id and the ruling, nothing from the mail. The ruling
+    // has landed by now, so a failed audit is logged rather than failing a
+    // request whose effect a retry would only repeat.
+    let entry = NewAuditEntry {
+        actor: state.audit_actor.to_string(),
+        action: "auth_verdict".to_string(),
+        target: Some(message_id.to_string()),
+        detail: Some(
+            verdict
+                .map_or("cleared", |verdict| verdict.as_str())
+                .to_string(),
+        ),
+    };
+    if let Err(error) = store_call(&state, move |store, account_id| {
+        store.append_audit(account_id, &entry)
+    })
+    .await
+    {
+        eprintln!(
+            "squelch-api: auth verdict on {message_id} landed but its audit row did not ({error:?})"
+        );
+    }
     Ok(Json(json!({ "id": message_id, "verdict": verdict })))
 }
 
@@ -3615,8 +3629,14 @@ pub async fn reveal_sealed(
     Path(message_id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
     let sealed = store_call(&state, move |store, account_id| {
-        // Audit BEFORE returning the body, recording only the message id so the
-        // log itself never leaks a secret.
+        // Membership FIRST, then the audit, then the body leaves: a reveal
+        // row means a real reveal of auth mail. The Auth page's pairing
+        // reads these rows as "the owner used this code", so a refused
+        // reveal of some other id must leave none (it would read as used if
+        // that message were later classified auth). The audit still lands
+        // before anything is returned, and a failed audit returns nothing.
+        // Only the message id is recorded, so the log never leaks a secret.
+        let body = store.sealed_body(account_id, message_id)?;
         store.append_audit(
             account_id,
             &NewAuditEntry {
@@ -3626,7 +3646,7 @@ pub async fn reveal_sealed(
                 detail: None,
             },
         )?;
-        store.sealed_body(account_id, message_id)
+        Ok(body)
     })
     .await?;
 

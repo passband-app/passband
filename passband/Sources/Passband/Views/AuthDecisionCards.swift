@@ -43,7 +43,7 @@ struct AuthDecisionStack: View {
             case .burst(let b):
                 AuthBurstCard(
                     burst: b,
-                    onAllMine: { for m in b.items { decisions.set(m, .mine) } },
+                    onAllMine: { decisions.setAll(b.items, .mine) },
                     onReviewEach: {
                         withAnimation(Motion.disclose) { expanded.formUnion(b.memberIds) }
                     })
@@ -100,7 +100,7 @@ struct AuthDecisionCard: View {
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
             if meta.isCritical {
-                Text("A change like this can hand someone the account. It stays in For your eyes until you answer.")
+                Text("A change like this can hand someone the account. It stays in For your eyes until you answer it or mark it done.")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)

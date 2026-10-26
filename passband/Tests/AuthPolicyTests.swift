@@ -41,6 +41,8 @@ struct AuthPolicyTests {
         aMissingRouteFallsBackQuietly()
         feedRowsAreAuthByTheirOwnDecision()
         eventsBecomeRevealableMeta()
+        sendersWithNoServiceNeverMakeABurst()
+        theRevealAsksAndOffersUndo()
 
         print("\(checks - failures)/\(checks) checks passed")
         if failures > 0 { exit(1) }
@@ -130,6 +132,9 @@ struct AuthPolicyTests {
             AuthPolicy.burstLine(b),
             AuthPolicy.explainedNote(explainer: nil, service: nil),
             AuthPolicy.explainedNote(explainer: meta(1, .otp), service: "GitHub"),
+            AuthPolicy.questionPrompt(meta(1, .passwordReset)), AuthPolicy.questionPrompt(meta(1, .appGrant)),
+            AuthPolicy.questionPrompt(meta(1, .loginAlert)),
+            AuthPolicy.answeredLine(meta(1, .appGrant), .notMine),
         ] + [SealedKind.loginAlert, .appGrant, .passwordReset].flatMap { k in
             let a = AuthPolicy.answers(meta(1, k))
             return [a.mine, a.notMine]
@@ -294,13 +299,16 @@ struct AuthPolicyTests {
         expect(AuthPolicy.answers(meta(1, .accountChange, critical: true)) == ("That was me", "Not me"), "critical")
         expect(
             AuthPolicy.explainedNote(explainer: meta(9, .otp), service: "GitHub")
-                == "explained by your GitHub code", "a code")
+                == "explained by your recent GitHub sign-in", "a code")
         expect(
             AuthPolicy.explainedNote(explainer: meta(9, .signinReceipt), service: "Google")
-                == "explained by your Google sign-in", "a receipt")
+                == "explained by your recent Google sign-in", "a receipt")
         expect(
             AuthPolicy.explainedNote(explainer: meta(9, .magicLink), service: nil)
-                == "explained by your sign-in link", "no name")
+                == "explained by a sign-in you just made", "no name")
+        expect(
+            AuthPolicy.explainedNote(explainer: nil, service: "GitHub")
+                == "explained by a sign-in you just made", "explainer no longer listed (the usual case)")
     }
 
     // MARK: - ledger migration
@@ -434,6 +442,42 @@ struct AuthPolicyTests {
             """.utf8))
         let m = event.map(AuthPolicy.authMeta(for:))
         expect(m?.id == 77 && m?.thread_id == "t77" && m?.subject == "Sign-in alert", "an auth event reveals message 77")
+    }
+
+    static func sendersWithNoServiceNeverMakeABurst() {
+        let relays = [
+            meta(1, .loginAlert, from: "a1@privaterelay.appleid.com", age: 3 * hour),
+            meta(2, .loginAlert, from: "b2@privaterelay.appleid.com", age: 2 * hour),
+            meta(3, .loginAlert, from: "c3@privaterelay.appleid.com", age: 1 * hour),
+        ]
+        expect(AuthPolicy.bursts(relays).bursts.isEmpty, "three relay senders are not three services")
+        let mixed = [
+            meta(1, .loginAlert, from: "a@google.com", age: 4 * hour),
+            meta(2, .loginAlert, from: "b@github.com", age: 3 * hour),
+            meta(3, .loginAlert, from: "someone@gmail.com", age: 2 * hour),
+            meta(4, .loginAlert, from: "x9@privaterelay.appleid.com", age: 1 * hour),
+        ]
+        let r = AuthPolicy.bursts(mixed)
+        expect(r.bursts.isEmpty, "freemail and relay never make up the third service")
+        expect(r.rest.count == 4, "and nobody is swallowed")
+        expect(AuthPolicy.service("someone@gmail.com") == nil, "a mailbox provider is no service")
+        let real = mixed + [meta(5, .loginAlert, from: "c@slack.com", age: 0.5 * hour)]
+        let b = AuthPolicy.bursts(real).bursts.first
+        expect(b?.services == 3 && b?.memberIds == [1, 2, 5], "a burst of real services leaves the relay and freemail out")
+    }
+
+    static func theRevealAsksAndOffersUndo() {
+        expect(AuthPolicy.offersAnswer(meta(1, .loginAlert)), "a sign-in asks")
+        expect(!AuthPolicy.offersAnswer(meta(1, .loginAlert, explainedBy: 2)), "an explained one does not")
+        expect(AuthPolicy.offersAnswer(meta(1, .loginAlert, age: 30 * day)), "an old one opened on purpose can still be answered")
+        expect(!AuthPolicy.offersAnswer(meta(1, .otp)), "a code does not ask")
+        expect(AuthPolicy.offersAnswer(meta(1, .otp, critical: true)), "unless it is also a critical change")
+        expect(AuthPolicy.questionPrompt(meta(1, .passwordReset)) == "Did you ask for this?", "reset prompt")
+        expect(AuthPolicy.questionPrompt(meta(1, .appGrant)) == "Did you allow this?", "grant prompt")
+        expect(AuthPolicy.answeredLine(meta(1, .appGrant), .mine) == "You said: I allowed it", "answered grant")
+        expect(AuthPolicy.answeredLine(meta(1, .loginAlert), .notMine) == "You said: Not me", "answered sign-in")
+        let tap = AuthPolicy.revealMeta(messageId: 7, threadId: "t7", sender: "a@b.com")
+        expect(tap.id == 7 && !tap.speaksVerdicts, "a tap's meta never claims the daemon keeps verdicts")
     }
 
     // MARK: -

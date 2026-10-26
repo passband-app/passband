@@ -98,7 +98,13 @@ struct MobileAuthView: View {
         store.sitrep.sealed.filter { AuthDecisions.shared.isOpen($0) }
     }
 
-    /// "explained by your GitHub code", on an alert that needs no ruling.
+    /// "You said: That was me", on a row that asked and was answered.
+    private func answeredLine(_ m: SealedMeta) -> String? {
+        guard AuthPolicy.offersAnswer(m), let v = AuthDecisions.shared.decision(m) else { return nil }
+        return AuthPolicy.answeredLine(m, v)
+    }
+
+    /// "explained by your recent GitHub sign-in", on an alert that needs no ruling.
     private func explainedNote(_ m: SealedMeta) -> String? {
         guard AuthPolicy.isExplained(m), let by = m.explained_by else { return nil }
         let explainer = store.sitrep.sealed.first { $0.id == by }
@@ -177,7 +183,7 @@ struct MobileAuthView: View {
                         .font(Typo.zoneTitle)
                         .foregroundStyle(Palette.ink)
                     Spacer()
-                    Text("\(AuthPolicy.cards(open, expanded: expandedBursts).count) open")
+                    Text("\(AuthPolicy.cards(open).count) open")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
                 }
@@ -214,6 +220,8 @@ struct MobileAuthView: View {
                         live: Self.isLive(meta),
                         busy: busy == meta.id,
                         explained: explainedNote(meta),
+                        answered: answeredLine(meta),
+                        onUndo: { AuthDecisions.shared.set(meta, nil) },
                         onReveal: { Task { await reveal(meta) } })
                 }
             }
@@ -253,8 +261,11 @@ struct AuthRow: View {
     let meta: SealedMeta
     let live: Bool
     let busy: Bool
-    /// "explained by your GitHub code", on an alert that needs no ruling.
+    /// "explained by your recent GitHub sign-in", on an alert that needs no ruling.
     var explained: String? = nil
+    /// "You said: That was me", beside an Undo, once answered.
+    var answered: String? = nil
+    var onUndo: () -> Void = {}
     let onReveal: () -> Void
 
     /// The store's own countdown ring for this id, if the arrival flow armed one.
@@ -299,6 +310,18 @@ struct AuthRow: View {
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaintest)
                             .lineLimit(1)
+                    }
+                    if let answered {
+                        HStack(spacing: 8) {
+                            Text(answered)
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkFaint)
+                                .lineLimit(1)
+                            Button("Undo", action: onUndo)
+                                .font(Typo.micro)
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Palette.accent)
+                        }
                     }
                 }
 

@@ -514,7 +514,8 @@ private struct PracticeRailShake: GeometryEffect {
 /// OPEN AUTH DECISIONS: how many questions are still waiting on "was this
 /// you?". Filtered by `AuthDecisions.isOpen` and grouped by `AuthPolicy.cards`,
 /// the same two the Auth page's rail lists by, so the number here is the number
-/// of cards there (a burst of new-device alerts is one). Danger-toned while a
+/// of decisions there, counted the same way the page's header counts them
+/// (a burst of new-device alerts is one, laid out for review or not). Danger-toned while a
 /// critical change is among them. Nothing drawn at zero: an empty badge is noise
 /// on the one icon that should only ever get loud for a reason.
 private struct AuthDecisionBadge: View {

@@ -2140,8 +2140,8 @@ fn sealed_rows(
         concat!(
             "SELECT m.id, m.account_id, m.thread_id, m.from_addr, m.subject, m.received_at,
                     s.message_id IS NOT NULL, json_extract(d.decision_json,'$.auth'), t.sealed_kind,
-                    v.verdict, COALESCE(m.auth_pass,0)=1,
-                    EXISTS(SELECT 1 FROM audit_log al WHERE al.account_id=m.account_id
+                    v.verdict, m.auth_pass,
+                    (SELECT MIN(al.ts) FROM audit_log al WHERE al.account_id=m.account_id
                            AND al.action='reveal_sealed' AND al.target=CAST(m.id AS TEXT))
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
@@ -2154,7 +2154,8 @@ fn sealed_rows(
     );
     let mut params: Vec<&dyn rusqlite::ToSql> = vec![&account_id];
     params.extend(extra.iter().map(|value| value as &dyn rusqlite::ToSql));
-    let mut stmt = conn.prepare(&sql)?;
+    // Cached: the done-row read runs once per merged alert window.
+    let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt
         .query_map(params.as_slice(), |r| {
             let auth = SealedAuth::read(
@@ -2166,6 +2167,10 @@ fn sealed_rows(
                 .get::<_, Option<String>>(9)?
                 .as_deref()
                 .and_then(crate::types::AuthVerdict::parse);
+            let auth_pass: Option<bool> = r.get(10)?;
+            // Effective, as FYE reads it (`auth_critical_sql!`): a sender
+            // that explicitly failed authentication makes no critical change.
+            let critical = auth.critical && auth_pass != Some(false);
             let message = SealedMessage {
                 id: r.get(0)?,
                 account_id: r.get(1)?,
@@ -2174,7 +2179,7 @@ fn sealed_rows(
                 subject: r.get(4)?,
                 received_at: dt(r, 5)?,
                 sealed_kind: auth.wire_kind,
-                critical: auth.critical,
+                critical,
                 verdict,
                 explained_by: None,
             };
@@ -2184,10 +2189,11 @@ fn sealed_rows(
                 subject: message.subject.clone(),
                 received_at: message.received_at,
                 kinds: auth.kinds,
-                critical: auth.critical,
-                auth_pass: r.get(10)?,
-                revealed: r.get(11)?,
+                critical,
+                auth_pass: auth_pass == Some(true),
+                revealed_at: dt_opt(r, 11)?,
                 not_mine: verdict == Some(crate::types::AuthVerdict::NotMine),
+                ruled: verdict.is_some(),
             };
             Ok((message, pairing))
         })?

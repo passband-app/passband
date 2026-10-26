@@ -180,58 +180,86 @@ final class AuthDecisions {
         local = next
         pending = [:]
         lastRows = []
+        daemonKeepsVerdicts = false
         migrationTried = []
         migrating = false
     }
 
+    /// Whether the daemon keeps verdicts, read off the last SEALED LIST only
+    /// (a row there carries `critical`). Never off a meta built from a feed
+    /// row or a notification, which says nothing about the daemon.
+    private(set) var daemonKeepsVerdicts = false
+
     /// The verdict for a message, or nil while it is still open.
     func decision(_ m: SealedMeta) -> AuthVerdict? {
         if let p = pending[m.id] { return p.verdict }
-        if m.speaksVerdicts, let v = m.serverVerdict { return v }
+        if daemonKeepsVerdicts {
+            // The listed row is the truth; a meta built elsewhere may lag it.
+            let row = lastRows.first { $0.id == m.id } ?? m
+            if let v = row.serverVerdict { return v }
+        }
         // On a new daemon this is a verdict still waiting to be uploaded; on an
         // old one it is the only copy there is.
         return local[m.id]
     }
 
-    /// Record a verdict (nil clears it). Asymmetric by design: `mine` just
-    /// resolves the card, while `notMine` starts an investigation, and the
-    /// caller opens the message.
+    /// Record a verdict (nil clears it: Undo). Asymmetric by design: `mine`
+    /// just resolves the card, while `notMine` starts an investigation, and
+    /// the caller opens the message.
     func set(_ m: SealedMeta, _ verdict: AuthVerdict?) {
-        guard Self.key != nil else { return }
+        setAll([m], verdict)
+    }
+
+    /// The same for several at once ("All me" on a burst): every PUT, then ONE
+    /// sealed refresh, rather than a list fetch per member.
+    func setAll(_ ms: [SealedMeta], _ verdict: AuthVerdict?) {
+        guard Self.key != nil, !ms.isEmpty else { return }
         let epoch = AppStore.shared.epoch
-        pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: nil)
+        for m in ms { pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: nil) }
         Task { @MainActor in
-            // BEFORE the send as well as after it: an account switch between
-            // the tap and this task would hand the old daemon's message id to
-            // the new one, a verdict on an unrelated message there.
-            guard AppStore.shared.isCurrent(epoch) else { return }
-            do {
-                try await APIClient.shared.putSealedVerdict(m.id, verdict: verdict?.rawValue)
+            var accepted = false
+            for m in ms {
+                // BEFORE each send as well as after it: an account switch
+                // between the tap and this task would hand the old daemon's
+                // message id to the new one, a verdict on an unrelated message.
                 guard AppStore.shared.isCurrent(epoch) else { return }
-                // Only a list fetched from here on can confirm it.
-                if pending[m.id]?.verdict == verdict {
-                    pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: fetchSeq)
-                }
-                // Any local copy is superseded by the server's.
-                writeLocal { $0.removeValue(forKey: m.id) }
-                await SitrepPoller.shared.refreshSealed()
-            } catch let error as APIError
-                where AuthPolicy.fallsBackToLedger(
-                    status: error.status,
-                    stillListed: !m.speaksVerdicts || lastRows.contains { $0.id == m.id })
-            {
-                // No verdict route (an older daemon, or one rolled back under
-                // us): this device keeps it, quietly.
-                guard AppStore.shared.isCurrent(epoch) else { return }
-                writeLocal { map in
-                    if let verdict { map[m.id] = verdict } else { map.removeValue(forKey: m.id) }
-                }
-                pending.removeValue(forKey: m.id)
-            } catch {
-                guard AppStore.shared.isCurrent(epoch) else { return }
-                pending.removeValue(forKey: m.id)
-                AppStore.shared.pushToast(errText(error, "could not save that answer"), .error)
+                if await write(m, verdict, epoch: epoch) { accepted = true }
             }
+            guard accepted, AppStore.shared.isCurrent(epoch) else { return }
+            await SitrepPoller.shared.refreshSealed()
+        }
+    }
+
+    /// One PUT and its outcome. True when the server accepted it.
+    private func write(_ m: SealedMeta, _ verdict: AuthVerdict?, epoch: Int) async -> Bool {
+        do {
+            try await APIClient.shared.putSealedVerdict(m.id, verdict: verdict?.rawValue)
+            guard AppStore.shared.isCurrent(epoch) else { return false }
+            // Only a list fetched from here on can confirm it.
+            if pending[m.id]?.verdict == verdict {
+                pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: fetchSeq)
+            }
+            // Any local copy is superseded by the server's.
+            writeLocal { $0.removeValue(forKey: m.id) }
+            return true
+        } catch let error as APIError
+            where AuthPolicy.fallsBackToLedger(
+                status: error.status,
+                stillListed: !daemonKeepsVerdicts || lastRows.contains { $0.id == m.id })
+        {
+            // No verdict route (an older daemon, or one rolled back under
+            // us): this device keeps it, quietly.
+            guard AppStore.shared.isCurrent(epoch) else { return false }
+            writeLocal { map in
+                if let verdict { map[m.id] = verdict } else { map.removeValue(forKey: m.id) }
+            }
+            pending.removeValue(forKey: m.id)
+            return false
+        } catch {
+            guard AppStore.shared.isCurrent(epoch) else { return false }
+            pending.removeValue(forKey: m.id)
+            AppStore.shared.pushToast(errText(error, "could not save that answer"), .error)
+            return false
         }
     }
 
@@ -252,6 +280,11 @@ final class AuthDecisions {
     func listed(_ rows: [SealedMeta], fetch: Int) {
         appliedFetch = max(appliedFetch, fetch)
         lastRows = rows
+        // An empty list says nothing either way; keep what the last one said.
+        if !rows.isEmpty {
+            let keeps = rows.contains(where: \.speaksVerdicts)
+            if keeps != daemonKeepsVerdicts { daemonKeepsVerdicts = keeps }
+        }
         if !pending.isEmpty {
             let next = AuthPolicy.settle(pending, rows: rows, fetch: fetch)
             if next != pending { pending = next }

@@ -110,7 +110,16 @@ enum AuthPolicy {
 
     /// Second-level labels that sit under a two-letter country code as a
     /// registry, not a service (`co.uk`, `com.au`): the service is one label
-    /// further in. The daemon's pairing uses the same list.
+    /// further in. A heuristic, enough for counting bursts; the daemon's
+    /// pairing uses the public suffix list.
+    /// Mailbox providers, not services: a sign-in alert from a person's own
+    /// address at one of these names no service at all.
+    static let freemail: Set<String> = [
+        "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
+        "yahoo.com", "icloud.com", "me.com", "mac.com", "aol.com", "proton.me",
+        "protonmail.com", "gmx.com", "fastmail.com",
+    ]
+
     static let countryRegistries: Set<String> = [
         "co", "com", "net", "org", "gov", "ac", "edu", "ne", "or",
     ]
@@ -118,7 +127,8 @@ enum AuthPolicy {
     /// The registrable domain of a sender, as the daemon's pairing reads it:
     /// the last two labels of the address's domain, lowercased, or three under
     /// a country registry (`amazon.co.uk`). nil for anything that is not an
-    /// address, and for Apple's private relay, which is every service at once.
+    /// address, for Apple's private relay (every service at once), and for a
+    /// mailbox provider (`freemail`).
     static func service(_ sender: String) -> String? {
         var addr = sender
         if let open = addr.lastIndex(of: "<"), let close = addr.lastIndex(of: ">"), open < close {
@@ -140,7 +150,8 @@ enum AuthPolicy {
             labels.count >= 3 && labels[labels.count - 1].count == 2
                 && countryRegistries.contains(labels[labels.count - 2])
             ? 3 : 2
-        return labels.suffix(take).joined(separator: ".")
+        let registrable = labels.suffix(take).joined(separator: ".")
+        return freemail.contains(registrable) ? nil : registrable
     }
 
     // MARK: - cards
@@ -180,7 +191,11 @@ enum AuthPolicy {
     /// on by one alert.
     static func bursts(_ open: [SealedMeta]) -> (bursts: [Burst], rest: [SealedMeta]) {
         let dated: [(m: SealedMeta, at: Date)] = open.compactMap { m in
+            // No service, no burst: a relay or a mailbox provider could be any
+            // number of services, so it neither counts toward the distinct
+            // services nor joins one by itself.
             guard !m.isCritical, let kind = m.kind, burstKinds.contains(kind),
+                service(m.sender) != nil,
                 let at = Fmt.date(m.received_at)
             else { return nil }
             return (m, at)
@@ -196,7 +211,7 @@ enum AuthPolicy {
                 j += 1
             }
             let run = dated[i...j].map(\.m)
-            let services = Set(run.map { service($0.sender) ?? $0.sender.lowercased() })
+            let services = Set(run.compactMap { service($0.sender) })
             if services.count >= burstMinServices {
                 out.append(Burst(items: run.reversed(), services: services.count))
                 grouped.formUnion(run.map(\.id))
@@ -266,17 +281,50 @@ enum AuthPolicy {
     /// The quiet note on an explained row. `explainer` is the message that
     /// explains it, when it is still listed, and `service` the name to call
     /// that sender by.
+    ///
+    /// Worded to be true whichever explained it (a code the owner revealed, a
+    /// sign-in link, or Google's receipt naming the service), and whether or
+    /// not the explainer is still listed (it usually is not: done mail leaves
+    /// the sealed list).
     static func explainedNote(explainer: SealedMeta?, service: String?) -> String {
-        guard let explainer else { return "explained by a code that came with it" }
-        let noun: String
-        switch explainer.kind {
-        case .magicLink: noun = "sign-in link"
-        case .passwordReset: noun = "reset"
-        case .signinReceipt: noun = "sign-in"
-        default: noun = "code"
+        if explainer != nil, let service, !service.isEmpty {
+            return "explained by your recent \(service) sign-in"
         }
-        if let service, !service.isEmpty { return "explained by your \(service) \(noun)" }
-        return "explained by your \(noun)"
+        return "explained by a sign-in you just made"
+    }
+
+    // MARK: - asking from the reveal
+
+    /// The question a reveal asks, when the message asks one at all.
+    static func questionPrompt(_ m: SealedMeta) -> String {
+        if m.isCritical { return "Was this you?" }
+        switch m.kind {
+        case .passwordReset, .magicLink: return "Did you ask for this?"
+        case .appGrant: return "Did you allow this?"
+        default: return "Was this you?"
+        }
+    }
+
+    /// The answer as given, for the line that offers Undo.
+    static func answeredLine(_ m: SealedMeta, _ verdict: AuthVerdict) -> String {
+        let a = answers(m)
+        return "You said: \(verdict == .mine ? a.mine : a.notMine)"
+    }
+
+    /// Whether a reveal (or a row) offers the question or its Undo: the
+    /// message asks one and nothing explained it. Ignores the window on
+    /// purpose: an old alert opened on purpose can still be answered.
+    static func offersAnswer(_ m: SealedMeta) -> Bool {
+        asksQuestion(m) && !isExplained(m)
+    }
+
+    /// The meta a notification tap reveals with, from what the payload
+    /// carries. The panel fills in subject and kind from the reveal itself.
+    /// `critical` stays nil: this says nothing about what the daemon keeps.
+    static func revealMeta(messageId: Int, threadId: String, sender: String) -> SealedMeta {
+        SealedMeta(
+            id: messageId, thread_id: threadId, sender: sender, subject: "", kind: nil,
+            received_at: "")
     }
 
     // MARK: - ledger migration
@@ -343,10 +391,12 @@ extension AuthPolicy {
     }
 
     /// The auth metadata a For-your-eyes row is drawn and revealed with, or
-    /// nil when the row is not auth mail. The row's own decision decides first,
-    /// so a blank or stale sealed list (the board snapshot an account switch
-    /// paints) never turns it into a normal row; the sealed row, when listed,
-    /// is the second signal and the better source (it carries the verdict).
+    /// nil when the row is not auth mail. Either signal makes it auth: the
+    /// sealed row when listed (preferred, it carries the verdict), else the
+    /// row's own decision, so a blank or stale sealed list (the board snapshot
+    /// an account switch paints) never turns it into a normal row. Whether the
+    /// daemon keeps verdicts is never read off a meta built here
+    /// (`AuthDecisions.daemonKeepsVerdicts` reads the sealed list only).
     static func authMeta(for update: AttentionUpdate, sealed: SealedMeta?) -> SealedMeta? {
         if let sealed { return sealed }
         guard update.isAuthRow else { return nil }

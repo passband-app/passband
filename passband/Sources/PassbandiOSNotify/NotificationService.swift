@@ -276,6 +276,7 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             EventBanner.messageKey: event.message_id,
             EventBanner.authKey: event.isAuth || event.sealed_kind != nil,
             EventBanner.threadKey: event.thread_id,
+            EventBanner.senderKey: event.sender,
         ]
         // Always a chime, and the system's rather than the user's chosen one:
         // the app's sound preference lives in ITS UserDefaults, which this
@@ -307,6 +308,9 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             EventBanner.authKey: event.isAuth || event.sealed_kind != nil,
             EventBanner.accountKey: account,
         ]
+        if event.isAuth || event.sealed_kind != nil {
+            content.userInfo[EventBanner.senderKey] = event.sender
+        }
         // The system default rather than the user's chosen chime: the app's
         // sound preference lives in ITS UserDefaults, which this process does
         // not share. Silencing the kinds the app silences matters more than

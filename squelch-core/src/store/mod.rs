@@ -1277,7 +1277,9 @@ pub struct SealedMessage {
     ///
     /// [`AuthKind::priority_pick`]: crate::triage::decision::AuthKind::priority_pick
     pub sealed_kind: Option<String>,
-    /// A takeover-class account change (`AuthAssessment::is_critical`).
+    /// A takeover-class account change that holds FYE: `AuthAssessment::
+    /// is_critical`, unless the sender explicitly failed authentication
+    /// (`auth_pass = 0`). The value FYE uses (`auth_critical_sql!`).
     pub critical: bool,
     /// The owner's server-side ruling, if they made one.
     pub verdict: Option<crate::types::AuthVerdict>,

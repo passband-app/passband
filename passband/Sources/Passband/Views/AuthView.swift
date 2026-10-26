@@ -55,8 +55,10 @@ struct AuthView: View {
     private var openDecisions: [SealedMeta] {
         visible.filter { decisions.isOpen($0) }
     }
+    /// Counted COLLAPSED, the rule the rail's badge uses too: a burst is one
+    /// decision ("All me") whether or not it is laid out for review.
     private var decisionCards: [AuthPolicy.Card] {
-        AuthPolicy.cards(openDecisions, expanded: expandedBursts)
+        AuthPolicy.cards(openDecisions)
     }
 
     /// Seconds since an ISO stamp; huge when missing/invalid (=> treated old).
@@ -197,6 +199,8 @@ struct AuthView: View {
                 AuthRow(
                     meta: m, selected: i == index, code: codes[m.id] ?? nil,
                     explained: explainedNote(m),
+                    answered: answeredLine(m),
+                    onUndo: { decisions.set(m, nil) },
                     onSelect: {
                         index = i
                         revealing = m
@@ -204,6 +208,13 @@ struct AuthView: View {
                 .id(m.id)
             }
         }
+    }
+
+    /// "You said: That was me", on a row that asked and was answered, beside
+    /// its Undo.
+    private func answeredLine(_ m: SealedMeta) -> String? {
+        guard AuthPolicy.offersAnswer(m), let v = decisions.decision(m) else { return nil }
+        return AuthPolicy.answeredLine(m, v)
     }
 
     /// The quiet line on a row an earlier code, link or receipt explains.
@@ -479,8 +490,11 @@ private struct AuthRow: View {
     let meta: SealedMeta
     let selected: Bool
     let code: String?
-    /// "explained by your GitHub code", on an alert that needs no ruling.
+    /// "explained by your recent GitHub sign-in", on an alert that needs no ruling.
     let explained: String?
+    /// "You said: That was me", with its Undo, once the row's question is answered.
+    let answered: String?
+    let onUndo: () -> Void
     /// Focus the row AND open the mail. One click, because the mail is what a
     /// row on this page is FOR — a click that only moved a cursor left the page
     /// looking inert, and the second click that used to open it was undiscoverable.
@@ -516,6 +530,18 @@ private struct AuthRow: View {
                             .foregroundStyle(Palette.inkFaintest)
                             .lineLimit(1)
                             .layoutPriority(1)
+                    }
+                    if let answered {
+                        Text(answered)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                        Button("Undo", action: onUndo)
+                            .buttonStyle(.glass)
+                            .controlSize(.mini)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkDim)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

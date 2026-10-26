@@ -106,20 +106,15 @@ pub struct GetThreadParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchMailParams {
     /// Free-text query, matched with hybrid keyword + semantic recall. May
-    /// carry operators: from:<name or address>, to:<name or address>,
-    /// in:sent (mail the owner wrote; from:me means the same),
-    /// after:YYYY-MM-DD, before:YYYY-MM-DD. May be empty when `from_me` or
-    /// `to` is set, which lists matching mail newest first.
+    /// carry operators: from:<name or address>, in:sent (mail the owner
+    /// wrote; from:me means the same), after:YYYY-MM-DD, before:YYYY-MM-DD.
+    /// May be empty when `from_me` is set, which lists the owner's sent mail
+    /// newest first.
     pub query: String,
     /// true: only mail the mailbox owner wrote themselves (their sent mail).
     /// Same as putting in:sent in the query.
     #[serde(default)]
     pub from_me: Option<bool>,
-    /// Only mail whose To, Cc or Bcc contains this text (a name or address,
-    /// case-insensitive). Same as to:<value> in the query. With from_me,
-    /// "what did I send to Dan" is from_me=true, to="dan".
-    #[serde(default)]
-    pub to: Option<String>,
     /// Max number of summaries to return (1-50). Defaults to 10.
     #[serde(default)]
     pub k: Option<u8>,
@@ -1315,11 +1310,12 @@ impl SquelchServer {
                        sort=\"best_match\" to rank on relevance alone when \
                        hunting an older thread. The owner's own SENT mail is \
                        searched too: pass from_me=true (or put in:sent in the \
-                       query) for only mail they wrote, and to=<name or address> \
-                       for mail addressed to someone, e.g. from_me=true, to=\"dan\" \
-                       for what they sent Dan. The query also accepts \
-                       from:, to:, after:YYYY-MM-DD and before:YYYY-MM-DD, and may \
-                       be empty when from_me or to is set (newest first). \
+                       query) for only mail they wrote, plus words about it, \
+                       e.g. from_me=true, query=\"dan lease\" for what they told \
+                       Dan about the lease. The query also accepts from:, \
+                       after:YYYY-MM-DD and before:YYYY-MM-DD, and may be empty \
+                       when from_me is set (their sent mail, newest first). \
+                       Recipients are not searchable here. \
                        Returns SUMMARIES ONLY (sender, one-line subject, \
                        received_at, thread_id, relevance, from_me), never message \
                        bodies, in `results`. from_me=true on a result means the \
@@ -1350,17 +1346,18 @@ impl SquelchServer {
         if params.from_me == Some(true) {
             filter.from_me = true;
         }
-        if let Some(to) = params
-            .to
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
-            filter.to = Some(to.to_owned());
+        // RECIPIENTS ARE HUMAN-DOOR DATA (SECURITY.md section 4): a `to:`
+        // filter rebuilds To, Cc and the owner's Bcc one fragment at a time.
+        // Refused, so the agent does not read an unfiltered page as filtered.
+        if filter.to.is_some() {
+            return Err(ErrorData::invalid_params(
+                "to: is not available here; recipients are not searchable",
+                None,
+            ));
         }
         if text.is_empty() && filter.is_empty() {
             return Err(ErrorData::invalid_params(
-                "query must not be empty unless from_me or to is set",
+                "query must not be empty unless from_me is set",
                 None,
             ));
         }
@@ -3200,7 +3197,6 @@ mod tests {
                     k: Some(50),
                     sort: None,
                     from_me: None,
-                    to: None,
                 }))
                 .await
                 .unwrap(),
@@ -3234,7 +3230,6 @@ mod tests {
         server: &SquelchServer,
         query: &str,
         from_me: Option<bool>,
-        to: Option<&str>,
     ) -> Result<serde_json::Value, ErrorData> {
         Ok(values(
             &server
@@ -3243,7 +3238,6 @@ mod tests {
                     k: Some(50),
                     sort: None,
                     from_me,
-                    to: to.map(str::to_string),
                 }))
                 .await?,
         )["results"]
@@ -3251,8 +3245,9 @@ mod tests {
     }
 
     /// The bug this exists for: an agent asked for the owner's sent mail and
-    /// got mail containing the WORD "sent". `in:sent`, `from_me` and `to` now
-    /// scope the search, and each hit says whether the owner wrote it.
+    /// got mail containing the WORD "sent". `in:sent` and `from_me` now scope
+    /// the search, each hit says whether the owner wrote it, and `to:` is
+    /// refused because recipients are human-door data.
     #[tokio::test]
     async fn search_mail_scopes_to_mail_the_owner_wrote() {
         let store = Arc::new(SqliteStore::open_in_memory().unwrap());
@@ -3288,7 +3283,7 @@ mod tests {
         };
 
         // Unscoped: everything, and the owner's own mail is marked.
-        let all = search_with(&server, "lease", None, None).await.unwrap();
+        let all = search_with(&server, "lease", None).await.unwrap();
         assert_eq!(threads(&all), ["t-amy", "t-dan", "t-in"]);
         for hit in all.as_array().unwrap() {
             assert_eq!(
@@ -3304,7 +3299,7 @@ mod tests {
             ("lease", Some(true)),
             ("in:sent sent", None),
         ] {
-            let hits = search_with(&server, q, from_me, None).await.unwrap();
+            let hits = search_with(&server, q, from_me).await.unwrap();
             let expect: &[&str] = if q.ends_with("sent sent") {
                 &[]
             } else {
@@ -3313,26 +3308,20 @@ mod tests {
             assert_eq!(threads(&hits), expect, "{q} {from_me:?}");
         }
 
-        // "What did I send Dan": the argument, the operator, and a filter-only
-        // search with no words at all.
-        for (q, to) in [
-            ("lease", Some("dan")),
-            ("lease to:dan", None),
-            ("", Some("Dan Smith")),
-        ] {
-            let hits = search_with(&server, q, Some(true), to).await.unwrap();
-            assert_eq!(threads(&hits), ["t-dan"], "{q:?} {to:?}");
-        }
-        let listing = search_with(&server, "", Some(true), None).await.unwrap();
+        // A filter-only search with no words: the owner's sends, newest first.
+        let listing = search_with(&server, "", Some(true)).await.unwrap();
         assert_eq!(threads(&listing), ["t-amy", "t-dan"]);
 
+        // Recipients are not a filter an agent may run, with or without words:
+        // "did this go to d", "da", "dan" would rebuild every To/Cc/Bcc.
+        for q in ["lease to:dan", "to:dan", "in:sent to:d"] {
+            let error = search_with(&server, q, None).await.unwrap_err();
+            assert_eq!(error.code, ErrorData::invalid_params("x", None).code, "{q}");
+        }
+
         // Nothing to search for and nothing to scope by is still refused.
-        assert!(search_with(&server, "  ", None, None).await.is_err());
-        assert!(
-            search_with(&server, "", Some(false), Some(" "))
-                .await
-                .is_err()
-        );
+        assert!(search_with(&server, "  ", None).await.is_err());
+        assert!(search_with(&server, "", Some(false)).await.is_err());
     }
 
     #[tokio::test]
@@ -3935,7 +3924,6 @@ mod tests {
                                     k: Some(k),
                                     sort: sort.map(str::to_string),
                                     from_me: None,
-                                    to: None,
                                 }))
                                 .await
                                 .unwrap(),

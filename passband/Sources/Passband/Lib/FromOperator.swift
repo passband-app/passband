@@ -115,7 +115,8 @@ enum FromOperator {
         guard !tokens.isEmpty else { return false }
         return tokens.allSatisfy { token in
             let lower = token.lowercased()
-            return operators.contains { lower.hasPrefix($0) && lower.count > $0.count }
+            return lower == scopeOperator
+                || operators.contains { lower.hasPrefix($0) && lower.count > $0.count }
         }
     }
 

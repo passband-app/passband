@@ -2608,9 +2608,6 @@ fn the_agent_door_finds_mail_i_wrote_and_still_checks_access() {
         assert_eq!(ids(&hits), HashSet::from([to_dan, inbox_copy]), "{mode:?}");
         assert!(hits.iter().all(|h| h.from_me), "{mode:?}");
 
-        let hits = run("lease from:me to:dan", mode);
-        assert_eq!(ids(&hits), HashSet::from([to_dan, inbox_copy]), "{mode:?}");
-
         // Unscoped, the owner's own mail is marked. Keyword mode leaves
         // stored sent rows out unless asked, as it always has.
         let hits = run("lease", mode);
@@ -2638,4 +2635,51 @@ fn the_agent_door_finds_mail_i_wrote_and_still_checks_access() {
     let json = serde_json::to_value(&hits[0]).unwrap();
     assert_eq!(json["from_me"], serde_json::json!(true));
     assert!(json.get("recipients").is_none(), "{json}");
+}
+
+#[test]
+fn to_never_matches_a_bcc_on_received_mail() {
+    // A SENT-walk sighting of inbound mail can store the sender's leaked or
+    // forged `Bcc:` before INBOX pins `is_sent` to 0. The reader never serves
+    // it, so `to:` must not match it either, on any leg.
+    let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
+    let (store, acct) = store_with_embedder(embedder.clone());
+    let received = triaged(acct, "g-forged", "t-forged")
+        .from("stranger@spam.test")
+        .to_addrs("me@example.com")
+        .bcc_addrs("ceo@victim.test")
+        .subject("quarterly numbers")
+        .body("quarterly numbers attached")
+        .seed(&store);
+    // The writer drops a Bcc on received mail, so plant it the way a SENT-walk
+    // sighting followed by an INBOX one leaves the row.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET bcc_addrs = 'ceo@victim.test' WHERE id = ?1",
+            [received],
+        )
+        .unwrap();
+    let mine = triaged(acct, "g-mine", "t-mine")
+        .from("me@example.com")
+        .is_sent(true)
+        .to_addrs("team@example.com")
+        .bcc_addrs("ceo@victim.test")
+        .subject("quarterly numbers")
+        .body("quarterly numbers for the team")
+        .seed(&store);
+    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+        embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
+    }
+    let (text, filter) = parse_search_query("quarterly to:ceo@victim");
+    let keyword = store
+        .search_filtered(acct, &text, &filter, SearchSort::Recent, false, 10, 0)
+        .unwrap();
+    assert!(!ids(&keyword).contains(&received), "keyword leg");
+    let hybrid = store
+        .hybrid_search(acct, &text, &filter, SearchSort::Recent, false, 10)
+        .unwrap()
+        .0;
+    assert_eq!(ids(&hybrid), HashSet::from([mine]), "own Bcc still matches");
 }

@@ -200,6 +200,10 @@ impl SearchFilter {
 pub fn parse_search_query(raw: &str) -> (String, SearchFilter) {
     let mut filter = SearchFilter::default();
     let mut words: Vec<String> = Vec::new();
+    // `from:me` is a `from:` VALUE, so a later `from:dan` replaces it like any
+    // repeated operator. `in:sent` is its own operator and is never undone.
+    let mut from_me_by_from = false;
+    let mut from_me_by_in = false;
 
     for token in tokenize(raw) {
         // Each arm: an empty value means "no constraint, drop the token"; a
@@ -207,9 +211,10 @@ pub fn parse_search_query(raw: &str) -> (String, SearchFilter) {
         if let Some(value) = strip_prefix_ci(&token, "from:") {
             let value = unquote(value);
             if value.eq_ignore_ascii_case("me") {
-                filter.from_me = true;
+                from_me_by_from = true;
                 filter.from = None;
             } else if !value.is_empty() {
+                from_me_by_from = false;
                 filter.from = Some(value.to_string());
             }
             continue;
@@ -224,7 +229,7 @@ pub fn parse_search_query(raw: &str) -> (String, SearchFilter) {
         if let Some(value) = strip_prefix_ci(&token, "in:")
             && unquote(value).eq_ignore_ascii_case("sent")
         {
-            filter.from_me = true;
+            from_me_by_in = true;
             continue;
         }
         if let Some(value) = strip_prefix_ci(&token, "after:") {
@@ -260,6 +265,7 @@ pub fn parse_search_query(raw: &str) -> (String, SearchFilter) {
         words.push(token);
     }
 
+    filter.from_me = from_me_by_from || from_me_by_in;
     (words.join(" "), filter)
 }
 
@@ -1097,6 +1103,19 @@ mod tests {
         let (_, filter) = parse_search_query("from:meghan");
         assert_eq!(filter.from.as_deref(), Some("meghan"));
         assert!(!filter.from_me);
+    }
+
+    #[test]
+    fn a_later_from_replaces_from_me_but_not_in_sent() {
+        let (_, f) = parse_search_query("from:me from:dan");
+        assert!(!f.from_me);
+        assert_eq!(f.from.as_deref(), Some("dan"));
+        let (_, f) = parse_search_query("from:dan from:me");
+        assert!(f.from_me);
+        assert_eq!(f.from, None);
+        let (_, f) = parse_search_query("in:sent from:dan");
+        assert!(f.from_me, "in:sent is its own operator");
+        assert_eq!(f.from.as_deref(), Some("dan"));
     }
 
     #[test]

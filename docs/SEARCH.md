@@ -310,12 +310,18 @@ searched for the word "sent" and got WeTransfer notices. So:
   which otherwise leaves it out (`SearchFilter::searches_sent`). `from:me` is
   therefore not a substring search for "me"; any other `in:` value is a word.
 - `to:<fragment>` is `from:` for the recipients: a case-insensitive substring
-  of To, Cc and (on the owner's own sends) Bcc, address or display name.
+  of To, Cc and, on the account's own mail only, Bcc (the reader's gate).
+  HUMAN DOOR ONLY. Recipients are human-door data (SECURITY.md §4), and a
+  `to:` filter at the agent door would rebuild them a fragment at a time, so
+  both agent doors (and so the Mac assistant) refuse it with a 400 /
+  invalid_params rather than dropping it.
 - Every hit carries `from_me`. The recipient list rides on the hit only so the
   recall legs can apply `to:` after ranking; it is never serialized.
 - MCP `search_mail` now parses the same operators (it ignored them before) and
-  takes `from_me` / `to` arguments too. With either set the query may be empty,
-  which is a newest-first keyword listing and buys no archive checks.
+  takes a `from_me` argument. With it set the query may be empty, which is a
+  newest-first keyword listing and buys no archive checks.
+- `from:me` is a `from:` value: a later `from:dan` replaces it. `in:sent` is
+  its own operator and is never undone.
 
 The agent door's access check is unchanged: these only narrow what it is
 already allowed to show (`the_agent_door_finds_mail_i_wrote_and_still_checks_access`).

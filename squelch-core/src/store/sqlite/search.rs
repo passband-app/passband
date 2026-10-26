@@ -121,14 +121,26 @@ impl MatchExcerpt {
     }
 }
 
-/// Everyone a message named, as one string over alias `m`: To, Cc and Bcc
-/// (Bcc is only ever stored on the owner's own sends). ONE EXPRESSION for the
-/// `to:` predicate in SQL and the [`SearchHit::recipients`] the recall legs
-/// match it against afterwards, so the two cannot disagree on who a message
-/// went to.
+/// Everyone a message named, as one string over alias `m`: To, Cc and, ON THE
+/// ACCOUNT'S OWN MAIL ONLY, Bcc. ONE EXPRESSION for the `to:` predicate in SQL
+/// and the [`SearchHit::recipients`] the recall legs match it against
+/// afterwards, so the two cannot disagree on who a message went to.
+///
+/// The Bcc gate is the reader's (`thread_view` in messages.rs): a SENT-walk
+/// sighting of inbound mail can store the sender's leaked or forged `Bcc:`
+/// before INBOX pins `is_sent` to 0, so the stored column alone is not "who
+/// the owner blind-copied".
+///
+/// HUMAN DOOR ONLY in effect: recipients are human-door data (SECURITY.md
+/// section 4), and both agent doors refuse `to:`.
 macro_rules! recipients_sql {
     () => {
-        "(COALESCE(m.to_addrs, '') || ', ' || COALESCE(m.cc_addrs, '') || ', ' || COALESCE(m.bcc_addrs, ''))"
+        concat!(
+            "(COALESCE(m.to_addrs, '') || ', ' || COALESCE(m.cc_addrs, '') || ', ' || \
+             CASE WHEN ",
+            own_mail_sql!(),
+            " THEN COALESCE(m.bcc_addrs, '') ELSE '' END)"
+        )
     };
 }
 

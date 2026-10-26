@@ -1000,8 +1000,11 @@ Phase 6's `drift` already proved it.
 **Order: DNS first, then mint.** A mint creates the key on whichever gateway
 control resolves. Against Railway's it fails loudly (the new admin credential
 is refused there), never silently, but it fails; so wait until control
-resolves the ALB. Tenants keep working on their old keys against Railway until
-their own mint, so there is no gap before a tenant's turn.
+resolves the ALB. **There IS a gap, so mint everyone straight away:** tenants
+reach Bifrost by hostname, so the moment the CNAME flips, a tenant still on
+its Railway key calls the AWS gateway, which does not know that key, and its
+LLM calls fail (`llm_config_failures`) until its own mint. On 2026-10-26 the
+seven mints took about two minutes and the failures stopped with them.
 
 0. **Last check that tenants will be admitted.** After the flip, every
    tenant's triage reaches the ALB from carrier's egress address, and a wrong

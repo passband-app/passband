@@ -261,6 +261,46 @@ pub struct SanitizedMessage {
     pub from_name: Option<String>,
     pub received_at: DateTime<Utc>,
     pub content: String,
+    /// The English translation of mail written in another language
+    /// (docs/TRANSLATION.md), joined INSIDE the same guarded query that read
+    /// `content`, so it reaches exactly the readers the body does. Absent
+    /// for English mail and for every translation not ready to serve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<ExternalTranslation>,
+}
+
+/// The agent door's view of a translation: the language, the English, and
+/// whether the fact check passed. No HTML, like everything else on that door.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExternalTranslation {
+    /// English name, e.g. "French".
+    pub source_language: String,
+    pub subject: String,
+    pub content: String,
+    /// `done`, or `incomplete` when the fact check found source facts (numbers,
+    /// codes, links) missing from the English: read the original for those.
+    pub status: String,
+}
+
+/// The reader's view of one message's translation (GET /client/thread/{id}).
+/// WIRE CONTRACT (docs/TRANSLATION.md, "Wire"): `source_lang` is the ISO code,
+/// `source_language` its English name; `status` is `deferred`, `pending`,
+/// `done` or `incomplete`. A `deferred` or `pending` translation carries empty
+/// `subject`/`content`, and the client shows the original while it waits.
+/// `deferred` (archive tier) is translated only once the reader displaying the
+/// thread calls `POST /client/thread/{id}/translate`. `failed` and
+/// `not_needed` translations are never on the wire at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClientTranslation {
+    pub source_lang: String,
+    pub source_language: String,
+    pub status: String,
+    pub subject: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_facts: Option<Vec<String>>,
 }
 
 /// A full thread as serialized DIRECTLY by the agent door (`get_thread`).
@@ -387,6 +427,13 @@ pub struct ClientMessage {
     /// bit on it, and the client already receives that derived answer.
     #[serde(default, skip_serializing)]
     pub auth_pass: Option<bool>,
+    /// The English translation of mail written in another language
+    /// (docs/TRANSLATION.md). Absent on English mail, on a daemon too old to
+    /// translate, and when the translation failed or was not needed. HUMAN
+    /// DOOR ONLY in this shape (it carries `html`); the agent door gets
+    /// [`ExternalTranslation`] on [`SanitizedMessage`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<ClientTranslation>,
 }
 
 /// One attachment's metadata on the HUMAN DOOR. Carries NO bytes.
@@ -863,6 +910,18 @@ pub struct SearchHit {
     pub subject_matches: Vec<String>,
     #[serde(default)]
     pub snippet_matches: Vec<String>,
+    /// Written by the account itself (`own_mail_sql!`): the owner's own sent
+    /// mail, including a send Gmail also labelled INBOX. Lets a reader of the
+    /// results, an agent especially, tell "you wrote this" from mail received,
+    /// without knowing the owner's addresses.
+    #[serde(default)]
+    pub from_me: bool,
+    /// To, Cc and (on the owner's own sends) Bcc as stored, comma-joined. Kept
+    /// so the recall legs can apply `to:` after ranking exactly as the keyword
+    /// leg applies it in SQL. NEVER SERIALIZED: a result is a summary, and the
+    /// recipient list is not part of it.
+    #[serde(skip)]
+    pub recipients: String,
 }
 
 /// One row of the human-door audit log. Human-door-only; never crosses MCP.
@@ -1370,6 +1429,7 @@ mod tests {
                 from_name: None,
                 received_at: Utc::now(),
                 content: "text".into(),
+                translation: None,
             }],
         };
         let v = serde_json::to_value(&tv).unwrap();
@@ -1440,6 +1500,7 @@ mod tests {
                     to_addrs: Some("Me <me@b.com>, \"Doe, Jane\" <jane@b.com>".into()),
                     cc_addrs: Some("cc@b.com".into()),
                     bcc_addrs: None,
+                    translation: None,
                 },
                 ClientMessage {
                     id: 2,
@@ -1461,6 +1522,7 @@ mod tests {
                     to_addrs: Some(String::new()),
                     cc_addrs: None,
                     bcc_addrs: Some("blind@b.com".into()),
+                    translation: None,
                 },
             ],
         };

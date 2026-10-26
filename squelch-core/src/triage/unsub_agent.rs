@@ -353,6 +353,8 @@ pub async fn step_at(
         // A remote browser is being held open while this runs, and the
         // fallback is never wrong: one retry, then the user.
         max_tries: 2,
+        max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(
         &client.http,

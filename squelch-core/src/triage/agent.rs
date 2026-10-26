@@ -196,6 +196,8 @@ async fn run_bounded(
             schema: schema.clone(),
             effort: connection.effort,
             max_tries: 1,
+            max_tokens: None,
+            disable_thinking: false,
         };
         // Retain provider usage before decoding either JSON syntax or step
         // structure. A malformed paid answer still belongs in the spend ledger.
@@ -369,6 +371,11 @@ fn condense_initial_context(
             condense_message_body(fields, config.full_body_chars, &mut stored);
             continue;
         }
+        // A machine translation (docs/TRANSLATION.md) shrinks with the body
+        // it translates, so neither outweighs the other in the budget.
+        if let Some(Value::String(translated)) = fields.get_mut("translated_body") {
+            *translated = super::condense::excerpt(translated, config.sibling_excerpt_chars).0;
+        }
         let Some(Value::String(body)) = fields.get_mut("body") else {
             continue;
         };
@@ -408,6 +415,21 @@ fn condense_message_body(
     let whole = super::condense::StoredBody::new(std::mem::take(body));
     let (kept, resume) = whole.condense_within(cap);
     *body = kept;
+    // The machine translation (docs/TRANSLATION.md) is condensed and capped
+    // like the body. It has no pager: `read_message` pages the ORIGINAL,
+    // which stays the source of truth, so a cut translation only says so.
+    if let Some(Value::String(translated)) = message.get_mut("translated_body") {
+        let condensed = super::condense::condense_body(translated);
+        let cut = condensed.chars().count() > cap;
+        *translated = if cut {
+            crate::text::truncate_ellipsis(&condensed, cap)
+        } else {
+            condensed
+        };
+        if cut {
+            message.insert("translated_body_truncated".into(), Value::Bool(true));
+        }
+    }
     if let Some(next) = resume {
         message.insert("next_offset".into(), json!(next));
         message.insert("body_truncated".into(), Value::Bool(true));
@@ -551,8 +573,10 @@ fn bound_evidence_text(value: &mut Value, budget: usize, stored: &StoredBodies) 
                     if key == "source" || (key == "body" && value.is_string()) {
                         continue;
                     }
-                    if matches!(key.as_str(), "content" | "text" | "snippet")
-                        && let Value::String(text) = value
+                    if matches!(
+                        key.as_str(),
+                        "translated_body" | "content" | "text" | "snippet"
+                    ) && let Value::String(text) = value
                     {
                         if text.len() > limit {
                             text.truncate(text.floor_char_boundary(limit));

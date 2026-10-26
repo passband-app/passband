@@ -159,6 +159,8 @@ pub async fn classify_at(
         effort: cfg.effort.as_deref(),
         // A BATCH pass: it is grinding a queue, so a 429 is worth sleeping on.
         max_tries: llm::MAX_TRIES,
+        max_tokens: None,
+        disable_thinking: false,
     };
     // No post-parse validation here: `account_hint` and the text fields are
     // sanitized in [`apply_result`], so the parsed record IS the outcome.

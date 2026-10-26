@@ -1757,6 +1757,75 @@ fn a_rebuild_that_cannot_run_leaves_the_old_index_serving() {
 }
 
 #[test]
+fn the_translation_columns_arrive_by_rebuild_and_carry_served_translations() {
+    // The definition every mailbox had before auto-translate: stemmed, prefix
+    // indexed, two columns. Adding `tsubject`/`tbody` to `schema.sql` is a
+    // column change, so the open rebuilds, and the refill must pick up the
+    // English of every SERVED translation (done, incomplete) and of no other.
+    let conn = fts_fixture(
+        "CREATE VIRTUAL TABLE messages_fts USING fts5(
+             subject, body, tokenize = 'porter unicode61', prefix = '2 3')",
+    );
+    conn.execute_batch(
+        "CREATE TABLE message_translations(
+             message_id INTEGER PRIMARY KEY, status TEXT NOT NULL,
+             subject TEXT, body TEXT);
+         INSERT INTO messages(id, account_id, gmail_msg_id, subject, body)
+             VALUES (2, 1, 'g2', 'Votre facture', 'votre facture est prête'),
+                    (3, 1, 'g3', 'Ihre Rechnung', 'Ihre Rechnung ist da'),
+                    (4, 1, 'g4', 'Tu factura', 'tu factura está lista');
+         INSERT INTO messages_fts(rowid, subject, body)
+             SELECT id, subject, body FROM messages WHERE id > 1;
+         INSERT INTO message_translations VALUES
+             (2, 'done', 'Your invoice', 'your invoice is ready'),
+             (3, 'incomplete', 'Your bill', 'your invoice is here'),
+             (4, 'failed', 'Your invoice', 'your invoice is ready');",
+    )
+    .unwrap();
+    let matching = |conn: &Connection, q: &str| -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1 ORDER BY rowid")
+            .unwrap();
+        stmt.query_map(params![q], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert!(matching(&conn, "invoice").is_empty());
+
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap();
+
+    let created = stored_fts_sql(&conn);
+    assert!(
+        created.contains("tsubject") && created.contains("tbody"),
+        "{created}"
+    );
+    assert_eq!(fts_rows(&conn), 4, "every message survived the rebuild");
+    assert_eq!(
+        matching(&conn, "invoice"),
+        vec![2, 3],
+        "failed rows serve nothing"
+    );
+    assert_eq!(matching(&conn, "tbody : invoice"), vec![2, 3]);
+    assert_eq!(
+        matching(&conn, "facture"),
+        vec![2],
+        "the original is still indexed"
+    );
+    // Positional readers keep their meaning: column 1 is still the body.
+    let body: String = conn
+        .query_row(
+            "SELECT snippet(messages_fts, 1, '', '', '…', 24) FROM messages_fts
+             WHERE messages_fts MATCH 'facture'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(body.contains("prête"), "{body}");
+}
+
+#[test]
 fn event_auth_flag_migration_defaults_legacy_rows_without_inferring_urgency() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE events(id INTEGER PRIMARY KEY,kind TEXT); INSERT INTO events VALUES(1,'urgent');").unwrap();

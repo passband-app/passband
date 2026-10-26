@@ -200,6 +200,13 @@ run_suite sitrep-poller \
   Sources/Passband/Model/SitrepPoller.swift \
   Tests/SitrepPollerTests.swift
 
+# The launch image warm: the rows on screen at once, the rest after a quiet
+# stretch, never on Low Power Mode or a costly path, never for an old account.
+run_suite image-warmer \
+  Sources/Passband/Lib/Concurrency.swift \
+  Sources/Passband/Model/ImageWarmer.swift \
+  Tests/ImageWarmerTests.swift
+
 run_suite onboarding-rehearsal \
   Sources/Passband/Model/OnboardingRehearsal.swift \
   Tests/OnboardingRehearsalTests.swift
@@ -498,6 +505,17 @@ run_suite need-today \
 # typed wrong there fails at the only place it can still be seen — the client
 # read a decode error on a fire-and-forget POST as a failed request and reported
 # that it could not reach a spam folder it had just synced perfectly.
+# Auto-translate's wire (docs/TRANSLATION.md): every field tolerant, because
+# the notification extension decodes the same message, and which version of a
+# message the reader shows, under which frame key.
+run_suite translation-wire \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/TranslationRefresh.swift \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Lib/ThreadStyle.swift \
+  Sources/Passband/Lib/Quotes.swift \
+  Tests/TranslationWireTests.swift
+
 run_suite spam-wire \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SubjectText.swift \

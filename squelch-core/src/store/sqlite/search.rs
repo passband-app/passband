@@ -19,8 +19,28 @@ use zerocopy::AsBytes;
 /// SQL before replacing the stored snippet.
 const BODY_WINDOW: &str = "snippet(messages_fts, 1, char(1), char(2), '…', 24)";
 
+/// [`BODY_WINDOW`] over the TRANSLATED body (column 3, `tbody`). Read only
+/// when the original body has no window: a reader searching an English word
+/// in French mail matched the translation, and the sentence that says it is
+/// the English one. NULL for a message with no served translation.
+const TBODY_WINDOW: &str = "snippet(messages_fts, 3, char(1), char(2), '…', 24)";
+
+/// The stored snippet a human-door hit shows when no match window replaces
+/// it: the translation's, when the message has a served one, else the
+/// message's own. Over alias `m`. A macro so [`hit_columns_sql`] can
+/// `concat!` it. The agent door never reads this: its hits are rehydrated
+/// from `messages` alone in `external_search_hits`.
+macro_rules! hit_snippet_sql {
+    () => {
+        "COALESCE((SELECT tr.snippet FROM message_translations tr
+                    WHERE tr.message_id = m.id AND tr.status IN ('done','incomplete')
+                      AND tr.snippet IS NOT NULL AND tr.snippet != ''), m.snippet)"
+    };
+}
+
 /// THE RELEVANCE SCORE for every keyword-leg query: bm25 with the SUBJECT
-/// weighted four times the body.
+/// weighted four times the body, and the translated subject and body
+/// (`tsubject`, `tbody`) weighted exactly as the originals they translate.
 ///
 /// A word in the subject is the sender saying what the mail is about; the same
 /// word two hundred words into a newsletter is a coincidence. Unweighted bm25
@@ -32,7 +52,7 @@ const BODY_WINDOW: &str = "snippet(messages_fts, 1, char(1), char(2), '…', 24)
 ///
 /// Like `rank`, this is NEGATIVE and more negative is better, so `-bm25(...)`
 /// is the relevance and every ORDER BY here reads biggest-first.
-const BM25: &str = "bm25(messages_fts, 4.0, 1.0)";
+const BM25: &str = "bm25(messages_fts, 4.0, 1.0, 4.0, 1.0)";
 
 /// The marker `BODY_WINDOW` plants on each matched term.
 const SNIPPET_MARK: char = '\u{1}';
@@ -121,7 +141,65 @@ impl MatchExcerpt {
     }
 }
 
-/// The envelope columns both hit-producing SELECTs share, in SELECT order.
+/// Everyone a message named, as one string over alias `m`: To, Cc and, ON THE
+/// ACCOUNT'S OWN MAIL ONLY, Bcc. ONE EXPRESSION for the `to:` predicate in SQL
+/// and the [`SearchHit::recipients`] the recall legs match it against
+/// afterwards, so the two cannot disagree on who a message went to.
+///
+/// The Bcc gate is the reader's (`thread_view` in messages.rs): a SENT-walk
+/// sighting of inbound mail can store the sender's leaked or forged `Bcc:`
+/// before INBOX pins `is_sent` to 0, so the stored column alone is not "who
+/// the owner blind-copied".
+///
+/// HUMAN DOOR ONLY in effect: recipients are human-door data (SECURITY.md
+/// section 4), and both agent doors refuse `to:`.
+macro_rules! recipients_sql {
+    () => {
+        concat!(
+            "(COALESCE(m.to_addrs, '') || ', ' || COALESCE(m.cc_addrs, '') || ', ' || \
+             CASE WHEN ",
+            own_mail_sql!(),
+            " THEN COALESCE(m.bcc_addrs, '') ELSE '' END)"
+        )
+    };
+}
+
+/// The envelope columns EVERY hit-producing SELECT starts with, in the order
+/// [`map_search_hit`] reads them. A macro so a `prepare_cached` literal can
+/// `concat!` it; one list, so no query hands back a hit whose `from_me` or
+/// recipients were never selected.
+///
+/// AN ARCHIVE ROW READS AS DONE (column 7): see [`push_filter_clauses`].
+///
+/// The snippet column is the human door's ([`hit_snippet_sql`], a served
+/// translation's when there is one) unless `original` is passed: the agent
+/// door's hits carry the message's own snippet.
+macro_rules! hit_columns_sql {
+    () => {
+        hit_columns_sql!(@snippet hit_snippet_sql!())
+    };
+    (original) => {
+        hit_columns_sql!(@snippet "m.snippet")
+    };
+    (@snippet $snippet:expr) => {
+        concat!(
+            "m.id, m.thread_id, m.from_addr, m.from_name, m.subject, m.received_at, ",
+            $snippet,
+            ",
+             (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1), ",
+            own_mail_sql!(),
+            ", ",
+            recipients_sql!()
+        )
+    };
+}
+const HIT_COLUMNS: &str = hit_columns_sql!();
+
+/// Columns [`HIT_COLUMNS`] fills, so a SELECT that appends its own can say
+/// where they start.
+const HIT_COLUMN_COUNT: usize = 10;
+
+/// The envelope columns ([`HIT_COLUMNS`]), in SELECT order.
 fn map_search_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
     Ok(SearchHit {
         id: r.get(0)?,
@@ -134,18 +212,26 @@ fn map_search_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
         is_done: r.get(7)?,
         subject_matches: Vec::new(),
         snippet_matches: Vec::new(),
+        from_me: r.get(8)?,
+        recipients: r.get(9)?,
     })
 }
 
-/// Envelope, status, subject highlights, then the body match window.
-/// Keep the stored snippet unless the returned body window carries a marker.
+/// Envelope, status, subject highlights, then the body match window and the
+/// translated body's. Keep the stored snippet unless a returned window carries
+/// a marker; the original body's window wins over the translation's.
 fn map_search_hit_with_window(r: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
     let mut hit = map_search_hit(r)?;
-    hit.subject_matches = matched_words(&r.get::<_, String>(8)?);
-    let raw: Option<String> = r.get(9)?;
-    if let Some(window) = body_window(raw.clone()) {
-        hit.snippet = window;
-        hit.snippet_matches = raw.as_deref().map(matched_words).unwrap_or_default();
+    hit.subject_matches = matched_words(&r.get::<_, String>(HIT_COLUMN_COUNT)?);
+    // The original body's window, else the translated body's: an English
+    // word in French mail matched the translation (see TBODY_WINDOW).
+    for column in [HIT_COLUMN_COUNT + 1, HIT_COLUMN_COUNT + 2] {
+        let raw: Option<String> = r.get(column)?;
+        if let Some(window) = body_window(raw.clone()) {
+            hit.snippet = window;
+            hit.snippet_matches = raw.as_deref().map(matched_words).unwrap_or_default();
+            break;
+        }
     }
     Ok(hit)
 }
@@ -193,6 +279,20 @@ fn push_filter_clauses(sql: &mut String, args: &mut Vec<Value>, filter: &SearchF
         let pattern = format!("%{}%", escape_like(from));
         args.push(Value::Text(pattern.clone()));
         args.push(Value::Text(pattern));
+    }
+    if filter.from_me {
+        // Authorship, not the stored `is_sent`: see `own_mail_sql!`. No bound
+        // parameter, so it sits anywhere among the anonymous `?`s.
+        sql.push_str(concat!(" AND ", own_mail_sql!()));
+    }
+    if let Some(to) = &filter.to {
+        // Same reading as `from:`: a literal, case-insensitive substring.
+        sql.push_str(concat!(
+            " AND ",
+            recipients_sql!(),
+            " COLLATE NOCASE LIKE ? ESCAPE '\\'"
+        ));
+        args.push(Value::Text(format!("%{}%", escape_like(to))));
     }
     if let Some(after) = filter.after {
         // INCLUSIVE: 00:00:00 UTC of the named day is in range. Timestamps are
@@ -389,10 +489,12 @@ impl SqliteStore {
             }
             let hit = conn
                 .query_row(
-                    "SELECT m.id,m.thread_id,m.from_addr,m.from_name,m.subject,m.received_at,m.snippet,
-                        (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
-                 FROM messages m LEFT JOIN triage t ON t.message_id=m.id
-                 WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0",
+                    concat!(
+                        "SELECT ",
+                        hit_columns_sql!(original),
+                        " FROM messages m LEFT JOIN triage t ON t.message_id=m.id
+                         WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0"
+                    ),
                     params![account_id, id],
                     map_search_hit,
                 )
@@ -464,7 +566,7 @@ impl SqliteStore {
                 );
                 args.push(Value::Text(exclude.to_string()));
             }
-            if !include_sent {
+            if !include_sent && !filter.searches_sent() {
                 sql.push_str(" AND m.is_sent = 0");
             }
             push_filter_clauses(&mut sql, &mut args, filter);
@@ -810,30 +912,50 @@ impl SqliteStore {
         // vec0 KNN: MATCH the embedding, constrain by the account_id metadata
         // column, cap with `k = ?`, then re-join triage to drop any sealed row
         // that should never have been indexed in the first place.
-        let mut stmt = conn.prepare(
-            "SELECT v.message_id, v.distance, m.received_at
-             FROM message_vecs v
-             JOIN messages m ON m.id = v.message_id
-             LEFT JOIN triage t ON t.message_id = v.message_id
-             WHERE v.embedding MATCH ?1
-               AND v.account_id = ?2
-               AND v.k = ?3
-               AND m.is_spam = 0
-             ORDER BY v.distance",
-        )?;
-        let rows = stmt.query_map(params![query.as_bytes(), account_id, k as i64], |r| {
-            Ok((
-                Candidate {
-                    id: r.get::<_, i64>(0)?,
-                    received_at: dt(r, 2)?,
-                },
-                r.get::<_, f64>(1)? as f32,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
+        //
+        // TWICE, once per vector table: the original's and the English
+        // translation's (docs/TRANSLATION.md). Each gives its own `k` nearest
+        // over the whole account, and a message is as near as the NEARER of
+        // its two vectors, so the merge keeps the smaller distance per message
+        // before cutting back to `k`. Every filter is the same on both.
+        let mut best: HashMap<i64, (Candidate, f32)> = HashMap::new();
+        for table in ["message_vecs", "message_translation_vecs"] {
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT v.message_id, v.distance, m.received_at
+                 FROM {table} v
+                 JOIN messages m ON m.id = v.message_id
+                 LEFT JOIN triage t ON t.message_id = v.message_id
+                 WHERE v.embedding MATCH ?1
+                   AND v.account_id = ?2
+                   AND v.k = ?3
+                   AND m.is_spam = 0
+                 ORDER BY v.distance"
+            ))?;
+            let rows = stmt.query_map(params![query.as_bytes(), account_id, k as i64], |r| {
+                Ok((
+                    Candidate {
+                        id: r.get::<_, i64>(0)?,
+                        received_at: dt(r, 2)?,
+                    },
+                    r.get::<_, f64>(1)? as f32,
+                ))
+            })?;
+            for row in rows {
+                let (c, dist) = row?;
+                best.entry(c.id)
+                    .and_modify(|e| {
+                        if dist < e.1 {
+                            e.1 = dist;
+                        }
+                    })
+                    .or_insert((c, dist));
+            }
         }
+        let mut out: Vec<(Candidate, f32)> = best.into_values().collect();
+        // Distance, then id: a stable order for equal distances, as vec0's
+        // own single-table order was for the one list it returned.
+        out.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.id.cmp(&b.0.id)));
+        out.truncate(k);
         Ok(out)
     }
 
@@ -876,16 +998,28 @@ impl SqliteStore {
         // each one's vector. `+v.account_id` keeps that test out of vec0's
         // planner, which would otherwise be offered it as a KNN constraint.
         // Ties break on the id so the list is the same list every time.
+        //
+        // THE TRANSLATION'S VECTOR is a second point read of the SAME
+        // readable row, never a second candidate set: it is LEFT JOINed onto
+        // a row the prefilter already passed, so it reaches exactly the rows
+        // the original's vector does, and the row ranks by the nearer of the
+        // two. Its account test sits in the ON clause, where a failing match
+        // leaves the original's distance alone rather than dropping the row.
         let mut stmt = conn.prepare_cached(concat!(
             "SELECT m.id, m.received_at
              FROM messages m
              CROSS JOIN message_vecs v ON v.message_id = m.id
+             LEFT JOIN message_translation_vecs tv
+               ON tv.message_id = m.id AND +tv.account_id = ?2
              WHERE m.account_id = ?2
                AND m.is_spam = 0
                AND +v.account_id = ?2
                AND ",
             external_candidate_flat_sql!("?2"),
-            " ORDER BY vec_distance_l2(v.embedding, ?1), m.id
+            " ORDER BY CASE WHEN tv.message_id IS NULL
+                       THEN vec_distance_l2(v.embedding, ?1)
+                       ELSE MIN(vec_distance_l2(v.embedding, ?1),
+                                vec_distance_l2(tv.embedding, ?1)) END, m.id
              LIMIT ?3"
         ))?;
         let rows = stmt.query_map(params![query.as_bytes(), account_id, k as i64], |r| {
@@ -1118,7 +1252,10 @@ impl SqliteStore {
             "SELECT CASE WHEN f.rowid IN (
                  SELECT rowid FROM messages_fts WHERE rowid = ?1 AND messages_fts MATCH ?4
              ) THEN {BODY_WINDOW} END,
-             highlight(messages_fts, 0, char(1), char(2))
+             highlight(messages_fts, 0, char(1), char(2)),
+             CASE WHEN f.rowid IN (
+                 SELECT rowid FROM messages_fts WHERE rowid = ?1 AND messages_fts MATCH ?5
+             ) THEN {TBODY_WINDOW} END
              FROM messages_fts f
              CROSS JOIN messages m ON m.id = f.rowid
              LEFT JOIN triage t ON t.message_id = m.id
@@ -1134,17 +1271,23 @@ impl SqliteStore {
         // A syntactically-invalid MATCH errors at step time, not prepare time;
         // both collapse to "no window".
         let scoped = format!("body : ({match_expr})");
-        stmt.query_row(params![message_id, account_id, match_expr, scoped], |r| {
-            let body: Option<String> = r.get(0)?;
-            let subject: String = r.get(1)?;
-            Ok(MatchExcerpt {
-                snippet: body
-                    .as_deref()
-                    .map(|raw| raw.replace([SNIPPET_MARK, '\u{2}'], "")),
-                snippet_matches: body.as_deref().map(matched_words).unwrap_or_default(),
-                subject_matches: matched_words(&subject),
-            })
-        })
+        let translated = format!("tbody : ({match_expr})");
+        stmt.query_row(
+            params![message_id, account_id, match_expr, scoped, translated],
+            |r| {
+                // The original body's window first; the translation's only when
+                // the terms are in the English and nowhere in the original.
+                let body: Option<String> = r.get::<_, Option<String>>(0)?.or(r.get(2)?);
+                let subject: String = r.get(1)?;
+                Ok(MatchExcerpt {
+                    snippet: body
+                        .as_deref()
+                        .map(|raw| raw.replace([SNIPPET_MARK, '\u{2}'], "")),
+                    snippet_matches: body.as_deref().map(matched_words).unwrap_or_default(),
+                    subject_matches: matched_words(&subject),
+                })
+            },
+        )
         .optional()
         .or(Ok(None))
     }
@@ -1347,14 +1490,14 @@ impl SqliteStore {
         id: i64,
     ) -> Result<Option<SearchHit>> {
         let row = conn
-            .prepare_cached(
-                "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                        m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
-                 FROM messages m
+            .prepare_cached(concat!(
+                "SELECT ",
+                hit_columns_sql!(),
+                " FROM messages m
                  LEFT JOIN triage t ON t.message_id = m.id
                  WHERE m.account_id = ?1 AND m.id = ?2
                        AND m.is_spam = 0",
-            )?
+            ))?
             .query_row(params![account_id, id], map_search_hit)
             .optional()?;
         Ok(row)
@@ -1410,9 +1553,8 @@ impl SqliteStore {
         // matched (see `body_window`) — a subject-only hit keeps the curated
         // snippet.
         let mut sql = format!(
-            "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1),
-                    highlight(messages_fts, 0, char(1), char(2)), {BODY_WINDOW}
+            "SELECT {HIT_COLUMNS},
+                    highlight(messages_fts, 0, char(1), char(2)), {BODY_WINDOW}, {TBODY_WINDOW}
              FROM messages_fts f
              CROSS JOIN messages m ON m.id = f.rowid
              LEFT JOIN triage t ON t.message_id = m.id
@@ -1432,7 +1574,7 @@ impl SqliteStore {
             );
             args.push(Value::Text(exclude.to_string()));
         }
-        if !filter.include_sent {
+        if !filter.searches_sent() {
             sql.push_str(" AND m.is_sent = 0");
         }
         push_filter_clauses(&mut sql, &mut args, filter);
@@ -1511,7 +1653,7 @@ impl SqliteStore {
         );
         sql.push_str(audience.clause());
         let mut args = vec![Value::Integer(account_id), Value::Text(expr.to_string())];
-        if !filter.include_sent {
+        if !filter.searches_sent() {
             sql.push_str(" AND m.is_sent = 0");
         }
         push_filter_clauses(&mut sql, &mut args, filter);
@@ -1606,7 +1748,7 @@ impl SqliteStore {
                 "SELECT COUNT(*) FROM messages m LEFT JOIN triage t ON t.message_id = m.id WHERE m.account_id = ? AND m.is_spam = 0",
             );
             let mut args = vec![Value::Integer(account_id)];
-            if !group.include_sent {
+            if !group.searches_sent() {
                 sql.push_str(" AND m.is_sent = 0");
             }
             push_filter_clauses(&mut sql, &mut args, &group);
@@ -1958,17 +2100,16 @@ impl SqliteStore {
         offset: u32,
         audience: Audience,
     ) -> Result<Vec<SearchHit>> {
-        let mut sql = String::from(
-            "SELECT m.id, m.thread_id, m.from_addr, m.from_name, m.subject,
-                    m.received_at, m.snippet, (COALESCE(t.status, 'new') = 'done' OR m.is_archive = 1)
+        let mut sql = format!(
+            "SELECT {HIT_COLUMNS}
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id
              WHERE m.account_id = ?
-               AND m.is_spam = 0",
+               AND m.is_spam = 0"
         );
         sql.push_str(audience.clause());
         let mut args = vec![Value::Integer(account_id)];
-        if !filter.include_sent {
+        if !filter.searches_sent() {
             sql.push_str(" AND m.is_sent = 0");
         }
         push_filter_clauses(&mut sql, &mut args, filter);
@@ -2030,6 +2171,80 @@ impl SqliteStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// [`Self::upsert_message_vector`] for the English translation's vector
+    /// (`message_translation_vecs`). Written only while the row's translation
+    /// is served: a translation dropped or closed meanwhile gets no vector,
+    /// and the check and the write share one lock.
+    pub(super) fn upsert_translation_vector(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        embedding: &[f32],
+    ) -> Result<()> {
+        if embedding.len() != VEC_DIMS {
+            return Err(CoreError::InvalidInput(format!(
+                "embedding len {} != vec0 width {VEC_DIMS}",
+                embedding.len()
+            )));
+        }
+        let conn = self.lock()?;
+        let served: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message_translations tr
+                 WHERE tr.message_id = ?1 AND tr.account_id = ?2
+                   AND tr.status IN ('done','incomplete'))",
+            params![message_id, account_id],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "DELETE FROM message_translation_vecs WHERE message_id = ?1",
+            params![message_id],
+        )?;
+        if served {
+            conn.execute(
+                "INSERT INTO message_translation_vecs(message_id, embedding, account_id)
+                 VALUES (?1, ?2, ?3)",
+                params![message_id, embedding.as_bytes(), account_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Up to `limit` served translations with no vector yet, newest mail
+    /// first, as the TRANSLATED subject and body. Spam is excluded like the
+    /// original's drain.
+    pub(super) fn translations_missing_vectors(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+    ) -> Result<Vec<MissingVector>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT m.id, COALESCE(tr.subject, ''), COALESCE(tr.body, '')
+             FROM message_translations tr
+             JOIN messages m ON m.id = tr.message_id
+             WHERE tr.account_id = ?1
+               AND tr.status IN ('done','incomplete')
+               AND m.is_spam = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM message_translation_vecs v WHERE v.message_id = m.id
+               )
+             ORDER BY m.received_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![account_id, limit as i64], |r| {
+            Ok(MissingVector {
+                message_id: r.get(0)?,
+                subject: r.get(1)?,
+                body: r.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     pub(super) fn messages_missing_vectors(

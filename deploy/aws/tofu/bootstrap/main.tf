@@ -18,14 +18,14 @@ terraform {
   # encryption block here (the key cannot encrypt the state that creates it),
   # and this state holds no secret.
   #
-  # backend "s3" {
-  #   bucket       = "passband-tofu-state-<account id>"
-  #   key          = "bootstrap/terraform.tfstate"
-  #   region       = "us-west-2"
-  #   encrypt      = true
-  #   kms_key_id   = "<tofu output -raw state_kms_key_arn>"
-  #   use_lockfile = true
-  # }
+  backend "s3" {
+    bucket       = "passband-tofu-state-824648488986"
+    key          = "bootstrap/terraform.tfstate"
+    region       = "us-west-2"
+    encrypt      = true
+    kms_key_id   = "arn:aws:kms:us-west-2:824648488986:key/1a682375-bc14-4f9b-8782-8a22078bea72"
+    use_lockfile = true
+  }
 }
 
 provider "aws" {

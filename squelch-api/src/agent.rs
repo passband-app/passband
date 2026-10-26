@@ -101,6 +101,15 @@ pub async fn search(
 ) -> Result<impl IntoResponse, ApiError> {
     let (text, filter) = parse_search_query(query.q.trim());
     let text = text.trim().to_owned();
+    // RECIPIENTS ARE HUMAN-DOOR DATA (SECURITY.md section 4). A `to:` filter
+    // would answer "did this go to X" one fragment at a time, which rebuilds
+    // To, Cc and the owner's Bcc for every readable message. Refused rather
+    // than ignored, so the caller does not read an unfiltered page as filtered.
+    if filter.to.is_some() {
+        return Err(ApiError::bad_request(
+            "to: is not available at the agent door",
+        ));
+    }
     if text.is_empty() && filter.is_empty() {
         return Err(ApiError::bad_request("q must not be empty"));
     }
@@ -135,7 +144,7 @@ pub async fn search(
         filter: filter.clone(),
         // Keyword mode leaves out the owner's sent mail unless the query asks
         // for it; the hybrid keyword leg always recalls it.
-        include_sent: search_mode == ExternalSearchMode::Hybrid || filter.include_sent,
+        include_sent: search_mode == ExternalSearchMode::Hybrid || filter.searches_sent(),
     });
     // One store method for both agent doors: it fetches only rows this door
     // may be shown, applies the full access check before the public result

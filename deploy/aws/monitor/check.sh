@@ -31,8 +31,15 @@ diff -u <(strip "$ROOT/deploy/monitoring/grafana/provisioning/datasources/promet
   || fail "a railway.internal host survives in the AWS configs"
 
 if command -v docker >/dev/null; then
+  # The env files exist only on the box (tmpfs, written by fetch-secrets), and
+  # older Compose releases (GitHub's runners) stat them even with
+  # --no-env-resolution. Render a copy pointed at empty stand-ins instead.
+  tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+  for s in prometheus grafana blackbox; do : >"$tmp/$s.env"; done
+  sed "s#/run/passband-monitor/#$tmp/#g" "$HERE/compose.yaml" >"$tmp/compose.yaml"
+  grep -q "/run/passband-monitor/" "$tmp/compose.yaml" && fail "env_file paths not rewritten"
   rendered=$(cd "$HERE" && ECR_REGISTRY=123456789012.dkr.ecr.us-west-2.amazonaws.com IMAGE_TAG=test \
-    docker compose -f compose.yaml config --no-env-resolution --format json 2>&1) \
+    docker compose -f "$tmp/compose.yaml" --project-directory "$HERE" config --format json 2>&1) \
     || fail "docker compose config failed: $rendered"
   published=$(jq -r '[.services[] | (.ports // [])[] | .published] | sort | join(",")' <<<"$rendered")
   [ "$published" = "3000,9090" ] || fail "published ports are '$published', want 3000,9090"

@@ -614,6 +614,7 @@ final class AppStore {
         didSet {
             guard sitrep.standing != oldValue.standing else { return }
             Badge.refresh(sitrep.standing)
+            noteHeadlineBand()
         }
     }
     /// The hero's sentence about what For-your-eyes is ABOUT, written by the
@@ -631,20 +632,68 @@ final class AppStore {
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
     var stats: StoreStats? {
-        didSet {
-            // The calendar gate, out of every poll: written only when it
-            // flips, so its readers (the rail, the Go menu) are not readers
-            // of the stats.
-            let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
-            if open != calendarPageAvailable { calendarPageAvailable = open }
-        }
+        didSet { noteStats() }
     }
+
+    /// THE VALUES THE BUSY VIEWS READ OFF THE STATS (the reader, the inbox,
+    /// both boards, the shells, the composers), written here and only when
+    /// they change. The stats themselves change on EVERY poll: the daemon stamps
+    /// `sync.last_success_at` each time Gmail answers (every five seconds by
+    /// default), so a view that read `stats?.anything`, or a property computed
+    /// from it, was a reader of the whole struct and was re-evaluated every
+    /// ten seconds — the reader's message stack for an address that never
+    /// moves, the root view for capability flags that never move. A view that
+    /// reads one of these and not the stats is redrawn only when it changes.
+    /// Views that draw the sync clock or the counters themselves still read
+    /// the stats, and redraw every poll as they should.
+    ///
+    /// Each is compared first: an assignment of the same value still tells
+    /// every reader to look again.
+    private func noteStats() {
+        let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
+        if open != calendarPageAvailable { calendarPageAvailable = open }
+        let email = stats?.account_email
+        if email != accountEmail { accountEmail = email }
+        let spam = stats?.spam
+        if spam != spamCount { spamCount = spam }
+        let landed = stats != nil
+        if landed != hasStats { hasStats = landed }
+        let dead = stats?.gmail?.connected == false
+        if dead != gmailDisconnected { gmailDisconnected = dead }
+        let draftsV2 = stats?.drafts_v2 == true
+        if draftsV2 != draftsV2Available { draftsV2Available = draftsV2 }
+        let scheduled = stats?.scheduled_send == true
+        if scheduled != scheduledSendAvailable { scheduledSendAvailable = scheduled }
+        let sharing = stats?.invite_sharing == true
+        if sharing != shareAvailable { shareAvailable = sharing }
+        let ios = stats?.ios_connected
+        if ios != iosConnected { iosConnected = ios }
+        let forwarding = stats?.forwarding == true
+        if forwarding != forwardingAvailable { forwardingAvailable = forwarding }
+        let attachments = stats?.compose_attachments == true
+        if attachments != composeAttachmentsAvailable { composeAttachmentsAvailable = attachments }
+        let relay = stats?.assistant_relay == true
+        if relay != relayAvailable { relayAvailable = relay }
+        var waiting = 0
+        if let triage = stats?.triage { waiting = max(triage.queued, 0) + max(triage.leased, 0) }
+        if waiting != triageWaiting { triageWaiting = waiting }
+        noteSyncStatus()
+    }
+
+    /// The mailbox's own address, for the reader's "me". See `noteStats`.
+    private(set) var accountEmail: String?
+    /// The spam folder's count, nil until the daemon has looked (see
+    /// `spamDoorVisible`). See `noteStats`.
+    private(set) var spamCount: Int?
+    /// Whether any stats have landed: the board's "all clear" waits for
+    /// them. See `noteStats`.
+    private(set) var hasStats = false
     /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
     /// number keys, the shortcuts sheet, the assistant's guide and the route
     /// all read this one property; the rule itself, the daemon's timeline AND
     /// the `calendar` hidden feature, is `CalendarGate.pageAvailable`.
     ///
-    /// STORED, and written by `stats`' didSet only when it changes (the
+    /// STORED, and written by `noteStats` only when it changes (the
     /// `statsEpoch` pattern): computed off `stats` it made the rail and the
     /// Go menu re-evaluate on every poll that changed any count. Off the raw
     /// `stats`, not `calendarAccess`: it says only whether a page exists,
@@ -656,8 +705,11 @@ final class AppStore {
     /// (the calendar grant and its consent link, `calendarAccess`) reads
     /// `stats` only while this is the live epoch.
     var statsEpoch: Int?
-    var lastRefresh: Date?
-    var refreshError: RefreshError?
+    var lastRefresh: Date? {
+        // `derive` reads only whether there has been one (`daemonDown`).
+        didSet { if (oldValue == nil) != (lastRefresh == nil) { noteSyncStatus() } }
+    }
+    var refreshError: RefreshError? { didSet { noteSyncStatus() } }
 
     /// Down = refreshes failing AND nothing has ever loaded this session, so the
     /// routed view is replaced by the down pane (Settings excepted: it must stay
@@ -674,7 +726,27 @@ final class AppStore {
     var selectedId: Int?
 
     // MARK: sitrep zones — see SitrepZoneCache
-    var zones = SitrepZoneCache()
+    var zones = SitrepZoneCache() {
+        didSet {
+            // A zone pass writes each zone apart; only Reading's moves this.
+            guard zones.reading != oldValue.reading else { return }
+            noteReadingThreads()
+        }
+    }
+    /// Every thread a Reading sender's window holds, which is what makes a
+    /// thread "reading mail" for the reader (`ThreadViewer.isReadingMail`).
+    /// STORED, rebuilt when the zones change and written only when the set
+    /// does: the reader asked it several times a body, and each was a walk
+    /// of every sender's every item.
+    private(set) var readingThreadIds: Set<String> = []
+
+    private func noteReadingThreads() {
+        var ids = Set<String>()
+        for sender in zones.reading {
+            for item in sender.items { ids.insert(item.thread_id) }
+        }
+        if ids != readingThreadIds { readingThreadIds = ids }
+    }
 
     // MARK: calendar page, see Model/CalendarStore.swift
     /// The last timeline that landed, held here for the reason the zones are:
@@ -906,11 +978,22 @@ final class AppStore {
     /// reader came in through a Reading tile.
     var readingOrder: [String] = []
 
+    /// What the Reading zone draws: its senders, pruned of mail already
+    /// resolved here.
+    var readingOnBoard: [ReadingSender] { Reading.prune(zones.reading, resolved: resolvedIds) }
+
+    /// Resolve the heroes of the Reading cards on screen. Those past the fold
+    /// resolve their own as they mount, or in the launch warm's deferred half
+    /// once the board has been quiet.
+    private func preloadBoardHeroes() {
+        HeroCache.shared.preload(readingOnBoard.prefix(BoardFold.reading).map(\.latestThreadId))
+    }
+
     /// A Reading tile: the sender's newest email, with the rest of that sender
     /// as the queue and the rest of the board behind it.
     func openReading(_ sender: ReadingSender) {
         guard !sender.latestThreadId.isEmpty else { return }
-        readingOrder = Reading.prune(zones.reading, resolved: resolvedIds).map(\.address)
+        readingOrder = readingOnBoard.map(\.address)
         openThread(
             sender.latestThreadId, queue: sender.items, readingMail: true, from: .reading)
     }
@@ -921,7 +1004,7 @@ final class AppStore {
         guard readingMail, let threadId, let first = threadQueue.first else { return nil }
         return Reading.next(
             after: SenderID.address(first.sender), in: readingOrder,
-            board: Reading.prune(zones.reading, resolved: resolvedIds), notThread: threadId)
+            board: readingOnBoard, notThread: threadId)
     }
 
     /// Shared by the preview and advance action so resolved siblings never peek.
@@ -1134,6 +1217,11 @@ final class AppStore {
     /// unconfigured: no toggle anywhere, no receipts fetched.
     var tracking: TrackingConfig?
 
+    // MARK: translation languages
+    /// The languages the owner reads, which the daemon leaves untranslated.
+    /// Fetched by the settings card, not at connect: nothing else reads it.
+    var translateConfig: TranslateConfigState = .unknown
+
     // MARK: account switching
 
     /// Bumped on every account switch. Every async writer of account-scoped
@@ -1189,19 +1277,27 @@ final class AppStore {
     }
 
     /// The owner's local date as the headline prompt reads it.
-    private static func headlineToday(_ now: Date = Date()) -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd (EEEE)"
-        return f.string(from: now)
+    /// Through `Agenda.format`'s formatters, kept per zone: one made per call
+    /// is what this was, and one kept on the zone it was made in would put
+    /// the day out by the difference after a flight.
+    private static func headlineToday() -> String {
+        Agenda.format(Date(), "yyyy-MM-dd (EEEE)", .current)
     }
 
     /// What a headline is ABOUT: the rows in the band and what triage said of
     /// each, plus the day. Any change here is a board the old sentence may no
-    /// longer describe.
-    var headlineKey: String {
-        Self.headlineToday() + "|"
-            + sitrep.standing.map { "\($0.thread_id):\($0.one_line)" }.joined(separator: "|")
+    /// longer describe. The day is read as it is (a kept formatter), and the
+    /// rows' half is kept in `headlineBand`: this was rebuilt, a new formatter
+    /// and a join of every row included, on every board body that keyed its
+    /// headline task on it.
+    var headlineKey: String { Self.headlineToday() + "|" + headlineBand }
+
+    /// The rows' half of `headlineKey`, rebuilt when the band changes.
+    private(set) var headlineBand = ""
+
+    private func noteHeadlineBand() {
+        let band = sitrep.standing.map { "\($0.thread_id):\($0.one_line)" }.joined(separator: "|")
+        if band != headlineBand { headlineBand = band }
     }
 
     private static let headlineDefaultsKey = "fyeHeadline.last"
@@ -1311,9 +1407,9 @@ final class AppStore {
         // live poller has never pulled (practice claims the connection before
         // it starts), so the stats are asked for once, here, while the client
         // still points at the real daemon. Read BEFORE the wipe either way.
-        var accountEmail = RehearsalMode.isEnabled ? nil : stats?.account_email
-        if accountEmail == nil, !RehearsalMode.isEnabled, connStatus == .connected {
-            accountEmail = (try? await APIClient.shared.getStats())?.account_email
+        var liveAddress = RehearsalMode.isEnabled ? nil : stats?.account_email
+        if liveAddress == nil, !RehearsalMode.isEnabled, connStatus == .connected {
+            liveAddress = (try? await APIClient.shared.getStats())?.account_email
         }
         guard !Task.isCancelled else { return }
         let previousStatus = connStatus
@@ -1347,7 +1443,7 @@ final class AppStore {
         wipeAccountCaches()
         closeOverlaysForPractice()
         RehearsalMode.setEnabled(true)
-        await RehearsalAPI.shared.reset(accountEmail: accountEmail)
+        await RehearsalAPI.shared.reset(accountEmail: liveAddress)
         // The fixture's calendar items keep the same ids from session to
         // session, and the zone retires an item a day after it was first
         // shown. Without this, a second run more than a day after the first
@@ -2209,7 +2305,7 @@ final class AppStore {
         // What a zone pass does once its rows are in, done for these rows:
         // the caches were wiped with the last account, and the cards are on
         // screen a round trip before the pass that would refill them.
-        HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
+        preloadBoardHeroes()
         warmZoneThreads()
     }
 
@@ -2374,6 +2470,7 @@ final class AppStore {
         authRings = []
         authQueue = []
         tracking = nil
+        translateConfig = .unknown
         // `route(to:)` first: it is what turns a closed calendar into the
         // sitrep, and the history has to name the page actually shown.
         route(to: page)
@@ -2676,7 +2773,12 @@ final class AppStore {
         // The seed, after `readingMail` (the style reads it) and before the
         // view mounts. A direct open (`openMessage`) has no cached view yet
         // and hands the reader its copy through `focusedMessageView` instead.
-        readerSeed = ThreadPrefetch.shared.cached(threadId).map { view in
+        // NOT A COPY THAT LACKS THE MESSAGE THIS OPEN NAMES (the reply it is
+        // for, the message it lands on): the reader goes to the daemon for that
+        // one (ThreadViewer.load), and a seed it then replaces is a flash.
+        readerSeed = ThreadPrefetch.shared.cached(
+            threadId, holding: [replyTo, focusMessage].compactMap { $0 }
+        ).map { view in
             ReaderSeed(
                 threadId: threadId, view: view,
                 style: ThreadViewer.resolveStyle(
@@ -2749,6 +2851,9 @@ final class AppStore {
         guard event.kind != .opened else { return }
         // A poll slowed down because nobody is looking catches up now.
         SitrepPoller.shared.noteLiveEvent()
+        // The fastest word that a cached thread is behind: drop the copy now
+        // rather than at the pull this asks for.
+        ThreadPrefetch.shared.retire(CollectionOfOne((event.thread_id, event.message_id)))
         noteThreadArrival(
             thread: event.thread_id, message: event.message_id, sender: event.sender)
     }
@@ -2910,7 +3015,7 @@ final class AppStore {
             zonesLoadedAt = Date()
         }
 
-        HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
+        preloadBoardHeroes()
         warmZoneThreads()
         // The reading half of the launch image warm's input; the bands are the
         // other half, and it starts once both have landed.
@@ -3334,9 +3439,13 @@ final class AppStore {
                 mailPagingState[mode, default: MailPaging()].exhausted = false
             }
             mailLoadedAt[mode] = Date()
+            // Every row is a message, so this is where a reply landing in a
+            // cached thread is noticed, whichever row it is.
+            ThreadPrefetch.shared.retire(fetched.items.lazy.map { ($0.thread_id, $0.id) })
             // Pull the head rows' threads before any click, so an open renders
             // from cache. Runs on the launch warm too, not just on a visit.
-            // Mail still to do first: it is what gets opened.
+            // Mail still to do first: it is what gets opened. Runs every poll
+            // tick on the page, and asks only for threads not already cached.
             ThreadPrefetch.shared.warm(
                 merge.rows.lazy.filter { $0.status != .done }
                     .prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
@@ -3423,6 +3532,9 @@ final class AppStore {
             if page.items != sentRows.value { sentRows.value = page.items }
             if sentRows.error != nil { sentRows.error = nil }
             sentLoadedAt = Date()
+            // A reply sent from another client is a new row here, and the
+            // thread's copy predates it.
+            ThreadPrefetch.shared.retire(page.items.lazy.map { ($0.thread_id, $0.id) })
             ThreadPrefetch.shared.warm(
                 page.items.prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
         } catch {
@@ -3503,7 +3615,7 @@ final class AppStore {
     /// condition left is that the daemon is new enough to have the field at
     /// all — `nil` means it cannot serve the page, and offering a door to a
     /// 400 would be worse than not offering one.
-    var spamDoorVisible: Bool { stats?.spam != nil }
+    var spamDoorVisible: Bool { spamCount != nil }
 
     /// Ask the daemon to go and fetch the spam folder. Called when the page is
     /// OPENED, not on the recurring poll: the daemon does not track that folder,
@@ -4250,8 +4362,8 @@ final class AppStore {
     /// nil (no stats yet, or a daemon too old to say) hides the drafts button
     /// and keeps ⌘N on the one-slot rule, because the by-id routes would 404
     /// on an old daemon. Note `DraftSaver.save` tells the two nil cases apart;
-    /// this flag does not need to.
-    var draftsV2Available: Bool { stats?.drafts_v2 == true }
+    /// this flag does not need to. Stored: see `noteStats`.
+    private(set) var draftsV2Available = false
 
     /// Fetch the drafts list into `draftsRows`. The drafts page calls it on open.
     ///
@@ -5394,8 +5506,8 @@ final class AppStore {
     /// Whether the composers may offer a send time. Same shape and same reason
     /// as `composeAttachmentsAvailable`: a daemon without an outbox would 404
     /// the click, so every schedule door (the clock, its chord, the palette)
-    /// is withheld. nil (no stats yet) counts as no.
-    var scheduledSendAvailable: Bool { stats?.scheduled_send == true }
+    /// is withheld. nil (no stats yet) counts as no. Stored: see `noteStats`.
+    private(set) var scheduledSendAvailable = false
 
     /// Set (or, with nil, clear) when a composer's mail goes.
     ///
@@ -6172,7 +6284,8 @@ final class AppStore {
     /// probe and SitrepPoller keeps it fresh, so no extra fetch exists for
     /// this. A self-host daemon never says `assistant_relay`, and nil means
     /// the switch is simply not offered (same posture as `trackingAvailable`).
-    var relayAvailable: Bool { stats?.assistant_relay == true }
+    /// Stored: see `noteStats`.
+    private(set) var relayAvailable = false
 
     // MARK: - gmail connection
 
@@ -6183,7 +6296,8 @@ final class AppStore {
     /// without a metrics registry), and a daemon that cannot see the credential
     /// must not have its silence rendered as an alarm. A false alarm here sends
     /// somebody through a Google consent screen for nothing.
-    var gmailDisconnected: Bool { stats?.gmail?.connected == false }
+    /// Both boards ask at the top of their bodies. Stored: see `noteStats`.
+    private(set) var gmailDisconnected = false
 
     /// A mailbox catch-up in flight, as `(done, total)`.
     ///
@@ -6253,8 +6367,37 @@ final class AppStore {
     /// credential, Gmail throttling or errors, catch-up and triage blockers,
     /// in that precedence. Every surface that talks about sync health reads
     /// this rather than re-deriving it. See Model/SyncStatus.swift.
-    var syncStatus: SyncStatus {
-        SyncStatus.derive(daemonDown: daemonDown, stats: stats, date: Fmt.date)
+    /// STORED, for the reason the values in `noteStats` are: the board's
+    /// banner, its status line and the empty-board hero all ask. Re-derived
+    /// whenever an input moves (the stats, the refresh error, the refresh
+    /// time: everything `derive` and `daemonDown` read) and written only when
+    /// the answer differs, which in a healthy mailbox is never.
+    private(set) var syncStatus: SyncStatus = .healthy
+    /// `derive` reads the clock for one thing, a cooldown's end; this looks
+    /// again at that instant, so the banner does not wait for the next poll
+    /// (as long as five minutes with the window hidden) to say it is over.
+    @ObservationIgnored private var syncStatusExpiry: Task<Void, Never>?
+    @ObservationIgnored private var syncStatusExpiresAt: Date?
+
+    private func noteSyncStatus() {
+        let now = Date()
+        let status = SyncStatus.derive(daemonDown: daemonDown, stats: stats, now: now, date: Fmt.date)
+        if status != syncStatus { syncStatus = status }
+        var expiry: Date?
+        if case .coolingDown(let until?, _) = status, until > now { expiry = until }
+        // The same end already armed: leave its timer be.
+        guard expiry != syncStatusExpiresAt else { return }
+        syncStatusExpiry?.cancel()
+        syncStatusExpiry = nil
+        syncStatusExpiresAt = expiry
+        if let expiry {
+            syncStatusExpiry = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(expiry.timeIntervalSince(now)))
+                guard !Task.isCancelled, let self else { return }
+                self.syncStatusExpiresAt = nil
+                self.noteSyncStatus()
+            }
+        }
     }
 
     /// When the DAEMON last heard from Gmail. Nil on a daemon too old to say,
@@ -6262,10 +6405,8 @@ final class AppStore {
     var daemonLastSync: Date? { Fmt.date(stats?.sync?.last_success_at) }
 
     /// Jobs waiting for, or running through, triage right now. 0 when unknown.
-    var triageWaiting: Int {
-        guard let t = stats?.triage else { return 0 }
-        return max(t.queued, 0) + max(t.leased, 0)
-    }
+    /// Stored: see `noteStats`.
+    private(set) var triageWaiting = 0
 
 
     // MARK: - invite sharing
@@ -6281,8 +6422,8 @@ final class AppStore {
     /// the connect probe. A self-host daemon, a daemon too old to say, and a
     /// hosted tenant nobody has turned sharing on for all read as false, and
     /// false means the button is never offered and the two-week nudge never
-    /// fires.
-    var shareAvailable: Bool { stats?.invite_sharing == true }
+    /// fires. Stored: see `noteStats`.
+    private(set) var shareAvailable = false
 
     /// The hidden features that are on for this mailbox. Read off the same
     /// stats as the capability flags above, and for a different reason than
@@ -6295,8 +6436,8 @@ final class AppStore {
 
     /// The daemon's answer to "has an iPhone app ever talked to this mailbox",
     /// or nil when it has not given one yet (or is too old to). Drives the
-    /// TestFlight ask; see `TestFlightNudge`.
-    var iosConnected: Bool? { stats?.ios_connected }
+    /// TestFlight ask; see `TestFlightNudge`. Stored: see `noteStats`.
+    private(set) var iosConnected: Bool?
 
     // MARK: - forwarding
 
@@ -6311,15 +6452,16 @@ final class AppStore {
     /// unknown field, sends the covering note by itself and returns 200 "sent",
     /// so hoping would mean mailing a stranger an empty "look at this" and
     /// telling the sender it worked. A send has no undo, so the only safe read
-    /// of "we do not know" is no.
-    var forwardingAvailable: Bool { stats?.forwarding == true }
+    /// of "we do not know" is no. Stored: see `noteStats`.
+    private(set) var forwardingAvailable = false
 
     /// Whether the composers may offer to attach files. Same shape and same
     /// reason as `forwardingAvailable`: a daemon that does not know
     /// `attachment_ids` ignores the key and mails the words without the
     /// files, answering 200 — so the affordance is withheld rather than
-    /// offered as a lie. nil (no stats yet) counts as no.
-    var composeAttachmentsAvailable: Bool { stats?.compose_attachments == true }
+    /// offered as a lie. nil (no stats yet) counts as no. Stored: see
+    /// `noteStats`.
+    private(set) var composeAttachmentsAvailable = false
 
     // MARK: - read tracking
 
@@ -6346,6 +6488,30 @@ final class AppStore {
     /// post-write view, so `configured` is refreshed alongside it.
     func setTrackingDefault(_ enabled: Bool) async throws {
         tracking = try await APIClient.shared.setTrackingDefault(enabled)
+    }
+
+    /// Read the languages left untranslated. A 404 is a daemon older than the
+    /// setting and draws a quiet hint, kept apart from a failed read, which
+    /// must not look like "not offered".
+    func refreshTranslateConfig() async {
+        let e = epoch
+        do {
+            let next = try await APIClient.shared.getTranslateConfig()
+            guard e == epoch else { return }
+            translateConfig = .loaded(next)
+        } catch {
+            guard e == epoch else { return }
+            translateConfig = translateConfig.failed(notFound: (error as? APIError)?.kind == .notFound)
+        }
+    }
+
+    /// Replace the whole set. Throws so the card can say why; the stored
+    /// answer only moves to what the daemon confirms.
+    func setReadLanguages(_ codes: [String]) async throws {
+        let e = epoch
+        let next = try await APIClient.shared.setReadLanguages(codes)
+        guard e == epoch else { return }
+        translateConfig = .loaded(next)
     }
 
     func openTriageFix(_ target: TriageFixTarget) { triageFix = target }

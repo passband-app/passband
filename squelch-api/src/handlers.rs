@@ -623,8 +623,31 @@ pub async fn get_thread(
 ) -> Result<impl IntoResponse, ApiError> {
     // Sealed and nonexistent threads are the SAME NotFound. Each message carries
     // its server-sanitized `html`, null for plain-text-only mail.
+    //
+    // READING A THREAD BUYS NOTHING (docs/TRANSLATION.md): an archive thread's
+    // `deferred` translations are served AS `deferred`, with no text, and stay
+    // parked. The client prefetches threads through this very GET (search
+    // results, list hovers, the sitrep), so promoting here would spend on
+    // archive mail nobody opened. The reader that DISPLAYS the thread asks
+    // for them over `POST /client/thread/{id}/translate` instead.
+    //
+    // NO TRANSLATOR, NO PROMISE: without one (translation off, no LLM), a
+    // `pending` or `deferred` row would never finish, so it is not served and
+    // the reader shows the original alone. A finished translation still is.
+    let translate_active = state.translate_active;
     query(&state, move |store, account_id| {
-        let view = store.thread_view_with_html(account_id, &thread_id)?;
+        let mut view = store.thread_view_with_html(account_id, &thread_id)?;
+        if !translate_active {
+            for message in &mut view.messages {
+                if message
+                    .translation
+                    .as_ref()
+                    .is_some_and(|t| t.status == "pending" || t.status == "deferred")
+                {
+                    message.translation = None;
+                }
+            }
+        }
         // Memoized per distinct sender: a thread is usually two addresses
         // repeated, and each miss is a round trip to `contacts`. The store
         // compares under COLLATE NOCASE, so the memo key is lowercased to match.
@@ -692,6 +715,104 @@ pub async fn mark_thread_opened(
     })
     .await?;
     Ok(Json(json!({ "opened": opened })))
+}
+
+// --- POST /client/thread/{thread_id}/translate ------------------------------
+
+/// "I am showing this thread: translate it." Promotes the thread's `deferred`
+/// (archive-tier) translations to `pending` and wakes the refine lane, so the
+/// work starts now rather than at the lane's next interval.
+///
+/// A ROUTE OF ITS OWN for `mark_thread_opened`'s reason: the GET is also how
+/// the client warms threads it has not shown, and archive mail spends nothing
+/// unprompted (`messages.is_archive` in schema.sql). Only the reader
+/// displaying the thread knows a person is looking at it.
+///
+/// IDEMPOTENT: only `deferred` rows move, so a second call promotes nothing
+/// and pokes nothing. `promoted` says how many moved. Sealed mail may move
+/// too and is still never claimed by the pass, so this spends nothing on it.
+pub async fn translate_thread(
+    State(state): State<ApiState>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !state.translate_active {
+        // Nothing would ever work a promoted row.
+        return Ok(Json(json!({ "promoted": 0 })));
+    }
+    let poke = state.archive_surfacing.poke.clone();
+    let promoted = store_call(&state, move |store, account_id| {
+        store.promote_deferred_translations(account_id, &thread_id, Utc::now())
+    })
+    .await?;
+    if promoted > 0
+        && let Some(poke) = &poke
+    {
+        poke.poke();
+    }
+    Ok(Json(json!({ "promoted": promoted })))
+}
+
+// --- GET/POST /client/translate-config ---------------------------------------
+
+/// The "Languages I read" setting: the codes the owner reads, every code they
+/// could pick (with its English name), and whether a translator is configured
+/// at all, so the card can say so instead of offering a choice that does
+/// nothing.
+#[derive(Debug, Serialize)]
+pub struct TranslateConfigView {
+    active: bool,
+    read_languages: Vec<String>,
+    available: Vec<LanguageChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LanguageChoice {
+    code: &'static str,
+    name: &'static str,
+}
+
+fn translate_config_view(active: bool, read_languages: Vec<String>) -> TranslateConfigView {
+    TranslateConfigView {
+        active,
+        read_languages,
+        available: squelch_core::translate::Lang::readable_choices()
+            .into_iter()
+            .map(|l| LanguageChoice {
+                code: l.code(),
+                name: l.english_name(),
+            })
+            .collect(),
+    }
+}
+
+pub async fn get_translate_config(
+    State(state): State<ApiState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let active = state.translate_active;
+    let codes = store_call(&state, move |store, account_id| {
+        store.read_languages(account_id)
+    })
+    .await?;
+    Ok(Json(translate_config_view(active, codes)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TranslateConfigBody {
+    read_languages: Vec<String>,
+}
+
+/// Replaces the whole set. Unknown codes and English are dropped, and the
+/// response is the set as stored.
+pub async fn set_translate_config(
+    State(state): State<ApiState>,
+    Json(body): Json<TranslateConfigBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let active = state.translate_active;
+    let codes = store_call(&state, move |store, account_id| {
+        store.set_read_languages(account_id, &body.read_languages, Utc::now())
+    })
+    .await?;
+    Ok(Json(translate_config_view(active, codes)))
 }
 
 // --- GET /client/attachments/{id} -------------------------------------------
@@ -1660,7 +1781,7 @@ pub async fn search(
             account_id,
             &term,
             partial,
-            filter.include_sent,
+            filter.searches_sent(),
             counted_strict,
         )?;
         if queued_at.elapsed().as_millis() >= 250 {
@@ -4103,6 +4224,12 @@ pub async fn get_usage(
                 state.stage2_model.as_ref(),
                 state.stage2_price_in_per_mtok,
                 state.stage2_price_out_per_mtok,
+            )
+        } else if name == squelch_core::translate::USAGE_CATEGORY {
+            (
+                state.translate_model.as_ref(),
+                state.translate_price_in_per_mtok,
+                state.translate_price_out_per_mtok,
             )
         } else if squelch_core::metrics::runs_notify_model(name) {
             (

@@ -71,30 +71,6 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
         // (WebFramePool.discard) is what unwires the delegates for good.
         webView.navigationDelegate = relay
         webView.uiDelegate = relay
-        webView.allowsBackForwardNavigationGestures = false
-        // No 3D-touch/long-press link preview: a peek would navigate a surface
-        // whose whole security posture is that it never navigates.
-        webView.allowsLinkPreview = false
-
-        // The document paints its own opaque white, so this is only about the
-        // frames BEFORE it lands: an opaque web view flashes system white (or
-        // black in dark mode) over the reader's ground while the paint-hold is
-        // still up.
-        webView.isOpaque = false
-        webView.backgroundColor = .clear
-        webView.scrollView.backgroundColor = .clear
-
-        // THE ONE SCROLL RULE. The height bridge sizes this frame to its content
-        // and the thread column scrolls; an inner scroll view that still claimed
-        // the pan would trap the gesture inside whichever message the finger
-        // happened to land on.
-        webView.scrollView.isScrollEnabled = false
-        webView.scrollView.bounces = false
-        webView.scrollView.showsVerticalScrollIndicator = false
-        // The frame is inset by its host, and a safe-area inset applied down here
-        // would be added to the measured height as blank space at the bottom of
-        // every message.
-        webView.scrollView.contentInsetAdjustmentBehavior = .never
 
         context.coordinator.attach(relay)
         context.coordinator.load(
@@ -142,14 +118,40 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
         return entry
     }
 
-    /// A frame with nothing loaded. Everything UIKit-side is set when it is
-    /// taken, since those are plain view properties and setting them twice
-    /// costs nothing.
+    /// A frame with nothing loaded, and everything UIKit-side set at birth.
+    /// AT BIRTH, not when it is taken: a frame the prewarmer renders ahead is
+    /// parked without ever being taken here, and a pool hit hands it out as it
+    /// is, so a property set only on the take path is missing from exactly
+    /// those frames.
     @MainActor
     static func buildFrame() -> WebFramePool.Entry {
         let (config, relay) = EmailFrame.makeConfiguration()
         let webView = WKWebView(frame: .zero, configuration: config)
         EmailFrame.pinLightAppearance(webView)
+        webView.allowsBackForwardNavigationGestures = false
+        // No 3D-touch/long-press link preview: a peek would navigate a surface
+        // whose whole security posture is that it never navigates.
+        webView.allowsLinkPreview = false
+
+        // The document paints its own opaque white, so this is only about the
+        // frames BEFORE it lands: an opaque web view flashes system white (or
+        // black in dark mode) over the reader's ground while the paint-hold is
+        // still up.
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+
+        // THE ONE SCROLL RULE. The height bridge sizes this frame to its content
+        // and the thread column scrolls; an inner scroll view that still claimed
+        // the pan would trap the gesture inside whichever message the finger
+        // happened to land on.
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+        webView.scrollView.showsVerticalScrollIndicator = false
+        // The frame is inset by its host, and a safe-area inset applied down here
+        // would be added to the measured height as blank space at the bottom of
+        // every message.
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         return WebFramePool.Entry(webView: webView, relay: relay)
     }
 }

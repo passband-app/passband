@@ -407,6 +407,9 @@ final class SitrepPoller {
             let next = SitrepData(
                 standing: page.items.map(\.row), new: [], open: [],
                 sealed: sealedFresh ? sl : store.sitrep.sealed, totalCount: page.total_count)
+            // A row naming a message newer than a thread's cached copy is mail
+            // that copy predates; it goes before anything can open it.
+            ThreadPrefetch.shared.retire(next.standing.lazy.map { ($0.thread_id, $0.id) })
             // ASSIGN ONLY ON CHANGE: @Observable notifies on assignment, not on
             // value difference, so writing an identical read model every 10s
             // re-lays out the whole dashboard for nothing. The stats are

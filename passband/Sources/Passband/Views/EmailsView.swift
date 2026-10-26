@@ -43,6 +43,10 @@ struct EmailsView: View {
     /// accessors below keep every key binding reading it as before; they run
     /// when a key fires, not while the body is built.
     @State private var cursor = ListCursor()
+    /// THE LIST'S CLOCK, on the minute: what the rows say with the time alone
+    /// ("3m", a deadline or reminder chip) used to ride on the redraw every
+    /// poll brought, when the header read the stats.
+    @State private var minute = Date()
     private var index: Int {
         get { cursor.index }
         nonmutating set { cursor.index = newValue }
@@ -172,8 +176,16 @@ struct EmailsView: View {
     private var verdicted: Bool { triageable && mode != .spam }
 
     var body: some View {
+        let _ = minute
         VStack(spacing: 0) {
             header
+                .task {
+                    await clockTicks(every: 60, while: { Platform.isAppOnScreen }) {
+                        // Not on a fresh mount, which has just drawn with now.
+                        let now = Date()
+                        if abs(now.timeIntervalSince(minute)) >= 1 { minute = now }
+                    }
+                }
             // ABOVE the list rather than inside it, so it does not scroll away.
             // The sentence answers "who put this here", and that question is
             // asked at row 40 as readily as at row 1.
@@ -617,7 +629,7 @@ struct EmailsView: View {
         private var showSpamDoor: Bool { store.spamDoorVisible && mode == .inbox }
         /// The count beside it, when there is one to show.
         private var spamDoorCount: Int? {
-            store.stats?.spam.flatMap { $0 > 0 ? $0 : nil }
+            store.spamCount.flatMap { $0 > 0 ? $0 : nil }
         }
 
         private var phoneHeader: some View {
@@ -697,7 +709,7 @@ struct EmailsView: View {
                             // not track this folder, so before the first visit
                             // there is no count to show and a "0" would be a
                             // claim nobody has checked.
-                            if let spam = store.stats?.spam, spam > 0 {
+                            if let spam = store.spamCount, spam > 0 {
                                 Text("\(spam)")
                                     .font(Typo.num(12, weight: .bold))
                                     .foregroundStyle(

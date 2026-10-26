@@ -462,6 +462,17 @@ actor APIClient {
         try await postNoContent("/client/thread/\(escaped)/opened")
     }
 
+    /// Ask the daemon to translate this thread's ARCHIVE mail, whose
+    /// translations `getThread` serves as `deferred` and leaves unbought.
+    /// Called by the reader DISPLAYING the thread, and by nothing else: the
+    /// prefetch reads threads nobody opened, and archive mail spends nothing
+    /// unprompted. Idempotent on the daemon, so a reopen may ask again.
+    func translateThread(_ threadId: String) async throws {
+        let escaped =
+            threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
+        try await postNoContent("/client/thread/\(escaped)/translate")
+    }
+
     /// Whether this daemon can share invites, and what the mail could say.
     /// Asked before anything is shown, so a daemon that cannot share never
     /// renders a button whose only outcome is a refusal.
@@ -1181,6 +1192,21 @@ actor APIClient {
     @discardableResult
     func setTrackingDefault(_ enabled: Bool) async throws -> TrackingConfig {
         try await post("/client/tracking-config", body: TrackingConfigBody(default_enabled: enabled))
+    }
+
+    // MARK: - translation languages
+
+    /// The languages left untranslated. A daemon older than the setting
+    /// answers 404, which the card reads as "not offered here".
+    func getTranslateConfig() async throws -> TranslateConfig {
+        try await get("/client/translate-config")
+    }
+
+    /// Replace the whole set. The answer is the daemon's post-write view, with
+    /// anything it refused already dropped.
+    @discardableResult
+    func setReadLanguages(_ codes: [String]) async throws -> TranslateConfig {
+        try await post("/client/translate-config", body: TranslateConfigBody(read_languages: codes))
     }
 
     // MARK: - agent write access

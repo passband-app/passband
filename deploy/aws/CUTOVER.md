@@ -359,7 +359,9 @@ nothing, and leaked), `SQUELCH_CONTROL_ALERT_WEBHOOK` (legacy name).
 openssl rand -base64 48 | tr -d '\n' | putin passband/control/SQUELCH_CONTROL_COOKIE_KEY
 
 # Bifrost admin credential: username:password, one colon, >= 32 chars. Hex keeps ':' out of the halves.
-printf 'passband-ops:%s' "$(openssl rand -hex 24)" | putin passband/control/SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN
+# Bifrost's password policy wants an uppercase letter and a special character;
+# plain hex is refused at "enable auth". No ':' in the password half.
+printf 'passband-ops:Pb-%s' "$(openssl rand -hex 24)" | putin passband/control/SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN
 
 # Relay: two different bearers, 64 hex chars each.
 openssl rand -hex 32 | tr -d '\n' | putin passband/relay/SQUELCH_RELAY_AUTH_TOKEN
@@ -423,7 +425,7 @@ export PGSSLMODE=verify-full PGSSLROOTCERT=$PWD/squelch-control/certs/rds-global
 admin() { PGPASSWORD=$(aws secretsmanager get-secret-value \
     --secret-id "$(tofu -chdir=$TF output -raw rds_master_secret_arn)" \
     --query SecretString --output text | jq -r .password) \
-  psql -X "host=$RDS_HOST hostaddr=127.0.0.1 port=15432 dbname=control user=passband_admin" "$@"; }
+  psql -X "host=$RDS_HOST hostaddr=127.0.0.1 port=15432 dbname=passband user=passband_admin" "$@"; }
 admin -c 'select version()'                    # PostgreSQL 16.x, over TLS
 
 CTRL_PW=$(openssl rand -hex 32)
@@ -434,9 +436,9 @@ p=sys.stdin.buffer.read(); s=os.urandom(16); k=hashlib.pbkdf2_hmac("sha256",p,s,
 c=hmac.new(k,b"Client Key","sha256").digest(); v=hmac.new(k,b"Server Key","sha256").digest()
 e=lambda x:b.b64encode(x).decode()
 sys.stdout.write("SCRAM-SHA-256$4096:%s$%s:%s"%(e(s),e(hashlib.sha256(c).digest()),e(v)))'; }
-printf "CREATE ROLE control LOGIN PASSWORD '%s';\nGRANT control TO passband_admin;\nALTER DATABASE control OWNER TO control;\n" \
+printf "CREATE ROLE control LOGIN PASSWORD '%s';\nGRANT control TO passband_admin;\nALTER DATABASE passband OWNER TO control;\n" \
   "$(printf '%s' "$CTRL_PW" | scram)" | admin -v ON_ERROR_STOP=1
-printf 'postgres://control:%s@%s:5432/control?sslmode=verify-full' "$CTRL_PW" "$RDS_HOST" \
+printf 'postgres://control:%s@%s:5432/passband?sslmode=verify-full' "$CTRL_PW" "$RDS_HOST" \
   | putin passband/control/SQUELCH_CONTROL_DATABASE_URL
 unset CTRL_PW
 ```
@@ -466,7 +468,7 @@ characters, safe to show). The DATABASE_URL works as the app will use it:
 
 ```sh
 PGPASSWORD=$(sget passband/control/SQUELCH_CONTROL_DATABASE_URL | sed -E 's#^postgres://control:([^@]+)@.*#\1#') \
-  psql -X "host=$RDS_HOST hostaddr=127.0.0.1 port=15432 dbname=control user=control" -c 'select current_user'   # control
+  psql -X "host=$RDS_HOST hostaddr=127.0.0.1 port=15432 dbname=passband user=control" -c 'select current_user'   # control
 ```
 
 **ROLLBACK.** A wrong value is fixed by another `put-secret-value`; the
@@ -488,8 +490,9 @@ exits without the Slack URL, and a box that keeps failing just wastes the phase.
 ```sh
 R=passband-app/passband
 gh api repos/$R/actions/oidc/customization/sub --jq '.include_claim_keys'           # ["repo","context","job_workflow_ref"]
+# Immutable subjects (0d): the repo part comes from GitHub's sub_claim_prefix.
 diff <(tofu -chdir=$TF output -raw github_deploy_oidc_sub; echo) \
-     <(echo "repo:$R:environment:aws-production:job_workflow_ref:$R/.github/workflows/deploy-aws.yml@refs/heads/main") && echo SUB-MATCHES
+     <(echo "$(gh api repos/$R/actions/oidc/customization/sub --jq .sub_claim_prefix):environment:aws-production:job_workflow_ref:$R/.github/workflows/deploy-aws.yml@refs/heads/main") && echo SUB-MATCHES
 ```
 
 If the template is not customized, every deploy job fails at
@@ -608,6 +611,18 @@ curl -s -o /dev/null -w '%{http_code}\n' https://bifrost.passband.app/      # NO
 If your address changes mid-phase (VPN, Wi-Fi hop), everything below starts
 answering `404 not found`: redo the three lines above.
 
+**Done 2026-10-26 through Bifrost's API instead of the UI** (a browser with a
+cached DNS answer lands on Railway's Bifrost, which already has auth, and
+asks for a login that is not this one). The API route: `GET /api/config`,
+then `PUT /api/config` with `client_config` (`disable_content_logging: true`,
+`log_retention_days: 7`) and `auth_config` (`is_enabled`, `admin_username`,
+`admin_password`). Give curl its credentials with `-K <(printf ...)`, never
+`-K -`: stdin is also where `--data-binary @-` reads the body, and an empty
+body comes back as `Invalid JSON`. Virtual keys can be minted the same way
+(`POST /api/governance/virtual-keys`, the shape in `squelch-control/src/bifrost.rs`).
+`llm sync --check` exits 1 on a gateway with ZERO virtual keys (Bifrost
+answers `"virtual_keys": null`); the provider-key half still reports `in sync`.
+
 1. Open `https://bifrost.passband.app`. Enable auth with the admin credential:
    username and password are the two halves of
    `passband/control/SQUELCH_CONTROL_BIFROST_ADMIN_TOKEN` (copy it with
@@ -699,6 +714,23 @@ curl -s -w ' %{http_code}\n' https://bifrost.passband.app/              # not fo
 **ROLLBACK.** Nothing public points here. Fix in the UI (reopen with
 `operator_cidrs` as above, then close it). Keep the `/etc/hosts` line until
 Phase 8; with `operator_cidrs = []` it only ever reaches the ALB's 404.
+
+---
+
+### Operator access to the Bifrost and Grafana UIs (tailnet)
+
+Added 2026-10-26, after the cutover. The monitor box joins the Passband
+tailnet as `tag:passband-aws` (key: `passband/monitor/TS_AUTHKEY`, reusable,
+tagged) and serves, tailnet-only:
+
+- `https://passband-monitor.<tailnet>.ts.net/`: the Bifrost UI, through a
+  loopback nginx that presents `Host: bifrost.passband.app` to the ALB
+- `https://passband-monitor.<tailnet>.ts.net:8443/`: Grafana
+
+So `operator_cidrs` stays `[]`; nobody's laptop goes on the ALB allow-list.
+A new tailnet needs the tag in `tagOwners` before a key can carry it, and
+Serve/HTTPS enabled once (DNS → HTTPS Certificates), or `tailscale serve`
+stops at a consent link and leaves no config.
 
 ---
 
@@ -818,11 +850,11 @@ price of a dump that nothing can write behind.
    ```sh
    # ctl <tool> <args…>: run a libpq tool as the app role over the tunnel.
    ctl() { local tool=$1; shift
-     PGHOST=$RDS_HOST PGHOSTADDR=127.0.0.1 PGPORT=15432 PGDATABASE=control PGUSER=control \
+     PGHOST=$RDS_HOST PGHOSTADDR=127.0.0.1 PGPORT=15432 PGDATABASE=passband PGUSER=control \
      PGPASSWORD=$(sget passband/control/SQUELCH_CONTROL_DATABASE_URL | sed -E 's#^postgres://control:([^@]+)@.*#\1#') \
      "$tool" "$@"; }
    printf 'DROP SCHEMA public CASCADE;\nCREATE SCHEMA public AUTHORIZATION control;\n' | ctl psql -X -v ON_ERROR_STOP=1
-   ctl pg_restore --no-owner --no-acl --exit-on-error -d control "$WORK/control.dump"
+   ctl pg_restore --no-owner --no-acl --exit-on-error -d passband "$WORK/control.dump"
    ctl psql -X -At -f "$WORK/counts.sql" > "$WORK/counts.rds"
    diff "$WORK/counts.railway" "$WORK/counts.rds" && echo IDENTICAL
    ```
@@ -985,8 +1017,11 @@ Phase 6's `drift` already proved it.
 **Order: DNS first, then mint.** A mint creates the key on whichever gateway
 control resolves. Against Railway's it fails loudly (the new admin credential
 is refused there), never silently, but it fails; so wait until control
-resolves the ALB. Tenants keep working on their old keys against Railway until
-their own mint, so there is no gap before a tenant's turn.
+resolves the ALB. **There IS a gap, so mint everyone straight away:** tenants
+reach Bifrost by hostname, so the moment the CNAME flips, a tenant still on
+its Railway key calls the AWS gateway, which does not know that key, and its
+LLM calls fail (`llm_config_failures`) until its own mint. On 2026-10-26 the
+seven mints took about two minutes and the failures stopped with them.
 
 0. **Last check that tenants will be admitted.** After the flip, every
    tenant's triage reaches the ALB from carrier's egress address, and a wrong

@@ -673,6 +673,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// flag, are reset where that lane's model answers: the access lane's
     /// fast model answering says nothing about the investigation model.
     fn note_provider_success(&self) {
+        // The gateway answered: the translate pass's release cap may now
+        // charge a row that keeps failing alone.
+        self.note_gateway_answer();
         let until = self.agent_retry_after.load(Ordering::Relaxed);
         if until > 0 && until <= Utc::now().timestamp() {
             let _ = self.agent_retry_after.compare_exchange(
@@ -1279,7 +1282,7 @@ const _: () = assert!(
 );
 
 /// Provider failures describe shared availability, not a permanently bad email.
-fn is_provider_outage(kind: &str) -> bool {
+pub(super) fn is_provider_outage(kind: &str) -> bool {
     crate::triage::llm::is_config_failure(kind)
         || matches!(kind, "transport" | "http_429")
         || kind

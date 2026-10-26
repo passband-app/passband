@@ -22,6 +22,7 @@ pub mod sync;
 pub mod text;
 pub mod timezone;
 pub mod tracking;
+pub mod translate;
 pub mod triage;
 pub mod types;
 

@@ -7,7 +7,7 @@
 import SwiftUI
 
 /// How many ranked standing items show before the quiet "{n} more" expander.
-private let eyesVisible = 10
+private let eyesVisible = BoardFold.forYourEyes
 
 /// THE FOR-YOUR-EYES WALK: the queue the reader is handed when an email is
 /// opened from this band, so `E` (done + next) can step through it without
@@ -75,11 +75,6 @@ struct SitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
 
-    /// How long a board row's thread stays good in the prefetch cache. Longer
-    /// than the default: a board row is the likeliest click in the app, and a
-    /// reader opened from a stale copy heals itself — the poll refetches in
-    /// place the moment it sees a newer message (AppStore.noteThreadArrival).
-    static let boardFresh: TimeInterval = 5 * 60
     /// How many of the top rows are worth a pre-rendered frame. Bounded by
     /// WebFramePool's prerendered tier; each is a live content process.
     private static let prerenderRows = 4
@@ -87,13 +82,19 @@ struct SitrepView: View {
     /// The whole warm for a list of board rows: threads first, then frames
     /// for the top few.
     fileprivate static func warmBoard(_ ids: [String]) {
-        ThreadPrefetch.shared.warm(
-            ids, immediate: eyesVisible, spacing: .milliseconds(150), fresh: boardFresh)
+        ThreadPrefetch.shared.warm(ids, immediate: eyesVisible, spacing: .milliseconds(150))
         FramePrewarmer.shared.want(Array(ids.prefix(prerenderRows)))
     }
 
     /// Hover + keyboard cursor. A reference, deliberately — see `SitrepCursor`.
     @State private var cursor = SitrepCursor()
+    /// THE BOARD'S CLOCK, on the half minute. What its own body works out from
+    /// the time alone (the records rail emptying as calendar rows end and
+    /// today's receipts and deliveries age out) used to ride on the redraw
+    /// every poll brought, because the board read the stats and they change
+    /// every poll; it no longer does, so the beat is kept here, at the
+    /// calendar card's own thirty seconds.
+    @State private var clock = Date()
 
     /// Below this page width the records rail stops being a pinned column and
     /// stacks under the left content, the whole page scrolling as one — a
@@ -174,7 +175,11 @@ struct SitrepView: View {
                 headline: store.fyeHeadline,
                 regenerating: store.fyeHeadlineRegenerating,
                 regenerate: { Task { await store.regenerateFyeHeadline() } },
-                empty: emptyHero)
+                // Asked only over an empty board, the one place the hero says
+                // it: the line is read off the stats (the sync clock moves
+                // every poll), and asking for it always made the whole board
+                // a reader of them.
+                empty: store.sitrep.standing.isEmpty ? emptyHero : nil)
                 .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
                 .padding(.horizontal, Self.gutter)
                 .padding(.bottom, Space.scaled(18))
@@ -261,6 +266,13 @@ struct SitrepView: View {
             }
         #endif
         .animation(.easeInOut(duration: 0.3), value: recordsEmpty)
+        .task {
+            await clockTicks(every: 30, while: { Platform.isAppOnScreen }) {
+                // Not on a fresh mount, which has just drawn with now.
+                let now = Date()
+                if abs(now.timeIntervalSince(clock)) >= 1 { clock = now }
+            }
+        }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
         .keyContext(.sitrep)
         .keyBindings(.sitrep, bindings)
@@ -318,12 +330,12 @@ struct SitrepView: View {
     /// Nothing for your eyes, and truly so: the board has loaded, and it is not
     /// empty only because sync or triage is stuck.
     private var isClear: Bool {
-        store.stats != nil && store.sitrep.standing.isEmpty && emptyHero == nil
+        store.hasStats && store.sitrep.standing.isEmpty && emptyHero == nil
     }
 
     /// The reading cards as the zone draws them.
     private var readingSenders: [ReadingSender] {
-        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+        store.readingOnBoard
     }
 
     /// Clear AND nothing to read: the board with nothing on it at all, which
@@ -338,7 +350,8 @@ struct SitrepView: View {
     /// Every records card would only say it has nothing. Four cards of "No
     /// receipts today." is a dashboard of absences, so the rail steps aside.
     private var recordsEmpty: Bool {
-        CalendarZone.rows(store, now: Date()).isEmpty
+        _ = clock
+        return CalendarZone.rows(store, now: Date()).isEmpty
             && ShipmentsZone.rows(store).isEmpty
             && BankingZone.rows(store).isEmpty
             && ReceiptsZone.rows(store).isEmpty
@@ -1191,7 +1204,7 @@ private struct ObligationRow: View {
                 // The pointer resting on a row is the best predictor of the
                 // next click: make sure its thread is cached (a no-op when it
                 // already is) and, a beat later, rendered.
-                ThreadPrefetch.shared.prefetch(update.thread_id, fresh: SitrepView.boardFresh)
+                ThreadPrefetch.shared.prefetch(update.thread_id, fresh: ThreadPrefetch.warmFresh)
                 FramePrewarmer.shared.nudge(update.thread_id)
             }
         }

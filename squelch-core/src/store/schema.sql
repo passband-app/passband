@@ -925,8 +925,15 @@ CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(account_id, me
 -- rebuilds any `messages_fts` whose stored definition differs from it at all.
 -- There is no second copy to update and no list of options to remember to
 -- extend, so an edit here cannot ship unmigrated.
+--
+-- `tsubject`/`tbody` are the ENGLISH TRANSLATION (docs/TRANSLATION.md), from
+-- `message_translations` while its status is `done` or `incomplete`, NULL
+-- otherwise. Columns are APPENDED so every positional reference to 0 (subject)
+-- and 1 (body) keeps its meaning; bm25 weighs them 4.0 and 1.0 like the
+-- originals. Every writer fills all four: the message upsert, the translate
+-- pass when a translation lands, a heal that drops one, and the rebuild.
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    subject, body, tokenize = 'porter unicode61', prefix = '2 3'
+    subject, body, tsubject, tbody, tokenize = 'porter unicode61', prefix = '2 3'
 );
 
 -- ON-BOX SEMANTIC RECALL. A sqlite-vec `vec0` table holding one embedding per
@@ -942,6 +949,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 -- configured embedder matches at attach time. Changing it means editing this
 -- literal AND resetting the dev db — there are no migrations for a vec0 table.
 CREATE VIRTUAL TABLE IF NOT EXISTS message_vecs USING vec0(
+    message_id INTEGER PRIMARY KEY,
+    embedding  FLOAT[384],
+    account_id INTEGER
+);
+
+-- THE ENGLISH TRANSLATION'S VECTOR (docs/TRANSLATION.md), one per message whose
+-- `message_translations` row is `done` or `incomplete`, embedded the same way
+-- as the original (`message_embed_text(subject, body)`). The original's vector
+-- in `message_vecs` is untouched; the KNN legs take the nearer of the two per
+-- message. Same width, same metadata column, and the same rule that a vec0
+-- table has no foreign keys: whoever deletes a translation deletes this row.
+CREATE VIRTUAL TABLE IF NOT EXISTS message_translation_vecs USING vec0(
     message_id INTEGER PRIMARY KEY,
     embedding  FLOAT[384],
     account_id INTEGER
@@ -2094,3 +2113,52 @@ CREATE TABLE IF NOT EXISTS auth_verdicts (
     decided_at TEXT NOT NULL,
     PRIMARY KEY(account_id, message_id)
 );
+-- Auto-translate (docs/TRANSLATION.md): the English version of mail written in
+-- another language, BESIDE the message. `messages.subject`/`body`/`body_html`
+-- are never rewritten. A SERVED translation (`done`, `incomplete`) IS part of
+-- the agent's content snapshot, hashed in only when one exists. Ingest
+-- inserts `pending` (live) or `deferred` (archive tier, or a backfill over
+-- the day's translate budget) for a non-English message; spam, sent, own and
+-- sealed mail never get a row. Timestamps are
+-- unix seconds. `missing_facts` is a JSON array, set when `incomplete`.
+-- `not_needed` is terminal: the translator read the message as English, so
+-- the local detection was a false positive and nothing is served.
+-- `rejected` is terminal too: the engine refused its own output (a reverse or
+-- fact check it could not pass), so nothing is served and nothing is retried.
+--
+-- `lease` is the claim token: stamped by every claim, matched by every write
+-- of a result, cleared by every terminal write. A result whose lease is gone
+-- (a heal dropped and re-queued the row, or the lease expired and another
+-- pass took it) writes nothing. `triage_wait_until` is how long agent triage
+-- holds this message's job back while the row is `pending`, so foreign mail
+-- is normally triaged once, on the English (docs/TRANSLATION.md, Pipeline);
+-- set for newly arrived live mail only. `releases` counts consecutive claims
+-- handed back on a configuration or outage failure without spending an
+-- attempt; past two, the next message-shaped such failure (a timeout, a 400)
+-- is charged to the row, but only if the gateway has answered some other
+-- translation since `first_released_at` (unix MILLISECONDS, the first release
+-- of the run, or the last charge; NULL after any verdict). A total outage
+-- therefore never spends an attempt.
+CREATE TABLE IF NOT EXISTS message_translations (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL,
+    source_lang TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed','not_needed','rejected')),
+    subject TEXT,
+    body TEXT,
+    body_html TEXT,
+    snippet TEXT,
+    missing_facts TEXT,
+    model TEXT,
+    prompt_version INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease TEXT,
+    triage_wait_until INTEGER,
+    releases INTEGER NOT NULL DEFAULT 0,
+    first_released_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+-- The translate pass's claim: one account's rows by status.
+CREATE INDEX IF NOT EXISTS idx_message_translations_claim
+    ON message_translations(account_id, status, updated_at);

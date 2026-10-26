@@ -366,6 +366,7 @@ mod specialists;
 #[cfg(test)]
 mod tests;
 mod tracking;
+mod translations;
 mod triage_stages;
 mod zones;
 
@@ -750,6 +751,18 @@ impl SqliteStore {
     #[cfg(test)]
     pub(crate) fn execute_batch_for_test(&self, sql: &str) {
         self.lock().unwrap().execute_batch(sql).unwrap();
+    }
+
+    /// One integer off the store's connection, for a test outside this
+    /// module that has to read a row no store method returns.
+    #[cfg(test)]
+    pub(crate) fn query_i64_for_test(&self, sql: &str) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        self.lock()
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .optional()
+            .unwrap()
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -1886,6 +1899,15 @@ impl Store for SqliteStore {
         self.stage1_usage_since(account_id, since_day)
     }
 
+    fn category_usage_since(
+        &self,
+        account_id: AccountId,
+        since_day: &str,
+        category: &str,
+    ) -> Result<Stage2Usage> {
+        self.category_usage_since(account_id, since_day, category)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn extract_bump_usage(
         &self,
@@ -2035,5 +2057,81 @@ impl Store for SqliteStore {
     /// embedder, including one attached late in the background.
     fn embedder(&self) -> Option<std::sync::Arc<dyn crate::embed::Embedder>> {
         SqliteStore::embedder(self)
+    }
+
+    fn queue_translation(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        source_lang: &str,
+        deferred: bool,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.queue_translation(account_id, message_id, source_lang, deferred, now)
+    }
+
+    fn claim_translations(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::store::TranslationJob>> {
+        self.claim_translations(account_id, now, limit)
+    }
+
+    fn record_translation(
+        &self,
+        job: &crate::store::TranslationJob,
+        write: &crate::store::TranslationWrite<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.record_translation(job, write, now)
+    }
+
+    fn read_languages(&self, account_id: AccountId) -> Result<Vec<String>> {
+        self.read_languages(account_id)
+    }
+
+    fn set_read_languages(
+        &self,
+        account_id: AccountId,
+        codes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        self.set_read_languages(account_id, codes, now)
+    }
+
+    fn promote_deferred_translations(
+        &self,
+        account_id: AccountId,
+        thread_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        self.promote_deferred_translations(account_id, thread_id, now)
+    }
+
+    fn message_translations(
+        &self,
+        account_id: AccountId,
+        message_ids: &[i64],
+    ) -> Result<Vec<crate::store::MessageTranslation>> {
+        self.message_translations(account_id, message_ids)
+    }
+
+    fn upsert_translation_vector(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        embedding: &[f32],
+    ) -> Result<()> {
+        self.upsert_translation_vector(account_id, message_id, embedding)
+    }
+
+    fn translations_missing_vectors(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+    ) -> Result<Vec<crate::store::MissingVector>> {
+        self.translations_missing_vectors(account_id, limit)
     }
 }

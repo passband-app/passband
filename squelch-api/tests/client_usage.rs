@@ -352,3 +352,49 @@ async fn every_row_is_priced_and_the_rows_add_up_to_the_total() {
     // The flat legacy shape carries it too.
     assert!(body["rows"][0]["est_cost_usd"].is_f64());
 }
+
+/// THE TRANSLATE ARM (docs/TRANSLATION.md, invariant 6). Auto-translate runs
+/// Claude Sonnet 5, which is neither stage's model nor the notify model, so
+/// its ledger category is priced at its own rates. Without the arm it would
+/// fall through to Stage-1's.
+#[tokio::test]
+async fn the_translate_category_costs_at_the_translate_models_rates() {
+    let seed = |store: &squelch_core::store::SqliteStore, acct: i64| {
+        for category in ["translate", "extract_banking"] {
+            store
+                .extract_bump_usage(
+                    acct,
+                    "2026-07-09",
+                    category,
+                    UsageTokens {
+                        input: 1_000_000,
+                        output: 1_000_000,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+    };
+    // The defaults: Sonnet 5's list price, $2 in and $10 out per MTok.
+    let body = get_usage(priced_harness(seed).app).await;
+    let cost = |body: &Value, name: &str| {
+        body["categories"][name]["totals"]["est_cost_usd"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!(
+        (cost(&body, "translate") - 12.0).abs() < 1e-9,
+        "translate costs at Sonnet 5 rates, got {}",
+        cost(&body, "translate")
+    );
+    assert!((cost(&body, "extract_banking") - (S1_IN + S1_OUT)).abs() < 1e-9);
+    assert_eq!(body["categories"]["translate"]["model"], "claude-sonnet-5");
+
+    // And the configured pair, when the config names one.
+    let (state, store, acct) = common::state_with(seed);
+    let state: ApiState = state.with_translate_config("translate-test", 1.0, 3.0);
+    let _ = (store, acct);
+    let body = get_usage(router(state)).await;
+    assert!((cost(&body, "translate") - 4.0).abs() < 1e-9);
+    assert_eq!(body["categories"]["translate"]["model"], "translate-test");
+}

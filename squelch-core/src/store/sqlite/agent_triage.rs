@@ -25,6 +25,9 @@ const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arr
                AND (?2!='initial_investigation' OR j.trigger NOT LIKE 'revisit:%')
                AND j.available_at<=?3 AND (j.state='queued' OR (j.state='leased' AND j.lease_until<=?3))
                AND (j.kind NOT IN ('triage','access') OR NOT EXISTS(
+                   SELECT 1 FROM message_translations tr WHERE tr.message_id=j.message_id
+                     AND tr.status='pending' AND tr.triage_wait_until>?4))
+               AND (j.kind NOT IN ('triage','access') OR NOT EXISTS(
                    SELECT 1 FROM agent_triage_jobs active JOIN messages other ON other.account_id=active.account_id AND other.id=active.message_id
                    WHERE active.account_id=j.account_id AND active.kind IN ('triage','access')
                      AND active.state='leased' AND active.lease_until>?3 AND active.id!=j.id
@@ -53,7 +56,11 @@ const MESSAGE_COLUMNS: &str = concat!(
              revision FROM agent_thread_attention a WHERE a.account_id=m.account_id AND
              a.thread_id=m.thread_id),0),COALESCE((SELECT group_concat(field || value_json || revision)
              FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),''),
-    m.is_sent"
+    m.is_sent,
+    (SELECT tr.subject FROM message_translations tr WHERE tr.message_id=m.id
+             AND tr.status IN ('done','incomplete')),
+    (SELECT tr.body FROM message_translations tr WHERE tr.message_id=m.id
+             AND tr.status IN ('done','incomplete'))"
 );
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     let mut message = AgentMessage {
@@ -76,6 +83,12 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
         opened_at: row.get(9)?,
         remind_at: row.get(10)?,
         notify_eligible_at: row.get(11)?,
+        // The machine translation rides along for the model to READ, and it
+        // IS in `content_snapshot` below (docs/TRANSLATION.md, Pipeline): the
+        // access assessment must cover what the agent door will serve, so a
+        // translation landing after triage re-triages the message once.
+        translated_subject: row.get(15)?,
+        translated_body: row.get(16)?,
     };
     // Only serde primitives are hashed, so serialization cannot fail here.
     message.source.content = content_snapshot(&message).expect("serializable message");
@@ -144,7 +157,7 @@ fn read_message(conn: &Connection, account: AccountId, id: i64) -> Result<AgentM
     .ok_or(CoreError::NotFound)
 }
 fn content_snapshot(message: &AgentMessage) -> Result<String> {
-    fingerprint(&(
+    let base = (
         message.id,
         &message.thread_id,
         &message.from_addr,
@@ -153,7 +166,16 @@ fn content_snapshot(message: &AgentMessage) -> Result<String> {
         &message.received_at,
         message.is_sent,
         message.is_spam,
-    ))
+    );
+    // THE SERVED TRANSLATION IS CONTENT (docs/TRANSLATION.md): the agent door
+    // serves it beside the body, so the access assessment must have read it.
+    // Hashed ONLY WHEN THERE IS ONE, so every message without a translation
+    // keeps exactly the snapshot it always had and nothing re-triages
+    // fleet-wide when this ships.
+    match (&message.translated_subject, &message.translated_body) {
+        (None, None) => fingerprint(&base),
+        (subject, body) => fingerprint(&(base, subject, body)),
+    }
 }
 fn read_thread(
     conn: &Connection,
@@ -442,14 +464,20 @@ pub(super) fn promote_archive_conn(
     account: AccountId,
     message: i64,
 ) -> Result<bool> {
-    Ok(conn.execute(
+    let promoted = conn.execute(
         concat!(
             "UPDATE messages AS m SET is_archive=0
              WHERE m.account_id=?1 AND m.id=?2 AND m.is_archive=1 AND NOT ",
             own_mail_sql!()
         ),
         params![account, message],
-    )? == 1)
+    )? == 1;
+    // Live from here on, so translated eagerly like live mail: a parked
+    // translation is queued, and the triage the caller queues waits for it.
+    if promoted {
+        super::translations::promote_live_translation_conn(conn, message, Utc::now())?;
+    }
+    Ok(promoted)
 }
 
 /// A PROMOTED ROW IS LEFT WITH WORK THAT CAN RUN. Call after the promotion's
@@ -558,6 +586,7 @@ pub(super) fn correct_agent_triage_conn(
         apply_corrections(conn, account, message, &mut decision)?;
         conn.execute("UPDATE agent_message_decisions SET decision_json=?3 WHERE account_id=?1 AND message_id=?2",
         params![account,message,json(&decision)?])?;
+        super::translations::close_if_untranslatable_conn(conn, account, message, now)?;
         if field == "destinations" {
             conn.execute(
                 "DELETE FROM agent_message_destinations WHERE account_id=?1 AND message_id=?2",
@@ -632,7 +661,13 @@ fn queue_investigation(
             || (state == "failed" && trigger.starts_with("manual:") && existing_trigger != trigger))
             && !matches!(
                 trigger,
-                "ingest" | "arrival" | "backfill" | "heal" | "source_access" | "archive_access"
+                "ingest"
+                    | "arrival"
+                    | "backfill"
+                    | "heal"
+                    | "translation"
+                    | "source_access"
+                    | "archive_access"
             )
         {
             conn.execute("UPDATE agent_triage_jobs SET state='queued',kind=?2,trigger=?3,attempts=0,available_at=?4,last_error=NULL WHERE id=?1",
@@ -804,6 +839,53 @@ pub(crate) fn seed_archive_state_conn(
     Ok(())
 }
 
+/// An archive row's stored snapshot brought up to the row as it now stands
+/// (its served translation landed or left) WITHOUT queuing anything: a new
+/// revision, access `pending`, so the agent door fails closed on it and the
+/// first explicit surfacing assesses what is actually there. A no-op when
+/// the snapshot has not moved, or the row has no state yet.
+pub(crate) fn reseed_archive_snapshot_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<()> {
+    let snapshot = content_snapshot(&read_message(conn, account, message)?)?;
+    conn.execute(
+        "UPDATE agent_message_state SET content_snapshot=?3,revision=revision+1,access='pending'
+         WHERE account_id=?1 AND message_id=?2 AND content_snapshot!=?3",
+        params![account, message, snapshot],
+    )?;
+    if let Some(restricted) = explicit_access_override(conn, account, message)? {
+        conn.execute(
+            "UPDATE agent_message_state SET access=?3 WHERE account_id=?1 AND message_id=?2",
+            params![
+                account,
+                message,
+                if restricted { "restricted" } else { "allowed" }
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Bring `message`'s stored content snapshot in line with the row as it now
+/// stands, WITHOUT a new revision, an access reset or a job: for a change the
+/// agent must not be asked about again. The one caller is a sealed message
+/// losing its translation, where sealing is terminal.
+pub(crate) fn refresh_snapshot_in_place_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<()> {
+    let snapshot = content_snapshot(&read_message(conn, account, message)?)?;
+    conn.execute(
+        "UPDATE agent_message_state SET content_snapshot=?3
+         WHERE account_id=?1 AND message_id=?2 AND content_snapshot!=?3",
+        params![account, message, snapshot],
+    )?;
+    Ok(())
+}
+
 /// Call inside the message ingest transaction. Duplicate provider fetches leave
 /// revisions and notification eligibility untouched.
 pub(crate) fn enqueue_agent_triage_conn(
@@ -837,7 +919,12 @@ pub(crate) fn enqueue_agent_triage_lane(
     let changed = previous.as_ref().is_none_or(|p| p.0 != snapshot);
     // `heal` sits with the ingest family: a re-read whose stored content did
     // not actually change is a no-op, never a re-run.
-    if !changed && matches!(trigger, "arrival" | "ingest" | "backfill" | "heal") {
+    if !changed
+        && matches!(
+            trigger,
+            "arrival" | "ingest" | "backfill" | "heal" | "translation"
+        )
+    {
         if trigger != "backfill"
             && previous.as_ref().is_some_and(|p| p.1 == 1)
             && !m.is_sent
@@ -1709,7 +1796,7 @@ impl AgentTriageStore for SqliteStore {
         let row = tx
             .query_row(
                 CLAIM_JOB_SQL,
-                params![account, kind, now.to_rfc3339()],
+                params![account, kind, now.to_rfc3339(), now.timestamp()],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
@@ -1985,6 +2072,14 @@ impl AgentTriageStore for SqliteStore {
              VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account_id,message_id) DO UPDATE SET
              revision=excluded.revision,decision_json=excluded.decision_json,decided_at=excluded.decided_at",
         params![job.account_id,job.message_id,revision,json(decision)?,Utc::now().to_rfc3339()])?;
+        // A decision that SEALS the message closes its translation here, at
+        // the event (docs/TRANSLATION.md, "Sealed mail").
+        super::translations::close_if_untranslatable_conn(
+            &tx,
+            job.account_id,
+            job.message_id,
+            Utc::now(),
+        )?;
         tx.execute(
             "UPDATE agent_message_state SET access=?1 WHERE account_id=?2 AND message_id=?3",
             params![
@@ -5195,9 +5290,15 @@ mod tests {
                 .prepare(&format!("EXPLAIN QUERY PLAN {CLAIM_JOB_SQL}"))
                 .unwrap();
             query
-                .query_map(params![1, "investigation", Utc::now().to_rfc3339()], |r| {
-                    r.get::<_, String>(3)
-                })
+                .query_map(
+                    params![
+                        1,
+                        "investigation",
+                        Utc::now().to_rfc3339(),
+                        Utc::now().timestamp()
+                    ],
+                    |r| r.get::<_, String>(3),
+                )
                 .unwrap()
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .unwrap()
@@ -5670,7 +5771,10 @@ mod tests {
             .lock()
             .unwrap()
             .execute(
-                "INSERT INTO messages_fts(rowid,subject,body) SELECT id,subject,body FROM messages",
+                &format!(
+                    "INSERT INTO messages_fts(rowid,subject,body,tsubject,tbody) {}",
+                    crate::store::sqlite::translations::FTS_ROW_SELECT
+                ),
                 [],
             )
             .unwrap();
@@ -5811,7 +5915,10 @@ mod tests {
             conn.execute("UPDATE messages SET body=CASE id WHEN 1 THEN 'invoice zebra' ELSE 'zebra shipment' END",[]).unwrap();
             conn.execute("DELETE FROM messages_fts", []).unwrap();
             conn.execute(
-                "INSERT INTO messages_fts(rowid,subject,body) SELECT id,subject,body FROM messages",
+                &format!(
+                    "INSERT INTO messages_fts(rowid,subject,body,tsubject,tbody) {}",
+                    crate::store::sqlite::translations::FTS_ROW_SELECT
+                ),
                 [],
             )
             .unwrap();

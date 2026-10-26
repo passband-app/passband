@@ -1687,7 +1687,7 @@ mod tests {
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v10")
+            (2_000, "agent-triage-v11")
         );
     }
     #[test]

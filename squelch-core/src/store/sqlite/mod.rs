@@ -129,6 +129,11 @@ macro_rules! thread_key_sql {
 /// me" verdicts. Never a per-row subquery: the
 /// sitrep inventory and the stats run it over the whole window.
 ///
+/// NO REVISION CHECK: it reads the message's standing decision, so a
+/// critical change or a "Not me" stays in FYE through a body heal or a
+/// re-fetch (which bump the state revision) until the re-triage lands, the
+/// way the sweeps and the shredder read it.
+///
 /// ONE DEFINITION for the FYE list, the sitrep's placement and Standing
 /// band, and the stats tiers, so they cannot drift
 /// (`auth_fye_list_and_placement_agree` pins that they do). The owner's
@@ -152,9 +157,7 @@ macro_rules! auth_fye_threads_cte {
             " ORDER BY fm.received_at DESC, fm.id DESC) AS pick
                  FROM auth_hold h
                  JOIN messages fm ON fm.account_id=h.account_id AND fm.id=h.message_id
-                 JOIN agent_message_state fs ON fs.account_id=fm.account_id AND fs.message_id=fm.id
                  JOIN agent_message_decisions d ON d.account_id=fm.account_id AND d.message_id=fm.id
-                   AND d.revision=fs.revision
                  LEFT JOIN auth_verdicts v ON v.account_id=fm.account_id AND v.message_id=fm.id
                  LEFT JOIN triage ft ON ft.account_id=fm.account_id AND ft.message_id=fm.id
                  WHERE fm.is_sent=0 AND fm.is_spam=0 AND fm.is_archive=0

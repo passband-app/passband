@@ -116,6 +116,15 @@ struct AuthView: View {
             index = max(0, min(index, max(0, count - 1)))
         }
         .onChange(of: focus?.id) { _, _ in copied = false }
+        // A page kept across an account switch must not carry the old
+        // mailbox's state: a reveal open over the switch would reveal the same
+        // int on the NEW daemon.
+        .onChange(of: store.epoch) { _, _ in
+            revealing = nil
+            expandedBursts = []
+            archived = []
+            codes = [:]
+        }
     }
 
     // MARK: - main column
@@ -490,7 +499,7 @@ private struct AuthRow: View {
     let meta: SealedMeta
     let selected: Bool
     let code: String?
-    /// "explained by your recent GitHub sign-in", on an alert that needs no ruling.
+    /// "explained by your GitHub sign-in", on an alert that needs no ruling.
     let explained: String?
     /// "You said: That was me", with its Undo, once the row's question is answered.
     let answered: String?

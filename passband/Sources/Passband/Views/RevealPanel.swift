@@ -10,6 +10,8 @@ import SwiftUI
 
 struct RevealPanel: View {
     let meta: SealedMeta
+    /// The reveal's audit source; nil = a page the human acted on.
+    var source: String? = nil
     let onClose: () -> Void
 
     @State private var revealState: Loadable<RevealedSealed> = .loading
@@ -155,7 +157,13 @@ struct RevealPanel: View {
 
     private func load() async {
         await $revealState.load("reveal failed") {
-            try await APIClient.shared.revealSealed(meta.id)
+            do {
+                return try await APIClient.shared.revealSealed(meta.id, source: source)
+            } catch let error as APIError where error.status == 404 {
+                // Usually a code already archived, used or shredded: say so
+                // calmly rather than "reveal failed".
+                throw APIError(error.kind, 404, "This one is no longer in your mailbox. It may have been archived or shredded.")
+            }
         }
         // How often humans actually need behind the seal — the count and
         // nothing else; the body itself never leaves the view above.

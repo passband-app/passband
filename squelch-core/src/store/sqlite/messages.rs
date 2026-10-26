@@ -2142,7 +2142,8 @@ fn sealed_rows(
                     s.message_id IS NOT NULL, json_extract(d.decision_json,'$.auth'), t.sealed_kind,
                     v.verdict, m.auth_pass,
                     (SELECT MIN(al.ts) FROM audit_log al WHERE al.account_id=m.account_id
-                           AND al.action='reveal_sealed' AND al.target=CAST(m.id AS TEXT))
+                           AND al.action='reveal_sealed' AND al.target=CAST(m.id AS TEXT)
+                           AND al.detail IS NOT 'notification')
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id
              LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id

@@ -393,7 +393,7 @@ private struct MobileShell: View {
         // one-time panel, as the same full-screen cover the page uses.
         // Everything else (search, mail lists, mixed threads) opens the reader.
         .fullScreenCover(item: revealOpen) { meta in
-            RevealPanel(meta: meta) { store.revealRequest = nil }
+            RevealPanel(meta: meta, source: store.revealSource) { store.revealRequest = nil }
                 .background(Palette.canvas.ignoresSafeArea())
         }
         // Which Google account to pick, said before the browser opens: the

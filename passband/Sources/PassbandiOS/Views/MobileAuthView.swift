@@ -104,7 +104,7 @@ struct MobileAuthView: View {
         return AuthPolicy.answeredLine(m, v)
     }
 
-    /// "explained by your recent GitHub sign-in", on an alert that needs no ruling.
+    /// "explained by your GitHub sign-in", on an alert that needs no ruling.
     private func explainedNote(_ m: SealedMeta) -> String? {
         guard AuthPolicy.isExplained(m), let by = m.explained_by else { return nil }
         let explainer = store.sitrep.sealed.first { $0.id == by }
@@ -140,6 +140,11 @@ struct MobileAuthView: View {
         // pull-to-refresh that could not fetch a just-arrived code would betray
         // the only reason anyone opens it.
         .refreshable { _ = await SitrepPoller.shared.pull() }
+        // Nothing of the old mailbox survives an account switch on this page.
+        .onChange(of: store.epoch) { _, _ in
+            revealing = nil
+            expandedBursts = []
+        }
         // The one-time panel for kinds with no digits to present. A full-screen
         // cover rather than a sheet: it renders a sandboxed web body, and a
         // half-height card is not a reading surface.
@@ -261,7 +266,7 @@ struct AuthRow: View {
     let meta: SealedMeta
     let live: Bool
     let busy: Bool
-    /// "explained by your recent GitHub sign-in", on an alert that needs no ruling.
+    /// "explained by your GitHub sign-in", on an alert that needs no ruling.
     var explained: String? = nil
     /// "You said: That was me", beside an Undo, once answered.
     var answered: String? = nil

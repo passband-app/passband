@@ -288,9 +288,9 @@ enum AuthPolicy {
     /// the sealed list).
     static func explainedNote(explainer: SealedMeta?, service: String?) -> String {
         if explainer != nil, let service, !service.isEmpty {
-            return "explained by your recent \(service) sign-in"
+            return "explained by your \(service) sign-in"
         }
-        return "explained by a sign-in you just made"
+        return "explained by a sign-in of yours"
     }
 
     // MARK: - asking from the reveal
@@ -437,22 +437,46 @@ extension AuthPolicy {
         /// a list whose fetch started after that can confirm the write. nil
         /// while the PUT is still in flight.
         var acceptedAfterFetch: Int?
+        /// Already sent a second time because a later list disagreed.
+        var resent = false
+    }
+
+    struct Settled: Sendable, Equatable {
+        var pending: [Int: PendingWrite]
+        /// Ids whose latest intent should be PUT once more.
+        var resend: [Int]
     }
 
     /// Settle pending writes against a list whose fetch was number `fetch`.
-    /// A write is dropped (the list now speaks for it) once the PUT has come
-    /// back AND a list fetched after that agrees with it or no longer lists
-    /// the message. A list that was already in flight when the PUT landed can
-    /// still carry the old answer, and must not reopen the card.
+    /// Nothing is decided until the PUT has come back and a list fetched
+    /// AFTER that arrives: a list already in flight when the PUT landed can
+    /// still carry the old answer, and must not reopen the card. Then:
+    /// - the list agrees, or no longer lists the message: settled, dropped;
+    /// - it disagrees, first time: the latest intent is sent once more
+    ///   (`resend`), waiting again for a list after that;
+    /// - it disagrees after the resend: dropped, and the server's answer is
+    ///   what shows. Deterministic either way: never a question left open
+    ///   against a server that answered it, until relaunch.
     static func settle(
         _ pending: [Int: PendingWrite], rows: [SealedMeta], fetch: Int
-    ) -> [Int: PendingWrite] {
+    ) -> Settled {
         let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        return pending.filter { id, write in
-            guard let after = write.acceptedAfterFetch, fetch > after else { return true }
-            guard let row = byId[id] else { return false }
-            return row.serverVerdict != write.verdict
+        var out = pending
+        var resend: [Int] = []
+        for (id, write) in pending {
+            guard let after = write.acceptedAfterFetch, fetch > after else { continue }
+            guard let row = byId[id], row.serverVerdict != write.verdict else {
+                out.removeValue(forKey: id)
+                continue
+            }
+            if write.resent {
+                out.removeValue(forKey: id)
+            } else {
+                out[id] = PendingWrite(verdict: write.verdict, acceptedAfterFetch: nil, resent: true)
+                resend.append(id)
+            }
         }
+        return Settled(pending: out, resend: resend.sorted())
     }
 
     /// Whether a failed verdict PUT means "this daemon has no verdict route,

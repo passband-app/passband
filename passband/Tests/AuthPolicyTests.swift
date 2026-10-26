@@ -39,6 +39,7 @@ struct AuthPolicyTests {
         migrationSkipsClosedAndCriticalMine()
         aStaleListCannotSettleAWrite()
         aMissingRouteFallsBackQuietly()
+        aDisagreeingListResendsOnceThenShowsTheServer()
         feedRowsAreAuthByTheirOwnDecision()
         eventsBecomeRevealableMeta()
         sendersWithNoServiceNeverMakeABurst()
@@ -299,16 +300,16 @@ struct AuthPolicyTests {
         expect(AuthPolicy.answers(meta(1, .accountChange, critical: true)) == ("That was me", "Not me"), "critical")
         expect(
             AuthPolicy.explainedNote(explainer: meta(9, .otp), service: "GitHub")
-                == "explained by your recent GitHub sign-in", "a code")
+                == "explained by your GitHub sign-in", "a code")
         expect(
             AuthPolicy.explainedNote(explainer: meta(9, .signinReceipt), service: "Google")
-                == "explained by your recent Google sign-in", "a receipt")
+                == "explained by your Google sign-in", "a receipt")
         expect(
             AuthPolicy.explainedNote(explainer: meta(9, .magicLink), service: nil)
-                == "explained by a sign-in you just made", "no name")
+                == "explained by a sign-in of yours", "no name")
         expect(
             AuthPolicy.explainedNote(explainer: nil, service: "GitHub")
-                == "explained by a sign-in you just made", "explainer no longer listed (the usual case)")
+                == "explained by a sign-in of yours", "explainer no longer listed (the usual case)")
     }
 
     // MARK: - ledger migration
@@ -385,17 +386,37 @@ struct AuthPolicyTests {
 
     static func aStaleListCannotSettleAWrite() {
         typealias W = AuthPolicy.PendingWrite
+        func settle(_ p: [Int: W], _ rows: [SealedMeta], _ fetch: Int) -> AuthPolicy.Settled {
+            AuthPolicy.settle(p, rows: rows, fetch: fetch)
+        }
         let inFlight: [Int: W] = [1: W(verdict: .mine, acceptedAfterFetch: nil)]
         let agrees = [meta(1, .loginAlert, verdict: "mine")]
         let stale = [meta(1, .loginAlert, verdict: nil)]
-        expect(AuthPolicy.settle(inFlight, rows: agrees, fetch: 9) == inFlight, "a PUT still in flight is never settled")
+        expect(settle(inFlight, agrees, 9) == .init(pending: inFlight, resend: []), "a PUT still in flight is never settled")
         let accepted: [Int: W] = [1: W(verdict: .mine, acceptedAfterFetch: 4)]
-        expect(AuthPolicy.settle(accepted, rows: agrees, fetch: 4) == accepted, "a list already in flight cannot confirm")
-        expect(AuthPolicy.settle(accepted, rows: stale, fetch: 5) == accepted, "a later list that disagrees keeps it")
-        expect(AuthPolicy.settle(accepted, rows: agrees, fetch: 5).isEmpty, "a later list that agrees settles it")
-        expect(AuthPolicy.settle(accepted, rows: [], fetch: 5).isEmpty, "a later list without the message settles it")
+        expect(settle(accepted, agrees, 4) == .init(pending: accepted, resend: []), "a list already in flight cannot confirm")
+        expect(settle(accepted, agrees, 5) == .init(pending: [:], resend: []), "a later list that agrees settles it")
+        expect(settle(accepted, [], 5) == .init(pending: [:], resend: []), "a later list without the message settles it")
         let clear: [Int: W] = [1: W(verdict: nil, acceptedAfterFetch: 4)]
-        expect(AuthPolicy.settle(clear, rows: stale, fetch: 5).isEmpty, "a clear settles on a null verdict")
+        expect(settle(clear, stale, 5).pending.isEmpty, "a clear settles on a null verdict")
+    }
+
+    /// The Undo race: the server ended on "mine" though the latest intent is
+    /// a clear. Resolved deterministically: resend once, then the server wins.
+    static func aDisagreeingListResendsOnceThenShowsTheServer() {
+        typealias W = AuthPolicy.PendingWrite
+        let undo: [Int: W] = [1: W(verdict: nil, acceptedAfterFetch: 4)]
+        let serverMine = [meta(1, .loginAlert, verdict: "mine")]
+        let first = AuthPolicy.settle(undo, rows: serverMine, fetch: 5)
+        expect(first.resend == [1], "the latest intent is sent once more")
+        expect(first.pending[1] == W(verdict: nil, acceptedAfterFetch: nil, resent: true), "and waits for its own PUT again")
+        var afterResend = first.pending
+        afterResend[1]?.acceptedAfterFetch = 6
+        let second = AuthPolicy.settle(afterResend, rows: serverMine, fetch: 7)
+        expect(second.resend.isEmpty && second.pending.isEmpty, "still disagreeing: dropped, the server's answer shows")
+        let fixed = AuthPolicy.settle(afterResend, rows: [meta(1, .loginAlert, verdict: nil)], fetch: 7)
+        expect(fixed.pending.isEmpty && fixed.resend.isEmpty, "agreeing after the resend: settled")
+        expect(AuthPolicy.settle(first.pending, rows: serverMine, fetch: 9).pending == first.pending, "a resend in flight is never judged")
     }
 
     static func aMissingRouteFallsBackQuietly() {

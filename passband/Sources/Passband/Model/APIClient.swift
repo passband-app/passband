@@ -871,8 +871,15 @@ actor APIClient {
 
     /// Reveal exactly one sealed body: audited server-side, `no-store`, and the
     /// returned body must live in view state only — see docs/SECURITY.md §4.
-    func revealSealed(_ id: Int) async throws -> RevealedSealed {
-        try await post("/client/sealed/\(id)/reveal")
+    ///
+    /// `source` says where the reveal came from: nil for one the human asked
+    /// for on a page (the Auth page, a For-your-eyes row), "notification" for
+    /// a banner tap. The daemon's pairing counts only interactive reveals as
+    /// "the owner used this code". Sent as `?source=` only when set (absent
+    /// means interactive); a daemon older than the parameter has no query
+    /// extractor on this route and ignores it.
+    func revealSealed(_ id: Int, source: String? = nil) async throws -> RevealedSealed {
+        try await post("/client/sealed/\(id)/reveal", query: ["source": source])
     }
 
     /// Record (or, with nil, clear) the owner's ruling on one piece of auth

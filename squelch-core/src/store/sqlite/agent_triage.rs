@@ -2848,9 +2848,12 @@ fn list_items_with_query(
         // `m` and `d` are the message the row SHOWS: the qualifying auth
         // message when the thread has one (`q`), else the representative.
         // `t` stays the REPRESENTATIVE's triage row, so the thread's own
-        // reminder, snooze and activity time (and so its rank, and the agent
-        // door's `since`) are what they were before any auth mail qualified.
-        // Done is the shown message's: `q` is not done by construction.
+        // reminder and activity time (and so its rank, and the agent door's
+        // `since`) are what they were before any auth mail qualified. Done
+        // and snooze are the shown message's: `q` is not done by
+        // construction, and a snooze on the representative does not hide a
+        // takeover-class change or a "Not me" (the sitrep's Standing band
+        // judges the shown row the same way).
         concat!("WITH ",auth_fye_threads_cte!()," SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
              strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(a.relevant_activity),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,a.decision_message_id,m.from_name
@@ -2865,7 +2868,7 @@ fn list_items_with_query(
              (COALESCE(pref.show_in_fye,CASE WHEN ",own_mail_sql!()," THEN 0
              WHEN q.id IS NOT NULL THEN 1
              WHEN ",auth_mail_sql!()," THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND ",archive_listable_sql!()," AND (q.id IS NOT NULL OR COALESCE(t.status,'new')!='done') AND
-             (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5")
+             (q.id IS NOT NULL OR t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5")
     } else if destination == "records" {
         concat!("SELECT m.id,m.thread_id,m.from_addr,m.subject,
              strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id,m.from_name
@@ -4367,6 +4370,9 @@ mod tests {
             // A ruled alert, beside a code that would explain it.
             alert(22, "alerts@seventh.test", 6000),
             code(23, "codes@seventh.test", 5990, true, Some(5995), false),
+            // A code revealed only by tapping its notification banner.
+            alert(24, "alerts@eighth.test", 7000),
+            code(25, "codes@eighth.test", 6990, true, None, false),
         ];
         for seed in &seeds {
             seed_auth(&store, seed.id, auth(&[seed.kind], false), seed.kind == Otp);
@@ -4396,6 +4402,15 @@ mod tests {
             }
         }
         store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO audit_log(account_id,ts,actor,action,target,detail)
+                 VALUES(1,?1,'human','reveal_sealed','25','notification')",
+                [time(6995)],
+            )
+            .unwrap();
+        store
             .set_auth_verdict(1, 17, Some(crate::types::AuthVerdict::NotMine), Utc::now())
             .unwrap();
         store
@@ -4414,6 +4429,7 @@ mod tests {
         assert_eq!(explained(18), None, "a done code outside the window");
         assert_eq!(explained(20), None, "a code opened long after the sign-in");
         assert_eq!(explained(22), None, "a ruled alert");
+        assert_eq!(explained(24), None, "a code revealed from its notification");
     }
 
     /// ARCHIVING ONE AUTH MESSAGE NEVER CLEARS AN UNRULED CRITICAL SIBLING.
@@ -4568,7 +4584,8 @@ mod tests {
 
     /// The FYE row SHOWS the qualifying auth message, but the thread keeps
     /// its own clock: rank time and the agent door's `since` read the
-    /// representative's activity, and the representative's snooze holds.
+    /// representative's activity; a snooze on the representative does not
+    /// hide the change.
     /// (A thread the owner unpinned stays out even when a reminder fires:
     /// `thread_fye_override` filters every FYE row, before and after this.)
     #[test]
@@ -4605,8 +4622,9 @@ mod tests {
                 .map(|item| item.message_id)
                 .collect::<Vec<_>>()
         };
-        // A snooze on the thread's representative hides the thread until it
-        // is due, as for any FYE row; once due it is back, showing the change.
+        // A snooze on the thread's representative does NOT hide the change:
+        // the list agrees with the sitrep's Standing band, which judges the
+        // shown row on its own.
         let snooze = |at: DateTime<Utc>| {
             store
                 .lock()
@@ -4618,9 +4636,26 @@ mod tests {
                 .unwrap();
         };
         snooze(Utc::now() + chrono::Duration::days(1));
-        assert!(listed(&store).is_empty());
-        snooze(Utc::now() - chrono::Duration::minutes(1));
         assert_eq!(listed(&store), vec![40]);
+        let standing: Vec<i64> = store
+            .human_agent_updates(1, &inventory(Some(crate::store::SitrepBand::Standing)))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.update.id)
+            .collect();
+        assert_eq!(standing, vec![40], "the Standing band agrees");
+        let agent: Vec<i64> = store
+            .external_agent_fye(1, 100, &RankingConfig::default(), Utc::now())
+            .unwrap()
+            .into_iter()
+            .map(|item| item.message_id)
+            .collect();
+        assert_eq!(agent, vec![40], "and so does the agent door");
+        // Without a qualifying message, the snooze hides the thread as ever.
+        store
+            .set_auth_verdict(1, 40, Some(crate::types::AuthVerdict::Mine), Utc::now())
+            .unwrap();
+        assert!(listed(&store).is_empty());
     }
 
     /// FYE MEMBERSHIP FOR AUTH MAIL NEVER PARSES THE MAILBOX: the thread CTE
@@ -4687,6 +4722,36 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&50) && ids.contains(&51));
         assert_eq!(store.shred_pending_count(1, cutoff).unwrap(), 2);
+    }
+
+    /// A body heal or re-fetch bumps the message's state revision before the
+    /// re-triage lands. The critical change and the "Not me" stay in FYE
+    /// through it.
+    #[test]
+    fn auth_fye_survives_a_content_revision() {
+        use crate::triage::decision::AuthKind::*;
+        let store = fixture();
+        seed_auth(&store, 10, auth(&[AccountChange], true), false);
+        seed_auth(&store, 11, auth(&[LoginAlert], false), false);
+        store
+            .set_auth_verdict(1, 11, Some(crate::types::AuthVerdict::NotMine), Utc::now())
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agent_message_state SET revision=revision+1 WHERE message_id IN (10,11)",
+                [],
+            )
+            .unwrap();
+        let mut listed: Vec<i64> = store
+            .agent_fye(1, 100, &RankingConfig::default(), Utc::now())
+            .unwrap()
+            .into_iter()
+            .map(|item| item.message_id)
+            .collect();
+        listed.sort();
+        assert_eq!(listed, vec![10, 11]);
     }
 
     /// FYE placement never opens the agent door: a restricted critical change

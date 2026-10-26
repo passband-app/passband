@@ -1143,6 +1143,9 @@ final class AppStore {
     /// holding auth mail (by design), so search, All Mail, reply and a thread
     /// that mixes a code with correspondence open the normal reader.
     var revealRequest: SealedMeta?
+    /// Where `revealRequest` came from, for the reveal's audit source: nil for
+    /// a page the human acted on, `RevealSource.notification` for a banner tap.
+    private(set) var revealSource: String?
 
     /// Threads that hold auth mail, per the sealed list AND the For-your-eyes
     /// rows' own decisions: what `ThreadPrefetch` refuses to warm or cache.
@@ -1163,7 +1166,8 @@ final class AppStore {
         AuthPolicy.authMeta(for: update, sealed: sealedMeta(message: update.id))
     }
 
-    func requestReveal(_ meta: SealedMeta) {
+    func requestReveal(_ meta: SealedMeta, source: String? = nil) {
+        revealSource = source
         revealRequest = meta
     }
 
@@ -2303,6 +2307,7 @@ final class AppStore {
         // A reveal up over the old account would keep showing its body, and
         // one not yet mounted would reveal the same int on the NEW daemon.
         revealRequest = nil
+        revealSource = nil
         // The unsubscribe tray's rows and buttons belong to the old account:
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.

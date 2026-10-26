@@ -846,6 +846,39 @@ async fn sealed_verdict_round_trips_and_moves_fye() {
         .map(|entry| entry.target)
         .collect();
     assert_eq!(reveals, vec![Some(id.to_string())]);
+    // A reveal opened from a notification tap says so on its audit row (the
+    // pairing ignores those); an unknown source is refused and leaves none.
+    let response = h
+        .app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            &format!("/client/sealed/{id}/reveal?source=notification"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = h
+        .app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            &format!("/client/sealed/{id}/reveal?source=push"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let details: Vec<Option<String>> = h
+        .store
+        .list_audit(h.acct, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.action == "reveal_sealed")
+        .map(|entry| entry.detail)
+        .collect();
+    assert_eq!(details.len(), 2);
+    assert!(details.contains(&Some("notification".to_string())));
+    assert!(details.contains(&None));
 
     // Not auth mail, or no such message: 404.
     for target in [other, other + 1000] {

@@ -214,9 +214,21 @@ final class AuthDecisions {
     /// sealed refresh, rather than a list fetch per member.
     func setAll(_ ms: [SealedMeta], _ verdict: AuthVerdict?) {
         guard Self.key != nil, !ms.isEmpty else { return }
-        let epoch = AppStore.shared.epoch
         for m in ms { pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: nil) }
-        Task { @MainActor in
+        enqueue(ms, verdict)
+    }
+
+    /// Verdict writes run ONE AT A TIME, in tap order: "That was me" then a
+    /// quick Undo must reach the server in that order, or the server could end
+    /// on the answer the owner took back. Rare enough that one queue for all
+    /// messages costs nothing.
+    @ObservationIgnored private var writeChain: Task<Void, Never>?
+
+    private func enqueue(_ ms: [SealedMeta], _ verdict: AuthVerdict?) {
+        let epoch = AppStore.shared.epoch
+        let previous = writeChain
+        writeChain = Task { @MainActor in
+            await previous?.value
             var accepted = false
             for m in ms {
                 // BEFORE each send as well as after it: an account switch
@@ -236,9 +248,8 @@ final class AuthDecisions {
             try await APIClient.shared.putSealedVerdict(m.id, verdict: verdict?.rawValue)
             guard AppStore.shared.isCurrent(epoch) else { return false }
             // Only a list fetched from here on can confirm it.
-            if pending[m.id]?.verdict == verdict {
-                pending[m.id] = .init(verdict: verdict, acceptedAfterFetch: fetchSeq)
-            }
+            // (Keeping `resent`, so a disagreeing list resends only once.)
+            if pending[m.id]?.verdict == verdict { pending[m.id]?.acceptedAfterFetch = fetchSeq }
             // Any local copy is superseded by the server's.
             writeLocal { $0.removeValue(forKey: m.id) }
             return true
@@ -257,7 +268,9 @@ final class AuthDecisions {
             return false
         } catch {
             guard AppStore.shared.isCurrent(epoch) else { return false }
-            pending.removeValue(forKey: m.id)
+            // Only roll back the intent this write carried: a later tap
+            // (an Undo queued behind it) owns `pending` now.
+            if pending[m.id]?.verdict == verdict { pending.removeValue(forKey: m.id) }
             AppStore.shared.pushToast(errText(error, "could not save that answer"), .error)
             return false
         }
@@ -286,8 +299,14 @@ final class AuthDecisions {
             if keeps != daemonKeepsVerdicts { daemonKeepsVerdicts = keeps }
         }
         if !pending.isEmpty {
-            let next = AuthPolicy.settle(pending, rows: rows, fetch: fetch)
-            if next != pending { pending = next }
+            let settled = AuthPolicy.settle(pending, rows: rows, fetch: fetch)
+            if settled.pending != pending { pending = settled.pending }
+            // A later list disagreed with an accepted write: send the latest
+            // intent once more, through the same queue.
+            for id in settled.resend {
+                guard let write = pending[id], let row = rows.first(where: { $0.id == id }) else { continue }
+                enqueue([row], write.verdict)
+            }
         }
         guard !migrating,
             let plan = AuthPolicy.migration(

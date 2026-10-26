@@ -349,10 +349,11 @@ final class Notifier {
         deliver(.thread(threadId), accountId: accountId)
     }
 
-    /// A background auth banner's tap: the Auth view of the mailbox the code
-    /// arrived in. NOT a reveal — the human lands on the list and asks for the
-    /// code themselves, which is the audited act this whole flow keeps in their
-    /// hands.
+    /// A tap on an auth banner that names no message: the Auth view of the
+    /// mailbox it arrived in, where the human asks for the mail themselves. A
+    /// banner that does name its message opens the reveal instead
+    /// (`handleRevealTap`), audited with source "notification" so the daemon's
+    /// pairing never counts a tap as "the owner used this code".
     ///
     /// The same analytics event as a thread tap, because it is the same act (a
     /// banner opened) and the bool already says which shape it had.
@@ -447,7 +448,8 @@ final class Notifier {
             let store = AppStore.shared
             store.requestReveal(
                 store.sealedMeta(message: messageId)
-                    ?? AuthPolicy.revealMeta(messageId: messageId, threadId: threadId, sender: sender))
+                    ?? AuthPolicy.revealMeta(messageId: messageId, threadId: threadId, sender: sender),
+                source: RevealSource.notification)
         }
     }
 }

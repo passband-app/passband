@@ -1846,6 +1846,12 @@ struct SealedMeta: Codable, Sendable, Identifiable, Hashable {
     var explained_by: Int? = nil
 }
 
+/// POST /client/sealed/{id}/reveal's optional `?source=`: where the reveal came
+/// from. Absent means interactive (a page the human acted on).
+enum RevealSource {
+    static let notification = "notification"
+}
+
 /// PUT /client/sealed/{id}/verdict. `verdict` nil CLEARS the ruling, and the
 /// key must still be on the wire as an explicit null: the shared encoder drops
 /// nil optionals, so this one encodes by hand.

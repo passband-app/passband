@@ -3624,10 +3624,33 @@ struct RevealedSealed {
     html: Option<String>,
 }
 
+/// `?source=notification` on a reveal opened by tapping a notification.
+/// Absent (every older client) or `interactive` is the owner choosing to
+/// reveal on the Auth page or FYE.
+#[derive(Debug, Default, Deserialize)]
+pub struct RevealQuery {
+    #[serde(default)]
+    source: Option<String>,
+}
+
 pub async fn reveal_sealed(
     State(state): State<ApiState>,
     Path(message_id): Path<i64>,
+    Query(query): Query<RevealQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The source rides on the audit row's detail. The Auth page's pairing
+    // reads a reveal as "the owner used this code", which a tap on an
+    // unsolicited code's banner is not, so notification reveals never
+    // explain an alert (`sealed_rows` skips them).
+    let detail = match query.source.as_deref() {
+        None | Some("interactive") => None,
+        Some("notification") => Some("notification".to_string()),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "source must be notification or interactive",
+            ));
+        }
+    };
     let sealed = store_call(&state, move |store, account_id| {
         // Membership FIRST, then the audit, then the body leaves: a reveal
         // row means a real reveal of auth mail. The Auth page's pairing
@@ -3643,7 +3666,7 @@ pub async fn reveal_sealed(
                 actor: AUDIT_ACTOR.to_string(),
                 action: "reveal_sealed".to_string(),
                 target: Some(message_id.to_string()),
-                detail: None,
+                detail,
             },
         )?;
         Ok(body)

@@ -298,6 +298,28 @@ then volume, then recency, then address. The menu's keys (arrows, Enter, Tab,
 Esc) mount only while it is showing, so they take those keys from the results
 list only for as long as there is a list to take them for.
 
+### 4.1a Mail I wrote: `in:sent`, `from:me`, `to:`
+
+Sent mail was always indexed, and every agent search already recalled it. What
+was missing was a way to ASK for it: an agent told "find what I sent Dan"
+searched for the word "sent" and got WeTransfer notices. So:
+
+- `in:sent` (or `from:me`, as in Gmail) keeps only mail the account wrote. It
+  is AUTHORSHIP (`own_mail_sql!`), not the stored `is_sent` column, so a send
+  Gmail also labelled INBOX counts. It brings sent mail into keyword mode,
+  which otherwise leaves it out (`SearchFilter::searches_sent`). `from:me` is
+  therefore not a substring search for "me"; any other `in:` value is a word.
+- `to:<fragment>` is `from:` for the recipients: a case-insensitive substring
+  of To, Cc and (on the owner's own sends) Bcc, address or display name.
+- Every hit carries `from_me`. The recipient list rides on the hit only so the
+  recall legs can apply `to:` after ranking; it is never serialized.
+- MCP `search_mail` now parses the same operators (it ignored them before) and
+  takes `from_me` / `to` arguments too. With either set the query may be empty,
+  which is a newest-first keyword listing and buys no archive checks.
+
+The agent door's access check is unchanged: these only narrow what it is
+already allowed to show (`the_agent_door_finds_mail_i_wrote_and_still_checks_access`).
+
 ### 4.2 The empty state remembers
 
 Opening `/` on a cleared field gave a blank rectangle. It now gives the last ten

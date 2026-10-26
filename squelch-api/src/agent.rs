@@ -135,7 +135,7 @@ pub async fn search(
         filter: filter.clone(),
         // Keyword mode leaves out the owner's sent mail unless the query asks
         // for it; the hybrid keyword leg always recalls it.
-        include_sent: search_mode == ExternalSearchMode::Hybrid || filter.include_sent,
+        include_sent: search_mode == ExternalSearchMode::Hybrid || filter.searches_sent(),
     });
     // One store method for both agent doors: it fetches only rows this door
     // may be shown, applies the full access check before the public result

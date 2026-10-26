@@ -1,4 +1,5 @@
-//! Query operators for human-door search: `from:`, `after:`, `before:`.
+//! Query operators for search: `from:`, `to:`, `in:sent` (or `from:me`),
+//! `after:`, `before:`. Both doors parse them with the same function.
 //!
 //! The raw string the reader types is one field, but it carries two things: the
 //! words to rank on, and structured constraints. [`parse_search_query`] splits
@@ -85,6 +86,16 @@ pub struct SearchFilter {
     /// case-insensitive. Not an exact address match: `from:jane` finds
     /// `jane@example.com` and `Jane Doe` alike.
     pub from: Option<String>,
+    /// MAIL THE ACCOUNT WROTE, and nothing else (`in:sent`, `from:me`). This is
+    /// authorship (`own_mail_sql!`), not the stored `is_sent` column, so a send
+    /// Gmail also labelled INBOX still counts. Setting it brings the owner's
+    /// sent mail into a leg that would otherwise leave it out: see
+    /// [`Self::searches_sent`].
+    pub from_me: bool,
+    /// Substring to look for in the recipients (To, Cc, and on the owner's
+    /// own sends Bcc), case-insensitive, the same way `from:` reads the
+    /// sender. `to:dan` finds `dan@example.com` and `Dan Smith` alike.
+    pub to: Option<String>,
     /// Inclusive lower bound on `received_at`.
     pub after: Option<DateTime<Utc>>,
     /// Exclusive upper bound on `received_at`.
@@ -94,7 +105,19 @@ pub struct SearchFilter {
 impl SearchFilter {
     /// No constraint at all — the caller can take the unfiltered fast path.
     pub fn is_empty(&self) -> bool {
-        self.done.is_none() && self.from.is_none() && self.after.is_none() && self.before.is_none()
+        self.done.is_none()
+            && self.from.is_none()
+            && !self.from_me
+            && self.to.is_none()
+            && self.after.is_none()
+            && self.before.is_none()
+    }
+
+    /// Whether the owner's own sent mail is in scope. A leg that leaves sent
+    /// mail out by default (keyword mode) must still keep it for `in:sent`,
+    /// or the operator would always come back empty.
+    pub fn searches_sent(&self) -> bool {
+        self.include_sent || self.from_me
     }
 
     pub fn order_hits<T>(&self, hits: &mut [T], done: impl Fn(&T) -> bool) {
@@ -129,6 +152,17 @@ impl SearchFilter {
                 return false;
             }
         }
+        if self.from_me && !hit.from_me {
+            return false;
+        }
+        if let Some(to) = &self.to
+            && !hit
+                .recipients
+                .to_ascii_lowercase()
+                .contains(&to.to_ascii_lowercase())
+        {
+            return false;
+        }
         if let Some(after) = self.after
             && hit.received_at < after
         {
@@ -149,6 +183,9 @@ impl SearchFilter {
 /// (`from:"jane doe"`). Operator prefixes are case-insensitive (`From:`,
 /// `AFTER:`). Rules that keep the result predictable:
 ///
+/// - `in:sent` and `from:me` both mean "mail I wrote" ([`SearchFilter::from_me`]),
+///   as they do in Gmail. `from:me` is therefore NOT a substring search for
+///   "me". Any other `in:` value is not an operator and stays a word.
 /// - A repeated operator takes its LAST value — the reader edited their mind.
 /// - An operator with an EMPTY value (`from:`) constrains nothing and is
 ///   dropped, rather than being handed to FTS5, where a bare `:` is a syntax
@@ -169,9 +206,25 @@ pub fn parse_search_query(raw: &str) -> (String, SearchFilter) {
         // value we cannot read means "not an operator after all, keep the word".
         if let Some(value) = strip_prefix_ci(&token, "from:") {
             let value = unquote(value);
-            if !value.is_empty() {
+            if value.eq_ignore_ascii_case("me") {
+                filter.from_me = true;
+                filter.from = None;
+            } else if !value.is_empty() {
                 filter.from = Some(value.to_string());
             }
+            continue;
+        }
+        if let Some(value) = strip_prefix_ci(&token, "to:") {
+            let value = unquote(value);
+            if !value.is_empty() {
+                filter.to = Some(value.to_string());
+            }
+            continue;
+        }
+        if let Some(value) = strip_prefix_ci(&token, "in:")
+            && unquote(value).eq_ignore_ascii_case("sent")
+        {
+            filter.from_me = true;
             continue;
         }
         if let Some(value) = strip_prefix_ci(&token, "after:") {
@@ -975,6 +1028,8 @@ mod tests {
             is_done: false,
             subject_matches: Vec::new(),
             snippet_matches: Vec::new(),
+            from_me: false,
+            recipients: String::new(),
         };
         let (_, f) = parse_search_query("from:JANE@example");
         assert!(f.matches(&hit), "address match, case-folded");
@@ -997,6 +1052,8 @@ mod tests {
             is_done: false,
             subject_matches: Vec::new(),
             snippet_matches: Vec::new(),
+            from_me: false,
+            recipients: String::new(),
         };
         let (_, f) = parse_search_query("after:2026-05-05");
         assert!(f.matches(&hit), "midnight of the after: day is IN range");
@@ -1011,5 +1068,72 @@ mod tests {
         assert!(f.matches(&hit));
         let (_, f) = parse_search_query("after:2026-05-05");
         assert!(!f.matches(&hit));
+    }
+
+    #[test]
+    fn in_sent_and_from_me_both_mean_mail_i_wrote() {
+        for q in [
+            "in:sent lease",
+            "from:me lease",
+            "IN:Sent lease",
+            "From:ME lease",
+        ] {
+            let (text, filter) = parse_search_query(q);
+            assert_eq!(text, "lease", "{q}");
+            assert!(filter.from_me, "{q}");
+            assert_eq!(
+                filter.from, None,
+                "from:me is not a substring search for \"me\": {q}"
+            );
+            assert!(!filter.is_empty(), "{q}");
+            assert!(filter.searches_sent(), "{q}");
+        }
+        // Any other mailbox is not an operator: the word stays, quoted so its
+        // colon cannot reach FTS5 as a column filter.
+        let (text, filter) = parse_search_query("in:inbox lease");
+        assert_eq!(text, r#""in:inbox" lease"#);
+        assert!(filter.is_empty());
+        // `from:` with any other value is the sender substring it always was.
+        let (_, filter) = parse_search_query("from:meghan");
+        assert_eq!(filter.from.as_deref(), Some("meghan"));
+        assert!(!filter.from_me);
+    }
+
+    #[test]
+    fn to_is_lifted_like_from() {
+        let (text, filter) = parse_search_query(r#"in:sent to:"dan smith" invoice"#);
+        assert_eq!(text, "invoice");
+        assert!(filter.from_me);
+        assert_eq!(filter.to.as_deref(), Some("dan smith"));
+        let (text, filter) = parse_search_query("to: invoice");
+        assert_eq!(text, "invoice");
+        assert!(filter.is_empty(), "an empty to: constrains nothing");
+    }
+
+    #[test]
+    fn matches_checks_authorship_and_recipients() {
+        let mut hit = SearchHit {
+            id: 1,
+            thread_id: "t".into(),
+            from_addr: "me@example.com".into(),
+            from_name: None,
+            subject: "s".into(),
+            received_at: day(2026, 5, 5),
+            snippet: "".into(),
+            is_done: false,
+            subject_matches: Vec::new(),
+            snippet_matches: Vec::new(),
+            from_me: true,
+            recipients: "Dan Smith <Dan@Example.com>, , ".into(),
+        };
+        let (_, f) = parse_search_query("in:sent to:dan@EXAMPLE");
+        assert!(f.matches(&hit), "own mail, recipient case-folded");
+        let (_, f) = parse_search_query(r#"to:"dan smith""#);
+        assert!(f.matches(&hit), "recipient display name");
+        let (_, f) = parse_search_query("to:bob");
+        assert!(!f.matches(&hit));
+        hit.from_me = false;
+        let (_, f) = parse_search_query("in:sent");
+        assert!(!f.matches(&hit), "received mail is not mine");
     }
 }

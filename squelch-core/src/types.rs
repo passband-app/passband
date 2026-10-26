@@ -863,6 +863,18 @@ pub struct SearchHit {
     pub subject_matches: Vec<String>,
     #[serde(default)]
     pub snippet_matches: Vec<String>,
+    /// Written by the account itself (`own_mail_sql!`): the owner's own sent
+    /// mail, including a send Gmail also labelled INBOX. Lets a reader of the
+    /// results, an agent especially, tell "you wrote this" from mail received,
+    /// without knowing the owner's addresses.
+    #[serde(default)]
+    pub from_me: bool,
+    /// To, Cc and (on the owner's own sends) Bcc as stored, comma-joined. Kept
+    /// so the recall legs can apply `to:` after ranking exactly as the keyword
+    /// leg applies it in SQL. NEVER SERIALIZED: a result is a summary, and the
+    /// recipient list is not part of it.
+    #[serde(skip)]
+    pub recipients: String,
 }
 
 /// One row of the human-door audit log. Human-door-only; never crosses MCP.

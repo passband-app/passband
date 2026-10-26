@@ -908,7 +908,7 @@ struct SearchHit: Codable, Sendable, Identifiable, Hashable {
     var displaySnippet: String? = nil
     enum CodingKeys: String, CodingKey {
         case is_done, subject_matches, snippet_matches, id, thread_id
-        case from_addr, from_name, subject, received_at, snippet, legs
+        case from_addr, from_name, subject, received_at, snippet, legs, from_me
     }
 
     // Optional for compatibility with older daemons: unknown is not unfinished.
@@ -928,6 +928,9 @@ struct SearchHit: Codable, Sendable, Identifiable, Hashable {
     /// decode every hit from one — the whole search panel dark over a
     /// diagnostic.
     var legs: [String]?
+    /// The account wrote this message (its own sent mail). OPTIONAL because
+    /// an older daemon sends no such field.
+    var from_me: Bool? = nil
 }
 
 /// WHAT RETRIEVAL DID WITH THE READER'S WORDS, straight from the daemon: how

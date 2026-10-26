@@ -2439,3 +2439,203 @@ fn a_vector_batch_is_all_or_nothing_and_idempotent() {
         "no transaction left open by the failure"
     );
 }
+
+// ---- MAIL I WROTE: `in:sent`, `from:me`, `to:` ------------------------
+//
+// Sent mail was always in the index, and an agent still could not find it:
+// nothing let a caller ask for "mail I wrote" or "mail to Dan", so a search
+// for `in:sent` ranked the WORD "sent". These pin the scope operators on every
+// leg, and that the agent door keeps applying its access check under them.
+
+/// Three of the owner's own messages (two sent copies, one sent copy Gmail
+/// also labelled INBOX so its stored `is_sent` is 0) and two received ones,
+/// all about the lease, with recipients.
+fn seed_own_mail(store: &SqliteStore, acct: AccountId) -> [i64; 5] {
+    let to_dan = triaged(acct, "g-to-dan", "t-dan")
+        .from("me@example.com")
+        .is_sent(true)
+        .to_addrs("Dan Smith <dan@landlord.test>")
+        .subject("lease renewal")
+        .body("dan, the signed lease renewal is attached")
+        .received_at(day(2026, 3, 10))
+        .seed(store);
+    let to_amy = triaged(acct, "g-to-amy", "t-amy")
+        .from("me@example.com")
+        .is_sent(true)
+        .to_addrs("amy@friend.test")
+        .subject("lease question")
+        .body("amy, did you read your lease")
+        .received_at(day(2026, 3, 11))
+        .seed(store);
+    // Authorship, not the column: a send that came back through INBOX.
+    let inbox_copy = triaged(acct, "g-self", "t-self")
+        .from("me@example.com")
+        .to_addrs("dan@landlord.test")
+        .subject("lease reminder")
+        .body("reminder to myself about the lease, cc dan")
+        .received_at(day(2026, 3, 12))
+        .seed(store);
+    let from_dan = triaged(acct, "g-from-dan", "t-dan")
+        .from("dan@landlord.test")
+        .from_name(Some("Dan Smith"))
+        .to_addrs("me@example.com")
+        .subject("re: lease renewal")
+        .body("thanks, the lease renewal is countersigned")
+        .received_at(day(2026, 3, 13))
+        .seed(store);
+    let newsletter = triaged(acct, "g-news", "t-news")
+        .from("news@sent.test")
+        .to_addrs("me@example.com")
+        .subject("sent: lease tips")
+        .body("we sent you lease tips")
+        .received_at(day(2026, 3, 14))
+        .seed(store);
+    [to_dan, to_amy, inbox_copy, from_dan, newsletter]
+}
+
+fn ids(hits: &[crate::types::SearchHit]) -> HashSet<i64> {
+    hits.iter().map(|h| h.id).collect()
+}
+
+#[test]
+fn in_sent_scopes_the_keyword_leg_and_the_listing_to_mail_i_wrote() {
+    let (store, acct) = store();
+    let [to_dan, to_amy, inbox_copy, from_dan, newsletter] = seed_own_mail(&store, acct);
+    let mine = HashSet::from([to_dan, to_amy, inbox_copy]);
+
+    // Keyword mode leaves sent mail out by default (`include_sent` false), and
+    // `in:sent` must bring it back rather than come up empty.
+    for q in ["lease in:sent", "lease from:me"] {
+        let (text, filter) = parse_search_query(q);
+        assert!(!filter.include_sent);
+        let hits = store
+            .search_filtered(acct, &text, &filter, SearchSort::Recent, false, 10, 0)
+            .unwrap();
+        assert_eq!(ids(&hits), mine, "{q}");
+        assert!(hits.iter().all(|h| h.from_me), "{q}");
+    }
+
+    // Operators alone: the newest-first listing.
+    let (text, filter) = parse_search_query("in:sent");
+    let hits = store
+        .search_filtered(acct, &text, &filter, SearchSort::Recent, false, 10, 0)
+        .unwrap();
+    assert_eq!(
+        hits.iter().map(|h| h.id).collect::<Vec<_>>(),
+        vec![inbox_copy, to_amy, to_dan]
+    );
+
+    // `to:` matches the recipients, address or display name, in SQL.
+    let (text, filter) = parse_search_query("lease in:sent to:dan");
+    let hits = store
+        .search_filtered(acct, &text, &filter, SearchSort::Recent, false, 10, 0)
+        .unwrap();
+    assert_eq!(ids(&hits), HashSet::from([to_dan, inbox_copy]));
+    let (text, filter) = parse_search_query(r#"in:sent to:"dan smith""#);
+    let hits = store
+        .search_filtered(acct, &text, &filter, SearchSort::Recent, false, 10, 0)
+        .unwrap();
+    assert_eq!(ids(&hits), HashSet::from([to_dan]), "display name");
+    // Without the scope, keyword mode still leaves stored sent rows out.
+    let (text, filter) = parse_search_query("to:dan");
+    let hits = store
+        .search_filtered(acct, &text, &filter, SearchSort::Recent, false, 10, 0)
+        .unwrap();
+    assert_eq!(ids(&hits), HashSet::from([inbox_copy]));
+
+    // Received mail carries from_me = false, and is untouched by the scope.
+    let (text, filter) = parse_search_query("lease");
+    let hits = store
+        .search_filtered(acct, &text, &filter, SearchSort::Recent, false, 10, 0)
+        .unwrap();
+    let by_id: std::collections::HashMap<i64, bool> =
+        hits.iter().map(|h| (h.id, h.from_me)).collect();
+    assert_eq!(by_id.get(&from_dan), Some(&false));
+    assert_eq!(by_id.get(&newsletter), Some(&false));
+    assert_eq!(by_id.get(&inbox_copy), Some(&true));
+}
+
+#[test]
+fn in_sent_and_to_apply_after_ranking_on_the_recall_legs() {
+    let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
+    let (store, acct) = store_with_embedder(embedder.clone());
+    let [to_dan, to_amy, inbox_copy, ..] = seed_own_mail(&store, acct);
+    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+        embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
+    }
+
+    let (text, filter) = parse_search_query("lease in:sent");
+    let hits = store
+        .hybrid_search(acct, &text, &filter, SearchSort::Recent, false, 10)
+        .unwrap()
+        .0;
+    assert_eq!(ids(&hits), HashSet::from([to_dan, to_amy, inbox_copy]));
+
+    let (text, filter) = parse_search_query("lease in:sent to:DAN@landlord");
+    let hits = store
+        .semantic_search_hits(acct, &text, &filter, SearchSort::Recent, false, 10)
+        .unwrap()
+        .0;
+    assert_eq!(ids(&hits), HashSet::from([to_dan, inbox_copy]));
+}
+
+#[test]
+fn the_agent_door_finds_mail_i_wrote_and_still_checks_access() {
+    let embedder = Arc::new(StubEmbedder::new(VEC_DIMS));
+    let (store, acct) = store_with_embedder(embedder.clone());
+    let [to_dan, to_amy, inbox_copy, from_dan, newsletter] = seed_own_mail(&store, acct);
+    for m in store.messages_missing_vectors(acct, 10).unwrap() {
+        embed_and_store(&store, &*embedder, acct, m.message_id, &m.subject, &m.body);
+    }
+    for id in [to_dan, inbox_copy, from_dan, newsletter] {
+        super::messages::assess_external(&store, acct, id, "allowed");
+    }
+    // One of the owner's own sends is restricted: no operator may reach it.
+    super::messages::assess_external(&store, acct, to_amy, "restricted");
+
+    let run = |q: &str, mode| {
+        let (text, filter) = parse_search_query(q);
+        store
+            .external_search_filtered(acct, &text, &filter, SearchSort::Recent, mode, 10)
+            .unwrap()
+    };
+    for mode in [
+        ExternalSearchMode::Hybrid,
+        ExternalSearchMode::Keyword,
+        ExternalSearchMode::Semantic,
+    ] {
+        let hits = run("lease in:sent", mode);
+        assert_eq!(ids(&hits), HashSet::from([to_dan, inbox_copy]), "{mode:?}");
+        assert!(hits.iter().all(|h| h.from_me), "{mode:?}");
+
+        let hits = run("lease from:me to:dan", mode);
+        assert_eq!(ids(&hits), HashSet::from([to_dan, inbox_copy]), "{mode:?}");
+
+        // Unscoped, the owner's own mail is marked. Keyword mode leaves
+        // stored sent rows out unless asked, as it always has.
+        let hits = run("lease", mode);
+        assert!(!ids(&hits).contains(&to_amy), "{mode:?}");
+        let own = if mode == ExternalSearchMode::Keyword {
+            1
+        } else {
+            2
+        };
+        assert_eq!(hits.iter().filter(|h| h.from_me).count(), own, "{mode:?}");
+        assert!(
+            hits.iter().any(|h| h.id == from_dan && !h.from_me),
+            "{mode:?}"
+        );
+    }
+
+    // Operators alone at the agent door: a newest-first keyword listing.
+    let hits = run("in:sent", ExternalSearchMode::Keyword);
+    assert_eq!(
+        hits.iter().map(|h| h.id).collect::<Vec<_>>(),
+        vec![inbox_copy, to_dan]
+    );
+
+    // The recipients never ride out on the wire.
+    let json = serde_json::to_value(&hits[0]).unwrap();
+    assert_eq!(json["from_me"], serde_json::json!(true));
+    assert!(json.get("recipients").is_none(), "{json}");
+}

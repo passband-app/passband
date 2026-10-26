@@ -1660,7 +1660,7 @@ pub async fn search(
             account_id,
             &term,
             partial,
-            filter.include_sent,
+            filter.searches_sent(),
             counted_strict,
         )?;
         if queued_at.elapsed().as_millis() >= 250 {

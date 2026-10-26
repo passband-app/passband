@@ -1428,9 +1428,12 @@ final class AssistantSession {
               drop a word, search only the rarest word, try the sender's name or company,
               and raise the limit to 20.
             - search_mail takes operators alongside the words: from:<name or address
-              fragment>, after:YYYY-MM-DD, before:YYYY-MM-DD. "The invoice Dan sent in
-              March" is "invoice from:dan after:\(year)-03-01 before:\(year)-04-01", and
-              "from:dan" alone lists everything Dan sent, newest first.
+              fragment>, to:<name or address fragment>, in:sent, after:YYYY-MM-DD,
+              before:YYYY-MM-DD. "The invoice Dan sent in March" is "invoice from:dan
+              after:\(year)-03-01 before:\(year)-04-01", and "from:dan" alone lists
+              everything Dan sent, newest first. in:sent (or from:me) is mail the user
+              wrote: "what did I tell Dan about the lease" is "lease in:sent to:dan".
+              A result with from_me true is the user's own message.
             - get_records is a shortcut, never the whole story. It holds only what Passband
               extracted from mail RECEIVED in its window, 30 days unless you widen it, 90
               at most. Empty means "nothing extracted lately", not "not in the mailbox":

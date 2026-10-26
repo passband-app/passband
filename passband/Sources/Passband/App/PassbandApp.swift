@@ -278,7 +278,15 @@ struct PassbandCommands: Commands {
         CommandMenu("Accounts") {
             ForEach(Array(accounts.accounts.enumerated()), id: \.element.id) { index, account in
                 Button {
-                    Task { await accounts.switchTo(account.id) }
+                    // The live account's own chord is "home": back to the
+                    // sitrep from wherever you are (the calendar, settings, an
+                    // open email). Here and not in `switchTo`, whose other
+                    // callers (the rail, a notification) mean only "switch".
+                    if account.id == accounts.activeId {
+                        store.setView(.sitrep)
+                    } else {
+                        Task { await accounts.switchTo(account.id) }
+                    }
                 } label: {
                     // The live one wears a check, the way every account picker
                     // on this platform says which one you are looking at.

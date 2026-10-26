@@ -717,6 +717,23 @@ Phase 8; with `operator_cidrs = []` it only ever reaches the ALB's 404.
 
 ---
 
+### Operator access to the Bifrost and Grafana UIs (tailnet)
+
+Added 2026-10-26, after the cutover. The monitor box joins the Passband
+tailnet as `tag:passband-aws` (key: `passband/monitor/TS_AUTHKEY`, reusable,
+tagged) and serves, tailnet-only:
+
+- `https://passband-monitor.<tailnet>.ts.net/`: the Bifrost UI, through a
+  loopback nginx that presents `Host: bifrost.passband.app` to the ALB
+- `https://passband-monitor.<tailnet>.ts.net:8443/`: Grafana
+
+So `operator_cidrs` stays `[]`; nobody's laptop goes on the ALB allow-list.
+A new tailnet needs the tag in `tagOwners` before a key can carry it, and
+Serve/HTTPS enabled once (DNS → HTTPS Certificates), or `tailscale serve`
+stops at a consent link and leaves no config.
+
+---
+
 ## Phase 5: monitoring
 
 **Preconditions.** Phase 3's monitor deploy succeeded; Phase 4 step 7 done.

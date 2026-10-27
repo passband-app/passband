@@ -482,13 +482,6 @@ fn archive_mail_is_in_search_and_the_reader_and_in_no_count_or_listing() {
     assert_eq!(rate.received, 1);
     assert!(rate.oldest_received_at.unwrap() > days_ago(2));
     assert_eq!(store.count_inbound_since(acct, days_ago(400)).unwrap(), 1);
-    assert_eq!(
-        store
-            .sender_rule_digest(acct, "pat@old.example", 10)
-            .unwrap()
-            .len(),
-        1
-    );
 
     // ---- the lists ---------------------------------------------------------
     // Assessed as allowed AND given everything a committed triage writes to
@@ -518,6 +511,16 @@ fn archive_mail_is_in_search_and_the_reader_and_in_no_count_or_listing() {
             .external_shipments_within(acct, None)
             .unwrap()
             .is_empty()
+    );
+    // The rule digest hides mail whose access is still unassessed (its
+    // subjects go to a model), so it is asked here, once every row is
+    // allowed: what keeps the archive rows out is then `is_archive` alone.
+    assert_eq!(
+        store
+            .sender_rule_digest(acct, "pat@old.example", 10)
+            .unwrap()
+            .len(),
+        1
     );
     for id in archived {
         assert_eq!(jobs(&store, id), 0);

@@ -327,6 +327,10 @@ impl SqliteStore {
         let conn = self.lock()?;
         // Done stamps resolved_at; reopening clears it. Human actions also apply
         // to mail restricted from external agents.
+        //
+        // EITHER WAY `resolved_by` IS CLEARED, on every row the write touches:
+        // a person re-doing or reopening a row an automatic sweep resolved has
+        // taken it over, and that sweep's undo must no longer reach it.
         let resolved_at = match status {
             AttentionStatus::Done => Some(Utc::now().to_rfc3339()),
             _ => None,
@@ -355,7 +359,7 @@ impl SqliteStore {
             AttentionStatus::Done => conn.execute(
                 concat!(
                     "UPDATE triage
-                 SET status = ?1, resolved_at = ?2, reminded_at = NULL
+                 SET status = ?1, resolved_at = ?2, resolved_by = NULL, reminded_at = NULL
                  WHERE account_id = ?3
                    AND (message_id = ?4 OR (message_id IN (
                        SELECT sib.id FROM messages me
@@ -370,7 +374,7 @@ impl SqliteStore {
             )?,
             _ => conn.execute(
                 "UPDATE triage
-                 SET status = ?1, resolved_at = ?2
+                 SET status = ?1, resolved_at = ?2, resolved_by = NULL
                  WHERE account_id = ?3 AND message_id = ?4",
                 params![status.as_str(), resolved_at, account_id, message_id],
             )?,
@@ -422,7 +426,7 @@ impl SqliteStore {
         tx.execute(
             concat!(
                 "UPDATE triage
-             SET status = 'done', resolved_at = ?1, reminded_at = NULL
+             SET status = 'done', resolved_at = ?1, resolved_by = NULL, reminded_at = NULL
              WHERE account_id = ?2
                AND (message_id = ?3 OR (message_id IN (
                    SELECT sib.id FROM messages me
@@ -479,6 +483,7 @@ impl SqliteStore {
             "UPDATE triage
              SET status = 'open',
                  resolved_at = NULL,
+                 resolved_by = NULL,
                  reminded_at = remind_at,
                  remind_at = NULL
              WHERE account_id = ?1
@@ -508,7 +513,7 @@ impl SqliteStore {
         let n = conn.execute(
             concat!(
                 "UPDATE triage
-             SET status = 'done', resolved_at = ?1
+             SET status = 'done', resolved_at = ?1, resolved_by = NULL
              WHERE account_id = ?2
 
                AND status != 'done'
@@ -520,6 +525,24 @@ impl SqliteStore {
                 holds_fye_triage_sql!()
             ),
             params![Utc::now().to_rfc3339(), account_id, sender],
+        )?;
+        // AND THE OWNER TAKES OVER what an automatic sweep had already
+        // resolved for this sender. Those rows are done either way; what
+        // changes is whose done it is. Left tagged, a later undo of that
+        // sweep would reopen mail from a sender the owner has just
+        // unsubscribed from or muted. Not counted in the return, which is
+        // the rows this call newly resolved.
+        conn.execute(
+            "UPDATE triage
+             SET resolved_by = NULL
+             WHERE account_id = ?1
+               AND status = 'done' AND resolved_by IS NOT NULL
+               AND message_id IN (
+                   SELECT m.id FROM messages m
+                   WHERE m.account_id = ?1
+                     AND LOWER(TRIM(m.from_addr)) = ?2
+               )",
+            params![account_id, sender],
         )?;
         Ok(n)
     }
@@ -728,11 +751,27 @@ impl SqliteStore {
 /// epoch — because the epoch reads as "the ledger has always been running",
 /// which is the one answer that produces the flattering number this whole
 /// mechanism exists to prevent.
-fn open_ledger_since(conn: &Connection, account_id: AccountId) -> Result<DateTime<Utc>> {
+pub(super) fn open_ledger_since(conn: &Connection, account_id: AccountId) -> Result<DateTime<Utc>> {
+    ledger_since(conn, account_id, OPEN_LEDGER_SINCE_KEY)
+}
+
+/// The moment an account's DWELL ledger started running: the same resolution
+/// as [`open_ledger_since`] over the other key, with the same fallbacks and
+/// the same direction of failure (see `migrate::stamp_dwell_ledger_start`).
+/// It floors `opened_at`, not `received_at`: mail that arrived last year and
+/// was opened this morning was opened where dwell could be reported.
+pub(super) fn dwell_ledger_since(
+    conn: &Connection,
+    account_id: AccountId,
+) -> Result<DateTime<Utc>> {
+    ledger_since(conn, account_id, DWELL_LEDGER_SINCE_KEY)
+}
+
+fn ledger_since(conn: &Connection, account_id: AccountId, key: &str) -> Result<DateTime<Utc>> {
     let stored: Option<String> = conn
         .query_row(
             "SELECT value FROM app_settings WHERE account_id = ?1 AND key = ?2",
-            params![account_id, OPEN_LEDGER_SINCE_KEY],
+            params![account_id, key],
             |r| r.get(0),
         )
         .optional()?;

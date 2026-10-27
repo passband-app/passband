@@ -20,11 +20,23 @@ pub struct FeedQuery {
     pub include_done: Option<bool>,
 }
 
+/// How many items a feed page holds: 200 unless asked, never more than 1000.
+/// Shared with [`smart_clear`], whose rows must be the items the Reading feed
+/// returns.
+fn feed_limit(requested: Option<usize>) -> usize {
+    requested.unwrap_or(200).clamp(1, 1000)
+}
+
+/// Where a feed's window starts when the caller names no `since`.
+fn default_feed_since(now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    now - chrono::Duration::days(30)
+}
+
 pub async fn feed(
     State(state): State<ApiState>,
     Query(query): Query<FeedQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let limit = feed_limit(query.limit);
     let ranking = state.triage_config.ranking.clone();
     let now = Utc::now();
     if query.all_time == Some(true) && query.since.is_some() {
@@ -36,7 +48,7 @@ pub async fn feed(
         since: if query.all_time == Some(true) {
             None
         } else {
-            Some(query.since.unwrap_or(now - chrono::Duration::days(30)))
+            Some(query.since.unwrap_or(default_feed_since(now)))
         },
         include_done: query.include_done.unwrap_or(false),
     };
@@ -287,6 +299,265 @@ pub async fn opened(
     })
     .await?;
     Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+pub struct AttentionReport {
+    /// Milliseconds this message was on screen since the last report.
+    #[serde(default)]
+    pub dwell_ms: u64,
+    /// Links in it followed since the last report. A count: the client never
+    /// sends which.
+    #[serde(default)]
+    pub link_clicks: u32,
+}
+
+/// POST /client/v2/messages/{message_id}/attention: add one report of reading
+/// attention to a message's totals. See
+/// [`AgentTriageStore::record_message_attention`] for the clamps.
+///
+/// ALWAYS 204 FOR A WELL-FORMED REPORT, and this is where it parts from
+/// `/opened` above, which answers 404 for a message it does not know. Two
+/// reasons, and the first is a contract with clients already shipped:
+///
+/// - A client reads 404 from THIS route as "this daemon predates the route"
+///   and stops reporting for the rest of the session. A 404 for one unknown
+///   id (mail deleted on another device while it was on screen) would silence
+///   every report after it.
+/// - Mail KNOWN to be kept close is accepted and never written: auth mail and
+///   restricted mail by their stored decision or assessment, and legacy
+///   sealed rows (`known_sealed_mail_sql!`, not the retired `sensitivity`
+///   column alone). Mail not yet assessed IS written; see that macro's
+///   sibling for why that is safe.
+///   Answering it differently from a missing id would tell the caller which
+///   an id was; one status for written, kept close and missing alike says
+///   nothing.
+///
+/// A malformed body still gets the extractor's ordinary 4xx.
+///
+/// NO AUDIT ROW, as `/opened` writes none. `audit_log` records what the owner
+/// DID to their mailbox (sent, unsubscribed, changed a rule); this is
+/// telemetry about looking at it, it fires several times per message read,
+/// and a log flooded with it would bury the entries the log exists to keep.
+pub async fn attention(
+    State(state): State<ApiState>,
+    Path(message_id): Path<i64>,
+    Json(report): Json<AttentionReport>,
+) -> Result<impl IntoResponse, ApiError> {
+    store_call(&state, move |store, account| {
+        store.record_message_attention(account, message_id, report.dwell_ms, report.link_clicks)
+    })
+    .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// POST /client/v2/reading/smart_clear: "I trust you to clean this out". Marks
+/// done, as one undoable batch, the open Reading mail that has expired or
+/// that the owner plainly does not want. What qualifies, and what is never
+/// touched, is [`squelch_core::triage::smart_clear`]; this is the order it
+/// happens in, which is about the store mutex:
+///
+/// 1. One locked read finds the rows worth asking the model about.
+/// 2. THE MODEL IS ASKED WITH NO LOCK HELD. It can take twenty seconds, and
+///    sync shares that mutex.
+/// 3. One locked transaction judges every row AGAIN and writes. The owner was
+///    using the app during step 2, so nothing step 1 saw is trusted: a model
+///    verdict lands only on a row that is still open and still undecided.
+///
+/// `model` says what became of step 2. Every `skipped_*` value means the
+/// sweep ran on stored facts alone, which is a smaller sweep and never an
+/// error: `skipped_nothing_to_ask` (no undecided row has a summary),
+/// `skipped_unconfigured` (no key), `skipped_cap` (the day's passes are
+/// spent), `skipped_failed` (a refusal, a timeout, an error, or an answer that
+/// called nearly every row expired and was thrown away whole).
+///
+/// `rows` is the receipt's full list: one entry per message written done, in
+/// `message_ids`' order, with its subject, sender, date and reason, read in
+/// the transaction that wrote it. `by_reason` is the tally of it.
+///
+/// ONE AUDIT ROW for the batch, not one per message: the batch id is the
+/// target and everything it took can be read back from it.
+///
+/// ONE PRESS AT A TIME. Each press reads a hundred senders' mail under the
+/// store mutex and may hold a model call open for twenty seconds; a client
+/// that loops on the button would otherwise queue those back to back and
+/// starve sync. A press that arrives while another is running answers 429
+/// before it touches the store.
+pub async fn smart_clear(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
+    use squelch_core::metrics::SMART_CLEAR_USAGE_CATEGORY;
+    use squelch_core::triage::smart_clear::{self as sd, ClearReason};
+    use std::sync::atomic::Ordering;
+
+    /// Clears the in-flight mark however the press ends, an error or a
+    /// dropped connection included.
+    struct Running(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    if state.smart_clear_running.swap(true, Ordering::AcqRel) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "a smart clear is already running",
+        ));
+    }
+    let _running = Running(state.smart_clear_running.clone());
+
+    let limit = feed_limit(None);
+    let now = Utc::now();
+    let inventory = squelch_core::store::agent_triage::AgentListQuery {
+        since: Some(default_feed_since(now)),
+        include_done: false,
+    };
+    let day = now.format("%Y-%m-%d").to_string();
+    let scan_inventory = inventory.clone();
+    let scan_day = day.clone();
+    let (scan, spent) = store_call(&state, move |store, account| {
+        let scan = store.smart_clear_scan(account, now, &scan_inventory, limit)?;
+        // The runaway guard, read from the same ledger the passes bill into.
+        let spent: u64 = store
+            .list_usage_by_category(account, 1)?
+            .into_iter()
+            .filter(|(c, _)| c == SMART_CLEAR_USAGE_CATEGORY)
+            .flat_map(|(_, days)| days)
+            .filter(|d| d.day == scan_day)
+            .map(|d| d.calls)
+            .sum();
+        Ok((scan, spent))
+    })
+    .await?;
+
+    let mut verdicts = std::collections::HashMap::new();
+    let model = if scan.asks.is_empty() {
+        "skipped_nothing_to_ask"
+    } else if let Some(client) = state.smart_clear.clone() {
+        // RESERVE before calling, as the headline does and for its reasons:
+        // the ledger only learns of calls the provider reported usage for,
+        // and two presses at once would both read the same total.
+        let reserved = state.smart_clear_attempts.lock().is_ok_and(|mut t| {
+            if t.0 != day {
+                *t = (day.clone(), 0);
+            }
+            if u64::from(t.1).max(spent) >= u64::from(sd::DAILY_CAP) {
+                return false;
+            }
+            t.1 += 1;
+            true
+        });
+        if !reserved {
+            "skipped_cap"
+        } else {
+            let pass = sd::judge(&client, now, &scan.asks).await;
+            // Billed on every outcome that reported usage, a refusal and a
+            // garbled answer included.
+            if let Some(u) = pass.usage {
+                let bill_day = day.clone();
+                let _ = store_call(&state, move |store, account| {
+                    if let Err(e) = store.extract_bump_usage(
+                        account,
+                        &bill_day,
+                        SMART_CLEAR_USAGE_CATEGORY,
+                        u.into(),
+                    ) {
+                        eprintln!("squelch: smart clear usage ledger bump failed ({e})");
+                    }
+                    Ok(())
+                })
+                .await;
+            }
+            if pass.answered {
+                verdicts = pass.verdicts;
+                "ok"
+            } else {
+                "skipped_failed"
+            }
+        }
+    } else {
+        "skipped_unconfigured"
+    };
+
+    // A FRESH CLOCK for the write: the 24-hour floor and every "has passed"
+    // are judged as of the moment the rows are taken, not of the press.
+    let outcome = store_call(&state, move |store, account| {
+        store.smart_clear_apply(account, Utc::now(), &inventory, limit, &scan, &verdicts)
+    })
+    .await?;
+
+    let mut by_reason = serde_json::Map::new();
+    for reason in ClearReason::ALL {
+        let n = outcome.cleared.iter().filter(|(_, r)| *r == reason).count();
+        by_reason.insert(reason.as_str().into(), json!(n));
+    }
+    // THE FULL LIST behind the receipt: each message taken, with its subject,
+    // its sender and why. Mail text, so it is here and nowhere else: this
+    // route is the human door, the response is `no-store`, and none of it is
+    // written to the batch or the audit row. Sealed mail is never cleared, so
+    // it is never listed.
+    let rows: Vec<serde_json::Value> = outcome
+        .rows
+        .iter()
+        .map(|row| {
+            json!({
+                "message_id": row.message_id,
+                "reason": row.reason.as_str(),
+                "sender": row.sender,
+                "sender_name": row.sender_name,
+                "subject": row.subject,
+                "received_at": row.received_at,
+            })
+        })
+        .collect();
+    if let Some(batch) = outcome.batch_id {
+        crate::handlers::audit_action(
+            &state,
+            "reading.smart_clear",
+            Some(batch.to_string()),
+            &outcome.cleared.len().to_string(),
+        )
+        .await;
+    }
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "batch_id": outcome.batch_id.map(|id| id.to_string()),
+            "cleared": outcome.cleared.len(),
+            "senders": outcome.senders,
+            "by_reason": by_reason,
+            "message_ids": outcome.cleared.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            "rows": rows,
+            "model": model,
+        })),
+    ))
+}
+
+/// POST /client/v2/reading/smart_clear/{batch_id}/undo: give a batch back.
+/// Reopens exactly the rows that batch took and that nobody has touched
+/// since, each to the status it had. A second undo reopens nothing and says
+/// `0`; a batch this account does not have is 404, whether it is unknown or
+/// somebody else's.
+pub async fn smart_clear_undo(
+    State(state): State<ApiState>,
+    Path(batch_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    // The id is handed out as a string so the client never does arithmetic on
+    // it; one that is not a number names no batch.
+    let Ok(batch) = batch_id.parse::<i64>() else {
+        return Err(ApiError::not_found());
+    };
+    let reopened = store_call(&state, move |store, account| {
+        store.smart_clear_undo(account, batch, Utc::now())
+    })
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    crate::handlers::audit_action(
+        &state,
+        "reading.smart_clear_undo",
+        Some(batch.to_string()),
+        &reopened.to_string(),
+    )
+    .await;
+    Ok(Json(json!({ "reopened": reopened })))
 }
 
 pub async fn capabilities() -> impl IntoResponse {

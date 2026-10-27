@@ -281,6 +281,10 @@ enum ProductGuide {
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".
         - Hover a Reading card and press e to mark everything from that sender done. That one cannot be undone.
 
+        Clearing out Reading (a pill at the top right of the Reading card, on the Mac):
+        - "smart clear" clears what has plainly run its course in one press: events that already happened, offers that ended, mail that is no longer current, and promotions and senders the user never opens. It can take up to about 20 seconds. A receipt card at the bottom right then says how many emails were cleared and why, with an Undo button. Undo, or the u key, puts all of it back, and stays for 30 seconds.
+        - "View full list" on that receipt opens a page listing every email that was cleared: its subject, its sender and why. The undo timer is paused while that page is open. On it, u undoes everything, and Return or Esc confirms and goes back with the timer carrying on from where it stopped.
+
         Other things on the page:
         - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (or the first part of the address when that is not available) and is changed in Settings > General > You.
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.

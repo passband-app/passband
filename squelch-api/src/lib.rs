@@ -124,6 +124,21 @@ fn client_router(state: ApiState) -> Router {
             "/client/v2/messages/{message_id}/opened",
             post(triage::opened),
         )
+        // "This is how long I looked, and how many links I followed." HUMAN
+        // DOOR ONLY for the reason `/opened` is: it is a statement about what
+        // a PERSON did, which an agent cannot make. Counts only, never a URL.
+        .route(
+            "/client/v2/messages/{message_id}/attention",
+            post(triage::attention),
+        )
+        // "Clean Reading out for me", and its exact undo. HUMAN DOOR ONLY,
+        // like every write and more than most: it resolves mail in bulk on
+        // the owner's say-so, which no agent may borrow.
+        .route("/client/v2/reading/smart_clear", post(triage::smart_clear))
+        .route(
+            "/client/v2/reading/smart_clear/{batch_id}/undo",
+            post(triage::smart_clear_undo),
+        )
         .route(
             "/client/v2/messages/{message_id}/corrections",
             post(triage::correct),

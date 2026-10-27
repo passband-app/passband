@@ -668,7 +668,8 @@ struct ReadingZone: View {
         // missing feature, not as "nothing this week".
         ZoneCard(
             symbol: "envelope.open", title: "Reading", count: senders.count,
-            subtitle: "newsletters, announcements, and offers"
+            subtitle: "newsletters, announcements, and offers",
+            trailing: actions
         ) {
             if senders.isEmpty {
                 EmptyNote("Nothing to read yet.")
@@ -676,6 +677,18 @@ struct ReadingZone: View {
                 grid
             }
         }
+    }
+
+    /// The zone's door, smart clear. Mac only for now, and gone with the
+    /// mail: on an empty zone there is nothing for it to do. Not in the
+    /// practice inbox, whose senders are fixtures.
+    private var actions: AnyView? {
+        #if os(macOS)
+            guard !senders.isEmpty, !RehearsalMode.isEnabled else { return nil }
+            return AnyView(ReadingActions())
+        #else
+            return nil
+        #endif
     }
 
     /// NON-LAZY on purpose: a LazyVGrid rebuilds cards as they cross the
@@ -712,6 +725,28 @@ struct ReadingZone: View {
         .padding(.top, Space.s10)
     }
 }
+
+#if os(macOS)
+    /// SMART CLEAR, in Reading's corner. A leaf of its own so the zone above
+    /// stays free of closures and of the store's working flags:
+    /// a smart clear starting must not re-measure every card in the grid.
+    private struct ReadingActions: View {
+        @Environment(AppStore.self) private var store
+
+        var body: some View {
+            HStack(spacing: Space.s6) {
+                ZonePill(
+                    symbol: "checkmark.rectangle.stack", label: "smart clear",
+                    help: "Clear what has expired and what you never open. You can undo it.",
+                    accessibilityName: "Smart clear",
+                    working: store.smartClearWorking, workingLabel: "tidying up"
+                ) {
+                    Task { await store.runSmartClear() }
+                }
+            }
+        }
+    }
+#endif
 
 /// Fetch + derive for the reading zone. Free-standing so the always-mounted
 /// SitrepView can own it.
@@ -805,6 +840,14 @@ private struct ReadingCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // Only seen when a removal is ANIMATED, which is the smart clear
+        // sweep: the tile slides a little way off and fades instead of
+        // blinking out. An ordinary `e` is not animated and is unchanged.
+        .transition(
+            .asymmetric(
+                insertion: .opacity,
+                removal: .opacity.combined(with: .offset(x: 26)).combined(
+                    with: .scale(scale: 0.94))))
         .onHover { over in
             hovering = over
             // Nothing READS this during a render — only the `e` handler, at

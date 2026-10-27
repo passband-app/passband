@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v13";
+pub const PROMPT_VERSION: &str = "agent-triage-v14";
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -845,6 +845,19 @@ pub fn validate_decision(
     if !attention(&decision.attention) {
         return fail("invalid_attention_evidence_or_factors");
     }
+    // `ends` is read by ONE consumer (smart clear), through the one parser
+    // it uses, so it is validated with that parser and not the stricter
+    // closure above: the agent writes a stated time as a local time with no
+    // offset, and refusing that would cost a turn for a value the reader
+    // understands. (The closure stays as it is for `due` and `attention_at`,
+    // whose other readers parse only what it accepts.)
+    if !decision
+        .ends
+        .as_ref()
+        .is_none_or(|time| sources.contains(&time.source_message_id) && time.stated().is_some())
+    {
+        return fail("invalid_ends_time");
+    }
     for update in &decision.related_updates {
         if revisions.get(&update.thread_id) != Some(&update.expected_revision)
             || !evidence(&update.evidence)
@@ -1105,6 +1118,7 @@ fn decision_schema_body() -> Value {
             "reading_kind",
             nullable(enumeration(&["content", "promotion"])),
         ),
+        ("ends", nullable(reference("time"))),
         ("summary", text()),
         ("reason", text()),
         (
@@ -1701,7 +1715,7 @@ mod tests {
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v13")
+            (2_000, "agent-triage-v14")
         );
     }
     #[test]
@@ -1896,6 +1910,51 @@ mod tests {
         assert_eq!(
             fresh.reading_kind,
             Some(crate::triage::decision::ReadingKind::Content)
+        );
+    }
+    #[test]
+    fn ends_is_offered_validated_and_defaults_on_stored_rows() {
+        assert!(SYSTEM.contains("set ends to the date or time the offer, sale, or event"));
+        let schema = decision_schema();
+        assert_eq!(schema["properties"]["ends"], nullable(reference("time")));
+        // A decision stored before the field existed still reads.
+        let mut decision = serde_json::to_value(valid()).unwrap();
+        decision.as_object_mut().unwrap().remove("ends");
+        let stored: MessageDecision = serde_json::from_value(decision.clone()).unwrap();
+        assert_eq!(stored.ends, None);
+        // A date-only value from a message the run read is accepted.
+        let source = stored.attention.relevant_message_ids[0];
+        decision["ends"] = json!({"value": "2026-10-31", "timezone": null,
+            "source_message_id": source, "interpreted_relative": false});
+        let dated: MessageDecision = serde_json::from_value(decision.clone()).unwrap();
+        assert_eq!(dated.ends.as_ref().unwrap().value, "2026-10-31");
+        let sources = BTreeSet::from([source]);
+        let none = BTreeMap::new();
+        let rules: [i64; 0] = [];
+        assert_eq!(validate_decision(&dated, &sources, &none, &rules), Ok(()));
+        // The agent writes a stated time as a LOCAL time with no offset, the
+        // way it writes event starts. That is a valid `ends`.
+        for naive in ["2026-10-31T23:59:00", "2026-10-31T23:59"] {
+            let mut timed = dated.clone();
+            timed.ends.as_mut().unwrap().value = naive.into();
+            assert_eq!(
+                validate_decision(&timed, &sources, &none, &rules),
+                Ok(()),
+                "{naive}"
+            );
+        }
+        // One that is not a date, or cites a message nobody read, is not.
+        let mut vague = dated.clone();
+        vague.ends.as_mut().unwrap().value = "end of the month".into();
+        assert_eq!(
+            validate_decision(&vague, &sources, &none, &rules),
+            Err("invalid_ends_time".to_string())
+        );
+        let mut unsourced = dated;
+        unsourced.ends.as_mut().unwrap().source_message_id = source + 999;
+        assert_eq!(
+            validate_decision(&unsourced, &sources, &none, &rules),
+            Err("invalid_ends_time".to_string())
         );
     }
     #[test]

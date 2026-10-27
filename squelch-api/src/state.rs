@@ -9,6 +9,7 @@ use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
 use squelch_core::triage::rule_infer::RuleInferClient;
 use squelch_core::triage::rule_suggest::RuleSuggestClient;
+use squelch_core::triage::smart_clear::SmartClearClient;
 use squelch_core::triage::unsub_page::UnsubPageClient;
 use squelch_core::types::AccountId;
 
@@ -100,6 +101,13 @@ pub struct ApiState {
     /// the whole ratio between a small model and a capable one.
     pub(crate) notify_price_in_per_mtok: f64,
     pub(crate) notify_price_out_per_mtok: f64,
+    /// The configured SMART CLEAR model id and its per-MTok prices: the label
+    /// and the fourth pricing arm on `/client/usage`'s `smart_clear` category.
+    /// Its own numbers for the reason the notify lane has its own: it runs a
+    /// model that is neither stage's and not the notify model either.
+    pub(crate) smart_clear_model: Arc<str>,
+    pub(crate) smart_clear_price_in_per_mtok: f64,
+    pub(crate) smart_clear_price_out_per_mtok: f64,
     /// The TRANSLATE model and its per-MTok prices (docs/TRANSLATION.md),
     /// which `/client/usage` costs the `translate` category with. Its own arm
     /// for the notify arm's reason: it is neither Stage-1's model nor the
@@ -321,6 +329,17 @@ pub struct ApiState {
     /// daily cap the usage ledger cannot see (timeouts report no usage) and
     /// cannot see in time (two calls racing the same ledger read).
     pub(crate) fye_headline_attempts: Arc<std::sync::Mutex<(String, u32)>>,
+    /// The model behind smart clear's "has this expired" pass. `None` (no key,
+    /// every test harness) means a press clears on stored facts alone and
+    /// says so. See [`squelch_core::triage::smart_clear`].
+    pub(crate) smart_clear: Option<SmartClearClient>,
+    /// Smart clear model passes ATTEMPTED today, as (UTC day, count): the half
+    /// of the daily cap the usage ledger cannot see, exactly as
+    /// `fye_headline_attempts` is for the headline.
+    pub(crate) smart_clear_attempts: Arc<std::sync::Mutex<(String, u32)>>,
+    /// A smart clear press is in flight. One at a time: the second answers
+    /// 429 without touching the store (see `triage::smart_clear`).
+    pub(crate) smart_clear_running: Arc<std::sync::atomic::AtomicBool>,
     /// The hosted assistant relay: forwards the Passband app's Anthropic-shaped
     /// streaming request to the gateway with a daemon-held credential. `None`
     /// (no gateway + assistant key configured, and every test harness) means
@@ -581,6 +600,14 @@ impl ApiState {
                 .price_in_per_mtok,
             notify_price_out_per_mtok: squelch_core::config::NotifyConfig::default()
                 .price_out_per_mtok,
+            smart_clear_model: {
+                let s = squelch_core::config::SmartClearConfig::default();
+                Arc::from(s.model.as_str())
+            },
+            smart_clear_price_in_per_mtok: squelch_core::config::SmartClearConfig::default()
+                .price_in_per_mtok,
+            smart_clear_price_out_per_mtok: squelch_core::config::SmartClearConfig::default()
+                .price_out_per_mtok,
             translate_model: Arc::from(
                 squelch_core::config::TranslateConfig::default()
                     .model
@@ -635,6 +662,9 @@ impl ApiState {
             fye_headline: None,
             fye_headline_cache: Arc::new(std::sync::Mutex::new(None)),
             fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
+            smart_clear: None,
+            smart_clear_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
+            smart_clear_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assistant: None,
             sharing: None,
             features: Features::none(),
@@ -1021,6 +1051,29 @@ impl ApiState {
         self
     }
 
+    /// Attach smart clear's model. `None` keeps
+    /// `/client/v2/reading/smart_clear` clearing on stored facts alone.
+    pub fn with_smart_clear(mut self, client: Option<SmartClearClient>) -> Self {
+        self.smart_clear = client;
+        self
+    }
+
+    /// Set the SMART CLEAR model + its per-MTok prices, which `/client/usage`
+    /// costs the `smart_clear` category with. See
+    /// [`ApiState::with_notify_config`] for why each model that is not a
+    /// stage's gets its own entry point.
+    pub fn with_smart_clear_config(
+        mut self,
+        model: impl Into<String>,
+        price_in_per_mtok: f64,
+        price_out_per_mtok: f64,
+    ) -> Self {
+        self.smart_clear_model = Arc::from(model.into().as_str());
+        self.smart_clear_price_in_per_mtok = price_in_per_mtok;
+        self.smart_clear_price_out_per_mtok = price_out_per_mtok;
+        self
+    }
+
     /// The small model that reads an unsubscribe page when a job needs one.
     /// `None` (no key, every test harness) leaves the no-model rule: done only
     /// when the page says so, and one action only when it is the obvious one.
@@ -1347,6 +1400,12 @@ impl ApiState {
                 cfg.notify.price_in_per_mtok,
                 cfg.notify.price_out_per_mtok,
             )
+            // Smart clear's own model and prices, for the same reason.
+            .with_smart_clear_config(
+                cfg.smart_clear.model.clone(),
+                cfg.smart_clear.price_in_per_mtok,
+                cfg.smart_clear.price_out_per_mtok,
+            )
             .with_translate_config(
                 cfg.translate.model.clone(),
                 cfg.translate.price_in_per_mtok,
@@ -1368,6 +1427,9 @@ impl ApiState {
             .with_rule_suggestion(RuleSuggestClient::from_config(cfg))
             // The sitrep headline: same key, same notify model.
             .with_fye_headline(HeadlineClient::from_config(cfg))
+            // Smart clear's expiry pass: same key, its OWN model
+            // (`[smart_clear]`), billed under its own ledger category.
+            .with_smart_clear(SmartClearClient::from_config(cfg))
             // The unsubscribe page reader rides the same key and the notify
             // model, billed under its own ledger category.
             .with_unsub_page_reader(UnsubPageClient::from_config(cfg))

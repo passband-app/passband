@@ -972,6 +972,254 @@ final class AppStore {
     private func dropSkipUndos() {
         undos.removeAll { $0.kind == .skip }
     }
+
+    // MARK: smart clear
+
+    /// SMART CLEAR: one press on the Reading zone and the daemon marks expired
+    /// and plainly unwanted mail done. What it took is shown as a receipt
+    /// with an undo that reopens exactly that batch.
+    struct SmartClearReceipt: Equatable, Identifiable {
+        let id = UUID()
+        /// nil when this daemon kept no batch: a receipt with no undo.
+        var batchId: String?
+        var cleared: Int
+        var senders: Int
+        var byReason: [String: Int]
+        var messageIds: [Int]
+        /// The model pass was meant to run and did not.
+        var modelMissed: Bool
+        var createdAt = Date()
+        /// When the receipt, and the undo on it, leave. A clock that can be
+        /// stopped: looking at the full list costs none of the window.
+        var clock: SmartClearClock
+        /// Every email cleared, for the full list. nil when the daemon did
+        /// not send them. Mail content: it lives here and nowhere else.
+        var items: [SmartClearItem]?
+        /// The undo request is out.
+        var undoing = false
+    }
+    /// The receipt's full list is up. While it is, the undo clock is stopped.
+    private(set) var smartClearListOpen = false
+
+    /// Open the full list of what the receipt on screen cleared, and stop
+    /// the undo clock for as long as it is up.
+    func openSmartClearList() {
+        guard smartClearReceipt?.items?.isEmpty == false, !smartClearListOpen else { return }
+        smartClearReceipt?.clock.pause(at: Date())
+        smartClearListOpen = true
+    }
+
+    /// Leave the full list BY ANY ROUTE: the clock starts again from where
+    /// it stopped. Safe to call twice, and with no list up.
+    func closeSmartClearList() {
+        smartClearListOpen = false
+        smartClearReceipt?.clock.resume(at: Date())
+    }
+    /// The daemon is working on it: up to about twenty seconds.
+    var smartClearWorking = false
+    var smartClearReceipt: SmartClearReceipt? {
+        // The list is the receipt's: it cannot outlive it by any route.
+        didSet { if smartClearReceipt == nil, smartClearListOpen { smartClearListOpen = false } }
+    }
+
+    /// How long a receipt and its undo stay. Six times an ordinary undo chip:
+    /// this one took a batch of mail nobody looked at one by one, and reading
+    /// what it took is the point of showing it.
+    static let smartClearUndoTTL: TimeInterval = 30
+    /// A receipt with nothing to undo is only news.
+    private static let smartClearNewsTTL: TimeInterval = 9
+
+    /// The receipt is on screen with a live undo, so `u` means that. Only
+    /// where the receipt is drawn (the bare sitrep): a key must not undo
+    /// something the person cannot see.
+    var smartClearUndoOffered: Bool {
+        guard let receipt = smartClearReceipt else { return false }
+        return receipt.batchId != nil && !receipt.undoing && showsSitrepCorner
+    }
+
+    /// The sitrep with nothing over it: where the bottom-right corner's cards
+    /// (the unsubscribe tray, the smart clear receipt) are drawn.
+    var showsSitrepCorner: Bool {
+        activeView == .sitrep && threadId == nil && !composeOpen
+    }
+
+    /// The press. Asks the daemon, takes what it cleared off the board at
+    /// once, and puts up the receipt.
+    ///
+    /// NEVER FROM THE PRACTICE INBOX: its mail is fixtures, and the real
+    /// daemon would be asked to clean a mailbox the person is not looking at.
+    func runSmartClear() async {
+        guard !smartClearWorking else { return }
+        guard !RehearsalMode.isEnabled else {
+            pushToast(SmartClearCopy.unavailable, .info)
+            return
+        }
+        let e = epoch
+        smartClearWorking = true
+        // A second run closes the first one's undo: the daemon undoes by
+        // batch, and two receipts in one corner would be two countdowns.
+        smartClearReceipt = nil
+        let result: SmartClearResult?
+        do {
+            result = try await APIClient.shared.smartClear()
+        } catch let error as APIError where error.status == 429 {
+            // One press at a time, daemon-side: another device got there
+            // first. Its sweep is this mailbox's too, so show the result.
+            guard e == epoch else { return }
+            smartClearWorking = false
+            pushToast(SmartClearCopy.alreadyRunning, .info)
+            await refreshZones(force: true)
+            return
+        } catch {
+            guard e == epoch else { return }
+            smartClearWorking = false
+            pushToast(SmartClearCopy.failed, .error)
+            // A timeout is not proof nothing happened: show what the daemon
+            // has now rather than what the board had before.
+            await refreshZones(force: true)
+            return
+        }
+        // The OLD account's daemon answered; its ids mean nothing here. The
+        // switch's wipe already put the pill back to rest.
+        guard e == epoch else { return }
+        smartClearWorking = false
+        guard let result else {
+            pushToast(SmartClearCopy.unavailable, .info)
+            return
+        }
+        // Counts only: never a sender, an address or a word of mail.
+        Analytics.capture(
+            "smart_clear",
+            [
+                "cleared": result.cleared,
+                "senders": result.senders,
+                "event_passed": result.by_reason["event_passed"] ?? 0,
+                "offer_ended": result.by_reason["offer_ended"] ?? 0,
+                "expired": result.by_reason["expired"] ?? 0,
+                "ignored_sender": result.by_reason["ignored_sender"] ?? 0,
+                "stale_promo": result.by_reason["stale_promo"] ?? 0,
+                "model_ran": result.model == "ok",
+                "undoable": result.batch_id != nil,
+            ])
+        guard result.cleared > 0 else {
+            pushToast(SmartClearCopy.nothing(model: result.model), .info)
+            return
+        }
+        showSmartClearReceipt(result)
+        await sweepResolved(result.message_ids, epoch: e)
+        guard e == epoch else { return }
+        // The tiles left optimistically; this makes the daemon's list the
+        // thing on screen.
+        await refreshZones(force: true)
+    }
+
+    private func showSmartClearReceipt(_ result: SmartClearResult) {
+        let ttl = result.batch_id == nil ? Self.smartClearNewsTTL : Self.smartClearUndoTTL
+        let now = Date()
+        let receipt = SmartClearReceipt(
+            batchId: result.batch_id, cleared: result.cleared, senders: result.senders,
+            byReason: result.by_reason, messageIds: result.message_ids,
+            modelMissed: SmartClearCopy.modelMissed(result.model),
+            createdAt: now, clock: SmartClearClock(startedAt: now, lasting: ttl),
+            items: result.rows.map { rows in
+                rows.map {
+                    SmartClearItem(
+                        id: $0.message_id, reason: $0.reason ?? "", sender: $0.sender,
+                        senderName: $0.sender_name, subject: $0.subject, receivedAt: $0.received_at)
+                }
+            })
+        smartClearListOpen = false
+        smartClearReceipt = receipt
+        let id = receipt.id
+        Task { [weak self] in
+            // The deadline can MOVE (the full list stops the clock), so this
+            // asks the clock each time it wakes instead of sleeping the TTL.
+            while let self, let live = self.smartClearReceipt, live.id == id {
+                let left = live.clock.remaining(at: Date())
+                if live.clock.isPaused || live.undoing {
+                    // Not while its undo is out either: that request's
+                    // answer still has to find the receipt it belongs to.
+                    try? await Task.sleep(for: .milliseconds(400))
+                } else if left <= 0 {
+                    self.smartClearReceipt = nil
+                    return
+                } else {
+                    try? await Task.sleep(for: .seconds(left))
+                }
+            }
+        }
+    }
+
+    func dismissSmartClearReceipt() {
+        guard smartClearReceipt?.undoing != true else { return }
+        smartClearListOpen = false
+        smartClearReceipt = nil
+    }
+
+    /// Reopen exactly what the receipt on screen cleared.
+    func undoSmartClear() async {
+        guard let receipt = smartClearReceipt, !receipt.undoing, let batch = receipt.batchId
+        else { return }
+        smartClearReceipt?.undoing = true
+        let e = epoch
+        do {
+            let undone = try await APIClient.shared.undoSmartClear(batchId: batch)
+            // Reopened on the OLD account's daemon: nothing to tell this one.
+            guard e == epoch else { return }
+            unresolve(Set(receipt.messageIds))
+            if smartClearReceipt?.id == receipt.id { smartClearReceipt = nil }
+            pushToast(SmartClearCopy.undone(reopened: undone.reopened), .info)
+            Analytics.capture("smart_clear_undone", ["reopened": undone.reopened])
+            // The refresh after the clear took these tiles out of the zone's
+            // rows for real, so un-resolving alone shows nothing: the board
+            // has to be read again. Forced, to outlast a pass already out.
+            await refreshZones(force: true)
+            await SitrepPoller.shared.pull()
+        } catch {
+            guard e == epoch else { return }
+            if smartClearReceipt?.id == receipt.id { smartClearReceipt?.undoing = false }
+            pushToast("Undo did not go through. Try again.", .error)
+        }
+    }
+
+    /// Take a batch of resolved mail off the Reading zone AS A SWEEP: sender
+    /// by sender in the order the board draws them, a few at a time, so the
+    /// eye sees the zone being cleared rather than a grid that blinked. Ids
+    /// not on the board are simply recorded.
+    private func sweepResolved(_ ids: [Int], epoch e: Int) async {
+        let all = Set(ids)
+        guard !all.isEmpty else { return }
+        var onBoard: [[Int]] = []
+        var seen = Set<Int>()
+        for sender in Reading.prune(zones.reading, resolved: resolvedIds) {
+            let mine = sender.items.map(\.id).filter(all.contains)
+            guard !mine.isEmpty else { continue }
+            onBoard.append(mine)
+            seen.formUnion(mine)
+        }
+        noteResolved(all.subtracting(seen))
+        guard !onBoard.isEmpty else { return }
+        #if os(macOS)
+            let still = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        #else
+            let still = UIAccessibility.isReduceMotionEnabled
+        #endif
+        if still {
+            withAnimation(.easeOut(duration: 0.25)) { noteResolved(seen) }
+            return
+        }
+        // At most eight waves however many tiles there are: the sweep should
+        // take about half a second whether it clears four senders or forty.
+        let perWave = max(1, Int((Double(onBoard.count) / 8).rounded(.up)))
+        var i = 0
+        while i < onBoard.count {
+            guard e == epoch else { return }
+            let wave = Set(onBoard[i..<min(i + perWave, onBoard.count)].joined())
+            withAnimation(.smooth(duration: 0.42)) { noteResolved(wave) }
+            i += perWave
+            try? await Task.sleep(for: .milliseconds(60))
+        }
+    }
     var readingMail = false
     var readingStack: Bool {
         guard readingMail, let first = threadQueue.first else { return false }
@@ -1094,6 +1342,21 @@ final class AppStore {
     /// the announcement have different rules, and ThreadArrivals is where the
     /// difference lives.
     private var arrivals = ThreadArrivals()
+    /// HOW LONG EACH MESSAGE HAS BEEN IN FRONT OF THE READER, and what was
+    /// clicked in it. Owned here for the reason `arrivals` is: `openThread`
+    /// and `closeThread` are the only two doors a thread goes through, and a
+    /// clock that lived in the reader view would be two clocks during an `S`
+    /// page turn, when two readers are mounted at once.
+    ///
+    /// Untracked, because nothing draws it; a view body that happened to call
+    /// one of the doors below must not become a reader of the dwell ledger.
+    @ObservationIgnored private var attention = AttentionClock()
+    /// The epoch `attention` was last touched under. Message ids are one
+    /// daemon's SQLite ints, so time banked against account A's message 40 is
+    /// a lie about account B's message 40. Compared on every touch rather than
+    /// reset beside each of the dozen places the epoch is bumped: one of those
+    /// would be missed, and the failure would be silent.
+    @ObservationIgnored private var attentionEpoch = 0
     var compose: ComposeState? {
         didSet {
             let open = compose != nil
@@ -2408,6 +2671,11 @@ final class AppStore {
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.
         UnsubscribeJobs.shared.reset()
+        // A smart clear in flight was asked of the old daemon, and a receipt's
+        // undo names a batch the new one never made.
+        smartClearWorking = false
+        smartClearReceipt = nil
+        smartClearListOpen = false
         // And the ignored-unsubscribe notice, for the same reason.
         UnsubscribeViolations.shared.reset()
         sitrep = SitrepData()
@@ -2806,7 +3074,14 @@ final class AppStore {
         // described A, and the ask bar would pin B's id under A's subject and
         // A's message id. Same-thread reopens keep it — the viewer is already
         // mounted and may never re-adopt.
-        if self.threadId != threadId { openThreadSummary = nil }
+        if self.threadId != threadId {
+            openThreadSummary = nil
+            // The message that was in focus is not any more, whatever the new
+            // thread turns out to hold. A same-thread reopen (a notification
+            // for the thread already up, an undo) leaves the stint running:
+            // the reader is still looking at it.
+            attentionBlur()
+        }
         // The reader's slot holds one thing: a thread replaces a preview.
         scheduledPreviewId = nil
         self.threadId = threadId
@@ -2883,6 +3158,7 @@ final class AppStore {
         focusedMessageView = nil
         threadId = nil
         arrivals.reset(to: nil)
+        attentionBlur()
         threadQueue = []
         readingMail = false
         readingOrder = []
@@ -2893,6 +3169,79 @@ final class AppStore {
         DraftSaver.shared.flush(.inlineReply, inlineReply)
         inlineReply = nil
         pendingReplyMessageId = nil
+    }
+
+    // MARK: - reading attention
+
+    /// Milliseconds on a clock that only goes forward and does not run while
+    /// the machine sleeps. Wall time does neither: a timezone change or an NTP
+    /// step mid-read would hand the dwell clock a negative or an hour-long
+    /// stint, and a lid closed on an open email would count the night.
+    private static func attentionNow() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds / 1_000_000
+    }
+
+    /// The clock, for the live epoch. Anything it held for another account is
+    /// dropped unsent: by the time this runs the client is talking to a
+    /// different daemon, and there is no longer anywhere honest to send it.
+    private func withAttention<T>(_ body: (inout AttentionClock, UInt64) -> T) -> T {
+        if attentionEpoch != epoch {
+            attention = AttentionClock()
+            attentionEpoch = epoch
+        }
+        return body(&attention, Self.attentionNow())
+    }
+
+    /// A RECEIVED message is at the reader's focus. Called on every geometry
+    /// tick of the selected card, so the clock answers whether anything
+    /// closed and only then is a flush worth a task.
+    ///
+    /// The practice inbox never starts a stint: its mail is fixtures, and its
+    /// ids would be reported against whatever real message shares them.
+    func attentionFocus(_ messageId: Int) {
+        guard !RehearsalMode.isEnabled else { return }
+        if withAttention({ $0.focus(messageId, now: $1) }) { flushAttention() }
+    }
+
+    /// Nothing that counts is at the focus any more: the reader closed, moved
+    /// to another thread, went to the background, or scrolled onto a message
+    /// the user wrote.
+    func attentionBlur() {
+        if withAttention({ $0.blur(now: $1) }) { flushAttention() }
+    }
+
+    /// The scene stopped being active (another app, another window). The
+    /// stint stays open, and stops earning until `attentionResume`.
+    func attentionPause() { withAttention { $0.pause(now: $1) } }
+
+    func attentionResume() { withAttention { $0.resume(now: $1) } }
+
+    /// A link in a received message's BODY was activated. Sent at once rather
+    /// than with the stint: the click usually hands the user to a browser, and
+    /// "when they come back and close the reader" may be never.
+    func attentionClick(_ messageId: Int) {
+        guard !RehearsalMode.isEnabled else { return }
+        withAttention { clock, _ in clock.click(messageId) }
+        flushAttention()
+    }
+
+    /// Send what is owed, best effort and off to the side: nothing awaits
+    /// this, a failure is dropped inside `reportAttention`, and there is no
+    /// retry. Sequential so an old daemon's first 404 stops the rest; fenced
+    /// on the epoch per report, because the ids mean nothing to the next
+    /// account's daemon.
+    private func flushAttention() {
+        let reports = withAttention { clock, _ in clock.drain() }
+        guard !reports.isEmpty, !RehearsalMode.isEnabled else { return }
+        let e = epoch
+        Task {
+            for report in reports {
+                guard isCurrent(e) else { return }
+                await APIClient.shared.reportAttention(
+                    messageId: report.messageId, dwellMs: report.dwellMs,
+                    linkClicks: report.linkClicks)
+            }
+        }
     }
 
     // MARK: - live arrivals
@@ -2956,6 +3305,9 @@ final class AppStore {
     /// The tour joins on `wantsBlur` alone: its three talking steps are modals
     /// like any other, but its coach marks POINT AT the board, so blurring what
     /// they are ringing would defeat them.
+    /// The smart clear list is NOT here: it is a page in the content area
+    /// beside the real rail, opaque over the board, and a blur would smear
+    /// the rail it sits next to.
     var modalOverlayOpen: Bool {
         askBarOpen || shortcutsOpen
             || triageFix != nil || remindTarget != nil || schedulePicker != nil
@@ -6830,6 +7182,25 @@ final class AppStore {
         sitrep.standing.removeAll { $0.id == messageId }
         sitrep.new.removeAll { $0.id == messageId }
         sitrep.open.removeAll { $0.id == messageId }
+    }
+
+    /// The same for a batch, as ONE change to `resolvedIds`: every insert
+    /// fires its observers, and a smart clear can name dozens of ids.
+    func noteResolved(_ ids: Set<Int>) {
+        guard !ids.isEmpty else { return }
+        resolvedIds.formUnion(ids)
+        sitrep.standing.removeAll { ids.contains($0.id) }
+        sitrep.new.removeAll { ids.contains($0.id) }
+        sitrep.open.removeAll { ids.contains($0.id) }
+    }
+
+    /// The reverse, for an undo that reopened a batch on the daemon: stop
+    /// hiding exactly these ids everywhere a resolved id is hidden, as
+    /// `fireUndo` does for one. The caller refreshes what it needs to.
+    func unresolve(_ ids: Set<Int>) {
+        guard !ids.isEmpty else { return }
+        resolvedIds.subtract(ids)
+        for id in ids { reopenInMail(id) }
     }
 
     /// Done on a whole Reading sender at once: the tile's `e`, and the reader's

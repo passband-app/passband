@@ -2189,6 +2189,58 @@ impl AgentTriageStore for SqliteStore {
         params![now.to_rfc3339(),account,message])?;
         Ok(())
     }
+    fn record_message_attention(
+        &self,
+        account: AccountId,
+        message: i64,
+        dwell_ms: u64,
+        link_clicks: u32,
+    ) -> Result<()> {
+        let dwell = dwell_ms.min(MAX_DWELL_REPORT_MS);
+        let clicks = link_clicks.min(MAX_LINK_CLICKS_REPORT);
+        if dwell == 0 && clicks == 0 {
+            return Ok(());
+        }
+        let conn = self.lock()?;
+        // One statement: the add and both ceilings are evaluated against the
+        // stored row, so two reports racing through the mutex cannot both read
+        // the old total. The WHERE is every refusal at once: another
+        // account's message, an id that does not exist, and mail that is kept
+        // close each match nothing, and the call answers Ok for all of them
+        // without having looked to see which it was.
+        //
+        // "KEPT CLOSE" IS `known_sealed_mail_sql!`: auth mail and restricted
+        // mail by their stored decision, not only the retired `sensitivity`
+        // column, which nothing arriving today sets.
+        //
+        // THE LOOSER OF THE TWO MACROS, and the only place it is used. Mail
+        // whose assessment is still pending TAKES the report: it is being
+        // read right now, before triage has got to it, and a refused report
+        // cannot be had back. If it turns out to be a login code the count
+        // sits on a row every reader skips (`sealed_mail_sql!` has the
+        // argument, and the test that holds it).
+        conn.execute(
+            concat!(
+                "UPDATE triage AS t
+                 SET dwell_ms=min(?1,dwell_ms+?2), link_clicks=min(?3,link_clicks+?4)
+                 WHERE t.account_id=?5 AND t.message_id=?6
+                   AND EXISTS(SELECT 1 FROM messages m
+                              WHERE m.account_id=t.account_id AND m.id=t.message_id
+                                AND NOT ",
+                known_sealed_mail_sql!(),
+                ")"
+            ),
+            params![
+                MAX_DWELL_TOTAL_MS as i64,
+                dwell as i64,
+                MAX_LINK_CLICKS_TOTAL,
+                clicks,
+                account,
+                message
+            ],
+        )?;
+        Ok(())
+    }
     fn agent_access_allowed(&self, account: AccountId, message: i64) -> Result<bool> {
         super::messages::external_message_allowed_conn(&*self.lock()?, account, message)
     }
@@ -2326,7 +2378,7 @@ impl AgentTriageStore for SqliteStore {
         // An audited automatic closure is model evidence, not a user's Done.
         // A later explicit completion has a newer resolved_at and is preserved.
         tx.execute(
-            "UPDATE triage SET status='open',resolved_at=NULL
+            "UPDATE triage SET status='open',resolved_at=NULL,resolved_by=NULL
              WHERE account_id=?1 AND status='done' AND EXISTS(
                  SELECT 1 FROM audit_log a
                  WHERE a.account_id=triage.account_id AND a.action='bill.auto_close'
@@ -2397,17 +2449,31 @@ impl AgentTriageStore for SqliteStore {
         limit: usize,
         query: &AgentListQuery,
     ) -> Result<Vec<AgentListItem>> {
-        let conn = self.lock()?;
-        let mut items = list_items_with_query(&conn, account, "reading", Utc::now(), query)?;
-
-        items.sort_by(|a, b| {
-            b.received_at
-                .cmp(&a.received_at)
-                .then_with(|| b.message_id.cmp(&a.message_id))
-        });
-        items.truncate(limit);
-        Ok(items)
+        reading_items(&*self.lock()?, account, limit, query, Utc::now())
     }
+}
+
+/// The Reading inventory, newest first: the ONE answer to "what is in Reading".
+/// `GET /client/v2/feed?destination=reading` reads it through
+/// `agent_reading_with_query`, and the per-sender purge read
+/// (`reading_senders`) calls it under the lock it already holds, so the two
+/// cannot disagree about which mail is open there.
+pub(super) fn reading_items(
+    conn: &Connection,
+    account: AccountId,
+    limit: usize,
+    query: &AgentListQuery,
+    now: DateTime<Utc>,
+) -> Result<Vec<AgentListItem>> {
+    let mut items = list_items_with_query(conn, account, "reading", now, query)?;
+
+    items.sort_by(|a, b| {
+        b.received_at
+            .cmp(&a.received_at)
+            .then_with(|| b.message_id.cmp(&a.message_id))
+    });
+    items.truncate(limit);
+    Ok(items)
 }
 
 /// A blank display name is no display name.
@@ -2895,7 +2961,7 @@ fn apply_attention(
     )?;
     Ok(())
 }
-fn list_items(
+pub(super) fn list_items(
     conn: &Connection,
     account: AccountId,
     destination: &str,

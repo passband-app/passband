@@ -123,7 +123,20 @@ waiting_weight = 5.0
 importance_weight = 2.0
 recency_half_life_hours = 24.0
 waiting_saturation_days = 7.0
+
+[smart_clear]
+model = "claude-sonnet-5"
+effort = "low"
+price_in_per_mtok = 2.0
+price_out_per_mtok = 10.0
 ```
+
+`[smart_clear]` is the model behind smart clear's one question (see "Smart clear"
+below). It resolves its key, provider and URL from `[stage2]` like every other
+model here and is prefixed for a gateway at call time. The prices are the
+configured model's own and are what both cost estimators charge the
+`smart_clear` ledger category; move the model and move them with it. File
+only: there is deliberately no env var, so a change takes hold at the daemon roll.
 
 Environment overrides: `SQUELCH_TRIAGE_MODEL`, `SQUELCH_TRIAGE_REVIEW_MODEL`,
 `SQUELCH_TRIAGE_MAX_TURNS`, `SQUELCH_TRIAGE_MAX_TOOL_CALLS`,
@@ -299,6 +312,292 @@ and no autonomous follow-ups. Input that cannot fit is rejected without granting
 access, rather than silently truncated. Its token usage is recorded separately as
 `agent_access`, using the notification model's price configuration. Human TUI
 reads remain available while assessments are pending.
+
+### Reading attention and per-sender statistics
+
+`POST /client/v2/messages/{id}/attention` takes `{"dwell_ms": n, "link_clicks": n}`
+(either may be omitted) and ADDS the report to that message's totals in
+`triage.dwell_ms` and `triage.link_clicks`. One report adds at most 10 minutes and
+20 clicks; a message holds at most 1 hour and 1,000 clicks. It answers `204` for
+every well-formed report, including one about a message id the daemon does not
+know or about mail known to be kept close (an auth or restricted decision, a
+restricting correction, access state `restricted`, or a legacy sealed row), and
+writes nothing for those two. Mail whose access assessment is still pending IS
+written: it is being read before triage reached it, and a refused report is
+lost for good. That is safe because every reader of these counts leaves
+kept-close mail out when it reads, so a count on a row that later proves to be
+a login code is never used. That differs from
+`/opened`, which answers `404` for an unknown id: clients treat a `404` from the
+attention route as "this daemon predates the route" and stop reporting for the
+session. The route writes no audit row (it fires several times per message read)
+and changes nothing in the agent's `user_state` fingerprint, so a report cannot
+make an in-flight triage commit stale. Human door only.
+
+What is stored is two counts per message. No URL, link host, scroll position or
+timestamp of a report is kept, and only the owner's own client can write them.
+
+Smart clear scores each sender with open mail in Reading (the same inventory
+`/client/v2/feed?destination=reading` returns), at most 100 senders, from
+per-sender statistics read in `store/sqlite/reading_senders.rs`. Nothing about
+them is served to a client.
+
+- Counts cover the sender's inbound, non-spam mail that the owner did not write,
+  received since the later of 90 days ago and the start of the open ledger
+  (`app_settings.opened_ledger_since`, else the account's `created_at`).
+- Mail that is kept close is not counted. The definition lives in one place
+  (`store/sqlite/mod.rs`), in two layers. `known_sealed_mail_sql!`: the stored decision is auth mail, or it
+  restricts external access, or a correction does, or the access assessment
+  came back `restricted`, or the legacy `triage.sensitivity` column says
+  sealed. Nothing in the agent pipeline writes that column any more, so a guard
+  on the column alone protects nothing that arrives today. `sealed_mail_sql!`
+  is that plus mail whose access assessment is still pending. Readers (these
+  counts, smart clear's scan and write) use the strict one: unassessed mail does not count for its sender and is not swept,
+  which corrects itself when triage commits. The attention write alone uses the
+  looser one.
+- Mail that failed authentication (`messages.auth_pass = 0`) is not counted
+  either: the sender is the From address, and a forgery in a sender's name is not that sender's record. Mail
+  never checked (`NULL`) still counts.
+- `per_month` scales `received` by the days the ledger covers. Under 7 covered
+  days it is `null`, with no volume term in the score and no `high_volume`
+  reason.
+- `cleared_unopened` counts mail the OWNER cleared: done, never opened, not
+  resolved by smart clear (`resolved_by IS NULL`), and with no reminder pending
+  (a snooze is interest, not dismissal).
+- The dwell sample is mail opened at or after the dwell ledger started
+  (`dwell_ledger_since`, stamped on the open that added the column) for which a
+  client reported any dwell or click. An open with no report behind it, from a
+  client that predates the attention route, is not counted as a zero-second look.
+  The sample is the newest 25 such opens per sender.
+- Dwell is judged against length. A message's read fraction is its dwell over the
+  time its words take at 238 words per minute, capped at 1; words are counted in
+  `messages.body`, the flattened text triage reads. Mail under 40 words has no
+  read fraction.
+- `score` is 0 to 100. It is `null`, with the reason `not_enough_history`, under
+  4 received messages or under 14 covered days of ledger: on a young ledger
+  everything is unopened and there is no pattern to read. A sender the owner
+  has written to, one governed by a `surface` rule, or one kept recently is
+  always 0, and that answer comes first. The scoring
+  and the reason codes (`not_enough_history`, `known_contact`, `wanted_by_rule`,
+  `kept_recently`, `rarely_opened`, `cleared_unopened`, `skimmed`, `brief_looks`,
+  `read_closely`, `never_clicked`, `high_volume`) live in
+  `squelch-core/src/triage/sender_fatigue.rs`.
+- Opens, dwell and clicks are recorded by Passband clients only. Mail read
+  elsewhere looks ignored here, so the scores lean high. Smart clear (below)
+  acts on the score: a sender at 75 or more has their unopened open Reading
+  mail marked done. That is why 75 needs a second signal on top of "never
+  opened", and why the sweep is undoable.
+
+### Kept senders
+
+A row in `reading_sender_keeps` records that the owner chose to keep a sender.
+For 60 days the sender scores 0 with the single reason `kept_recently` and
+smart clear never takes their mail. After 60 days the keep stops affecting
+anything. If the owner later unsubscribes from the sender, or writes a squelch
+rule that governs them, the newer decision wins and the keep is ignored.
+
+### Who resolved a row: `triage.resolved_by`
+
+`triage.resolved_by` is `NULL` when a person resolved the row, or when a path
+older than the column did (the two cannot be told apart for old rows, and old
+rows are not backfilled). Smart clear writes `smart_clear:<batch id>`.
+
+Anything that reads `status = 'done'` as the owner deciding must also require
+`resolved_by IS NULL`. The column does not do that for a reader by itself. Two
+readers check it today: the fatigue score's `cleared_unopened` (smart clear reads
+that score to choose senders and would otherwise raise it with each sweep), and
+the rule suggester's sender digest, which reports a swept row as open so its
+"cleared without opening" count is the owner's. The triage agent does not: its
+context and its `user_state` fingerprint still see a swept row as a plain done.
+
+Every statement that writes `triage.status` also clears `resolved_by`: the done
+and reopen routes, a reminder being set or firing, the per-sender resolve, "not
+spam", the cutover's reopening of audited auto-closures, and a re-ingest that
+resolves the row. The per-sender resolve (run when the owner unsubscribes from
+or mutes a sender) also clears it on that sender's rows that were ALREADY done
+by a sweep, so undoing the sweep later does not reopen mail the owner has since
+dealt with by sender. A person who reopens or re-does a row has taken it over, and
+the batch's undo then leaves it alone.
+
+### Smart clear
+
+`POST /client/v2/reading/smart_clear` (no body) marks done, as one batch, the
+open Reading mail that has expired or that the owner plainly does not want:
+
+```
+{ "batch_id": "17",
+  "cleared": 43, "senders": 17,
+  "by_reason": { "event_passed": 3, "offer_ended": 5, "expired": 4,
+                 "ignored_sender": 20, "stale_promo": 11 },
+  "message_ids": [812, 790],
+  "rows": [ { "message_id": 812, "reason": "offer_ended",
+              "sender": "deals@shop.example", "sender_name": "Shop Deals",
+              "subject": "Last day: 20% off", "received_at": "2026-09-28T14:02:11+00:00" } ],
+  "model": "ok" }
+```
+
+`batch_id` is `null` and nothing is recorded when nothing was cleared; `rows`
+and `message_ids` are then empty.
+
+`rows` is the receipt's full list: one entry per message this press wrote done,
+the same messages in the same order as `message_ids`, each with why it was
+taken (`reason` is one of the `by_reason` keys, and `by_reason` is the tally of
+`rows`). `sender` is the address as stored, `sender_name` the display name or
+an empty string. The subject, sender and date are read by primary key inside
+the transaction that wrote the row, for exactly the rows it wrote. They are in
+the response only: the batch's stored `detail` keeps ids, reasons and prior
+status, and no mail text. The route is human door only, and sealed mail is
+never cleared, so a sealed subject cannot appear here.
+
+The candidates are the Reading feed's open items: the 30-day window and the
+feed's default limit. Mail older than that window is never swept. That is
+intended: the owner cannot see it in Reading to check the sweep against.
+
+Never cleared, whatever else is true:
+
+- mail from an address the owner has written to, a sender under a `surface`
+  rule, a sender kept in the last 60 days;
+- mail that is kept close, by the strict definition above (auth mail,
+  restricted mail, pending access, legacy sealed rows);
+- mail with a pending or fired reminder;
+- mail whose thread is showing in FYE, by the FYE listing's own function (the
+  decision's attention plus the owner's per-thread override);
+- mail whose decision carries a bill, receipt, delivery or financial update:
+  `done` is one status for every inventory, so clearing it from Reading would
+  take it off Billing or Shipping too. An event record does not protect;
+- a row an earlier smart clear took and the owner undid. An undo records the
+  ids it gave back on the batch, and for 90 days no press takes them again;
+- mail received in the last 24 hours.
+
+Then the stored dates are read. Times are read in the four shapes the triage
+agent writes: a timestamp with an offset, a local date and time with no offset
+(`2026-10-10T19:00:00` or `2026-10-10T19:00`, which is most timed events, and
+the same with a space in place of the `T`), and a bare date. With no timezone database, a local time or a bare date is taken to
+be over at its last occurrence anywhere on Earth (12 hours behind UTC), which
+can only make a row wait longer.
+
+- Evidence dates are every event `start` and `ends`. One that was already over
+  when the mail arrived is ignored (a wrong year, or a recap of something past).
+- Holds are an unresolved action's `due` and `factors.attention_at` (each on the
+  decision or on the thread's current attention), and the decision's
+  `revisit.at`. They can keep a row and
+  are never a reason to clear one.
+- A date that is present and cannot be read ("next Friday evening"; event starts
+  are not format-checked at triage) counts as still ahead. The row is left alone
+  and the model is not asked about it.
+
+If any of those is still ahead, and is within 90 days of the mail's arrival, the
+mail is still live and nothing below takes it. A date further out than 90 days
+("valid until 2099") does not keep a row alive.
+
+Each cleared message has exactly one reason, first match:
+
+1. `event_passed`: every event the stored decision records has passed.
+2. `offer_ended`: the stored decision's `ends` has passed.
+3. `ignored_sender`: the sender's fatigue score, computed by the same function
+   and under the same 100-sender cap as the list above, is 75 or more, the
+   owner never opened this message, and it was received at or after the open
+   ledger began (before that, "never opened" cannot be known). On a ledger under 14 days old no sender has
+   a score, so this takes nothing.
+4. `stale_promo`: a promotion (the decision's `reading_kind`, else promotional
+   and not editorial kinds), received 14 or more days ago, never opened, and
+   received at or after the open ledger began. Mail from before the ledger (the
+   whole backfill of a new account) has no open on record because none could
+   be recorded, so it is never stale. Content is never stale.
+5. Rows none of those took, whose decision has no usable date, are put to a
+   model once. It answers `expired`, or `offer_ended` / `event_passed` when it
+   can tell which.
+
+A time has "passed" 24 hours after it. A date with no time has passed 24 hours
+after that date has ended in every timezone (the daemon carries no timezone
+database), so an event happening today is never cleared. An event has only a
+start, so a multi-day event is treated as over a day after it begins.
+
+The done is message-scoped, unlike the human done, which resolves the whole
+thread. It stamps `resolved_at` and `resolved_by`. Like any done it changes the
+agent's `user_state` fingerprint, so a triage pass in flight on one of those
+threads commits `Stale` and retries with its usual backoff.
+
+The model pass (`[smart_clear]`, default `claude-sonnet-5` at low effort):
+
+- It is sent, per row, a row number, the day the mail arrived, and the summary
+  triage already wrote, inside the untrusted fence, plus the current time. The
+  subject, body, sender address, display name and message id are not fields of
+  the prompt. A summary is prose about the mail and often names the sender, so
+  that is a statement about fields, not about every word. A row with no
+  summary, and restricted or auth mail, is not asked about.
+- Its yes is checked. An `expired` answer counts only for a row whose summary,
+  as the model was shown it (the first 220 characters), says when: a day word
+  (a month or weekday name, today, tomorrow, tonight, day, days, hours, week,
+  weekend, EOD, a named holiday, month names in Spanish, French and German) or
+  a number written as a date or time (`10/15`, `2026-10-15`, `15th`, `5pm`,
+  `17:00`, `May 5`, `Sat 12`). A bare number ("20% off", "Top 10") is not a date.
+- The whole pass is discarded, and reported as `skipped_failed`, when the model
+  says yes to summaries that say nothing about time: 3 or more such yeses, or
+  20% of the yeses once there are at least 5. A model following the prompt
+  never does that. A backstop also discards a pass that calls 80% or more of 10
+  or more rows expired. Half a batch really having expired is ordinary (the
+  week after a sale), so the share alone is not treated as a sign of trouble.
+- That check is a floor, not protection. In one real mailbox 46% of Reading
+  summaries passed the gate before its word list was widened, and more pass
+  now, so a pass steered to say yes only to those rows can still take a good
+  share of what was asked. What bounds it is that a press is one batch of at
+  most 60 model-judged rows, undone exactly by one call, and that an undo is
+  remembered.
+- A verdict is applied only if the row's stored summary is still the one that
+  was sent (compared by fingerprint under the write's lock), so a message
+  re-triaged during the call is left alone.
+- At most 60 rows per press, newest first, one attempt, 20 seconds.
+- At most 20 passes per account per day.
+- `model` reports it: `ok`, or `skipped_nothing_to_ask`, `skipped_unconfigured`
+  (no LLM key), `skipped_cap`, `skipped_failed` (refusal, timeout, error). Every
+  `skipped_*` press still clears on stored facts.
+- Usage is billed to the `smart_clear` ledger category, which both cost
+  estimators price from `[smart_clear]`.
+
+The store mutex is not held during the model call. Rows are read under the
+lock, the model is asked with it released, and the write re-reads and re-judges
+every row in one transaction, so a row the owner opened, reminded, resolved or
+kept in the meantime is judged as it now is. The sender scores measured by the
+first read are reused by the write instead of being measured twice; who the
+owner said to leave alone, and each row's own state, are always read again. A
+sender any of whose mail was opened after the first read is treated as unscored
+for that press, since an open is what lowers a score.
+
+One press at a time per account: a press that arrives while another is running
+answers `429` without touching the store.
+
+One audit row per batch: `reading.smart_clear`, target the batch id, detail the
+count.
+
+`POST /client/v2/reading/smart_clear/{batch_id}/undo` answers
+`{"reopened": n}`. It walks the batch's recorded list by primary key and
+reopens the rows that are still done and still stamped with that batch, each to
+the status it had (`new` or `open`), clearing their `resolved_at` and
+`resolved_by`. Rows a person has touched since are left as
+they are. The ids it reopened are recorded on the batch, and smart clear does not
+take those rows again. A second undo answers `0`. An unknown batch, or another
+account's, is `404`. A batch whose record cannot be read answers `500` and is
+left as it was, not marked undone, so it can still be undone once repaired.
+Audited as `reading.smart_clear_undo`.
+
+Known limits:
+
+- The one-press-at-a-time guard is released when the request ends. A client that
+  disconnects while the first locked read is still running frees it before that
+  read finishes.
+- The stale-score check reads a sender's newest open over their whole history
+  through the sender index, not just the 90-day window.
+- The per-sender resolve (unsubscribe, mute) matches the sender with
+  `LOWER(TRIM(from_addr))`, which the sender index cannot serve.
+- An event record has only a start, so a multi-day event is over a day after it
+  begins.
+
+The triage decision carries an optional `ends` for Reading mail (prompt version
+`agent-triage-v14`): when the offer, sale or event the message is about ends,
+only when the message states it. It is validated with the same parser smart clear
+reads it with, so a local time with no offset is accepted. Decisions stored before it read as `null`. The
+prompt version is a label in each run's metadata; changing it re-triages
+nothing.
 
 Record cards read canonical Receipt, Banking, Calendar and Delivery decisions;
 marketing cards read promotional Reading decisions. Model date-only deadlines

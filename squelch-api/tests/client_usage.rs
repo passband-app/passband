@@ -27,15 +27,21 @@ const S2_OUT: f64 = 15.0;
 const N_IN: f64 = 0.1;
 const N_OUT: f64 = 0.5;
 
-/// A harness whose state carries known models and prices for both stages and
-/// for the notify lane.
+/// Smart clear's prices: a fourth pair unlike any of the other three, so a
+/// category costed off the wrong arm cannot land on the right number.
+const SD_IN: f64 = 0.03;
+const SD_OUT: f64 = 0.07;
+
+/// A harness whose state carries known models and prices for both stages, for
+/// the notify lane and for smart clear.
 fn priced_harness(seed: impl FnOnce(&squelch_core::store::SqliteStore, i64)) -> Harness {
     let (state, store, acct) = common::state_with(seed);
     let state: ApiState = state
         .with_stage2_model("sonnet-test", Some("anthropic".into()))
         .with_stage2_prices(S2_IN, S2_OUT)
         .with_stage1_config("haiku-test", S1_IN, S1_OUT, 500)
-        .with_notify_config("notify-test", N_IN, N_OUT);
+        .with_notify_config("notify-test", N_IN, N_OUT)
+        .with_smart_clear_config("smart-clear-test", SD_IN, SD_OUT);
     Harness {
         app: router(state),
         store,
@@ -397,4 +403,47 @@ async fn the_translate_category_costs_at_the_translate_models_rates() {
     let body = get_usage(router(state)).await;
     assert!((cost(&body, "translate") - 4.0).abs() < 1e-9);
     assert_eq!(body["categories"]["translate"]["model"], "translate-test");
+}
+
+/// THE FOURTH ARM. Smart clear's model pass runs its own model, which is not
+/// the notify model and not Stage-1's. Falling through to the stage-1 arm
+/// would label and bill a mid-sized model's call as the stage-1 model's.
+#[tokio::test]
+async fn the_smart_clear_category_costs_at_its_own_model() {
+    let app = priced_harness(|store, acct| {
+        for category in ["smart_clear", "notify", "extract_banking"] {
+            store
+                .extract_bump_usage(
+                    acct,
+                    "2026-07-09",
+                    category,
+                    UsageTokens {
+                        input: 1_000_000,
+                        output: 1_000_000,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+    })
+    .app;
+
+    let body = get_usage(app).await;
+    let cost = |name: &str| {
+        body["categories"][name]["totals"]["est_cost_usd"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!(
+        (cost("smart_clear") - (SD_IN + SD_OUT)).abs() < 1e-9,
+        "smart_clear costs at its own prices, got {}",
+        cost("smart_clear")
+    );
+    assert_eq!(
+        body["categories"]["smart_clear"]["model"],
+        "smart-clear-test"
+    );
+    // The arms beside it are undisturbed.
+    assert!((cost("notify") - (N_IN + N_OUT)).abs() < 1e-9);
+    assert!((cost("extract_banking") - (S1_IN + S1_OUT)).abs() < 1e-9);
 }

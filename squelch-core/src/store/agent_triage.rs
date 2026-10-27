@@ -119,6 +119,25 @@ pub enum AgentCommitOutcome {
     Stale,
 }
 
+/// The most dwell ONE attention report may add, in milliseconds (ten minutes).
+/// A report covers one stretch of a message being on screen; a longer stretch
+/// than this is a window left open, not reading, and the client is not trusted
+/// to have told the two apart.
+pub const MAX_DWELL_REPORT_MS: u64 = 600_000;
+/// The most dwell a message can ever accumulate (one hour). Past this the
+/// number has stopped saying anything more ("read thoroughly" was settled long
+/// before), and an unbounded sum is one buggy client loop away from a value
+/// that drags a sender's median with it.
+pub const MAX_DWELL_TOTAL_MS: u64 = 3_600_000;
+/// The most link clicks ONE attention report may add. Nobody follows more
+/// than a handful of links between two reports; a larger number is a client
+/// bug or a replayed queue.
+pub const MAX_LINK_CLICKS_REPORT: u32 = 20;
+/// The most link clicks a message can ever accumulate. The only question the
+/// total answers is "none, or some", so the ceiling exists to keep the column
+/// bounded rather than to preserve precision.
+pub const MAX_LINK_CLICKS_TOTAL: u32 = 1_000;
+
 /// Explicit lifecycle and time window for Reading and Records inventories.
 #[derive(Debug, Clone)]
 pub struct AgentListQuery {
@@ -365,6 +384,39 @@ pub trait AgentTriageStore: Send + Sync {
         account: AccountId,
         message: i64,
         now: DateTime<Utc>,
+    ) -> Result<()>;
+    /// Add one client report of reading attention to a message's totals:
+    /// how long it was on screen and how many of its links were followed.
+    ///
+    /// ADDITIVE, because the client reports in pieces (a thread is closed and
+    /// reopened, a phone and a Mac both read it) and no single report knows
+    /// the total. Both the report and the stored total are clamped; see
+    /// [`MAX_DWELL_REPORT_MS`] and its neighbours for why.
+    ///
+    /// A message that is NOT THERE and one KNOWN to be kept close (auth mail,
+    /// restricted mail, a legacy sealed row) are both accepted and both write
+    /// nothing, so the answer never says which of the two an id is, nor
+    /// whether it is either. Mail whose access assessment is still PENDING is
+    /// written: it is being read before triage reached it, and a refused
+    /// report is lost for good. Every reader of these columns leaves kept-
+    /// close mail out at read time, so a count on a row that later proves to
+    /// be a login code is never read. That is deliberately not what
+    /// [`Self::acknowledge_agent_message`] does (it is `NotFound` for a
+    /// missing id): see the `/attention` handler for why a 404 is not
+    /// available to this route. Such a row is refused because a login code
+    /// has no reading behaviour worth keeping, and every statistic over these
+    /// columns excludes that mail, so a stamp there could only ever be a
+    /// stored fact about restricted mail that nothing reads.
+    ///
+    /// Touches neither `opened_at` nor anything else in the `user_state`
+    /// fingerprint, so a report can never turn an in-flight triage commit
+    /// `Stale`.
+    fn record_message_attention(
+        &self,
+        account: AccountId,
+        message: i64,
+        dwell_ms: u64,
+        link_clicks: u32,
     ) -> Result<()>;
     fn agent_records(&self, account: AccountId, limit: usize) -> Result<Vec<AgentListItem>>;
     fn agent_reading(&self, account: AccountId, limit: usize) -> Result<Vec<AgentListItem>>;

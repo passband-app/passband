@@ -1020,7 +1020,7 @@ struct ThreadViewer: View {
                                     holdNewest(proxy)
                                     // A card arriving is the window moving.
                                     if mounting { renderAhead() }
-                                    if i == index { acknowledgeDisplayedMessage(id: m.id, frame: frame) }
+                                    if i == index { acknowledgeDisplayedMessage(m, frame: frame) }
                                     if i == newestIndex { newestHeight = frame.height }
                                 }
                                 .onDisappear { map.drop(i) }
@@ -1128,6 +1128,7 @@ struct ThreadViewer: View {
                 // instantiated is the one SwiftUI reliably declines to perform:
                 // it has nothing to animate from, so it does nothing at all.
                 .onChange(of: scenePhase) { _, phase in
+                    noteScenePhaseForAttention(phase)
                     if phase == .active { acknowledgeVisibleFocus() }
                 }
                 // Conditional, not hidden: this floats over a scroll surface,
@@ -3169,14 +3170,30 @@ struct ThreadViewer: View {
 
     private func acknowledgeVisibleFocus() {
         guard let top = map.topmost, let message = messages[safe: top], let frame = map.frames[top] else { return }
-        acknowledgeDisplayedMessage(id: message.id, frame: frame)
+        acknowledgeDisplayedMessage(message, frame: frame)
     }
 
-    private func acknowledgeDisplayedMessage(id: Int, frame: CGRect) {
+    /// The one place that knows a specific MESSAGE is in front of the user:
+    /// scene active, this reader's thread the open one, the card across the
+    /// focus line. Two things hang off that fact, at different rates.
+    ///
+    /// THE DWELL CLOCK hears about it every time, above the once-only guard:
+    /// that guard exists so the opened stamp is posted once per reader, and a
+    /// clock behind it would time the first visit to a message and never the
+    /// second. The store drops a repeat of the message already in focus, so
+    /// this costs nothing on the scroll ticks that call it.
+    ///
+    /// Only RECEIVED mail is timed. A message the user wrote landing at the
+    /// focus ends the stint of whatever was there instead: they are no longer
+    /// reading the newsletter above it. `fromMe` is false on a daemon too old
+    /// to say, which is the same reading the bubbles give it.
+    private func acknowledgeDisplayedMessage(_ message: ClientMessage, frame: CGRect) {
+        let id = message.id
         guard scenePhase == .active, store.threadId == threadId,
             MessageReadVisibility.isFocused(minY: frame.minY, maxY: frame.maxY,
-                viewportHeight: viewportHeight),
-            acknowledgedMessages.insert(id).inserted else { return }
+                viewportHeight: viewportHeight) else { return }
+        if message.fromMe { store.attentionBlur() } else { store.attentionFocus(id) }
+        guard acknowledgedMessages.insert(id).inserted else { return }
         let epoch = store.epoch
         Task {
             guard store.isCurrent(epoch) else { return }
@@ -3184,6 +3201,25 @@ struct ThreadViewer: View {
             catch {
                 if store.isCurrent(epoch) { acknowledgedMessages.remove(id) }
             }
+        }
+    }
+
+    /// Time away from the window is not reading. Only the reader whose thread
+    /// is the open one speaks: during an `S` page turn the outgoing reader is
+    /// still mounted and sees the same phase change, and the clock is the
+    /// open thread's to speak for.
+    ///
+    /// `.inactive` pauses and `.background` CLOSES. On iOS the background is
+    /// the last thing the app is told before it may be killed without a
+    /// word, so what is owed is sent then; coming back, `.active` runs
+    /// `acknowledgeVisibleFocus` and a fresh stint starts.
+    private func noteScenePhaseForAttention(_ phase: ScenePhase) {
+        guard store.threadId == threadId else { return }
+        switch phase {
+        case .active: store.attentionResume()
+        case .inactive: store.attentionPause()
+        case .background: store.attentionBlur()
+        @unknown default: store.attentionPause()
         }
     }
 
@@ -3887,7 +3923,11 @@ private struct MessageCard: View, Equatable {
                 allowTrackers: message.allowsTrackers,
                 attachments: message.attachmentList,
                 textHeight: Self.guessedBody(message, style: style, original: showingOriginal),
-                bubble: chat, mine: mine, findID: message.id, disclosures: disclosures)
+                bubble: chat, mine: mine, findID: message.id,
+                // Received mail only: a click in the user's own sent message
+                // says nothing about a sender.
+                attentionMessageId: mine ? nil : message.id,
+                disclosures: disclosures)
             .id(translated)
         } else {
             PlainBody(
@@ -4783,7 +4823,7 @@ private final class LandingHold {
     /// the only thing on screen that moves on its own while you read, slow
     /// enough to sit in the corner of the eye. All the way round, never one
     /// edge lit. Still under Reduce Motion.
-    private struct FlowBorder: View {
+    struct FlowBorder: View {
         let radius: CGFloat
         let moving: Bool
 

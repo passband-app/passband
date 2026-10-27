@@ -88,6 +88,13 @@ struct EmailWebView: View {
     /// The message this body is, for the reader's find (ReaderFind). nil for a
     /// body no find reaches: a preview, a reveal, the forward composer.
     let findID: Int?
+    /// The received message whose link clicks are counted (AttentionClock),
+    /// or nil for a body whose clicks mean nothing about a sender: the
+    /// settings preview, a scheduled send, the forward composer, a reveal,
+    /// the user's own sent mail. OPT-IN for that reason; only the reader's
+    /// received-mail card passes it. The count is all that is kept: the link
+    /// itself goes to `Opener` and nowhere else.
+    let attentionMessageId: Int?
     /// What the reader already opened up in this message (its remote images,
     /// its quoted history), kept by message id across a rebuild of this view.
     /// Keyed by `findID`, which is the message id in the reader and nil
@@ -161,6 +168,7 @@ struct EmailWebView: View {
         html: String, cacheKey: String? = nil, allowTrackers: Bool = false,
         attachments: [Attachment] = [], textHeight: CGFloat = 0,
         bubble: Bool = false, mine: Bool = false, findID: Int? = nil,
+        attentionMessageId: Int? = nil,
         disclosures: BodyDisclosures? = nil
     ) {
         self.html = html
@@ -171,6 +179,7 @@ struct EmailWebView: View {
         self.bubble = bubble
         self.mine = mine
         self.findID = findID
+        self.attentionMessageId = attentionMessageId
         self.disclosures = disclosures
         // Seeded HERE, not on appear: a frame that mounted collapsed and then
         // unfolded would be a visible second layout of the same message.
@@ -356,7 +365,19 @@ struct EmailWebView: View {
                     if sizing == .waiting { sizing = .settling }
                 },
                 onQuotedFound: { hasQuoted = $0 },
-                onLink: { Opener.open($0) }
+                onLink: {
+                    // Counted only when it is a link `Opener` will actually
+                    // open: a mailto: or an in-page anchor reaches here too
+                    // and goes nowhere, and "clicked" should mean they went.
+                    // And not the footer's unsubscribe link, which is the
+                    // reader leaving, not engaging.
+                    if let attentionMessageId, Opener.isHTTP($0),
+                        AttentionClock.isEngagement(link: $0)
+                    {
+                        store.attentionClick(attentionMessageId)
+                    }
+                    Opener.open($0)
+                }
             )
             // `maxWidth`, not `width`: a hugging bubble is capped at what the
             // document reported, and the column caps that in turn, so a

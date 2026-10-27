@@ -491,6 +491,45 @@ impl Default for NotifyConfig {
     }
 }
 
+/// The model behind smart clear's one question (`[smart_clear]`): has what this
+/// Reading mail is about already expired? See [`crate::triage::smart_clear`].
+///
+/// ITS OWN MODEL AND ITS OWN PRICES, the fourth pair in the ledger. It is not
+/// the notify model (too small to do date arithmetic over sixty summaries
+/// reliably) and not Stage-1's (far more than the question needs), so both
+/// cost estimators price its category off the two numbers here. Change the
+/// model and these prices move with it, or the estimate drifts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmartClearConfig {
+    /// The model asked. Default `claude-sonnet-5`, which the hosted gateway's
+    /// allow-list carries in both spellings (verified 2026-10-05; it does NOT
+    /// carry `claude-sonnet-5-5`). Qualified with the gateway's provider
+    /// prefix at call time, like every other model here.
+    pub model: String,
+    /// Reasoning depth, sent as `output_config.effort`. Default `low`: the
+    /// question is date arithmetic, and the owner is waiting on the answer.
+    pub effort: Option<String>,
+    /// USD per million input tokens for `model`. Default 2.0, the list price
+    /// of `claude-sonnet-5` (Anthropic first-party API rates as of
+    /// 2026-09-25).
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, same source.
+    pub price_out_per_mtok: f64,
+}
+
+impl Default for SmartClearConfig {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-5".to_string(),
+            effort: Some("low".to_string()),
+            // claude-sonnet-5 per-MTok (input / output).
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+        }
+    }
+}
+
 /// Auto-translate (docs/TRANSLATION.md): mail in another language is
 /// translated to English in the refine lane. ON by default and file-only: the
 /// feature takes hold when the daemon version rolls, so there is deliberately
@@ -1935,6 +1974,8 @@ pub struct Config {
     /// first-sight freshness test, and the rescue ceiling a late verdict has to
     /// beat.
     pub notify: NotifyConfig,
+    /// Smart clear's model pass: which model, at what effort, at what price.
+    pub smart_clear: SmartClearConfig,
     /// Scheduled re-evaluation: how often triage looks at its own past verdicts.
     pub revisit: RevisitPassConfig,
     /// APNs pusher: the blind relay's URL + bearer. Absent `relay_url` means the
@@ -1972,6 +2013,7 @@ impl Default for Config {
             sync: SyncConfig::default(),
             embed: EmbedConfig::default(),
             notify: NotifyConfig::default(),
+            smart_clear: SmartClearConfig::default(),
             revisit: RevisitPassConfig::default(),
             pusher: PusherConfig::default(),
             tracking: TrackingConfig::default(),
@@ -4082,6 +4124,31 @@ archive_access_daily_cap = 9
         // not the notify threshold; they must not alias.
         assert_eq!(c.default_min_importance, 0);
         unsafe { std::env::remove_var("SQUELCH_NOTIFY_MIN_IMPORTANCE") }
+    }
+
+    /// `[smart_clear]` reads from the file and from nowhere else: like
+    /// `[translate]`, it takes hold at the daemon roll, so no env var moves it.
+    #[test]
+    fn the_smart_clear_section_reads_from_toml_only() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // A config that predates the section has the defaults.
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.smart_clear.model, "claude-sonnet-5");
+        let c: Config =
+            toml::from_str("[smart_clear]\nmodel = \"from-the-file\"\nprice_in_per_mtok = 1.5\n")
+                .unwrap();
+        assert_eq!(c.smart_clear.model, "from-the-file");
+        assert_eq!(c.smart_clear.price_in_per_mtok, 1.5);
+        assert_eq!(
+            c.smart_clear.price_out_per_mtok, 10.0,
+            "unnamed keys default"
+        );
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_SMART_CLEAR_MODEL", "from-the-env") }
+        let mut env = c.clone();
+        env.apply_env_overrides();
+        unsafe { std::env::remove_var("SQUELCH_SMART_CLEAR_MODEL") }
+        assert_eq!(env.smart_clear.model, "from-the-file");
     }
 
     /// THE FAST LANE'S DEFAULTS, asserted one by one because two of them are

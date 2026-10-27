@@ -165,6 +165,14 @@ data:
   # `squelch-control llm sync` covers it (DEFAULT_LLM_MODELS lists Haiku in
   # both spellings); moving the notify model is a daemon code-default change
   # plus a roll until the warden grows the passthrough.
+  #
+  # AND A FOURTH, the same way: smart clear (docs/TRIAGE-OPERATIONS.md, "Smart
+  # done") runs `claude-sonnet-5` by its own code default and qualifies it to
+  # `anthropic/claude-sonnet-5` itself. DEFAULT_LLM_MODELS lists it in both
+  # spellings and the live allow-list carried both on 2026-10-05; it does NOT
+  # carry `claude-sonnet-5-5`. If the gateway drops it, a press answers
+  # `model: "skipped_failed"` and clears on stored facts alone. Degraded, not
+  # dark.
   SQUELCH_WARDEN_LLM_STAGE1_MODEL: "anthropic/claude-opus-5-5"
   SQUELCH_WARDEN_LLM_STAGE2_MODEL: "anthropic/claude-opus-5-5"
   # The APNs relay, which is how a hosted tenant's iPhone gets a push at all.

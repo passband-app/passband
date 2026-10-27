@@ -52,6 +52,77 @@ macro_rules! own_mail_sql {
 }
 const OWN_MAIL: &str = own_mail_sql!();
 
+/// SQL predicate for mail that is KNOWN to be kept close, over a `messages m`
+/// row and its `triage t` row: what the product calls sealed. True when ANY
+/// of these holds:
+///
+/// - the stored decision is AUTH mail (`auth.kinds` is not empty): a login
+///   code, a reset link, a sign-in alert. The membership the Auth page reads
+///   (`sealed_messages`).
+/// - the stored decision RESTRICTS external access, or a person's correction
+///   does, or the access assessment came back `restricted`. The refusing half
+///   of what the agent door reads (`messages::external_message_allowed_conn`).
+/// - the retired `triage.sensitivity` column says so. NOTHING IN THE AGENT
+///   PIPELINE WRITES IT ANY MORE (ingest always writes `normal`), so on its
+///   own it guards only unmigrated legacy rows and rows a person sealed
+///   through the compatibility endpoint. A guard that reads only this column
+///   guards nothing arriving today.
+///
+/// "KNOWN" IS THE WORD THAT MATTERS. Mail whose access assessment is still
+/// PENDING is not in here: nobody has said anything about it yet. Whether
+/// that counts as kept close depends on who is asking, and there are exactly
+/// two answers, so there are exactly two macros and the second is built from
+/// this one ([`sealed_mail_sql!`]). Neither is ever written out by hand.
+///
+/// Correlated subqueries rather than joins, so it drops into any statement
+/// that has `m` and `t` (including an `UPDATE triage AS t`); each is a
+/// primary-key probe. A macro for the reason [`own_mail_sql!`] is.
+macro_rules! known_sealed_mail_sql {
+    () => {
+        "(COALESCE(t.sensitivity,'normal')!='normal' \
+          OR EXISTS(SELECT 1 FROM agent_message_decisions sealed_d \
+                    WHERE sealed_d.account_id=m.account_id AND sealed_d.message_id=m.id \
+                      AND (json_array_length(sealed_d.decision_json,'$.auth.kinds')>0 \
+                           OR COALESCE(json_extract(sealed_d.decision_json,'$.external_access.restricted'),0))) \
+          OR EXISTS(SELECT 1 FROM agent_message_state sealed_s \
+                    WHERE sealed_s.account_id=m.account_id AND sealed_s.message_id=m.id \
+                      AND sealed_s.access='restricted') \
+          OR EXISTS(SELECT 1 FROM agent_triage_corrections sealed_c \
+                    WHERE sealed_c.account_id=m.account_id AND sealed_c.message_id=m.id \
+                      AND sealed_c.field='external_access' AND sealed_c.value_json='true'))"
+    };
+}
+
+/// SQL predicate for mail a READER must leave out: [`known_sealed_mail_sql!`],
+/// OR mail whose access assessment is still pending.
+///
+/// THE STRICT ANSWER, for everything that counts, scores or sweeps: the
+/// per-sender Reading statistics, and smart done's scan and write. Unassessed
+/// mail might be a login code, so it does not count for its sender and is not
+/// swept until triage has said what it is. That costs nothing lasting: it
+/// corrects itself the moment the decision commits.
+///
+/// THE ONE CALLER THAT USES THE LOOSER MACRO INSTEAD is the attention WRITE
+/// (`record_message_attention`), and the asymmetry is deliberate. A report
+/// refused is lost for good, and mail opened in its first moments, before
+/// triage has reached it, is exactly when dwell is real. A report accepted
+/// onto a row that later turns out to be a login code harms nothing, BECAUSE
+/// every reader goes through this macro and drops that row once its decision
+/// lands (`tests::smart_clear_guards::dwell_reported_before_an_auth_decision_
+/// reaches_no_statistic`). Writers may be generous only as long as readers
+/// are strict; a new reader of `dwell_ms` or `link_clicks` owes this macro.
+macro_rules! sealed_mail_sql {
+    () => {
+        concat!(
+            "(",
+            known_sealed_mail_sql!(),
+            " OR EXISTS(SELECT 1 FROM agent_message_state pending_s \
+                        WHERE pending_s.account_id=m.account_id AND pending_s.message_id=m.id \
+                          AND pending_s.access='pending'))"
+        )
+    };
+}
+
 /// Auth mail, over alias `d` (the message's `agent_message_decisions` row,
 /// LEFT JOINed): its decision names an auth kind. The Rust form is
 /// `AuthAssessment::is_auth`.
@@ -358,10 +429,12 @@ mod migrate;
 mod notify;
 mod outbound;
 pub mod people;
+pub mod reading_senders;
 mod rules;
 mod scheduled;
 mod search;
 mod senders;
+pub mod smart_clear;
 mod specialists;
 #[cfg(test)]
 mod tests;
@@ -412,6 +485,12 @@ use crate::types::{
 /// share stat can refuse to look back further than the column has existed. See
 /// `migrate::stamp_open_ledger_start`.
 pub(crate) const OPEN_LEDGER_SINCE_KEY: &str = "opened_ledger_since";
+
+/// `app_settings` key recording when this account's dwell ledger started: the
+/// first open on which `triage.dwell_ms` existed. Dwell and click statistics
+/// count only mail opened at or after it. See
+/// `migrate::stamp_dwell_ledger_start`.
+pub(crate) const DWELL_LEDGER_SINCE_KEY: &str = "dwell_ledger_since";
 
 // schema.sql stays beside `store/mod.rs`; this file is `store/sqlite/mod.rs`.
 const SCHEMA: &str = include_str!("../schema.sql");

@@ -634,7 +634,8 @@ impl SqliteStore {
             "UPDATE triage
                 SET stage1_model_used = NULL, model_used = NULL, needs_stage2 = 0,
                     extractor_model_used = NULL, retriage_at = ?3,
-                    status = 'new', surfaced_at = NULL, resolved_at = NULL
+                    status = 'new', surfaced_at = NULL, resolved_at = NULL,
+                    resolved_by = NULL
               WHERE account_id = ?1 AND message_id = ?2",
             params![account_id, message_id, now],
         )?;
@@ -1351,6 +1352,12 @@ impl SqliteStore {
                  status=CASE WHEN excluded.status='done' THEN 'done' ELSE triage.status END,
                  resolved_at=CASE WHEN excluded.status='done'
                      THEN excluded.resolved_at ELSE triage.resolved_at END,
+                 -- A re-ingest that resolves the row is its own resolution and
+                 -- replaces `resolved_at`, so whatever sweep had resolved it
+                 -- before no longer owns it. One that leaves the status alone
+                 -- leaves the provenance alone too.
+                 resolved_by=CASE WHEN excluded.status='done'
+                     THEN NULL ELSE triage.resolved_by END,
                  -- WRITTEN ONCE, ON FIRST INSERT, AND NEVER AGAIN — not even to
                  -- a fresher stamp, and not conditioned on `PROCESSED` like the
                  -- verdict columns. Notify eligibility is a fact about when we
@@ -1538,14 +1545,7 @@ impl SqliteStore {
     }
 
     pub(super) fn is_known_contact(&self, account_id: AccountId, addr: &str) -> Result<bool> {
-        let conn = self.lock()?;
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM contacts
-             WHERE account_id=?1 AND addr=?2 COLLATE NOCASE AND sent_count > 0",
-            params![account_id, addr],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
+        is_known_contact_conn(&*self.lock()?, account_id, addr)
     }
 
     pub(super) fn sync_state(
@@ -2185,6 +2185,24 @@ impl SqliteStore {
         }
         Ok(true)
     }
+}
+
+/// [`SqliteStore::is_known_contact`] for a caller already holding the
+/// connection: the one definition of "the owner has written to this address",
+/// so a read that asks it for many senders under one lock cannot drift from
+/// the floor triage applies.
+pub(super) fn is_known_contact_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    addr: &str,
+) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM contacts
+             WHERE account_id=?1 AND addr=?2 COLLATE NOCASE AND sent_count > 0",
+        params![account_id, addr],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// What the Auth page reads off one sealed row's decision: the kinds (for

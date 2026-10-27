@@ -36,17 +36,34 @@ struct ActionLayer: View {
             // opposite corner, so a job and an undo chip never fight for one.
             // Sitrep only, with no reader or composer over it: `u` leaves the
             // reader on purpose, and this is where the user lands.
-            if showsUnsubscribeTray {
+            //
+            // THE SMART CLEAR RECEIPT SHARES THE CORNER, under the tray: one
+            // column pinned to the bottom edge, so a job starting while a
+            // receipt is up pushes nothing sideways and covers nothing.
+            if showsUnsubscribeTray || showsSmartClearReceipt {
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
                     HStack(spacing: 0) {
                         Spacer(minLength: 0)
-                        UnsubscribeTray().fixedSize()
+                        VStack(alignment: .trailing, spacing: Space.s10) {
+                            if showsUnsubscribeTray {
+                                UnsubscribeTray().fixedSize()
+                                    .transition(.opacity)
+                            }
+                            if showsSmartClearReceipt, let receipt = store.smartClearReceipt {
+                                SmartClearReceiptCard(receipt: receipt)
+                                    .id(receipt.id)
+                                    .transition(
+                                        .move(edge: .trailing).combined(with: .opacity))
+                            }
+                        }
                     }
                 }
                 .padding(.trailing, Space.scaled(18))
                 .padding(.bottom, Space.scaled(18))
                 .transition(.opacity)
+                .animation(.smooth(duration: 0.3), value: store.smartClearReceipt?.id)
+                .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)
             }
 
             // THE DISCOVERY RING'S FOUND MOMENT. Above the toasts and the
@@ -140,9 +157,15 @@ struct ActionLayer: View {
         .background { ViolationScanKeeper() }
     }
 
+    /// NOT WHILE THE SMART CLEAR LIST IS UP: it is a page in the content
+    /// pane, and the corner's cards belong to the board it covers.
     private var showsUnsubscribeTray: Bool {
-        store.activeView == .sitrep && store.threadId == nil && !store.composeOpen
+        store.showsSitrepCorner && !store.smartClearListOpen
             && !UnsubscribeJobs.shared.items.isEmpty
+    }
+
+    private var showsSmartClearReceipt: Bool {
+        store.showsSitrepCorner && !store.smartClearListOpen && store.smartClearReceipt != nil
     }
 
     // MARK: - toasts

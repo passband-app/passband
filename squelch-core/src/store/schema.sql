@@ -327,6 +327,27 @@ CREATE TABLE IF NOT EXISTS triage (
     -- product. Every consumer has to know that; see `Store::share_open_rate`,
     -- which is the only one, and which says so.
     opened_at       TEXT,
+    -- HOW LONG THIS MAIL WAS ON SCREEN, in milliseconds, summed over every
+    -- report the owner's client has sent (`POST
+    -- /client/v2/messages/{id}/attention`). A duration and nothing else: not
+    -- what was scrolled to, not when. Clamped per report and in total (see
+    -- `store::agent_triage::MAX_DWELL_TOTAL_MS`), so a reader left open over
+    -- lunch cannot make one newsletter look studied.
+    --
+    -- ZERO MEANS TWO DIFFERENT THINGS, and only `dwell_ledger_since` tells them
+    -- apart: a row opened before the client could report dwell has 0 for no
+    -- behavioural reason. Every statistic over this column therefore counts
+    -- only rows whose `opened_at` is at or after that floor; see
+    -- `migrate::stamp_dwell_ledger_start`.
+    --
+    -- NOT part of the agent's `user_state` fingerprint, on purpose: a dwell
+    -- report arrives while mail is being read, which is exactly when a triage
+    -- pass may be in flight, and it changes nothing that pass decided.
+    dwell_ms        INTEGER NOT NULL DEFAULT 0,
+    -- HOW MANY LINKS IN THIS MAIL THE OWNER FOLLOWED, summed the same way and
+    -- under the same floor. A COUNT ONLY: no URL, no host, no position is
+    -- ever stored, here or anywhere else.
+    link_clicks     INTEGER NOT NULL DEFAULT 0,
     -- MAY THIS MESSAGE EVER NOTIFY, and from when (RFC3339 UTC). NULL means
     -- never: a backfill row, the user's own sent copy, or mail that was already
     -- older than `notify.freshness_window_secs` the first time we saw it.
@@ -348,6 +369,30 @@ CREATE TABLE IF NOT EXISTS triage (
     status          TEXT NOT NULL DEFAULT 'new',
     surfaced_at     TEXT,
     resolved_at     TEXT,
+    -- WHO RESOLVED THIS ROW, when it was not a person. NULL means a human did,
+    -- or a path older than this column: the two are indistinguishable, which
+    -- is the gap this column closes going forward (docs/TRIAGE-OPERATIONS.md,
+    -- "Historical automatic `done` rows without reliable provenance cannot be
+    -- distinguished from a human dismissal").
+    --
+    -- The one writer today is smart clear, which stamps
+    -- `smart_clear:<smart_clear_batches.id>`. That stamp is what makes the batch
+    -- undoable.
+    --
+    -- IT DOES NOT, BY ITSELF, KEEP A SWEEP OUT OF ANYTHING. A reader that
+    -- takes `status = 'done'` to mean the owner decided has to check this
+    -- column too, and only two do: the fatigue score's `cleared_unopened`
+    -- (`reading_senders::SENDER_COUNTS_SQL`), which smart clear itself reads
+    -- and would otherwise feed, and the rule suggester's digest
+    -- (`rules::SENDER_RULE_DIGEST_SQL`). Everything else still sees a swept
+    -- row as plain done, the triage agent's context included (its
+    -- `user_state` fingerprint and its prompt treat any done as the owner's).
+    -- That one is deliberate for now; a new reader is not excused by it.
+    --
+    -- ANY LATER HUMAN STATUS WRITE CLEARS IT. A person who reopens or re-does
+    -- a row has taken it over, and an undo of the batch must then leave it
+    -- alone. Every statement that writes `status` therefore writes this too.
+    resolved_by     TEXT,
     created_at      TEXT NOT NULL
 );
 
@@ -660,6 +705,44 @@ CREATE TABLE IF NOT EXISTS unsubscribes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_unsubscribes_requested ON unsubscribes(account_id, requested_at);
+
+-- READING SENDER KEEPS. One row per (account, sender_addr): the owner looked at
+-- this sender in the Reading purge flow and chose to stay subscribed. The
+-- flow then leaves them alone for `KEEP_QUIET_DAYS`; after that the row no
+-- longer affects the score and is kept only as the date it happened.
+-- `sender_addr` is the lowercased bare address, as in `unsubscribes`. A second
+-- keep refreshes `kept_at`.
+--
+-- NOTHING DELETES A ROW. A later unsubscribe or squelch rule for the same
+-- sender simply outranks it at read time (the newer decision wins; see
+-- `reading_senders`), so no rule or unsubscribe writer has to know this table
+-- exists.
+CREATE TABLE IF NOT EXISTS reading_sender_keeps (
+    account_id  INTEGER NOT NULL,
+    sender_addr TEXT NOT NULL,
+    kept_at     TEXT NOT NULL,
+    PRIMARY KEY (account_id, sender_addr)
+);
+
+-- SMART CLEAR BATCHES. One row per press of "clean this out" that cleared
+-- anything. `triage.resolved_by = 'smart_clear:<id>'` on each row it took is
+-- the membership; `detail` is JSON carrying each cleared message with the
+-- reason it went and the status it had, so an undo restores exactly that.
+-- `undone_at` is stamped by the first undo and makes every later one a no-op.
+-- That undo also writes `reopened` into `detail`: the ids it gave back. Smart
+-- done reads those (for batches undone in the last 90 days) and never takes
+-- such a row again, because an undo is the owner saying "not those".
+CREATE TABLE IF NOT EXISTS smart_clear_batches (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL,
+    undone_at   TEXT,
+    cleared     INTEGER NOT NULL,
+    detail      TEXT NOT NULL
+);
+-- For the one read that is not by id: an account's recently undone batches.
+CREATE INDEX IF NOT EXISTS idx_smart_clear_batches_undone
+    ON smart_clear_batches(account_id, undone_at);
 
 -- AUTH-MAIL SHREDDER (retention). One row per message the retention pass moved
 -- to Gmail Trash, so the "N shredded" figure is a real ledger and a message can

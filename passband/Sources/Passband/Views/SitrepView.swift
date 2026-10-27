@@ -1590,24 +1590,41 @@ struct FlowLayout: Layout {
     }
 #endif
 
-// MARK: - flow mode
+// MARK: - zone pills
 
-/// `space` flow mode: the Space walk, as a button in For-your-eyes' corner.
-/// It is how the key gets found: the reader who clicks it learns, from the
-/// keycap on the button they just pressed, that Space was the way all along.
-private struct FlowModeButton: View {
+/// A ZONE'S DOOR, as a pill in its header's corner: flow mode on For your
+/// eyes, smart clear on Reading. It is how a key gets found: the reader who
+/// clicks one learns, from the keycap on the button they just pressed, that
+/// the key was the way all along.
+struct ZonePill: View {
+    let symbol: String
+    let label: String
+    /// The key that does the same thing, shown on hover. nil for a door with
+    /// no key of its own.
+    var key: String?
+    let help: String
+    let accessibilityName: String
+    /// The thing the pill starts is under way and can take a while: the label
+    /// changes, a glint drifts round the border, and a press does nothing.
+    var working = false
+    var workingLabel: String?
     let action: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
+
+    private var lit: Bool { hovering && !working }
+    private var strong: Bool { lit || working }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: Space.scaled(5)) {
                 // THE KEY ONLY ON HOVER. At rest the corner says what the
                 // button is; reaching for it is when the shortcut is worth
-                // teaching, so the spacebar slides in then and the pill grows
+                // teaching, so the keycap slides in then and the pill grows
                 // out to the left (it is pinned to the card's right edge).
-                if hovering {
-                    Text("space")
+                if lit, let key {
+                    Text(key)
                         .font(Typo.mono(9.5, weight: .semibold))
                         .foregroundStyle(Palette.accent)
                         .padding(.horizontal, Space.scaled(9))
@@ -1624,26 +1641,48 @@ private struct FlowModeButton: View {
                         // the left edge moving out.
                         .transition(.opacity)
                 }
-                Image(systemName: "wind")
+                Image(systemName: symbol)
                     .font(Typo.ui(9.5, weight: .semibold))
                     .foregroundStyle(Palette.accent)
-                Text("flow mode")
+                Text(working ? (workingLabel ?? label) : label)
                     .font(Typo.micro)
-                    .foregroundStyle(hovering ? Palette.ink : Palette.inkDim)
+                    .foregroundStyle(lit ? Palette.ink : Palette.inkDim)
+                    .contentTransition(.opacity)
             }
-            .padding(.leading, hovering ? 3 : 8)
+            .padding(.leading, lit && key != nil ? 3 : 8)
             .padding(.trailing, Space.scaled(9))
             .padding(.vertical, Space.scaled(3))
             .background(
                 Capsule(style: .continuous)
-                    .fill(Palette.accentSoft.opacity(hovering ? 0.9 : 0.35))
+                    .fill(Palette.accentSoft.opacity(strong ? 0.9 : 0.35))
             )
+            #if os(macOS)
+                // Alive without a spinner: the flow hint's glint, all the way
+                // round the capsule, for as long as the wait lasts.
+                .overlay {
+                    if working { FlowBorder(radius: 99, moving: !reduceMotion) }
+                }
+            #endif
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .disabled(working)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.18), value: hovering)
-        .help("Walk through For your eyes one email at a time (Space)")
-        .accessibilityLabel("Flow mode")
+        .animation(.easeOut(duration: 0.25), value: working)
+        .help(help)
+        .accessibilityLabel(working ? (workingLabel ?? accessibilityName) : accessibilityName)
+    }
+}
+
+/// `space` flow mode: the Space walk, as a button in For-your-eyes' corner.
+private struct FlowModeButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        ZonePill(
+            symbol: "wind", label: "flow mode", key: "space",
+            help: "Walk through For your eyes one email at a time (Space)",
+            accessibilityName: "Flow mode", action: action)
     }
 }

@@ -136,6 +136,48 @@ pub struct SupportedTime {
     pub source_message_id: i64,
     pub interpreted_relative: bool,
 }
+/// What a [`SupportedTime`] value says, once read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatedTime {
+    /// A timestamp with an offset: one instant.
+    Instant(DateTime<Utc>),
+    /// A date and a time with NO offset: a local time, wherever the thing
+    /// happens. This is how the triage agent writes most timed events (the
+    /// zone name rides beside it in `timezone`), so a reader that only
+    /// understands offsets understands a quarter of them.
+    Local(chrono::NaiveDateTime),
+    /// A date with no time.
+    Day(chrono::NaiveDate),
+}
+
+impl SupportedTime {
+    /// Read `value`. THE ONE PARSER for a stated time: `ends` is validated
+    /// with it and smart clear reads every stored date with it, so the two
+    /// cannot disagree about what counts as a time. `None` for anything else
+    /// ("next Friday evening"), which a caller must treat as a time it cannot
+    /// read, never as no time at all.
+    pub fn stated(&self) -> Option<StatedTime> {
+        let value = self.value.trim();
+        if let Ok(at) = DateTime::parse_from_rfc3339(value) {
+            return Some(StatedTime::Instant(at.with_timezone(&Utc)));
+        }
+        // With a `T` between the date and the time, or a space: the same
+        // local time either way.
+        for format in [
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M",
+            "%Y-%m-%d %H:%M:%S%.f",
+            "%Y-%m-%d %H:%M",
+        ] {
+            if let Ok(local) = chrono::NaiveDateTime::parse_from_str(value, format) {
+                return Some(StatedTime::Local(local));
+            }
+        }
+        chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .ok()
+            .map(StatedTime::Day)
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AttentionFactors {
     pub urgency: f64,
@@ -310,6 +352,25 @@ impl RecordProposal {
         }
     }
 }
+impl MessageDecision {
+    /// Is this Reading message a PROMOTION rather than a piece to read? The
+    /// model's own `reading_kind` when it gave one. Decisions stored before
+    /// that field existed fall back to the kinds triage already gave them,
+    /// the same fallback the clients apply: content is editorial and not
+    /// promotional, so everything else is promotion only when it is
+    /// positively marked promotional. An older row with neither kind is
+    /// NEITHER here, which is the careful answer for a caller that clears
+    /// promotions.
+    pub fn is_reading_promotion(&self) -> bool {
+        match self.reading_kind {
+            Some(kind) => kind == ReadingKind::Promotion,
+            None => {
+                self.kinds.contains(&EmailKind::Promotional)
+                    && !self.kinds.contains(&EmailKind::Editorial)
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MessageDecision {
     pub kinds: Vec<EmailKind>,
@@ -319,6 +380,12 @@ pub struct MessageDecision {
     /// client falls back to `kinds`.
     #[serde(default)]
     pub reading_kind: Option<ReadingKind>,
+    /// When the offer, sale or event a Reading message is about ENDS, and only
+    /// when the message itself says so. What lets smart clear clear an expired
+    /// promotion from a stored fact instead of a second model call. Defaults
+    /// for the reason `reading_kind` does: stored decisions predate it.
+    #[serde(default)]
+    pub ends: Option<SupportedTime>,
     pub summary: String,
     pub reason: String,
     pub auth: AuthAssessment,

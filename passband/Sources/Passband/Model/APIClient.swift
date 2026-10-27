@@ -68,6 +68,14 @@ actor APIClient {
     private var config: Config?
     private let session: URLSession
 
+    /// The configured daemon answered 404 to an attention report: it predates
+    /// the route, and will go on predating it until it is upgraded. Remembered
+    /// so a session against an old daemon costs ONE wasted request rather than
+    /// one per message read. Per connection, not per process: `configure` and
+    /// `deconfigure` clear it, because the next account's daemon is a
+    /// different build with its own answer.
+    private var attentionUnsupported = false
+
     /// 15s is generous for a local daemon. Without a hard timeout a daemon dying
     /// mid-request hangs forever and wedges a poller's in-flight guard with it.
     private static let requestTimeout: TimeInterval = 15
@@ -130,12 +138,14 @@ actor APIClient {
         // Normalize: strip trailing slashes so we can join with `/client/...`.
         while base.hasSuffix("/") { base.removeLast() }
         config = Config(baseURL: base, token: bearer)
+        attentionUnsupported = false
     }
 
     /// Forget the configured daemon. After this, requests fail with "client
     /// not configured" instead of presenting a token the user asked to forget.
     func deconfigure() {
         config = nil
+        attentionUnsupported = false
     }
 
     private func requireConfig() throws -> Config {
@@ -329,6 +339,35 @@ actor APIClient {
 
     func markMessageOpened(_ messageId: Int) async throws {
         try await postNoContent("/client/v2/messages/\(messageId)/opened")
+    }
+
+    /// How long a received message was at the reader's focus and how many of
+    /// its links were clicked: the evidence behind smart clear's sender scores.
+    ///
+    /// DOES NOT THROW, unlike its neighbours, because there is no caller that
+    /// could do anything with the failure. This is best-effort telemetry about
+    /// reading; a toast for it, or a retry that turns a daemon restart into a
+    /// queue of replays, would cost the reader more than the lost number is
+    /// worth. A report that fails is dropped.
+    ///
+    /// 404 IS "this daemon has no such route", and latches (see
+    /// `attentionUnsupported`). The latch is only set if the daemon that
+    /// answered is still the configured one: an account switch landing while
+    /// the request was out must not have the old daemon's 404 silence the new
+    /// one.
+    ///
+    /// Nothing is sent for the practice inbox. Its mail is fixtures and its
+    /// message ids are made up; the fixture transport would only refuse the
+    /// route, but refusing HERE means the request is never built at all.
+    func reportAttention(messageId: Int, dwellMs: UInt64, linkClicks: UInt32) async {
+        guard !RehearsalMode.isEnabled, !attentionUnsupported, let asked = config?.baseURL else { return }
+        do {
+            try await postNoContent(
+                "/client/v2/messages/\(messageId)/attention",
+                body: AttentionBody(dwell_ms: dwellMs, link_clicks: linkClicks))
+        } catch let error as APIError where error.status == 404 {
+            if config?.baseURL == asked { attentionUnsupported = true }
+        } catch {}
     }
 
     /// `peek: true` reads the same rows WITHOUT stamping the seen-ledger — for a
@@ -874,6 +913,34 @@ actor APIClient {
         try await post(
             "/client/unsubscribes/resolution",
             body: UnsubResolutionBody(sender: sender, resolution: resolution.rawValue))
+    }
+
+    // MARK: - reading smart clear
+
+    /// The daemon's smart clear runs a model pass and may take about twenty
+    /// seconds; the default idle timer would give up first and report a
+    /// clean-up that is still happening as a failure.
+    private static let smartClearTimeout: TimeInterval = 45
+
+    /// Ask the daemon to mark expired and plainly unwanted Reading mail done.
+    /// nil when this daemon predates the route.
+    ///
+    /// Never asked of the practice inbox: its mail is fixtures.
+    func smartClear() async throws -> SmartClearResult? {
+        guard !RehearsalMode.isEnabled else { return nil }
+        do {
+            return try await post(
+                "/client/v2/reading/smart_clear", body: EmptyBody(),
+                timeout: Self.smartClearTimeout)
+        } catch let error as APIError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Reopen exactly what one smart clear cleared.
+    func undoSmartClear(batchId: String) async throws -> SmartClearUndone {
+        let id = batchId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? batchId
+        return try await post("/client/v2/reading/smart_clear/\(id)/undo", body: EmptyBody())
     }
 
     // MARK: - sealed

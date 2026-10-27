@@ -1104,6 +1104,81 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     var id: String { sender }
 }
 
+// MARK: - reading smart clear
+
+/// `POST /client/v2/reading/smart_clear`: the daemon marked expired and plainly
+/// unwanted Reading mail done, and says what it took and why.
+struct SmartClearResult: Decodable, Sendable, Hashable {
+    /// The handle the undo takes. nil when nothing was cleared, or when this
+    /// daemon keeps no batch to undo.
+    var batch_id: String?
+    var cleared: Int
+    var senders: Int
+    /// Reason code to count. Codes this build has no line for are still
+    /// counted in `cleared`; `SmartClearCopy` folds them into one plain line.
+    var by_reason: [String: Int]
+    var message_ids: [Int]
+    /// Whether the model pass ran: `ok`, or one of the `skipped_` codes.
+    var model: String?
+    /// One per cleared message, for the full list. nil on a daemon that
+    /// does not send them: the list is then not offered, never faked.
+    var rows: [Row]?
+
+    /// One cleared message. Everything but the id and the sender is
+    /// optional, and `reason` stays a string: a code from a newer daemon
+    /// must cost a heading, not the decode.
+    struct Row: Decodable, Sendable, Hashable {
+        var message_id: Int
+        var reason: String?
+        var sender: String
+        var sender_name: String?
+        var subject: String?
+        var received_at: String?
+    }
+
+    /// A row that cannot be decoded is dropped by itself.
+    private struct RowSlot: Decodable {
+        var row: Row?
+        init(from decoder: Decoder) throws { row = try? Row(from: decoder) }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case batch_id, cleared, senders, by_reason, message_ids, model, rows
+    }
+
+    init(
+        batch_id: String?, cleared: Int, senders: Int, by_reason: [String: Int],
+        message_ids: [Int], model: String? = "ok", rows: [Row]? = nil
+    ) {
+        self.rows = rows
+        self.batch_id = batch_id
+        self.cleared = cleared
+        self.senders = senders
+        self.by_reason = by_reason
+        self.message_ids = message_ids
+        self.model = model
+    }
+
+    /// Lenient about everything but the count: a receipt can be drawn from
+    /// `cleared` alone, and a daemon a release ahead must not cost the whole
+    /// answer over a field this build does not read.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        batch_id = try c.decodeIfPresent(String.self, forKey: .batch_id)
+        cleared = try c.decode(Int.self, forKey: .cleared)
+        senders = try c.decodeIfPresent(Int.self, forKey: .senders) ?? 0
+        by_reason = try c.decodeIfPresent([String: Int].self, forKey: .by_reason) ?? [:]
+        message_ids = try c.decodeIfPresent([Int].self, forKey: .message_ids) ?? []
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        rows = (try? c.decodeIfPresent([RowSlot].self, forKey: .rows))?.compactMap(\.row)
+    }
+}
+
+/// `POST /client/v2/reading/smart_clear/{batch_id}/undo`.
+struct SmartClearUndone: Decodable, Sendable, Hashable {
+    var reopened: Int
+}
+
 // MARK: - search / audit / stats
 
 struct SearchHit: Codable, Sendable, Identifiable, Hashable {
@@ -2082,6 +2157,18 @@ struct RevealedSealed: Codable, Sendable {
 struct Page<T: Codable & Sendable>: Codable, Sendable {
     var items: [T]
     var next_cursor: String?
+}
+
+/// POST /client/v2/messages/{id}/attention: how long the message was at the
+/// reader's focus and how many links in its body were activated, since the
+/// last report. The daemon ADDS these to what it holds, so either may be 0 and
+/// a message read in three sittings is three bodies.
+///
+/// Two numbers and nothing else, on purpose: which link, where it went and
+/// what the mail said are not the daemon's to learn from this route.
+struct AttentionBody: Encodable, Sendable {
+    var dwell_ms: UInt64
+    var link_clicks: UInt32
 }
 
 struct ArchiveBody: Codable, Sendable {

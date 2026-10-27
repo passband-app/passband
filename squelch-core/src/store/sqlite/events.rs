@@ -137,7 +137,7 @@ impl SqliteStore {
         limit: usize,
     ) -> Result<Vec<Event>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT id, message_id, thread_id, kind, tier, importance, sender, one_line,
                     deadline, sealed_kind, created_at, is_auth
              FROM events

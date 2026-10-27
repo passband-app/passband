@@ -138,28 +138,23 @@ const ARCHIVE_EVIDENCE_SQL: &str = archive_evidence_sql!();
 /// [`read_message`] for the triage agent's evidence tools: an archive row
 /// nobody has asked about does not exist (see [`ARCHIVE_EVIDENCE_SQL`]).
 fn read_evidence_message(conn: &Connection, account: AccountId, id: i64) -> Result<AgentMessage> {
-    let readable: bool = conn.query_row(
-        &format!(
+    let readable: bool = conn
+        .prepare_cached(&format!(
             "SELECT EXISTS(SELECT 1 FROM messages m
              WHERE m.account_id=?1 AND m.id=?2 AND {ARCHIVE_EVIDENCE_SQL})"
-        ),
-        params![account, id],
-        |row| row.get(0),
-    )?;
+        ))?
+        .query_row(params![account, id], |row| row.get(0))?;
     if !readable {
         return Err(CoreError::NotFound);
     }
     read_message(conn, account, id)
 }
 fn read_message(conn: &Connection, account: AccountId, id: i64) -> Result<AgentMessage> {
-    conn.query_row(
-        &format!(
-            "SELECT {MESSAGE_COLUMNS} FROM messages m LEFT JOIN triage t ON t.message_id=m.id AND
+    conn.prepare_cached(&format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages m LEFT JOIN triage t ON t.message_id=m.id AND
              t.account_id=m.account_id WHERE m.account_id=?1 AND m.id=?2"
-        ),
-        params![account, id],
-        message_row,
-    )
+    ))?
+    .query_row(params![account, id], message_row)
     .optional()?
     .ok_or(CoreError::NotFound)
 }
@@ -396,19 +391,18 @@ fn thread_fye_override(
     thread: &str,
 ) -> Result<Option<bool>> {
     let explicit: Option<bool> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT show_in_fye FROM agent_thread_preferences WHERE account_id=?1 AND thread_id=?2",
-            params![account, thread],
-            |row| row.get(0),
-        )
+        )?
+        .query_row(params![account, thread], |row| row.get(0))
         .optional()?;
     if explicit.is_some() {
         return Ok(explicit);
     }
     // Existing beta corrections predate the thread preference table.
-    let encoded: Option<String> = conn.query_row("SELECT c.value_json FROM agent_triage_corrections c JOIN messages m ON m.account_id=c.account_id AND m.id=c.message_id
-        WHERE c.account_id=?1 AND m.thread_id=?2 AND c.field='show_in_fye' ORDER BY c.updated_at DESC,c.revision DESC,c.message_id DESC LIMIT 1",
-        params![account,thread],|row|row.get(0)).optional()?;
+    let encoded: Option<String> = conn.prepare_cached("SELECT c.value_json FROM agent_triage_corrections c JOIN messages m ON m.account_id=c.account_id AND m.id=c.message_id
+        WHERE c.account_id=?1 AND m.thread_id=?2 AND c.field='show_in_fye' ORDER BY c.updated_at DESC,c.revision DESC,c.message_id DESC LIMIT 1")?
+        .query_row(params![account,thread],|row|row.get(0)).optional()?;
     encoded.as_deref().map(decode).transpose()
 }
 
@@ -433,11 +427,8 @@ fn apply_corrections(
 }
 fn is_archive_conn(conn: &Connection, account: AccountId, message: i64) -> Result<bool> {
     Ok(conn
-        .query_row(
-            "SELECT is_archive FROM messages WHERE account_id=?1 AND id=?2",
-            params![account, message],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT is_archive FROM messages WHERE account_id=?1 AND id=?2")?
+        .query_row(params![account, message], |row| row.get(0))
         .optional()?
         .unwrap_or(false))
 }
@@ -1566,26 +1557,24 @@ fn source_assessment_wanted(conn: &Connection, account: AccountId, message: i64)
         return Ok(false);
     }
     let access: Option<String> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT access FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
-            params![account, message],
-            |row| row.get(0),
-        )
+        )?
+        .query_row(params![account, message], |row| row.get(0))
         .optional()?;
     if access.as_deref().is_some_and(|state| state != "pending") {
         return Ok(false);
     }
-    let active: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
+    let active: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
          AND kind IN ('triage','access') AND state IN ('queued','leased'))",
-        params![account, message],
-        |row| row.get(0),
-    )?;
-    let terminal: bool = conn.query_row(
+        )?
+        .query_row(params![account, message], |row| row.get(0))?;
+    let terminal: bool = conn.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs j JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
          WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access') AND j.state IN ('failed','completed') AND j.input_revision=a.revision)",
-        params![account,message],|row|row.get(0),
-    )?;
+    )?.query_row(params![account,message],|row|row.get(0))?;
     Ok(!active && !terminal)
 }
 
@@ -2024,10 +2013,12 @@ impl AgentTriageStore for SqliteStore {
         }
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let token: String = tx.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
+        let token: String = tx
+            .prepare_cached("SELECT lower(hex(randomblob(16)))")?
+            .query_row([], |r| r.get(0))?;
         let row = tx
+            .prepare_cached(CLAIM_JOB_SQL)?
             .query_row(
-                CLAIM_JOB_SQL,
                 params![account, kind, now.to_rfc3339(), now.timestamp()],
                 |r| {
                     Ok((
@@ -3319,7 +3310,7 @@ fn list_items_with_query(
              m.is_spam=0 AND ",archive_listable_sql!()," AND (?4 OR COALESCE(t.status,'new')!='done') AND
              (?5 IS NULL OR min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))>=julianday(?5))")
     };
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare_cached(sql)?;
     let raw = stmt
         .query_map(
             params![
@@ -7794,7 +7785,7 @@ fn human_inventory(
         /// critical change). The representative is then that message.
         auth_fye: bool,
     }
-    let mut statement=conn.prepare(concat!(
+    let mut statement=conn.prepare_cached(concat!(
         "WITH ",auth_fye_threads_cte!(),"
          SELECT m.id,m.thread_id,m.from_addr,m.from_name,m.subject,m.snippet,m.received_at,
              COALESCE(t.status,'new'),t.surfaced_at,t.resolved_at,t.remind_at,t.reminded_at,

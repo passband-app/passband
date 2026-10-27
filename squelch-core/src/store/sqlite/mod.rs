@@ -514,6 +514,24 @@ const CACHE_SIZE_KIB_NEGATED: i64 = -32_000;
 /// [`SqliteStore::set_pragmas`].
 const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 
+/// Compiled statements the store's connection keeps for `prepare_cached`.
+/// rusqlite's default is 16, and the store has more than twice that many
+/// cached statements (the job claim, the message reads, the listings, the
+/// access walks, ...), so at 16 they would evict each other. A compiled
+/// statement here is 8 to 40 KB (`StatementStatus::MemUsed`), so a full cache
+/// is one to three megabytes.
+///
+/// WHAT THE CACHE DOES NOT DO: stop the recompiling. SQLite marks a statement
+/// whose plan looked at a bound value (an integer `col=?`, a `LIMIT ?`) as
+/// expired when it is bound again, and rusqlite clears the bindings when it
+/// takes a statement back, so a cached one is still compiled once per call.
+/// An uncached one was compiled twice (at prepare, and again after binding),
+/// which is what caching saves: the job claim 207 us to 126 us. Ending the
+/// recompile takes the query planner stability guarantee
+/// (`SQLITE_DBCONFIG_ENABLE_QPSG`), which changes how every statement is
+/// planned and is measured and argued separately.
+const STATEMENT_CACHE_CAPACITY: usize = 64;
+
 /// Rows `ANALYZE` samples per index (`PRAGMA analysis_limit`). LARGE, so a
 /// table under it is scanned in full and the statistics say what the data
 /// says: at the 400 SQLite's docs suggest for a cheap pass, the sampler
@@ -659,13 +677,17 @@ impl SqliteStore {
     ///   big sort is certain) would hold every key in heap: on a memory-capped
     ///   tenant pod that is an OOM kill during open, on every restart.
     ///
-    /// `foreign_keys=ON`, the one other per-connection setting, is applied by
-    /// `schema.sql`'s first line through `execute_batch(SCHEMA)` in `init`.
+    /// Not a pragma but set here with them: the statement cache's capacity,
+    /// [`STATEMENT_CACHE_CAPACITY`]. `foreign_keys=ON`, the one other
+    /// per-connection setting, is applied by `schema.sql`'s first line through
+    /// `execute_batch(SCHEMA)` in `init`.
     fn set_pragmas(conn: &Connection) -> Result<()> {
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB_NEGATED)?;
         conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
+        // Not a pragma, but per connection like them.
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         Ok(())
     }
 

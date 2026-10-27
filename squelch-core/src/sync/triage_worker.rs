@@ -107,7 +107,7 @@ impl<S: Store> StoreEvidence<'_, S> {
                 return Ok(EvidenceResult {
                     source_message_ids: messages.iter().map(|m| m.id).collect(),
                     data: serde_json::json!({"messages": messages, "attention": context.attention,
-                        "user_corrections": context.corrections, "previous_decision": context.previous_decision}),
+                        "user_corrections": context.corrections, "previous_decision": fed_back(context.previous_decision)}),
                     thread_revisions: revisions,
                 });
             }
@@ -204,6 +204,19 @@ impl<S: Store> StoreEvidence<'_, S> {
     }
 }
 
+/// A stored decision as the agent may read it back: without its `done`,
+/// whose reason is model-authored and untrusted and never goes into a prompt
+/// (`store::sqlite::agent_triage::apply_done`). The human door still serves
+/// the stored decision whole.
+fn fed_back(
+    decision: Option<crate::triage::decision::MessageDecision>,
+) -> Option<crate::triage::decision::MessageDecision> {
+    decision.map(|decision| crate::triage::decision::MessageDecision {
+        done: None,
+        ..decision
+    })
+}
+
 /// The agent's starting context. `clock` is this run's "now" in the owner's
 /// zone (#526): fixed once per run, so a zone that changes mid-run cannot
 /// change an answer already given.
@@ -230,7 +243,7 @@ fn snapshot(
         initial: serde_json::json!({
             "message": context.message,
             "thread": siblings,
-            "previous_decision": context.previous_decision,
+            "previous_decision": fed_back(context.previous_decision.clone()),
             "attention": context.attention,
             "sender_preferences": context.matched_rules,
             "sender_is_contact": context.sender_is_contact,
@@ -1688,6 +1701,55 @@ mod budget_tests {
             !queued.contains(&ids[0]),
             "unseen oldest sibling remains unqueued"
         );
+    }
+
+    /// A stored `done` is never fed back to the agent: its reason is
+    /// model-authored, so a later run's starting context and a thread read
+    /// carry the previous decision without it. The rest of it stays.
+    #[test]
+    fn a_stored_done_reason_never_reaches_the_agent() {
+        let (store, account, ids) = evidence_fixture();
+        let stored = crate::triage::decision::MessageDecision {
+            summary: "Kept summary".into(),
+            done: Some(crate::triage::decision::DoneRequest {
+                reason: "PLANTED-DONE-REASON".into(),
+                evidence: vec![],
+            }),
+            ..Default::default()
+        };
+        let raw = serde_json::to_string(&stored).unwrap().replace('\'', "''");
+        let mut batch = String::new();
+        for id in &ids {
+            batch.push_str(&format!(
+                "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+                 VALUES({account},{id},1,'{raw}','2026-10-01T00:00:00+00:00');"
+            ));
+        }
+        store.execute_batch_for_test(&batch);
+        let job = read_job(account, ids[0]);
+        let context = store.load_agent_context(&job).unwrap();
+        // The store still holds it (the owner's door serves it).
+        assert!(context.previous_decision.as_ref().unwrap().done.is_some());
+        let snapshot = snapshot(&context, &job, 8, &utc_clock());
+        let initial = snapshot.initial.to_string();
+        assert!(initial.contains("Kept summary"), "{initial}");
+        assert!(!initial.contains("PLANTED-DONE-REASON"), "{initial}");
+        assert!(snapshot.initial["previous_decision"]["done"].is_null());
+        let reader = StoreEvidence {
+            store: &store,
+            account,
+            limit: 8,
+            sources: std::sync::Mutex::new(Vec::new()),
+        };
+        let read = reader
+            .read(&EvidenceRequest::ReadThread {
+                thread_id: "thread".into(),
+            })
+            .unwrap()
+            .data
+            .to_string();
+        assert!(read.contains("Kept summary"), "{read}");
+        assert!(!read.contains("PLANTED-DONE-REASON"), "{read}");
     }
 
     #[test]

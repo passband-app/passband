@@ -42,6 +42,41 @@ pub(super) const CANONICAL_MAIL_CTE: &str = concat!(
 )"
 );
 
+/// THE OWNER'S DONE, as one statement: `status='done'`, `resolved_at = ?1`,
+/// `resolved_by` cleared and the fired reminder retired, for message `?3` of
+/// account `?2` AND every sibling in its thread (`''` is no thread) except a
+/// sibling that holds FYE on its own (`holds_fye_triage_sql!`). Why each part, in
+/// [`SqliteStore::set_attention_status`]'s Done arm. It lives in ONE place
+/// because three writers must close mail identically: that arm, the
+/// deferral in `set_reminder`, and the triage agent's auto-done
+/// (`agent_triage::apply_done`), which is the owner's Done made for them and
+/// must leave the bands exactly as the owner's own would.
+macro_rules! done_thread_sql {
+    () => {
+        concat!(
+            "UPDATE triage
+     SET status = 'done', resolved_at = ?1, resolved_by = NULL, reminded_at = NULL
+     WHERE account_id = ?2
+       AND (message_id = ?3 OR (message_id IN (
+           SELECT sib.id FROM messages me
+           JOIN messages sib ON sib.account_id = me.account_id
+                            AND sib.thread_id = me.thread_id
+           WHERE me.account_id = ?2 AND me.id = ?3
+             AND me.thread_id != '') AND NOT ",
+            holds_fye_triage_sql!(),
+            "))"
+        )
+    };
+}
+pub(super) const DONE_THREAD_SQL: &str = done_thread_sql!();
+
+/// [`DONE_THREAD_SQL`] for the triage agent's auto-done: the same write, minus
+/// rows already `done`. The owner re-doing a closed row takes it over (its
+/// `resolved_by` cleared, its `resolved_at` now); the agent is not the owner,
+/// so a smart-cleared sibling keeps its batch (and that batch's undo), and a
+/// row the owner closed keeps the time they closed it.
+pub(super) const AGENT_DONE_THREAD_SQL: &str = concat!(done_thread_sql!(), " AND status != 'done'");
+
 /// The recency window every human-door listing runs under (`?2` is the caller's
 /// `since`), plus the ONE exemption from it: a row carrying a reminder, pending
 /// or fired.
@@ -357,20 +392,8 @@ impl SqliteStore {
             // rules on it. Done on that message itself is the owner's own act
             // and applies.
             AttentionStatus::Done => conn.execute(
-                concat!(
-                    "UPDATE triage
-                 SET status = ?1, resolved_at = ?2, resolved_by = NULL, reminded_at = NULL
-                 WHERE account_id = ?3
-                   AND (message_id = ?4 OR (message_id IN (
-                       SELECT sib.id FROM messages me
-                       JOIN messages sib ON sib.account_id = me.account_id
-                                        AND sib.thread_id = me.thread_id
-                       WHERE me.account_id = ?3 AND me.id = ?4
-                         AND me.thread_id != '') AND NOT ",
-                    holds_fye_triage_sql!(),
-                    "))"
-                ),
-                params![status.as_str(), resolved_at, account_id, message_id],
+                DONE_THREAD_SQL,
+                params![resolved_at, account_id, message_id],
             )?,
             _ => conn.execute(
                 "UPDATE triage
@@ -415,7 +438,7 @@ impl SqliteStore {
         if stamped == 0 {
             return Ok(false);
         }
-        // DEFERRING IS RESOLVING, thread-wide, with the SAME SQL shape as
+        // DEFERRING IS RESOLVING, thread-wide, with the SAME SQL as
         // `set_attention_status`'s Done arm and for the same reason: the bands
         // show one row per thread, so leaving a sibling open puts the mail the
         // user just snoozed straight back in front of them. It clears
@@ -423,22 +446,7 @@ impl SqliteStore {
         // fired stamp sits in the standing band while the thread is supposedly
         // parked until the new date.
         // A sibling that holds FYE is spared, as in the Done arm.
-        tx.execute(
-            concat!(
-                "UPDATE triage
-             SET status = 'done', resolved_at = ?1, resolved_by = NULL, reminded_at = NULL
-             WHERE account_id = ?2
-               AND (message_id = ?3 OR (message_id IN (
-                   SELECT sib.id FROM messages me
-                   JOIN messages sib ON sib.account_id = me.account_id
-                                    AND sib.thread_id = me.thread_id
-                   WHERE me.account_id = ?2 AND me.id = ?3
-                     AND me.thread_id != '') AND NOT ",
-                holds_fye_triage_sql!(),
-                "))"
-            ),
-            params![now, account_id, message_id],
-        )?;
+        tx.execute(DONE_THREAD_SQL, params![now, account_id, message_id])?;
         tx.commit()?;
         Ok(true)
     }

@@ -222,7 +222,24 @@ overrides: `enabled`, `batch_per_cycle`, `daily_cap`, `max_per_message`,
 one-hour minimum lead, a 400-day horizon, 12-hour deduplication, and 50 revisit
 investigations/account/day, within the shared account/background ceilings.
 Timestamp changes do not evade lifetime limits. Absurd values (a negative lead,
-a horizon past ten years) are clamped rather than trusted. The retired
+a horizon past ten years) are clamped rather than trusted. The same settings
+govern the past-event re-check: a day after the dates the model gave for a
+trip, ticket or booking, the poll tick queues a `revisit:event_ended:<time>`
+job, and on any `revisit:` job the agent may mark the message done, past
+the rails in `apply_done` (docs/CALENDAR.md §3.8). Code schedules; the model
+decides; the owner can always undo it. The re-check is asked only about events
+the owner is going to, at most three times a message under its own count (not
+the lifetime limit), counts as asked only once a `revisit:` run has committed
+an answer, and is claimed ahead of other revisits under the shared daily cap.
+Only moments that end a message's use (an event, trip, reservation or
+appointment ends, a delivery arrives, an invitation's date passes) earn the
+model's own revisit. A `revisit:` run moves mail only by its done: it writes
+no placement, so a revisit cannot lift mail into FYE or change its actions.
+TODO: expired promotions (a sale, offer or promo code that has ended) do not
+earn a revisit yet: they are about half of a mailbox's decisions and would
+push a landed flight's re-check back by days under the shared 50/day cap; do
+it once promo expiry has its own cap or lane, or a cheap path that needs no
+investigation. The retired
 deterministic sweeps' `deadline_grace_hours` and `fye_stale_days` knobs are
 gone; a config file that still sets them is ignored.
 

@@ -17,7 +17,13 @@ use sha2::{Digest, Sha256};
 // retry and cleared by neither a claim nor the passing of time, so a check
 // parked on a spent budget comes back at midnight (or on a grant within its
 // sub-cap's room) as ordinary work on the access lane instead of at the head
-// of the queue, ahead of the owner's own sent mail.
+// of the queue, ahead of the owner's own sent mail. Within a tier and lane, a
+// past-event re-check (`revisit:event_ended:%`) goes first: every `revisit:`
+// job shares one daily cap (`__agent_revisit__`), and a landed flight's
+// re-check must not wait days behind the agent's other revisits. Those jobs
+// are few (the scheduler asks only about events the owner went to, at most
+// three times a message), so going ahead of other background work costs it
+// little.
 const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arrival_eligible,j.kind,COALESCE(lane.foreground,0),j.last_error
              FROM agent_triage_jobs j INDEXED BY idx_agent_jobs_pending_claim JOIN messages candidate ON candidate.account_id=j.account_id AND candidate.id=j.message_id
              LEFT JOIN agent_job_lanes lane ON lane.job_id=j.id
@@ -36,7 +42,8 @@ const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arr
                  WHEN COALESCE(lane.foreground,0)=1 AND j.arrival_eligible=1 THEN 0
                  WHEN j.trigger LIKE 'manual:%' OR (j.trigger='archive_access' AND j.last_error IS NULL) THEN 1
                  ELSE 2 END,
-                 COALESCE(lane.foreground,0) DESC,j.available_at,j.id LIMIT 1";
+                 COALESCE(lane.foreground,0) DESC,
+                 j.trigger NOT LIKE 'revisit:event_ended:%',j.available_at,j.id LIMIT 1";
 
 fn json<T: serde::Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).map_err(|e| CoreError::Other(e.into()))
@@ -1270,6 +1277,196 @@ fn schedule_revisit(
     Ok(())
 }
 
+/// The most of a model-authored done reason the `auto_done` ledger keeps.
+pub(super) const AUTO_DONE_REASON_CHARS: usize = 300;
+
+/// What became of a decision's `done`: applied, or the rail that refused it.
+/// Codes only, so a log line can carry one: never the model's reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DoneOutcome {
+    Applied,
+    Refused(&'static str),
+}
+
+/// THE AGENT'S DONE, past the rails. The model judges whether a message
+/// still needs anything from the owner; these are the few things it is never
+/// trusted with, checked here in the decision's own transaction:
+///
+/// - only a scheduled re-check (`revisit:` trigger) may close mail: the model
+///   was asked that question then, and no other run;
+/// - the triage row is not already `done`. An `open` row (the owner undid
+///   their own Done, or pulled it back from the done list) still closes: a
+///   flight email kept handy before the flight is still unwanted after it.
+///   The agent's own done, undone, stays undone by the `auto_done` rail;
+/// - no reminder is pending or has fired: the owner set one, which is intent;
+/// - the message is received mail, not spam and not the archive tier;
+/// - neither it nor any message in its thread is the owner's own mail
+///   ([`super::OWN_MAIL`]): that is correspondence (`''` is no thread);
+/// - it was never auto-done before (its `auto_done` row), so an owner who
+///   reopened it and an undo that put it back to `new` both keep it;
+/// - every word in its thread is its own sender's ([`foreign_words`]): email
+///   text is never trusted, so nobody else's reply can lead to a done.
+///
+/// APPLIED, IT IS THE OWNER'S DONE, to the letter: the same thread-wide
+/// statement ([`super::attention::DONE_THREAD_SQL`]), because the bands show a
+/// thread by its representative, which need not be the re-checked message, and
+/// a done on one row would leave the thread in FYE. So the rails above hold for
+/// EVERY message in the thread, not only the re-checked one, under the same
+/// codes: any sibling that carries a reminder, is sent, spam or archive, or
+/// was auto-done before refuses the whole done. A sibling already `done`
+/// passes (the owner closed it; the owner's Done would close it again) and
+/// gets no ledger row; every row the write moved from `new` or `open` gets
+/// one, so
+/// the rule digest and the never-twice rail see each of them. Refused,
+/// nothing is written and the decision still commits.
+fn apply_done(
+    conn: &Connection,
+    job: &AgentJob,
+    decision: &MessageDecision,
+    now: DateTime<Utc>,
+) -> Result<Option<DoneOutcome>> {
+    let Some(done) = decision.done.as_ref() else {
+        return Ok(None);
+    };
+    let refuse = |code| Ok(Some(DoneOutcome::Refused(code)));
+    if !job.trigger.starts_with("revisit:") {
+        return refuse("not_revisit");
+    }
+    // The re-checked message and every message in its thread, with its triage
+    // row if it has one (a row without one is never written, but its mail is
+    // still the thread's and still read by the sent/spam/archive rail).
+    let mut thread = conn.prepare_cached(
+        "SELECT m.id,t.status,
+                COALESCE(t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL,0),
+                m.is_sent,m.is_spam,m.is_archive,
+                EXISTS(SELECT 1 FROM auto_done l
+                       WHERE l.account_id=m.account_id AND l.message_id=m.id)
+         FROM messages me
+         JOIN messages m ON m.account_id=me.account_id
+                        AND (m.id=me.id OR (me.thread_id!='' AND m.thread_id=me.thread_id))
+         LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
+         WHERE me.account_id=?1 AND me.id=?2
+         ORDER BY m.id",
+    )?;
+    let rows = thread
+        .query_map(params![job.account_id, job.message_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, bool>(4)?,
+                r.get::<_, bool>(5)?,
+                r.get::<_, bool>(6)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    match rows.iter().find(|row| row.0 == job.message_id) {
+        Some((_, Some(status), ..)) if status == "done" => return refuse("already_done"),
+        Some((_, Some(_), ..)) => {}
+        _ => return refuse("no_triage_row"),
+    }
+    if rows.iter().any(|row| row.2) {
+        return refuse("reminder");
+    }
+    if rows.iter().any(|row| row.3 || row.4 || row.5) {
+        return refuse("sent_spam_or_archive");
+    }
+    if rows.iter().any(|row| row.6) {
+        return refuse("auto_done_before");
+    }
+    let own: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM messages me JOIN messages m ON m.account_id=me.account_id
+                 AND (m.id=me.id OR (me.thread_id!='' AND m.thread_id=me.thread_id))
+                 WHERE me.account_id=?1 AND me.id=?2 AND {})",
+            super::OWN_MAIL
+        ),
+        params![job.account_id, job.message_id],
+        |r| r.get(0),
+    )?;
+    if own {
+        return refuse("own_mail_in_thread");
+    }
+    if let Some(code) = foreign_words(conn, job.account_id, job.message_id)? {
+        return refuse(code);
+    }
+    let at = now.to_rfc3339();
+    conn.execute(
+        super::attention::AGENT_DONE_THREAD_SQL,
+        params![at, job.account_id, job.message_id],
+    )?;
+    let reason = crate::text::truncate_chars(done.reason.trim(), AUTO_DONE_REASON_CHARS);
+    // Only rows this write closed: the Done spares a sibling that holds FYE,
+    // and a spared row given a ledger row would read as auto-done before.
+    let mut ledger = conn.prepare_cached(
+        "INSERT INTO auto_done(account_id,message_id,source,reason,done_at)
+         SELECT account_id,message_id,'agent_revisit',?3,?4 FROM triage
+         WHERE account_id=?1 AND message_id=?2 AND status='done' AND resolved_at=?4",
+    )?;
+    for (id, ..) in rows
+        .iter()
+        .filter(|row| matches!(row.1.as_deref(), Some("new") | Some("open")))
+    {
+        ledger.execute(params![job.account_id, id, reason, at])?;
+    }
+    Ok(Some(DoneOutcome::Applied))
+}
+
+/// Whether anyone but the message's own sender has words in its thread, as
+/// the rail code that refuses an auto-done for it, or None when nobody does.
+/// The owner's rule: email text is never trusted, so a done may rest only on
+/// mail from the one sender the re-checked message speaks for. That is its
+/// [`crate::triage::ghost::sender_scope`]: the authenticated organisation
+/// domain, or the full address on a shared domain. A message with no scope
+/// (not authenticated) speaks for nobody: `sender_unauthenticated`. A sibling
+/// whose scope is any other, or none: `foreign_sender_in_thread`. Thread `''`
+/// is no thread. The owner's own mail is its own rail (`own_mail_in_thread`).
+pub(super) fn foreign_words(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<Option<&'static str>> {
+    use crate::triage::ghost::sender_scope;
+    let Some((from, auth, thread)) = conn
+        .query_row(
+            "SELECT from_addr,auth_pass,thread_id FROM messages WHERE account_id=?1 AND id=?2",
+            params![account, message],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<bool>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(Some("sender_unauthenticated"));
+    };
+    let Some(scope) = sender_scope(&from, auth) else {
+        return Ok(Some("sender_unauthenticated"));
+    };
+    if thread.is_empty() {
+        return Ok(None);
+    }
+    let mut siblings = conn.prepare_cached(
+        "SELECT from_addr,auth_pass FROM messages WHERE account_id=?1 AND thread_id=?2 AND id!=?3",
+    )?;
+    let senders = siblings
+        .query_map(params![account, thread, message], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<bool>>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if senders
+        .iter()
+        .any(|(from, auth)| sender_scope(from, *auth).as_deref() != Some(scope.as_str()))
+    {
+        return Ok(Some("foreign_sender_in_thread"));
+    }
+    Ok(None)
+}
+
 /// Assess only legacy sources actually read as evidence. Their revision must
 /// exist before the model consumes a snapshot or a derivative records provenance.
 pub(super) fn ensure_agent_source_ids_conn(
@@ -2092,12 +2289,22 @@ impl AgentTriageStore for SqliteStore {
                 job.message_id
             ],
         )?;
-        tx.execute(
-            "DELETE FROM agent_message_destinations WHERE account_id=?1 AND message_id=?2",
-            params![job.account_id, job.message_id],
-        )?;
+        let done = apply_done(&tx, job, decision, Utc::now())?;
+        // A RE-CHECK MOVES MAIL ONLY BY ITS DONE. For the owner, done and
+        // leaving FYE are one act: a re-check writes no placement at all (no
+        // FYE flag, no representative, no Reading destination, no related
+        // thread), so a refused or absent done cannot hide mail by the side
+        // door, and an applied done leaves placement as the owner's own Done
+        // would, so their undo brings the thread straight back.
+        let recheck = job.trigger.starts_with("revisit:");
+        if !recheck {
+            tx.execute(
+                "DELETE FROM agent_message_destinations WHERE account_id=?1 AND message_id=?2",
+                params![job.account_id, job.message_id],
+            )?;
+        }
         // Sent/spam access reviews cannot populate human placement surfaces.
-        if !current.message.is_sent && !current.message.is_spam {
+        if !recheck && !current.message.is_sent && !current.message.is_spam {
             for destination in &decision.destinations {
                 let value = match destination {
                     MessageDestination::Reading => "reading",
@@ -2145,7 +2352,11 @@ impl AgentTriageStore for SqliteStore {
                 params![job.account_id, job.message_id, id, source_revision],
             )?;
         }
-        schedule_revisit(&tx, job, revision, decision, policy, Utc::now())?;
+        // A message the done closed needs no further re-check, so a revisit
+        // set beside it would be a billed run that can only refuse.
+        if done != Some(DoneOutcome::Applied) {
+            schedule_revisit(&tx, job, revision, decision, policy, Utc::now())?;
+        }
         if job.arrival_eligible && !current.message.is_sent && !current.message.is_spam {
             tx.execute("INSERT INTO
              agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,arrival_eligible,available_at)
@@ -2175,6 +2386,18 @@ impl AgentTriageStore for SqliteStore {
         )?;
         finish(&tx, job, "applied", &original.run_metadata)?;
         tx.commit()?;
+        // Ids and rail codes only: the model's reason is never logged.
+        match done {
+            Some(DoneOutcome::Applied) => eprintln!(
+                "squelch: auto-done applied to message {} (agent_revisit)",
+                job.message_id
+            ),
+            Some(DoneOutcome::Refused(code)) => eprintln!(
+                "squelch: auto-done not applied to message {} ({code})",
+                job.message_id
+            ),
+            None => {}
+        }
         Ok(AgentCommitOutcome::Applied)
     }
     fn acknowledge_agent_message(
@@ -4657,6 +4880,74 @@ mod tests {
         assert!(sealed(&store).is_empty());
     }
 
+    /// The agent's done is the owner's Done, so it spares the same sibling:
+    /// an unruled critical change in the thread stays where it is, and gets
+    /// no `auto_done` row (it was not closed, so it must not read as closed
+    /// before).
+    #[test]
+    fn an_auto_done_spares_an_unruled_critical_sibling_and_gives_it_no_ledger_row() {
+        use crate::triage::decision::{AuthAssessment, AuthKind::*, DoneRequest, EvidenceRef};
+        let store = fixture();
+        seed_auth_in(&store, 40, "t", -120, auth(&[AccountChange], true), false);
+        seed_auth_in(&store, 41, "t", -60, AuthAssessment::default(), false);
+        {
+            let conn = store.lock().unwrap();
+            conn.execute("UPDATE messages SET auth_pass=1 WHERE id IN (40,41)", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,arrival_eligible,available_at)
+                 SELECT 1,41,'triage','revisit:2026-10-20T00:00:00+00:00',revision,0,?1
+                 FROM agent_message_state WHERE account_id=1 AND message_id=41",
+                [(Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()],
+            )
+            .unwrap();
+        }
+        let job = store
+            .claim_agent_job(1, "investigation", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (job.message_id, job.trigger.starts_with("revisit:")),
+            (41, true)
+        );
+        let context = store.load_agent_context(&job).unwrap();
+        let mut verdict = decision(41);
+        verdict.done = Some(DoneRequest {
+            reason: "over".into(),
+            evidence: vec![EvidenceRef {
+                message_id: 41,
+                location: "body".into(),
+            }],
+        });
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &verdict,
+                std::slice::from_ref(&context.message.source),
+            )
+            .unwrap();
+        let conn = store.lock().unwrap();
+        let rows: Vec<(i64, String, bool)> = conn
+            .prepare(
+                "SELECT t.message_id,t.status,EXISTS(SELECT 1 FROM auto_done l
+                     WHERE l.account_id=t.account_id AND l.message_id=t.message_id)
+                 FROM triage t WHERE t.account_id=1 AND t.message_id IN (40,41) ORDER BY 1",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (40, "new".to_string(), false),
+                (41, "done".to_string(), true)
+            ]
+        );
+    }
+
     /// "Not me" mail holds its place against the same sweeps: archiving the
     /// next alert in its thread, a reminder on it, an unsubscribe from the
     /// sender.
@@ -5314,6 +5605,33 @@ mod tests {
                 .attention
                 .is_some()
         );
+    }
+
+    /// A past-event re-check is claimed ahead of an older revisit of the
+    /// agent's own (and of other background work): they share one daily cap,
+    /// and a landed flight's re-check must not wait behind it.
+    #[test]
+    fn a_past_event_recheck_is_claimed_ahead_of_other_revisits() {
+        let store = fixture();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,arrival_eligible,available_at)
+                 VALUES(1,1,'triage','revisit:2026-01-01T00:00:00+00:00',1,0,'2026-01-01'),
+                       (1,2,'triage','revisit:event_ended:2026-01-02T00:00:00+00:00',1,0,'2026-01-02')",
+            )
+            .unwrap();
+        let first = store
+            .claim_agent_job(1, "investigation", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.message_id, 2);
+        let second = store
+            .claim_agent_job(1, "investigation", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.message_id, 1);
     }
 
     #[test]
@@ -8327,5 +8645,746 @@ mod own_mail_tests {
             );
             assert_eq!(packages(&store), i64::from(unreadable_neighbour));
         }
+    }
+}
+
+/// The agent's `done` (`apply_done`): applied only on a scheduled re-check,
+/// only past every rail, as the owner's thread-wide Done, with a ledger row
+/// per message it closed; refused, the
+/// decision still commits and nothing else moves.
+#[cfg(test)]
+mod auto_done_tests {
+    use super::tests::{claim, decision};
+    use super::*;
+    use crate::triage::decision::{DoneRequest, EvidenceRef, RevisitRequest};
+
+    /// The shared fixture with every message from one AUTHENTICATED sender,
+    /// so a done may rest on its words (`foreign_words`).
+    fn fixture() -> SqliteStore {
+        let store = super::tests::fixture();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET from_addr='sender@venue.example',auth_pass=1",
+                [],
+            )
+            .unwrap();
+        store
+    }
+
+    fn done_verdict(id: i64, reason: &str) -> MessageDecision {
+        MessageDecision {
+            done: Some(DoneRequest {
+                reason: reason.into(),
+                evidence: vec![EvidenceRef {
+                    message_id: id,
+                    location: "body".into(),
+                }],
+            }),
+            ..decision(id)
+        }
+    }
+    /// The message's first decision (no done), then a queued `revisit:` job
+    /// for it, the way `schedule_revisit` writes one, claimed.
+    fn claim_revisit(store: &SqliteStore, id: i64) -> (AgentJob, AgentContext) {
+        claim_revisit_after(store, id, "SELECT 1")
+    }
+    /// [`claim_revisit`], running `setup` between the first decision and the
+    /// re-check's claim, so the claimed context already reads it.
+    fn claim_revisit_after(store: &SqliteStore, id: i64, setup: &str) -> (AgentJob, AgentContext) {
+        commit(store, claim(store, id), &decision(id));
+        store.lock().unwrap().execute_batch(setup).unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,arrival_eligible,available_at)
+                 SELECT 1,?1,'triage','revisit:2026-10-20T00:00:00+00:00',revision,0,?2
+                 FROM agent_message_state WHERE account_id=1 AND message_id=?1",
+                params![id, (Utc::now() - Duration::seconds(1)).to_rfc3339()],
+            )
+            .unwrap();
+        }
+        let job = store
+            .claim_agent_job(1, "investigation", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (job.message_id, job.trigger.starts_with("revisit:")),
+            (id, true)
+        );
+        let context = store.load_agent_context(&job).unwrap();
+        (job, context)
+    }
+    fn commit(
+        store: &SqliteStore,
+        (job, context): (AgentJob, AgentContext),
+        verdict: &MessageDecision,
+    ) -> AgentJob {
+        let sources = store.snapshot_agent_sources(1, &[job.message_id]).unwrap();
+        assert_eq!(
+            store
+                .commit_agent_decision(&job, &context, verdict, &sources)
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+        job
+    }
+    fn status(store: &SqliteStore, id: i64) -> (String, Option<String>) {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status,resolved_at FROM triage WHERE account_id=1 AND message_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+    fn ledger(store: &SqliteStore) -> Vec<(i64, i64, String, String, String)> {
+        let conn = store.lock().unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT account_id,message_id,source,reason,done_at FROM auto_done
+                 ORDER BY account_id,message_id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+    fn stored_done(store: &SqliteStore, id: i64) -> Option<DoneRequest> {
+        let raw: String = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT decision_json FROM agent_message_decisions WHERE account_id=1 AND message_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<MessageDecision>(&raw).unwrap().done
+    }
+    fn revisits_queued(store: &SqliteStore, id: i64) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM agent_triage_jobs WHERE account_id=1 AND message_id=?1
+                 AND trigger LIKE 'revisit:%' AND state='queued'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A sibling in thread `one` from another address of the same
+    /// authenticated organisation (which does not block), with a triage row
+    /// in `status`.
+    fn sibling(store: &SqliteStore, id: i64, status: &str) {
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+             VALUES(?1,1,?2,'one','desk@venue.example','subject',?3,'snippet','body',1)",
+            params![id, id.to_string(), (Utc::now() + Duration::seconds(id)).to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO triage(account_id,message_id,created_at,status,resolved_at)
+             VALUES(1,?1,?2,?3,CASE WHEN ?3='done' THEN '2026-01-02T00:00:00+00:00' END)",
+            params![id, Utc::now().to_rfc3339(), status],
+        )
+        .unwrap();
+    }
+    /// Every triage row of account 1, in id order: what a refused done must
+    /// leave exactly as it was.
+    fn all_status(store: &SqliteStore) -> Vec<(i64, String, Option<String>, Option<String>)> {
+        let conn = store.lock().unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT message_id,status,resolved_at,reminded_at FROM triage
+                 WHERE account_id=1 ORDER BY message_id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    /// The whole path: a re-check's done is the owner's Done, so it closes
+    /// the THREAD: the re-checked message and its `new` sibling, each with
+    /// `resolved_at` equal to its ledger row's `done_at` and the model's
+    /// reason capped. A sibling already closed is left exactly as it was:
+    /// one the owner closed keeps the time they closed it, and one smart
+    /// clear closed keeps its batch (`resolved_by`), so that batch's undo
+    /// still reaches it; neither gets a ledger row. Another thread is
+    /// untouched, and a revisit set beside the done
+    /// is not queued: a closed message needs no further re-check.
+    #[test]
+    fn a_revisit_done_closes_the_thread_with_a_ledger_row_per_closed_message() {
+        let store = fixture();
+        sibling(&store, 4, "new");
+        sibling(&store, 6, "done");
+        sibling(&store, 7, "done");
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE triage SET resolved_by='smart-batch' WHERE message_id=7",
+                [],
+            )
+            .unwrap();
+        let before = |id: i64| -> (String, Option<String>, Option<String>) {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status,resolved_at,resolved_by FROM triage WHERE account_id=1 AND message_id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        let closed_before = (before(6), before(7));
+        let reason = format!("The concert was last night. {}", "x".repeat(500));
+        let mut verdict = done_verdict(1, &reason);
+        verdict.revisit = Some(RevisitRequest {
+            at: Utc::now() + Duration::days(2),
+            reason: "check again".into(),
+        });
+        let (job, context) = claim_revisit(&store, 1);
+        commit(&store, (job, context), &verdict);
+        let rows = ledger(&store);
+        assert_eq!(
+            rows.iter().map(|row| (row.0, row.1)).collect::<Vec<_>>(),
+            [(1, 1), (1, 4)],
+            "a ledger row for each message the done moved from new"
+        );
+        for (account, message, source, kept, done_at) in rows {
+            assert_eq!((account, source.as_str()), (1, "agent_revisit"));
+            assert_eq!(kept.chars().count(), AUTO_DONE_REASON_CHARS);
+            assert!(reason.starts_with(&kept));
+            assert_eq!(
+                status(&store, message),
+                ("done".into(), Some(done_at)),
+                "{message}: resolved_at is the ledger's done_at"
+            );
+        }
+        assert_eq!(
+            (before(6), before(7)),
+            closed_before,
+            "closed siblings untouched"
+        );
+        assert_eq!(status(&store, 2), ("new".into(), None), "another thread");
+        assert_eq!(revisits_queued(&store, 1), 0, "no revisit after a done");
+        assert!(stored_done(&store, 1).is_some());
+    }
+
+    /// THE SAME WRITE AS THE OWNER'S DONE: the same thread closed once by the
+    /// owner's Done and once by the agent's leaves every triage row of the
+    /// account in the same state (status, resolved or not, fired reminder),
+    /// the already-done sibling and the other thread included.
+    #[test]
+    fn an_auto_done_writes_what_the_owners_done_writes() {
+        let closed = |by_agent: bool| {
+            let store = fixture();
+            sibling(&store, 4, "new");
+            sibling(&store, 6, "done");
+            if by_agent {
+                let (job, context) = claim_revisit(&store, 1);
+                commit(&store, (job, context), &done_verdict(1, "over"));
+            } else {
+                commit(&store, claim(&store, 1), &decision(1));
+                store
+                    .set_attention_status(1, 1, crate::types::AttentionStatus::Done)
+                    .unwrap();
+            }
+            all_status(&store)
+                .into_iter()
+                .map(|(id, state, resolved, reminded)| (id, state, resolved.is_some(), reminded))
+                .collect::<Vec<_>>()
+        };
+        let agent = closed(true);
+        assert_eq!(agent, closed(false));
+        assert_eq!(
+            agent.iter().filter(|row| row.1 == "done").count(),
+            3,
+            "the thread"
+        );
+    }
+
+    /// FYE READS THE THREAD BY ITS REPRESENTATIVE, here the newer sibling 4,
+    /// not the re-checked message 1. After the agent's done the thread is out
+    /// of FYE; the Mac's undo (`setStatus(id, .open)` for the ONE row it
+    /// showed, message-scoped) brings it back; and a second re-check cannot
+    /// close it again.
+    #[test]
+    fn an_auto_done_thread_leaves_fye_and_the_undo_brings_it_back() {
+        let store = fixture();
+        sibling(&store, 4, "new");
+        let commit_thread = |(job, context): (AgentJob, AgentContext),
+                             verdict: &MessageDecision| {
+            let sources = store.snapshot_agent_sources(1, &[1, 4]).unwrap();
+            assert_eq!(
+                store
+                    .commit_agent_decision(&job, &context, verdict, &sources)
+                    .unwrap(),
+                AgentCommitOutcome::Applied
+            );
+            job
+        };
+        let fye = || {
+            store
+                .agent_fye(1, 10, &RankingConfig::default(), Utc::now())
+                .unwrap()
+                .into_iter()
+                .map(|item| (item.thread_id, item.message_id))
+                .collect::<Vec<_>>()
+        };
+        let mut first = decision(1);
+        first.attention.relevant_message_ids = vec![1, 4];
+        commit_thread(claim(&store, 1), &first);
+        assert!(
+            fye().contains(&("one".to_string(), 4)),
+            "the newer sibling represents the thread"
+        );
+        let insert_revisit = |at: &str| {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,arrival_eligible,available_at)
+                     SELECT 1,1,'triage','revisit:'||?2,revision,0,?1
+                     FROM agent_message_state WHERE account_id=1 AND message_id=1",
+                    params![(Utc::now() - Duration::seconds(1)).to_rfc3339(), at],
+                )
+                .unwrap();
+            let job = store
+                .claim_agent_job(1, "investigation", Utc::now(), 60)
+                .unwrap()
+                .unwrap();
+            assert_eq!(job.message_id, 1);
+            let context = store.load_agent_context(&job).unwrap();
+            (job, context)
+        };
+        // The model's natural answer: done, and nothing for FYE. The FYE flag
+        // is not the done's to write, or the undo below would bring back a
+        // thread that is still flagged hidden.
+        let mut verdict = done_verdict(1, "over");
+        verdict.attention.relevant_message_ids = vec![1, 4];
+        verdict.attention.show_in_fye = false;
+        commit_thread(insert_revisit("2026-10-20T00:00:00+00:00"), &verdict);
+        assert!(
+            !fye().iter().any(|(thread, _)| thread == "one"),
+            "the thread is out of FYE"
+        );
+        assert!(
+            store
+                .set_attention_status(1, 4, crate::types::AttentionStatus::Open)
+                .unwrap()
+        );
+        assert!(
+            fye().contains(&("one".to_string(), 4)),
+            "the undo brings it back"
+        );
+        let job = commit_thread(insert_revisit("2026-10-21T00:00:00+00:00"), &verdict);
+        assert!(fye().contains(&("one".to_string(), 4)), "never twice");
+        let conn = store.lock().unwrap();
+        assert_eq!(
+            apply_done(&conn, &job, &verdict, Utc::now()).unwrap(),
+            Some(DoneOutcome::Refused("already_done"))
+        );
+        // The undo reopened 4, and an `open` row may close; the ledger is
+        // what keeps the agent's own undone done undone.
+        let reopened = AgentJob {
+            message_id: 4,
+            ..job.clone()
+        };
+        assert_eq!(
+            apply_done(&conn, &reopened, &verdict, Utc::now()).unwrap(),
+            Some(DoneOutcome::Refused("auto_done_before"))
+        );
+    }
+
+    /// The rule suggester reads "cleared without opening" as the owner not
+    /// wanting a sender's mail, so a done the daemon made reads as `new` in
+    /// its digest, until the owner touches the row (its `resolved_at` is no
+    /// longer the ledger's `done_at`).
+    #[test]
+    fn the_rule_digest_reads_an_agent_done_as_new() {
+        let store = fixture();
+        let (job, context) = claim_revisit(&store, 1);
+        commit(&store, (job, context), &done_verdict(1, "over"));
+        let digest = |store: &SqliteStore| {
+            store
+                .sender_rule_digest(1, "sender@venue.example", 10)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.status)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(status(&store, 1).0, "done");
+        assert_eq!(digest(&store), ["new", "new"]);
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE triage SET resolved_at='2026-01-02T00:00:00+00:00' WHERE message_id=1",
+                [],
+            )
+            .unwrap();
+        assert!(digest(&store).contains(&"done".to_string()));
+    }
+
+    /// The same answer on any other run is recorded in the decision and
+    /// changes nothing else; its revisit still queues.
+    #[test]
+    fn a_done_outside_a_revisit_commits_but_closes_nothing() {
+        let store = fixture();
+        let mut verdict = done_verdict(1, "over");
+        verdict.revisit = Some(RevisitRequest {
+            at: Utc::now() + Duration::days(2),
+            reason: "check again".into(),
+        });
+        let job = commit(&store, claim(&store, 1), &verdict);
+        assert_eq!(job.trigger, "arrival");
+        assert_eq!(status(&store, 1), ("new".into(), None));
+        assert!(ledger(&store).is_empty());
+        assert!(
+            stored_done(&store, 1).is_some(),
+            "the decision still commits"
+        );
+        assert_eq!(revisits_queued(&store, 1), 1);
+        let conn = store.lock().unwrap();
+        assert_eq!(
+            apply_done(&conn, &job, &verdict, Utc::now()).unwrap(),
+            Some(DoneOutcome::Refused("not_revisit"))
+        );
+    }
+
+    /// Each rail ALONE keeps the message, on the message itself and on a
+    /// sibling the thread-wide done would write: every case starts from the
+    /// fixture that
+    /// `a_revisit_done_closes_the_thread_with_a_ledger_row_per_closed_message`
+    /// closes and changes one thing, set after the first decision (which
+    /// would otherwise be the one to read it). The status, `resolved_at` and
+    /// ledger are untouched, the decision still commits, and the refusal
+    /// names that rail, so a rail that went missing would show as another
+    /// rail's code or as a done.
+    #[test]
+    fn each_rail_alone_keeps_the_message() {
+        // A sibling in the thread, from the same organisation, that would be
+        // written by the thread-wide done: each rail holds for it too.
+        const SIB: &str = "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass,is_spam,is_archive)
+             VALUES(5,1,'5','one','desk@venue.example','re: subject','2026-01-02T00:00:00+00:00','snippet','body',1,
+                    0,0);
+             INSERT INTO triage(account_id,message_id,created_at) VALUES(1,5,'2026-01-02T00:00:00+00:00');";
+        let sib = |then: &str| format!("{SIB}{then}");
+        let sibling_cases = [
+            (
+                "a sibling's reminder pending",
+                sib(
+                    "UPDATE triage SET status='done',remind_at='2099-01-01T00:00:00+00:00' WHERE message_id=5",
+                ),
+                "reminder",
+            ),
+            (
+                "a sibling's reminder fired",
+                sib("UPDATE triage SET reminded_at='2026-01-02T00:00:00+00:00' WHERE message_id=5"),
+                "reminder",
+            ),
+            (
+                "a sibling in spam",
+                sib("UPDATE messages SET is_spam=1 WHERE id=5"),
+                "sent_spam_or_archive",
+            ),
+            (
+                "a sibling in the archive",
+                sib("UPDATE messages SET is_archive=1 WHERE id=5"),
+                "sent_spam_or_archive",
+            ),
+            (
+                "a sibling auto-done before",
+                sib("UPDATE triage SET status='done' WHERE message_id=5;
+                     INSERT INTO auto_done(account_id,message_id,source,reason,done_at)
+                     VALUES(1,5,'agent_revisit','earlier','2026-01-02T00:00:00+00:00')"),
+                "auto_done_before",
+            ),
+        ];
+        let cases: [(&str, &str, &str); 12] = [
+            (
+                "already done",
+                "UPDATE triage SET status='done',resolved_at='2026-01-02T00:00:00+00:00' WHERE message_id=1",
+                "already_done",
+            ),
+            (
+                "reminder pending",
+                "UPDATE triage SET remind_at='2099-01-01T00:00:00+00:00' WHERE message_id=1",
+                "reminder",
+            ),
+            (
+                "reminder fired",
+                "UPDATE triage SET reminded_at='2026-01-02T00:00:00+00:00' WHERE message_id=1",
+                "reminder",
+            ),
+            ("sent", "UPDATE messages SET is_sent=1 WHERE id=1", "sent_spam_or_archive"),
+            ("spam", "UPDATE messages SET is_spam=1 WHERE id=1", "sent_spam_or_archive"),
+            ("archive", "UPDATE messages SET is_archive=1 WHERE id=1", "sent_spam_or_archive"),
+            (
+                "auto-done before, then undone",
+                "INSERT INTO auto_done(account_id,message_id,source,reason,done_at)
+                 VALUES(1,1,'agent_revisit','earlier','2026-01-02T00:00:00+00:00')",
+                "auto_done_before",
+            ),
+            (
+                "the owner wrote in the thread",
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                 VALUES(5,1,'5','one','a@test','re: subject','2026-01-02T00:00:00+00:00','snippet','body')",
+                "own_mail_in_thread",
+            ),
+            (
+                "a stranger replied in the thread",
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+                 VALUES(5,1,'5','one','someone@elsewhere.example','re: subject','2026-01-02T00:00:00+00:00','snippet','body',1)",
+                "foreign_sender_in_thread",
+            ),
+            (
+                "an unauthenticated reply in the thread, from the sender's own address",
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+                 VALUES(5,1,'5','one','sender@venue.example','re: subject','2026-01-02T00:00:00+00:00','snippet','body',0)",
+                "foreign_sender_in_thread",
+            ),
+            (
+                "the message itself is not authenticated",
+                "UPDATE messages SET auth_pass=0 WHERE id=1",
+                "sender_unauthenticated",
+            ),
+            (
+                "another address on a shared domain",
+                "UPDATE messages SET from_addr='alice@gmail.com' WHERE id=1;
+                 INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+                 VALUES(5,1,'5','one','bob@gmail.com','re: subject','2026-01-02T00:00:00+00:00','snippet','body',1)",
+                "foreign_sender_in_thread",
+            ),
+        ];
+        let cases = cases
+            .into_iter()
+            .map(|(name, setup, code)| (name, setup.to_string(), code))
+            .chain(sibling_cases);
+        for (name, setup, code) in cases {
+            let store = fixture();
+            let (job, context) = claim_revisit_after(&store, 1, &setup);
+            let before = all_status(&store);
+            let ledger_before = ledger(&store);
+            let verdict = done_verdict(1, "over");
+            commit(&store, (job.clone(), context), &verdict);
+            assert_eq!(all_status(&store), before, "{name}: status moved");
+            assert_eq!(ledger(&store), ledger_before, "{name}: ledger moved");
+            assert!(stored_done(&store, 1).is_some(), "{name}: decision lost");
+            let conn = store.lock().unwrap();
+            assert_eq!(
+                apply_done(&conn, &job, &verdict, Utc::now()).unwrap(),
+                Some(DoneOutcome::Refused(code)),
+                "{name}"
+            );
+        }
+    }
+
+    /// Reopened mail still closes. The owner may pull a flight email back
+    /// out of done to keep it handy before the flight (`open`), and after the
+    /// flight they still do not want it: the re-checked message and an
+    /// `open` sibling both close, each with its ledger row.
+    #[test]
+    fn reopened_mail_still_closes_after_the_event() {
+        let store = fixture();
+        sibling(&store, 4, "open");
+        let (job, context) = claim_revisit_after(
+            &store,
+            1,
+            "UPDATE triage SET status='open' WHERE message_id=1",
+        );
+        assert_eq!(status(&store, 1).0, "open");
+        commit(&store, (job, context), &done_verdict(1, "over"));
+        assert_eq!(
+            (status(&store, 1).0, status(&store, 4).0),
+            ("done".into(), "done".into())
+        );
+        assert_eq!(
+            ledger(&store).iter().map(|row| row.1).collect::<Vec<_>>(),
+            vec![1, 4]
+        );
+    }
+
+    /// A RE-CHECK MOVES MAIL ONLY BY ITS DONE. Every re-check answer here
+    /// says hide: thread `one` out of FYE, no Reading destination, and a
+    /// related update hiding thread `two`. On a re-check none of it is
+    /// written, whether the done applies, a rail refuses it, or none is
+    /// asked: done and leaving FYE are one act, and an applied done leaves
+    /// the FYE flag as the owner's Done would. An ordinary run is not held:
+    /// the model still places mail freely.
+    #[test]
+    fn a_recheck_writes_no_placement() {
+        use crate::triage::decision::RelatedAttentionUpdate;
+        let shown = |store: &SqliteStore, thread: &str| -> bool {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT json_extract(attention_json,'$.show_in_fye') FROM agent_thread_attention
+                     WHERE account_id=1 AND thread_id=?1",
+                    [thread],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let reading = |store: &SqliteStore| -> bool {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agent_message_destinations
+                     WHERE account_id=1 AND message_id=1 AND destination='reading')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let own_reply = "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+             VALUES(5,1,'5','one','a@test','re: subject','2026-01-02T00:00:00+00:00','snippet','body')";
+        const RECHECK: &str = "revisit:2026-10-20T00:00:00+00:00";
+        // (name, trigger, setup, asks for done, closes, placement kept)
+        for (name, trigger, setup, asks_done, closes, kept) in [
+            ("applied done", RECHECK, "SELECT 1", true, true, true),
+            ("refused done", RECHECK, own_reply, true, false, true),
+            ("re-check, no done", RECHECK, "SELECT 1", false, false, true),
+            ("ordinary run", "retriage", "SELECT 1", false, false, false),
+        ] {
+            let store = fixture();
+            let mut first = decision(1);
+            first.destinations = vec![MessageDestination::Reading];
+            commit(&store, claim(&store, 1), &first);
+            commit(&store, claim(&store, 2), &decision(2));
+            assert!(
+                shown(&store, "one") && shown(&store, "two") && reading(&store),
+                "{name}: starts placed"
+            );
+            {
+                let conn = store.lock().unwrap();
+                conn.execute_batch(setup).unwrap();
+                conn.execute(
+                    "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,arrival_eligible,available_at)
+                     SELECT 1,1,'triage',?1,revision,0,?2
+                     FROM agent_message_state WHERE account_id=1 AND message_id=1",
+                    params![trigger, (Utc::now() - Duration::seconds(1)).to_rfc3339()],
+                )
+                .unwrap();
+            }
+            let job = store
+                .claim_agent_job(1, "investigation", Utc::now(), 60)
+                .unwrap()
+                .unwrap();
+            assert_eq!((job.message_id, job.trigger.as_str()), (1, trigger));
+            let context = store.load_agent_context(&job).unwrap();
+            let mut verdict = if asks_done {
+                done_verdict(1, "over")
+            } else {
+                decision(1)
+            };
+            verdict.attention.show_in_fye = false;
+            verdict.destinations = vec![];
+            let two = store.agent_thread_context(1, "two").unwrap();
+            let mut hide_two = two.attention.unwrap();
+            hide_two.show_in_fye = false;
+            verdict.related_updates.push(RelatedAttentionUpdate {
+                thread_id: "two".into(),
+                expected_revision: two.revision.attention_revision,
+                attention: hide_two,
+                evidence: vec![],
+            });
+            let sources = store.snapshot_agent_sources(1, &[1, 2]).unwrap();
+            assert_eq!(
+                store
+                    .commit_agent_decision(&job, &context, &verdict, &sources)
+                    .unwrap(),
+                AgentCommitOutcome::Applied,
+                "{name}"
+            );
+            assert_eq!(status(&store, 1).0 == "done", closes, "{name}: closed");
+            assert_eq!(shown(&store, "one"), kept, "{name}: own thread");
+            assert_eq!(shown(&store, "two"), kept, "{name}: related thread");
+            assert_eq!(reading(&store), kept, "{name}: reading");
+        }
+    }
+
+    /// Own mail is read on the message too, not only its thread: a message
+    /// from the owner's own address with no thread is kept. And `''` is no
+    /// thread: other threadless own mail does not keep a threadless message.
+    #[test]
+    fn own_mail_reads_the_message_itself_and_no_thread_joins_nothing() {
+        for (own_from, closed) in [(true, false), (false, true)] {
+            let store = fixture();
+            {
+                let conn = store.lock().unwrap();
+                conn.execute("UPDATE messages SET thread_id='' WHERE id IN (1,2)", [])
+                    .unwrap();
+                conn.execute(
+                    "UPDATE messages SET from_addr='a@test',auth_pass=NULL WHERE id=?1",
+                    [if own_from { 1 } else { 2 }],
+                )
+                .unwrap();
+            }
+            let (job, context) = claim_revisit(&store, 1);
+            commit(&store, (job, context), &done_verdict(1, "over"));
+            assert_eq!(status(&store, 1).0 == "done", closed, "own_from={own_from}");
+            assert_eq!(ledger(&store).len(), usize::from(closed));
+        }
+    }
+
+    /// Accounts never cross: another tenant's ledger row for the same
+    /// message id, or its mail in a same-named thread, keeps nothing and is
+    /// never written.
+    #[test]
+    fn rails_read_only_this_account() {
+        let store = fixture();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_done(account_id,message_id,source,reason,done_at)
+                 VALUES(2,1,'agent_revisit','theirs','2026-01-02T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE messages SET thread_id='one',from_addr='b@test' WHERE id=3",
+                [],
+            )
+            .unwrap();
+        }
+        let (job, context) = claim_revisit(&store, 1);
+        commit(&store, (job, context), &done_verdict(1, "over"));
+        assert_eq!(status(&store, 1).0, "done");
+        // Nor does the thread-wide write reach the other tenant's message in
+        // the same-named thread, or its ledger.
+        let rows = ledger(&store);
+        assert_eq!(
+            rows.iter().map(|row| (row.0, row.1)).collect::<Vec<_>>(),
+            [(1, 1), (2, 1)]
+        );
+        let theirs: String = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM triage WHERE account_id=2 AND message_id=3",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(theirs, "new");
     }
 }

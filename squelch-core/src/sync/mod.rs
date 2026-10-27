@@ -2539,11 +2539,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// ONE TICK OF THE POLL LANE, everything between two sleeps: the daily
-    /// profile, the reminder sweep, the walk, the stamps a successful walk
-    /// leaves, and the unread count when it is owed. Returns whether the walk
-    /// found the mailbox changed, which is what the lane's idle ladder and
-    /// the unread fetch both key on. Its own function so a test can run a
-    /// tick without the lane's clock.
+    /// profile, the reminder sweep, the past-event re-check, the walk, the
+    /// stamps a successful walk leaves, and the unread count when it is owed.
+    /// Returns whether the walk found the mailbox changed, which is what the
+    /// lane's idle ladder and the unread fetch both key on. Its own function
+    /// so a test can run a tick without the lane's clock.
     async fn poll_tick(&self) -> Result<bool> {
         // The account's Google name and photo. Due once a day, so nearly
         // every tick this is a single atomic load; it sits before the walk
@@ -2554,6 +2554,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // call that can Err would let a bad credential or a Gmail outage
         // starve it for as long as the outage lasts.
         self.reminder_pass();
+        // Local too, and for the same reason.
+        self.event_revisit_pass();
         // THE UNREAD COUNT WHEN IT IS OWED (see `unread_stale`), BEFORE the
         // walk as every tick's fetch used to be: the walk is what can return
         // Err and bounce the whole lifecycle, and a mailbox stuck in that
@@ -4011,6 +4013,29 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
             Ok(_) => {}
             Err(e) => eprintln!("squelch: reminder sweep failed ({e}); skipping"),
+        }
+    }
+
+    /// THE PAST-EVENT RE-CHECK (docs/CALENDAR.md §3.8): a day after a trip,
+    /// ticket or booking is over, its mail gets a scheduled triage revisit,
+    /// and the agent decides whether it is done. The same shape as
+    /// [`Self::reminder_pass`]: local, synchronous, a count in the log and
+    /// never a subject, and an error is logged and dropped, because the next
+    /// tick tries again.
+    fn event_revisit_pass(&self) {
+        match self.store.schedule_past_event_revisits(
+            self.account_id,
+            Utc::now(),
+            &self.config.revisit,
+        ) {
+            Ok(ids) if !ids.is_empty() => {
+                eprintln!(
+                    "squelch: {} message(s) about past events queued for a re-check",
+                    ids.len()
+                )
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("squelch: past-event re-check scheduling failed ({e}); skipping"),
         }
     }
 
@@ -8402,6 +8427,133 @@ mod tests {
         assert!(rows[0].reminded_at.is_some(), "it came back on time");
     }
 
+    /// THE PAST-EVENT RE-CHECK RIDES THE SAME TICK, ahead of the walk: a
+    /// flight that landed days ago has its mail queued for the agent to
+    /// decide on even while Gmail is down. Queued, not done: that is the
+    /// model's answer.
+    #[tokio::test]
+    async fn the_poll_tick_queues_a_past_flights_recheck() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let mid = store
+            .upsert_message(&NewMessage {
+                account_id: acct,
+                gmail_msg_id: "g-checkin".into(),
+                thread_id: "t-checkin".into(),
+                from_addr: "noreply@airline.example".into(),
+                from_name: None,
+                subject: "Check in now".into(),
+                received_at: Utc::now() - ChronoDuration::days(6),
+                snippet: String::new(),
+                body: "body".into(),
+                body_html: None,
+                is_sent: false,
+                is_spam: false,
+                to_addrs: None,
+                cc_addrs: None,
+                bcc_addrs: None,
+                list_unsubscribe: None,
+                list_unsub_one_click: false,
+                auth_pass: Some(true),
+            })
+            .unwrap();
+        store
+            .set_triage(
+                mid,
+                acct,
+                0,
+                Tier::Noise,
+                crate::types::Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+        // The ghost as the projection leaves it: left five days ago, landed
+        // the same day, its facts from this message, which may feed it.
+        let start = Utc::now() - ChronoDuration::days(5);
+        let end = start + ChronoDuration::hours(11);
+        // The message's own record, which the scheduler also reads.
+        use crate::triage::decision::{
+            EventChange, EventCommitment, EventRecordKind, MessageDecision, RecordProposal,
+            SupportedTime,
+        };
+        let at = |t: DateTime<Utc>| {
+            Some(SupportedTime {
+                value: t.to_rfc3339(),
+                timezone: None,
+                source_message_id: mid,
+                interpreted_relative: false,
+            })
+        };
+        let decision = MessageDecision {
+            records: vec![RecordProposal::Event {
+                title: "Flight".into(),
+                start: at(start),
+                location: None,
+                end: at(end),
+                duration_estimate: None,
+                event_kind: EventRecordKind::Travel,
+                commitment: EventCommitment::Committed,
+                change: EventChange::Created,
+                identity_refs: vec!["PNR1".into()],
+                likelihood: None,
+                evidence: vec![],
+            }],
+            ..Default::default()
+        };
+        store.execute_batch_for_test(&format!(
+            "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+                 VALUES({acct},{mid},1,'{json}','{s}');
+             INSERT INTO agent_message_state(account_id,message_id,content_snapshot,access)
+                 VALUES({acct},{mid},'','allowed');
+             INSERT INTO ghost_events(id,account_id,kind,title,starts_at,start_sort,ends_at,
+                 commitment,owner_scope,owner_addr,supplier_message_id,created_at,updated_at)
+                 VALUES(1,{acct},'travel','Flight','{s}','{sort}','{e}','committed',
+                 'airline.example','noreply@airline.example',{mid},'{s}','{s}');
+             INSERT INTO ghost_event_sources(account_id,ghost_id,message_id,position,role)
+                 VALUES({acct},1,{mid},0,'created');",
+            s = start.to_rfc3339(),
+            json = serde_json::to_string(&decision).unwrap().replace('\'', "''"),
+            sort = start.format("%Y-%m-%dT%H:%M:%SZ"),
+            e = end.to_rfc3339(),
+        ));
+
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::broken());
+        let base = serve_mock(g.clone()).await;
+        let (_tx, mut shutdown) = tokio::sync::watch::channel(false);
+        assert!(
+            engine(store.clone(), acct, &base)
+                .poll_lane(&mut shutdown)
+                .await
+                .is_err()
+        );
+        let rows = inventory(
+            &store,
+            acct,
+            Utc::now() - ChronoDuration::days(30),
+            SpamScope::Exclude,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, crate::types::AttentionStatus::New);
+        use crate::store::agent_triage::AgentTriageStore;
+        let job = store
+            .claim_agent_job(acct, "investigation", Utc::now(), 120)
+            .unwrap()
+            .expect("a re-check queued");
+        assert_eq!(
+            (job.message_id, job.trigger),
+            (
+                mid,
+                format!(
+                    "revisit:event_ended:{}",
+                    (end + ChronoDuration::hours(24)).to_rfc3339()
+                )
+            )
+        );
+    }
+
     // ---- the two lanes, on the wire ----------------------------------------
     //
     // Nothing else in this file drives a refine pass against a mock LLM through
@@ -10908,6 +11060,233 @@ mod tests {
                 .to_string()
                 .contains(crate::triage::agent::PROMPT_VERSION)
         );
+        server.abort();
+    }
+    /// THE AGENT'S DONE, END TO END: the real worker, transport, validation
+    /// and commit, with a model that answers `done` every time. On the
+    /// arrival run the answer commits and closes nothing; on a scheduled
+    /// re-check (`revisit:` trigger) the same answer marks the message done.
+    #[tokio::test]
+    async fn agent_done_closes_mail_only_on_a_scheduled_recheck() {
+        use crate::store::agent_triage::AgentTriageStore;
+        use crate::triage::decision::*;
+        use crate::types::AttentionStatus;
+        let (store, account) = store_at_cursor(Some(100));
+        let raw = fixture(
+            account,
+            "agent-show",
+            "From: tickets@venue.example\r\nSubject: Your tickets\r\n\r\nThe show is on Friday.",
+            false,
+        );
+        let parsed = ingest_with_rules(&raw, &Stage1Config::default(), Utc::now(), &[], |_| false);
+        let id = store.ingest_message(&parsed).unwrap();
+        // Authenticated: a done may rest only on an authenticated sender's
+        // words.
+        store.execute_batch_for_test(&format!("UPDATE messages SET auth_pass=1 WHERE id={id}"));
+        let evidence = vec![EvidenceRef {
+            message_id: id,
+            location: "body".into(),
+        }];
+        let decision = MessageDecision {
+            kinds: vec![EmailKind::General],
+            summary: "Tickets for a show".into(),
+            reason: "Tickets".into(),
+            external_access: AccessAssessment {
+                restricted: false,
+                reason: "No access credentials".into(),
+                evidence: evidence.clone(),
+            },
+            attention: ThreadAttentionDecision {
+                relevant_message_ids: vec![id],
+                evidence: evidence.clone(),
+                ..Default::default()
+            },
+            done: Some(DoneRequest {
+                reason: "The show is over".into(),
+                evidence,
+            }),
+            ..Default::default()
+        };
+        let response = json!({"choices":[{"message":{"content":json!({"result":{"step":"finish", "decision":decision}}).to_string()},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":8}});
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let llm = ResolvedLlm {
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+            url: format!("http://{address}/"),
+        };
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let status = || {
+            inventory(
+                &store,
+                account,
+                Utc::now() - ChronoDuration::days(30),
+                SpamScope::Exclude,
+            )
+            .into_iter()
+            .find(|row| row.update.id == id)
+            .map(|row| row.status)
+        };
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert!(!job.trigger.starts_with("revisit:"));
+        engine.process_agent_job(job, &llm, &day).await;
+        assert!(
+            store
+                .external_agent_decision(account, id)
+                .unwrap()
+                .done
+                .is_some(),
+            "the arrival run committed its answer"
+        );
+        assert_eq!(status(), Some(AttentionStatus::New), "and closed nothing");
+        store
+            .enqueue_agent_triage(account, id, "revisit:2026-10-20T00:00:00+00:00", false)
+            .unwrap();
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert!(job.trigger.starts_with("revisit:"));
+        engine.process_agent_job(job, &llm, &day).await;
+        assert_eq!(status(), Some(AttentionStatus::Done));
+        server.abort();
+    }
+    /// THE PAST-EVENT RE-CHECK, END TO END: the model's arrival answer
+    /// records a show that is over (and asks for done, which an arrival run
+    /// never applies); the real commit projects it into a ghost; the poll
+    /// tick's scheduler queues the re-check; the real worker runs it with the
+    /// same answer, and the message is done.
+    #[tokio::test]
+    async fn a_past_events_mail_is_rechecked_and_the_agent_closes_it() {
+        use crate::store::agent_triage::AgentTriageStore;
+        use crate::triage::decision::*;
+        use crate::types::AttentionStatus;
+        let (store, account) = store_at_cursor(Some(100));
+        let raw = fixture(
+            account,
+            "agent-past-show",
+            "From: tickets@venue.example\r\nSubject: Your tickets\r\n\r\nThe show was on Friday.",
+            false,
+        );
+        let parsed = ingest_with_rules(&raw, &Stage1Config::default(), Utc::now(), &[], |_| false);
+        let id = store.ingest_message(&parsed).unwrap();
+        // Authenticated, so the ghost it makes has an owner.
+        store.execute_batch_for_test(&format!("UPDATE messages SET auth_pass=1 WHERE id={id}"));
+        let evidence = vec![EvidenceRef {
+            message_id: id,
+            location: "body".into(),
+        }];
+        let start = Utc::now() - ChronoDuration::days(3);
+        let at = |t: DateTime<Utc>| {
+            Some(SupportedTime {
+                value: t.to_rfc3339(),
+                timezone: None,
+                source_message_id: id,
+                interpreted_relative: false,
+            })
+        };
+        let decision = MessageDecision {
+            kinds: vec![EmailKind::General],
+            summary: "Tickets for a show".into(),
+            reason: "Tickets".into(),
+            external_access: AccessAssessment {
+                restricted: false,
+                reason: "No access credentials".into(),
+                evidence: evidence.clone(),
+            },
+            attention: ThreadAttentionDecision {
+                relevant_message_ids: vec![id],
+                evidence: evidence.clone(),
+                ..Default::default()
+            },
+            records: vec![RecordProposal::Event {
+                title: "Show".into(),
+                start: at(start),
+                location: None,
+                end: at(start + ChronoDuration::hours(3)),
+                duration_estimate: None,
+                event_kind: EventRecordKind::Ticket,
+                commitment: EventCommitment::Committed,
+                change: EventChange::Created,
+                identity_refs: vec!["SEAT12".into()],
+                likelihood: None,
+                evidence: evidence.clone(),
+            }],
+            done: Some(DoneRequest {
+                reason: "The show is over".into(),
+                evidence,
+            }),
+            ..Default::default()
+        };
+        let response = json!({"choices":[{"message":{"content":json!({"result":{"step":"finish", "decision":decision}}).to_string()},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":8}});
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let llm = ResolvedLlm {
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+            url: format!("http://{address}/"),
+        };
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let status = || {
+            inventory(
+                &store,
+                account,
+                Utc::now() - ChronoDuration::days(30),
+                SpamScope::Exclude,
+            )
+            .into_iter()
+            .find(|row| row.update.id == id)
+            .map(|row| row.status)
+        };
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert!(!job.trigger.starts_with("revisit:"));
+        engine.process_agent_job(job, &llm, &day).await;
+        assert_eq!(
+            status(),
+            Some(AttentionStatus::New),
+            "arrival closes nothing"
+        );
+        let config = crate::config::RevisitPassConfig::default();
+        assert_eq!(
+            store
+                .schedule_past_event_revisits(account, Utc::now(), &config)
+                .unwrap(),
+            vec![id],
+            "the show ended more than a day ago"
+        );
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert!(job.trigger.starts_with("revisit:event_ended:"));
+        engine.process_agent_job(job, &llm, &day).await;
+        assert_eq!(status(), Some(AttentionStatus::Done));
         server.abort();
     }
     #[tokio::test]

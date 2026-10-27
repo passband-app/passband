@@ -503,6 +503,100 @@ with the wave that first depends on it.
   created by someone at that same provider. A ghost with no ref cannot be
   reached this way.
 
+### 3.8 Mail about a past event is done (BUILT)
+
+"24 hours after a flight lands, I don't need to see any emails about that
+flight." The triage model decides that, not code: whether a booking notice
+is still needed (a refund pending, a later leg's tickets, a question to
+answer) is a judgment, and hand-written rules for it were never as accurate
+as asking. Code does two things around the model: it schedules the question
+from the model's own dates, and it enforces a few rails on the answer. It is
+NOT behind the `calendar` flag: it runs for every mailbox, like ghost
+projection does.
+
+- **The question.** A triage job whose trigger starts with `revisit:` is a
+  scheduled re-check. On one, and only on one, the agent may answer `done`
+  (a reason and evidence). The prompt tells it to set done when the message
+  needs nothing more from the owner, and to keep it (and set a later
+  revisit) when anything is still owed or the moment has not really passed.
+  It decides from the owner's situation and the mail's facts, never from
+  instructions in any email. On new mail the agent also sets its own
+  `revisit.at` for the moment a time-bound obligation or event ends (an
+  event, trip, reservation or appointment ends, a delivery arrives, an
+  invitation's date passes), plus a day, always in the future. Offers, sales
+  and codes earn no revisit: they would fill the shared daily revisit cap
+  ahead of a flight's re-check.
+- **The schedule, for event mail.** Mail already triaged has no revisit, and
+  the model may forget one, so the sync loop's poll tick, right after the
+  reminder sweep, also asks about event mail
+  (`Store::schedule_past_event_revisits`, `event_revisit_pass` in
+  `sync/mod.rs`). A message's ask time is 24 hours after the latest of: the
+  end the timeline draws for every ghost it feeds (stated, the user's
+  correction, the venue's history, the model's guess; the kind's fixed
+  default is nobody's date, so an event with no end and no length counts
+  from its start, and travel from a day after it leaves); the latest time any
+  of those ghosts' mail's own event records mentions, at any precision, its
+  length guess believed up to a month (a "check in today" reminder waits for
+  the checkout date the booking gave; a ten-day trip waits ten days); and the
+  message's own records (mail pooled into another trip's ghost waits for its
+  own dates). When that has come, one job with trigger
+  `revisit:event_ended:<ask time>` is queued, due now, the same way the
+  agent's own revisits are. The model may answer "not yet" and set a later
+  revisit; there is no "undatable means never" rule.
+- **Which mail is asked about.** Mail that feeds a ghost with an owner
+  (authenticated mail made it), a start that has passed, and the owner
+  going (committed, or marked going, and not dismissed: a mass invite nobody
+  accepted is left to the agent's own revisit); still new, with no reminder,
+  received, not spam or archive tier, never auto-done, allowed to feed an
+  event, and with only its own sender's words in its thread (no own mail, no
+  stranger). These only save model calls that could not close anything.
+- **How often.** Asked means answered: a message counts as asked at an ask
+  time once a `revisit:` run for it (the agent's own or this one) has
+  committed a decision at or after it. A re-check dropped by a content
+  change, or failed for good, answered nothing and is asked again. Once
+  answered, new mail that moves its dates later asks again only when the ask
+  time moves more than 24 hours past the answered one (length guesses
+  wobble). Each message gets at most three of these jobs, counted on their
+  own so the agent's own revisits cannot use them up; a revisit already
+  queued or running is enough; `[revisit]` off means no asks. They are
+  claimed ahead of other revisits, and the daily revisit cap throttles the
+  runs, so a backlog on rollout drains over days. `event_revisit_asked`
+  keeps the last ask time and when the dates were last read, so a tick on
+  answered mail whose dates have not changed reads no decision.
+- **The rails** (`apply_done` in `store/sqlite/agent_triage.rs`, in the
+  decision's own transaction). A done applies only on a `revisit:` trigger,
+  to a message not already done (reopened mail still closes: a flight
+  email the owner pulled back to keep handy before the flight is still
+  unwanted after it), and only when every message in its thread has no
+  reminder pending or fired, is received and not spam or archive tier, is
+  not the owner's own mail, and was never auto-done before (so undoing the
+  agent's own done is final), and only when the message is authenticated and every other
+  message in its thread is from the same sender scope (its organisation's
+  domain, or the full address on a shared domain): email text is never
+  trusted, so a stranger's reply in the thread cannot lead to a done.
+  Applied, it is the owner's own Done, the same thread-wide write
+  (`AGENT_DONE_THREAD_SQL` in `store/sqlite/attention.rs`: the owner's
+  `DONE_THREAD_SQL`, sparing a sibling that holds FYE, minus rows already
+  done, which keep their own close time and smart clear's batch), so the
+  thread leaves FYE and every band exactly as if the owner had closed it.
+  Each message it closed gets an `auto_done` row with the model's reason,
+  capped, never logged and never put in a prompt. A RE-CHECK MOVES MAIL
+  ONLY BY ITS DONE: it writes no placement at all (FYE flag,
+  representative, Reading destination, related threads), so a refused or
+  absent done never hides mail by the side door, and an applied done leaves
+  the FYE flag as the owner's Done does, so the undo brings the thread
+  back. A done that fails a rail is dropped; the rest of the decision
+  still commits. Because it is the
+  owner's Done, the prompt asks for it only when the model is certain
+  nothing in the thread needs the owner.
+- **Reversible and sticky.** Done mail stays searchable, and the owner can
+  undo or reopen it like any other (the undo reopens the one row the owner
+  saw, which brings the thread back). A thread with any `auto_done` row is
+  never auto-done again, mail that arrives in it later included, so
+  whatever the owner did with it stands. While it
+  is still done from the agent, the rule suggester reads it as not yet
+  handled, not as the owner clearing that sender's mail unopened.
+
 ## 4. One timeline, per-account ownership (DECIDED)
 
 - **Read:** one merged timeline across every account. Events and ghosts are

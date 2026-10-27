@@ -434,7 +434,7 @@ enum ProductGuide {
 
         Signature and tracking:
         - The signature is set in Settings > Mail > Signature. It is added to new messages and replies as the draft starts, so it can be edited per email.
-        - "track opens" in the composer adds a tracking pixel to that one email. The default is Settings > Mail > Read tracking. A tracked message shows an "opened" chip once it has been opened.
+        - "track opens" in the composer adds a tracking pixel to that one email. The default is Settings > Mail > Read tracking. Once a tracked message has been opened, the thread shows "x opens" under its date; clicking it lists every open with its time, and says who the message went to.
         """
 
     private static let mailList = """

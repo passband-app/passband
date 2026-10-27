@@ -3784,19 +3784,27 @@ private struct MessageCard: View, Equatable {
                 Spacer(minLength: Space.s8)
                 spamChip
                 attentionChip
-                ReadReceiptMark(opens: opens)
                 Text(Fmt.dateTime(message.received_at))
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.inkFaintest)
             }
-            // WHO ELSE WAS ON IT, under the sender and indented past the avatar
-            // so the two read as one block: this message came FROM that person
-            // and went TO these. Renders nothing when the daemon sent no
-            // recipients, so an older daemon draws exactly the old header.
-            MessageRecipients(
-                message: message, previous: previousRecipients, me: me, compact: false
-            )
-            .padding(.leading, 25)
+            // The second line: recipients on the left, under the sender, and
+            // the open count on the right, under the date. Sharing a row keeps
+            // the first line exactly as tall as it always was.
+            HStack(alignment: .top, spacing: Space.s8) {
+                // WHO ELSE WAS ON IT, under the sender and indented past the
+                // avatar so the two read as one block: this message came FROM
+                // that person and went TO these. Renders nothing when the daemon
+                // sent no recipients, so an older daemon draws the old header.
+                MessageRecipients(
+                    message: message, previous: previousRecipients, me: me, compact: false
+                )
+                .padding(.leading, 25)
+                .layoutPriority(1)
+                Spacer(minLength: 0)
+                OpensLink(opens: opens, recipients: message.audience?.recipients, me: me)
+                    .fixedSize()
+            }
         }
     }
 
@@ -3823,11 +3831,13 @@ private struct MessageCard: View, Equatable {
                 .contactCard(for: message.senderString)
                 spamChip
                 attentionChip
-                ReadReceiptMark(opens: opens)
                 Text(captionTime)
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
             }
+            // Under the time, on the bubble's own side.
+            OpensLink(
+                opens: opens, recipients: message.audience?.recipients, me: me, compact: true)
             // THE SAME LINES A CARD GETS, one point smaller, and hung from the
             // same edge as the bubble under them: a block sitting under the
             // user's own right-aligned bubble but pinned to the left of the

@@ -233,6 +233,16 @@ pub struct RevisitRequest {
     pub at: DateTime<Utc>,
     pub reason: String,
 }
+/// The model's answer to a scheduled re-check: this message no longer needs
+/// anything from the owner. Only a `revisit:` job may apply it, and only past
+/// the store's rails (`store::sqlite::agent_triage::apply_done`); anywhere
+/// else it is recorded in the decision and ignored. `reason` is model-authored
+/// and untrusted: never logged, never put in a prompt.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DoneRequest {
+    pub reason: String,
+    pub evidence: Vec<EvidenceRef>,
+}
 
 decision_enum!(EventRecordKind {
     Other,
@@ -396,6 +406,10 @@ pub struct MessageDecision {
     pub rule_exceptions: Vec<RuleException>,
     pub notification: NotificationAdvice,
     pub revisit: Option<RevisitRequest>,
+    /// Arrived after decisions were already stored, so it defaults (see
+    /// `reading_kind`).
+    #[serde(default)]
+    pub done: Option<DoneRequest>,
 }
 
 #[cfg(test)]
@@ -483,6 +497,16 @@ mod tests {
         assert!(identity_refs.is_empty());
         assert_eq!(likelihood, None);
         assert_eq!(evidence.len(), 1);
+    }
+
+    /// Reconcile re-reads every stored decision_json, so a decision written
+    /// before `done` existed must still deserialize, with no done.
+    #[test]
+    fn a_decision_without_done_still_deserializes() {
+        let mut old = serde_json::to_value(MessageDecision::default()).unwrap();
+        old.as_object_mut().unwrap().remove("done").unwrap();
+        let decision: MessageDecision = serde_json::from_value(old).unwrap();
+        assert_eq!(decision.done, None);
     }
 
     #[test]

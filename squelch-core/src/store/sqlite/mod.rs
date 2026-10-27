@@ -1649,6 +1649,15 @@ impl Store for SqliteStore {
         self.fire_due_reminders(account_id, now)
     }
 
+    fn schedule_past_event_revisits(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        policy: &crate::config::RevisitPassConfig,
+    ) -> Result<Vec<i64>> {
+        self.schedule_past_event_revisits(account_id, now, policy)
+    }
+
     fn resolve_sender(&self, account_id: AccountId, sender_addr: &str) -> Result<usize> {
         self.resolve_sender(account_id, sender_addr)
     }

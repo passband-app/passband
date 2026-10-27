@@ -1927,6 +1927,51 @@ AFTER DELETE ON messages BEGIN
     WHERE account_id = OLD.account_id AND supplier_message_id = OLD.id;
     DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND message_id = OLD.id;
 END;
+-- THE AUTO-DONE LEDGER (docs/CALENDAR.md §3.8): one row per message the
+-- daemon, not the owner, marked done, written in the same transaction as the
+-- status. `source` says what did it: 'agent_revisit' is the triage agent's
+-- `done` on a scheduled re-check, applied past the rails in
+-- `agent_triage::apply_done`. A message with a row here is never auto-done
+-- again, so an owner who reopens or undoes one keeps it; the row stays when
+-- they do. `reason` is MODEL-AUTHORED and UNTRUSTED, capped on the way in:
+-- never logged, never placed in a prompt. While the triage row's
+-- `resolved_at` is still `done_at`, the done is the daemon's and not the
+-- owner's (the rule suggester reads it so).
+CREATE TABLE IF NOT EXISTS auto_done (
+    account_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    source     TEXT NOT NULL,
+    reason     TEXT NOT NULL,
+    done_at    TEXT NOT NULL,
+    PRIMARY KEY(account_id, message_id)
+);
+-- The row goes with its message, as the ghost sources do.
+CREATE TRIGGER IF NOT EXISTS auto_done_follows_message
+AFTER DELETE ON messages BEGIN
+    DELETE FROM auto_done WHERE account_id = OLD.account_id AND message_id = OLD.id;
+END;
+-- THE PAST-EVENT RE-CHECK LEDGER (docs/CALENDAR.md §3.8): one row per message
+-- the poll tick queued a `revisit:event_ended:<ask_at>` triage job for
+-- (`SqliteStore::schedule_past_event_revisits`), or whose ask a `revisit:` run
+-- already answered. `ask_at` is the last ask time queued or answered, computed
+-- from the model's own event dates. Whether it was ANSWERED is read from
+-- `agent_triage_runs` (an `applied` run of a `revisit:` job at or after it),
+-- not from this row: a dropped or failed job is asked again. `asked_at` is
+-- when its dates were last read, so a tick on answered mail whose ghosts and
+-- source decisions have not changed since reads no decision JSON for it. Ids
+-- and times only.
+CREATE TABLE IF NOT EXISTS event_revisit_asked (
+    account_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    ask_at     TEXT NOT NULL,
+    asked_at   TEXT NOT NULL,
+    PRIMARY KEY(account_id, message_id)
+);
+-- The row goes with its message, as the auto-done ledger's does.
+CREATE TRIGGER IF NOT EXISTS event_revisit_asked_follows_message
+AFTER DELETE ON messages BEGIN
+    DELETE FROM event_revisit_asked WHERE account_id = OLD.account_id AND message_id = OLD.id;
+END;
 
 -- GOOGLE CALENDAR, READ ONLY (docs/CALENDAR.md §8, "Calendar sync"). Written
 -- only by the calendar sync loop, read only by the human door's timeline:

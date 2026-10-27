@@ -18,7 +18,9 @@ use super::*;
 /// unopened as "cleared without opening" and tells its model so in trusted
 /// context. A row smart clear resolved (`resolved_by` set) was not cleared by
 /// anybody, so it is reported as the open row it was until the owner says
-/// otherwise.
+/// otherwise. Likewise a row the triage agent's re-check closed (the
+/// `auto_done` ledger) and nobody has touched since (its `resolved_at` is
+/// still the ledger's `done_at`) reads as `new`: the owner did not clear it.
 ///
 /// NOT KEPT-CLOSE MAIL, by `sealed_mail_sql!` and not by the retired
 /// `sensitivity` column this statement used to read alone: the subjects here
@@ -27,7 +29,11 @@ use super::*;
 /// access is still unassessed stays out too.
 pub(crate) const SENDER_RULE_DIGEST_SQL: &str = concat!(
     "SELECT m.subject, t.tier,
-            CASE WHEN t.resolved_by IS NOT NULL THEN 'open' ELSE t.status END,
+            CASE WHEN t.resolved_by IS NOT NULL THEN 'open'
+                 WHEN t.status = 'done' AND EXISTS(SELECT 1 FROM auto_done l
+                     WHERE l.account_id = t.account_id AND l.message_id = t.message_id
+                       AND l.done_at = t.resolved_at)
+                 THEN 'new' ELSE t.status END,
             t.opened_at IS NOT NULL, t.category
      FROM messages m INDEXED BY idx_messages_from_nocase
      JOIN triage t ON t.message_id = m.id

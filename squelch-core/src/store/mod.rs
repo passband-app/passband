@@ -1161,7 +1161,9 @@ pub struct SenderDigestRow {
     pub subject: String,
     /// Triage tier (`signal`, `noise`, ...).
     pub tier: String,
-    /// Attention status: `new`, `open` or `done`.
+    /// Attention status: `new`, `open` or `done`. Mail the triage agent
+    /// marked done on a re-check (the `auto_done` ledger), untouched since,
+    /// is `new`: the owner did not clear it.
     pub status: String,
     /// The owner opened it in Passband.
     pub opened: bool,
@@ -2278,6 +2280,22 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// matches — and sealed rows are excluded in SQL. Called from the sync poll
     /// loop; nothing else should fire reminders.
     fn fire_due_reminders(&self, account_id: AccountId, now: DateTime<Utc>) -> Result<Vec<i64>>;
+
+    /// THE PAST-EVENT RE-CHECK (docs/CALENDAR.md §3.8): queue a triage
+    /// revisit (`revisit:event_ended:<ask time>`) for each message about a
+    /// trip, ticket or booking whose ask time, a day after the latest date
+    /// the model gave for it, has come, so the agent can decide whether it is
+    /// done. Returns the message ids queued. Schedules only: whether mail is
+    /// done is the model's answer, past the rails in the decision commit.
+    /// Honours `policy` (off) and its own cap of three asks a message, and
+    /// skips a message with a revisit already queued or running. Called
+    /// from the sync poll loop.
+    fn schedule_past_event_revisits(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        policy: &crate::config::RevisitPassConfig,
+    ) -> Result<Vec<i64>>;
 
     /// Resolve EVERY still-open triage row from one sender address, returning how
     /// many moved. Case-insensitive on `from_addr`; sealed rows excluded in SQL,

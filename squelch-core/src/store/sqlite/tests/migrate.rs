@@ -2993,3 +2993,24 @@ fn refresh_statistics_analyzes_the_real_tables_and_optimize_keeps_up() {
         "every row was counted, so `account_id = ?` is known to match them all"
     );
 }
+
+#[test]
+fn migrate_adds_skipped_to_a_prerelease_event_revisit_ledger() {
+    // A database a pre-release build opened has the past-event ledger without
+    // `skipped`; without it every scheduler tick would fail its query.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE event_revisit_asked(
+             account_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+             ask_at TEXT NOT NULL, asked_at TEXT NOT NULL,
+             PRIMARY KEY(account_id, message_id));
+         INSERT INTO event_revisit_asked VALUES(1,1,'a','b');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let skipped: i64 = conn
+        .query_row("SELECT skipped FROM event_revisit_asked", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(skipped, 0);
+}

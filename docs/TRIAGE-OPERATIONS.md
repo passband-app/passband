@@ -231,7 +231,10 @@ decides; the owner can always undo it. The re-check is asked only about events
 the owner is going to, at most three times a message under its own count (not
 the lifetime limit), counts as asked only once a `revisit:` run has committed
 an answer, and is claimed ahead of other revisits under the shared daily cap.
-Only time-bound obligations and events earn the model's own revisit.
+Only moments that end a message's use (an event, trip, reservation or
+appointment ends, a delivery arrives, an invitation's date passes) earn the
+model's own revisit. A `revisit:` run moves mail only by its done: it writes
+no placement, so a revisit cannot lift mail into FYE or change its actions.
 TODO: expired promotions (a sale, offer or promo code that has ended) do not
 earn a revisit yet: they are about half of a mailbox's decisions and would
 push a landed flight's re-check back by days under the shared 50/day cap; do

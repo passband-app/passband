@@ -818,6 +818,18 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // zoned local time, so each is rebuilt once from its stored decisions.
     rebuild_ghosts_for_zoned_times(conn);
 
+    // `skipped` came after the table's first form; a database a pre-release
+    // build opened has the table without it. Guarded, like the rest, on the
+    // table existing.
+    if tables_exist(conn, &["event_revisit_asked"])? {
+        add_column_if_missing(
+            conn,
+            "event_revisit_asked",
+            "skipped",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+
     // Guarded on table existence — migration unit tests build partial schemas.
     if !tables_exist(conn, &["triage", "deadlines", "messages"])? {
         return Ok(());

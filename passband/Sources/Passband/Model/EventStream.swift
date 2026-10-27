@@ -21,6 +21,9 @@
 // header and NOWHERE else: never in the URL, never in an error message.
 
 import Foundation
+#if os(iOS)
+    import UIKit
+#endif
 
 // MARK: - SSE framing
 
@@ -150,9 +153,14 @@ final class EventStream {
     private static let resourceTimeout: TimeInterval = 24 * 60 * 60
 
     private let resident = ResidentTask()
-    /// When the live connection opened (its 200 arrived). Frames for events
-    /// older than this are the replay of what happened while the app was away.
+    /// When the live connection opened (its 200 arrived), moved up to the
+    /// moment the app last came back to the foreground. Frames for events
+    /// older than this are the replay of what happened while the app was away,
+    /// whether the socket was rebuilt or survived the suspension.
     private var connectedAt = Date.distantFuture
+    #if os(iOS)
+        nonisolated(unsafe) private var foregroundObserver: NSObjectProtocol?
+    #endif
     private var cursor: Int?
     private var cursorLoaded = false
 
@@ -174,7 +182,23 @@ final class EventStream {
         self.accountId = accountId
         self.settings = settings
         self.cursorKey = AccountIndex.scopedKey(Self.cursorKeyBase, accountId)
+        #if os(iOS)
+            foregroundObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.connectedAt != .distantFuture else { return }
+                    self.connectedAt = Date()
+                }
+            }
+        #endif
     }
+
+    #if os(iOS)
+        deinit {
+            if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
+        }
+    #endif
 
     /// Start following the feed. Idempotent.
     func start() {
@@ -304,13 +328,24 @@ final class EventStream {
             // is what keeps this stream from having an opinion about which
             // account is live.
             AppStore.shared.noteLiveEvent(event, accountId: accountId)
-            // NO BANNER FOR THE PHONE'S BACKLOG. While the app was closed each
-            // of these reached the lock screen as a push; replayed now, they
-            // would pop up again the moment the app opens. The board already
-            // shows them. The Mac has no push behind it, so its catch-up
-            // banners are the only word it gets and they stay.
             #if os(iOS)
-                if EventBanner.isBacklog(createdAt: event.created_at, connectedAt: connectedAt) {
+                // ALREADY TOLD: a push for this mail was shown while the app
+                // was open, or tapped (which takes it out of Notification
+                // Center, where willPresent's own check would look).
+                if ToldEvents.contains(EventBanner.eventIdentity(account: accountId, event: event.id)) {
+                    return
+                }
+                // NO BANNER FOR THE BACKLOG, where pushes stand behind it:
+                // while the app was away each of these reached the lock screen
+                // as a push, and replayed now they would pop up again as the
+                // app opens. Only for an account this phone is registered for
+                // push with; without that (notifications refused, a daemon with
+                // no relay, a failed registration) the catch-up banner is the
+                // only word the reader gets, and it stays. The Mac has no push
+                // behind it at all, so its catch-up banners all stay.
+                if PushRegistration.shared.covers(accountId),
+                    EventBanner.isBacklog(createdAt: event.created_at, connectedAt: connectedAt)
+                {
                     return
                 }
             #endif

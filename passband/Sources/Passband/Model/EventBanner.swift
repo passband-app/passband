@@ -145,6 +145,11 @@ enum EventBanner {
         return nil
     }
 
+    /// The same identity for an event off the feed, before any notification.
+    static func eventIdentity(account: UUID, event: Int) -> String {
+        "\(account.uuidString.lowercased()):\(event)"
+    }
+
     /// BACKLOG: an event that happened before the feed connected, replayed
     /// from the cursor the app last saved. On the phone a push already put it
     /// on the lock screen while the app was closed, so bannering it again the
@@ -160,12 +165,17 @@ enum EventBanner {
     /// RFC 3339, with or without fractional seconds (the daemon writes both
     /// shapes across versions).
     static func eventDate(_ text: String) -> Date? {
-        let plain = ISO8601DateFormatter()
-        if let date = plain.date(from: text) { return date }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: text)
+        plainStamp.date(from: text) ?? fractionalStamp.date(from: text)
     }
+
+    /// Made once: a reconnect's replay parses a stamp per frame on the main
+    /// actor. ISO8601DateFormatter is safe to share for parsing.
+    nonisolated(unsafe) private static let plainStamp = ISO8601DateFormatter()
+    nonisolated(unsafe) private static let fractionalStamp: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     static func shouldPresentForeground(appActive: Bool, windowVisible: Bool, isTest: Bool, isAuth: Bool) -> Bool {
         isTest || isAuth || !(appActive && windowVisible)

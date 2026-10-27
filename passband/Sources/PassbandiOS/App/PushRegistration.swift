@@ -30,6 +30,11 @@ final class PushRegistration {
         timeout: 15, resource: 30,
         cachePolicy: .reloadIgnoringLocalCacheData, emptyHeaders: true)
     private var token: String?
+    /// Accounts whose daemon accepted this device's token this run: the ones a
+    /// push stands behind, so the feed can leave their backlog unbannered.
+    private var covered: Set<UUID> = []
+
+    func covers(_ account: UUID) -> Bool { token != nil && covered.contains(account) }
     private var syncing = false
     private var needsAnotherSync = false
 
@@ -92,6 +97,7 @@ final class PushRegistration {
 
     func registrationFailed() {
         token = nil
+        covered.removeAll()
     }
 
     /// Tell one account's daemon to stop pushing to this device. Called on the
@@ -106,7 +112,7 @@ final class PushRegistration {
     /// the token gone.
     func unregister(_ settings: ConnectionSettings) async {
         guard let token else { return }
-        await post("/client/devices/unregister", body: ["token": token], with: settings)
+        _ = await post("/client/devices/unregister", body: ["token": token], with: settings)
     }
 
     private func syncAllAccounts() async {
@@ -136,19 +142,25 @@ final class PushRegistration {
             "tag": tag.uuidString,
         ]
         if let env = APNsEnvironment.current { body["environment"] = env.rawValue }
-        await post("/client/devices", body: body, with: settings)
+        if await post("/client/devices", body: body, with: settings) {
+            covered.insert(tag)
+        } else {
+            covered.remove(tag)
+        }
     }
 
     /// POST one authenticated JSON body to the human door. Neither the daemon
     /// URL nor the capability token reaches a log, here or in an error.
+    /// True when the daemon answered 2xx.
+    @discardableResult
     private func post(_ path: String, body: [String: String], with settings: ConnectionSettings)
-        async
+        async -> Bool
     {
         var base = settings.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }
         guard let url = URL(string: base + path),
             let encoded = try? JSONSerialization.data(withJSONObject: body)
-        else { return }
+        else { return false }
 
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.httpMethod = "POST"
@@ -157,6 +169,9 @@ final class PushRegistration {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.identifyClient()
         request.httpBody = encoded
-        _ = try? await session.data(for: request)
+        guard let (_, response) = try? await session.data(for: request),
+            let http = response as? HTTPURLResponse
+        else { return false }
+        return (200..<300).contains(http.statusCode)
     }
 }

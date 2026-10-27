@@ -36,9 +36,16 @@
 //!    purge list scores with, is at or over [`SMART_CLEAR_SENDER_SCORE`], and
 //!    the owner never opened this message, which arrived after opens began
 //!    to be recorded.
-//! 4. `stale_promo`: a promotion, two weeks old, never opened, that arrived
-//!    after opens began to be recorded.
-//! 5. `expired`, and the model's own `event_passed` / `offer_ended`: rows that
+//! 4. `skimmed_sender`: a promotion from a sender whose mail the owner opens
+//!    and closes in a glance (see [`crate::triage::sender_fatigue::habitually_skimmed`]),
+//!    and this message was never opened or only glanced at too. Unlike the
+//!    score it needs no age of ledger: a look of two seconds is a thing the
+//!    owner DID, recorded the moment it happened, where "never opened" only
+//!    means something once there has been time to open.
+//! 5. `stale_promo`: a promotion, a week old, never opened in Passband. Mail
+//!    from before opens were recorded counts: a promotion a week old that is
+//!    still sitting in Reading has had its week, wherever it was read.
+//! 6. `expired`, and the model's own `event_passed` / `offer_ended`: rows that
 //!    none of the above took and whose decision has no date to check. The
 //!    model is asked only about those, so the capped pass is never spent on
 //!    mail that is going anyway.
@@ -86,10 +93,16 @@ use std::collections::HashMap;
 /// so a newsletter that is merely behind does not qualify.
 pub const SMART_CLEAR_SENDER_SCORE: u8 = 75;
 
-/// How old an unopened promotion has to be before it is stale. Two weeks
-/// outlasts nearly every sale, and is long enough that "has not opened it" is
-/// a decision and not a busy week.
-pub const STALE_PROMO_DAYS: i64 = 14;
+/// How old an unopened promotion has to be before it is stale. A week
+/// outlasts most sales, and every promotion that states its end date is
+/// judged by that date first, so this only reaches the ones that do not say.
+pub const STALE_PROMO_DAYS: i64 = 7;
+
+/// How long a look at THIS message still counts as a glance, for
+/// `skimmed_sender`. The same three seconds the fatigue score calls a brief
+/// look. A look the client never reported on (no dwell, no click) is not a
+/// glance: it is unknown, and the row is left alone.
+pub const GLANCE_MS: u64 = 3_000;
 
 /// Mail younger than this is never cleared, by any reason. Mail that arrived
 /// today has not had its chance to be read, whatever its sender's record.
@@ -136,15 +149,17 @@ pub enum ClearReason {
     OfferEnded,
     Expired,
     IgnoredSender,
+    SkimmedSender,
     StalePromo,
 }
 
 impl ClearReason {
-    pub const ALL: [ClearReason; 5] = [
+    pub const ALL: [ClearReason; 6] = [
         ClearReason::EventPassed,
         ClearReason::OfferEnded,
         ClearReason::Expired,
         ClearReason::IgnoredSender,
+        ClearReason::SkimmedSender,
         ClearReason::StalePromo,
     ];
 
@@ -154,6 +169,7 @@ impl ClearReason {
             ClearReason::OfferEnded => "offer_ended",
             ClearReason::Expired => "expired",
             ClearReason::IgnoredSender => "ignored_sender",
+            ClearReason::SkimmedSender => "skimmed_sender",
             ClearReason::StalePromo => "stale_promo",
         }
     }
@@ -198,6 +214,11 @@ pub struct RowFacts<'a> {
     pub thread_attention: Option<&'a ThreadAttentionDecision>,
     pub received_at: DateTime<Utc>,
     pub opened: bool,
+    /// What a client reported of the owner's look at this message: how long
+    /// it was open, and links followed. Zero and zero for unopened mail, and
+    /// for an open no client reported on.
+    pub dwell_ms: u64,
+    pub link_clicks: u32,
     /// Kept close: auth mail, restricted mail, or a legacy sealed row. Decided
     /// by the store's one definition (`sealed_mail_sql!`), not here.
     pub sealed: bool,
@@ -214,6 +235,16 @@ pub struct RowFacts<'a> {
     pub sender_protected: bool,
     /// The sender's fatigue score, when the sender was measured.
     pub sender_score: Option<u8>,
+    /// The sender's opened mail is habitually glanced at and closed
+    /// ([`crate::triage::sender_fatigue::habitually_skimmed`]), when the sender was measured.
+    pub sender_skimmed: bool,
+}
+
+/// Did the owner leave THIS message alone, or look at it only in passing?
+/// Unopened, or opened for under [`GLANCE_MS`] with no link followed. An open
+/// with nothing reported is neither: nobody knows how long it was read.
+fn only_glanced(row: &RowFacts<'_>) -> bool {
+    !row.opened || (row.link_clicks == 0 && row.dwell_ms > 0 && row.dwell_ms < GLANCE_MS)
 }
 
 /// Is this mail ALSO a record: a bill, a receipt, a delivery, a financial
@@ -410,16 +441,24 @@ fn weigh(row: &RowFacts<'_>, now: DateTime<Utc>) -> Judged {
     {
         return Judged::Clear(ClearReason::IgnoredSender);
     }
+    // A SENDER THE OWNER GLANCES AT AND CLOSES. Promotions only: a
+    // newsletter skimmed for its headline is still being read. And the
+    // message must not be the exception (opened and actually read, or a link
+    // followed). No ledger-age gate, on purpose: the evidence is looks the
+    // owner took, not mail they have not got to yet.
+    if row.sender_skimmed && row.decision.is_reading_promotion() && only_glanced(row) {
+        return Judged::Clear(ClearReason::SkimmedSender);
+    }
     // CONTENT IS NEVER STALE. An essay somebody subscribed to is as good in a
     // month; only a promotion goes off.
     //
-    // AND "NEVER OPENED" HAS TO BE KNOWABLE. Opens are recorded from the day
-    // the open ledger starts. Mail that arrived before it (the whole backfill
-    // of a new account) has no open on record because none could have been
-    // recorded, and that silence is not the owner ignoring it.
+    // NO LEDGER GATE HERE. Unlike `ignored_sender`, this is not a claim about
+    // the owner's habits. It is that a promotion a week old with no date
+    // still ahead has run its course, and the owner pressed "clean this out".
+    // Mail from before opens were recorded may have been read elsewhere; a
+    // read promotion a week on is just as finished.
     if row.decision.is_reading_promotion()
         && !row.opened
-        && !row.before_open_ledger
         && row.received_at <= now - Duration::days(STALE_PROMO_DAYS)
     {
         return Judged::Clear(ClearReason::StalePromo);
@@ -944,6 +983,21 @@ pub struct ModelPass {
     pub usage: Option<Usage>,
     /// The model answered. False for a refusal, a timeout or an error.
     pub answered: bool,
+    /// Why it did not, from a closed set the client can put in words:
+    /// `refused`, `timeout`, `discarded` (it answered, and the answer failed
+    /// the checks in [`read_verdicts`]), or `error` (anything else: an HTTP
+    /// failure, a truncated or unparseable answer). `None` when it answered.
+    pub failure: Option<&'static str>,
+}
+
+/// The closed `failure` value for a provider failure kind. The two kinds
+/// [`read_verdicts`] refuses a pass with are `discarded`; every other kind is
+/// a call that went wrong.
+fn failure_of(kind: &str) -> &'static str {
+    match kind {
+        "ungrounded_yeses" | "implausible_all_expired" => "discarded",
+        _ => "error",
+    }
 }
 
 /// The raw call, distinguishing refusal from failure for tests.
@@ -978,30 +1032,35 @@ pub async fn judge_at(
 /// Ask which rows have expired. INFALLIBLE and BOUNDED: every non-answer is an
 /// empty set within [`MODEL_BUDGET`], with whatever usage was reported.
 pub async fn judge(client: &SmartClearClient, now: DateTime<Utc>, rows: &[ModelRow]) -> ModelPass {
-    let failed = |usage| ModelPass {
+    let failed = |usage, why: &'static str| ModelPass {
         verdicts: HashMap::new(),
         usage,
         answered: false,
+        failure: Some(why),
     };
     match tokio::time::timeout(MODEL_BUDGET, judge_at(client, now, rows)).await {
         Ok(Ok(LlmOutcome::Ok(verdicts, usage))) => ModelPass {
             verdicts,
             usage,
             answered: true,
+            failure: None,
         },
-        Ok(Ok(LlmOutcome::Refused(usage))) => failed(usage),
+        Ok(Ok(LlmOutcome::Refused(usage))) => {
+            eprintln!("squelch: smart clear model pass refused");
+            failed(usage, "refused")
+        }
         Ok(Ok(LlmOutcome::Failed(kind, usage))) => {
             eprintln!("squelch: smart clear model pass failed ({kind})");
-            failed(usage)
+            failed(usage, failure_of(&kind))
         }
         Ok(Err(e)) => {
             eprintln!("squelch: smart clear model pass errored ({e})");
-            failed(None)
+            failed(None, "error")
         }
         Err(_) => {
             let secs = MODEL_BUDGET.as_secs();
             eprintln!("squelch: smart clear model pass exceeded its {secs}s budget");
-            failed(None)
+            failed(None, "timeout")
         }
     }
 }
@@ -1071,6 +1130,9 @@ mod tests {
             before_open_ledger: false,
             sender_protected: false,
             sender_score: None,
+            dwell_ms: 0,
+            link_clicks: 0,
+            sender_skimmed: false,
         }
     }
 
@@ -1284,11 +1346,11 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_promo_is_two_weeks_old_unopened_and_a_promotion() {
+    fn a_stale_promo_is_a_week_old_unopened_and_a_promotion() {
         let d = promo();
-        assert_eq!(stored_reason(&row(&d, 13), now()), None, "not old enough");
+        assert_eq!(stored_reason(&row(&d, 6), now()), None, "not old enough");
         assert_eq!(
-            stored_reason(&row(&d, 14), now()),
+            stored_reason(&row(&d, 7), now()),
             Some(ClearReason::StalePromo)
         );
         let mut opened = row(&d, 20);
@@ -1735,13 +1797,71 @@ mod tests {
     }
 
     #[test]
-    fn mail_from_before_the_open_ledger_is_never_stale() {
+    fn a_promotion_from_before_the_open_ledger_still_goes_stale() {
+        // A week in Reading is a week, whether or not opens were recorded.
         let d = promo();
         let mut r = row(&d, 20);
         r.before_open_ledger = true;
-        assert_eq!(stored_reason(&r, now()), None);
-        r.before_open_ledger = false;
         assert_eq!(stored_reason(&r, now()), Some(ClearReason::StalePromo));
+    }
+
+    #[test]
+    fn a_skimmed_senders_promotions_go_whether_unopened_or_glanced_at() {
+        let d = promo();
+        // Two days old: too young to be stale, old enough to be judged.
+        let mut r = row(&d, 2);
+        assert_eq!(stored_reason(&r, now()), None);
+        r.sender_skimmed = true;
+        assert_eq!(stored_reason(&r, now()), Some(ClearReason::SkimmedSender));
+        // No ledger gate: the sender's looks are evidence from day one.
+        r.before_open_ledger = true;
+        assert_eq!(stored_reason(&r, now()), Some(ClearReason::SkimmedSender));
+        // Opened for a second and a half: a glance, so it goes.
+        r.opened = true;
+        r.dwell_ms = 1_500;
+        assert_eq!(stored_reason(&r, now()), Some(ClearReason::SkimmedSender));
+    }
+
+    #[test]
+    fn a_skimmed_sender_keeps_the_one_the_owner_read_or_clicked() {
+        let d = promo();
+        let mut r = row(&d, 2);
+        r.sender_skimmed = true;
+        r.opened = true;
+        r.dwell_ms = 20_000;
+        assert_eq!(stored_reason(&r, now()), None, "read properly");
+        r.dwell_ms = 1_000;
+        r.link_clicks = 1;
+        assert_eq!(stored_reason(&r, now()), None, "followed a link");
+        r.link_clicks = 0;
+        r.dwell_ms = 0;
+        assert_eq!(stored_reason(&r, now()), None, "a look nobody reported");
+    }
+
+    #[test]
+    fn a_skimmed_sender_only_loses_promotions() {
+        let d = MessageDecision::default();
+        assert!(!d.is_reading_promotion());
+        let mut r = row(&d, 2);
+        r.sender_skimmed = true;
+        assert_eq!(stored_reason(&r, now()), None);
+    }
+
+    #[test]
+    fn a_skimmed_sender_is_still_bound_by_every_guard() {
+        let d = promo();
+        let mut r = row(&d, 2);
+        r.sender_skimmed = true;
+        r.sender_protected = true;
+        assert_eq!(stored_reason(&r, now()), None, "a kept or known sender");
+        r.sender_protected = false;
+        r.received_at = now() - Duration::hours(3);
+        assert_eq!(stored_reason(&r, now()), None, "under a day old");
+        let mut running = promo();
+        running.ends = Some(time("2026-10-31"));
+        let mut r = row(&running, 2);
+        r.sender_skimmed = true;
+        assert_eq!(stored_reason(&r, now()), None, "the offer is still on");
     }
 
     #[test]

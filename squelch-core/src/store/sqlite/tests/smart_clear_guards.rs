@@ -8,6 +8,7 @@ use super::reading_senders::{
 use super::smart_clear::{apply, content, promo, row, time};
 use super::support::*;
 use crate::store::agent_triage::AgentTriageStore;
+use crate::store::sqlite::smart_clear::SenderMark;
 use crate::triage::decision::{
     AuthKind, EvidenceRef, MessageDecision, RecordProposal, ThreadAttentionDecision,
 };
@@ -494,7 +495,13 @@ fn a_score_from_the_scan_does_not_outrank_what_the_owner_did_since() {
         let scan = store
             .smart_clear_scan(acct, Utc::now(), &inventory, 200)
             .unwrap();
-        assert_eq!(scan.sender_scores.get(NEWS), Some(&Some(77)));
+        assert_eq!(
+            scan.sender_scores.get(NEWS),
+            Some(&SenderMark {
+                score: Some(77),
+                skimmed: false
+            })
+        );
         store
             .acknowledge_agent_message(acct, first, Utc::now())
             .unwrap();
@@ -943,10 +950,10 @@ fn a_batch_whose_detail_cannot_be_read_is_not_marked_undone() {
     );
 }
 
-/// "Never opened" says nothing about mail that arrived before opens were
-/// recorded. On a new account the whole backfill is such mail.
+/// A promotion a week old is stale whether or not opens were being recorded
+/// when it arrived: it has had its week, wherever it was read.
 #[test]
-fn a_promotion_from_before_the_open_ledger_is_not_stale() {
+fn a_promotion_from_before_the_open_ledger_still_goes_stale() {
     let (store, acct) = store();
     // The ledger began three weeks ago.
     let ledger = (Utc::now() - Duration::days(21)).to_rfc3339();
@@ -959,8 +966,63 @@ fn a_promotion_from_before_the_open_ledger_is_not_stale() {
     let backfilled = promo(&store, acct, "backfilled", 25);
     let since = promo(&store, acct, "since", 20);
     let outcome = apply(&store, acct, &[]);
-    assert_eq!(outcome.cleared, [(since, ClearReason::StalePromo)]);
-    assert_eq!(row(&store, backfilled).0, "new");
+    let mut cleared = outcome.cleared.clone();
+    cleared.sort();
+    let mut want = vec![
+        (backfilled, ClearReason::StalePromo),
+        (since, ClearReason::StalePromo),
+    ];
+    want.sort();
+    assert_eq!(cleared, want);
+}
+
+/// THE POINT OF `skimmed_sender`: on a ledger two days old, with no score for
+/// anyone, a sender whose mail the owner opens and shuts in a second loses
+/// its promotions, unopened ones included. A sender read properly does not.
+#[test]
+fn a_skimmed_senders_promotions_clear_on_a_young_ledger() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let ledger = (now - Duration::days(2)).to_rfc3339();
+    store
+        .set_app_setting(acct, OPEN_LEDGER_SINCE_KEY, &ledger)
+        .unwrap();
+    store
+        .set_app_setting(acct, DWELL_LEDGER_SINCE_KEY, &ledger)
+        .unwrap();
+    let seed = |key: &str, from: &str, dwell: Option<u64>| {
+        let id = mail(&store, acct, key, from, 2);
+        into_reading(&store, acct, id);
+        if let Some(ms) = dwell {
+            store
+                .acknowledge_agent_message(acct, id, now - Duration::hours(30))
+                .unwrap();
+            store.record_message_attention(acct, id, ms, 0).unwrap();
+        }
+        id
+    };
+    let glanced: Vec<i64> = (0..3)
+        .map(|i| seed(&format!("glance{i}"), "deals@skim.example", Some(1_000)))
+        .collect();
+    let unopened = seed("unopened", "deals@skim.example", None);
+    let read: Vec<i64> = (0..3)
+        .map(|i| seed(&format!("read{i}"), "deals@loved.example", Some(60_000)))
+        .collect();
+    let loved_unopened = seed("loved", "deals@loved.example", None);
+
+    let outcome = apply(&store, acct, &[]);
+    let mut cleared = outcome.cleared.clone();
+    cleared.sort();
+    let mut want: Vec<(i64, ClearReason)> = glanced
+        .iter()
+        .chain([&unopened])
+        .map(|id| (*id, ClearReason::SkimmedSender))
+        .collect();
+    want.sort();
+    assert_eq!(cleared, want);
+    for id in read.iter().chain([&loved_unopened]) {
+        assert_eq!(row(&store, *id).0, "new", "a sender read properly stays");
+    }
 }
 
 /// The rule suggester's digest hands SUBJECTS to a model. Auth and restricted

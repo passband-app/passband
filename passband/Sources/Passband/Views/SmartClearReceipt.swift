@@ -53,8 +53,8 @@ struct SmartClearReceiptCard: View {
                 breakdown
                     .padding(.top, Space.s12)
             }
-            if receipt.modelMissed {
-                Text(SmartClearCopy.modelMissedNote)
+            if let note = receipt.modelNote {
+                Text(note)
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
                     .padding(.top, Space.s8)

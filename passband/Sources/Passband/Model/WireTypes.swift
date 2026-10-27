@@ -1120,6 +1120,9 @@ struct SmartClearResult: Decodable, Sendable, Hashable {
     var message_ids: [Int]
     /// Whether the model pass ran: `ok`, or one of the `skipped_` codes.
     var model: String?
+    /// With `skipped_failed`, why: `refused`, `timeout`, `discarded` or
+    /// `error`. nil otherwise, and on a daemon that does not say.
+    var model_detail: String?
     /// One per cleared message, for the full list. nil on a daemon that
     /// does not send them: the list is then not offered, never faked.
     var rows: [Row]?
@@ -1143,7 +1146,7 @@ struct SmartClearResult: Decodable, Sendable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case batch_id, cleared, senders, by_reason, message_ids, model, rows
+        case batch_id, cleared, senders, by_reason, message_ids, model, model_detail, rows
     }
 
     init(
@@ -1170,6 +1173,7 @@ struct SmartClearResult: Decodable, Sendable, Hashable {
         by_reason = try c.decodeIfPresent([String: Int].self, forKey: .by_reason) ?? [:]
         message_ids = try c.decodeIfPresent([Int].self, forKey: .message_ids) ?? []
         model = try c.decodeIfPresent(String.self, forKey: .model)
+        model_detail = try? c.decodeIfPresent(String.self, forKey: .model_detail)
         rows = (try? c.decodeIfPresent([RowSlot].self, forKey: .rows))?.compactMap(\.row)
     }
 }

@@ -89,6 +89,22 @@ struct SmartClearTests {
         precondition(
             SmartClearCopy.nothing(model: "skipped_failed")
                 == "Nothing obvious to clear. The closer look did not run this time.")
+        precondition(SmartClearCopy.modelNote("ok", detail: "timeout") == nil)
+        precondition(
+            SmartClearCopy.modelNote("skipped_failed", detail: "timeout")
+                == "The closer look ran out of time.")
+        precondition(
+            SmartClearCopy.modelNote("skipped_failed", detail: "discarded")
+                == "The closer look's answer did not add up, so it was set aside.")
+        precondition(
+            SmartClearCopy.modelNote("skipped_failed", detail: "from_the_future")
+                == SmartClearCopy.modelMissedNote)
+        precondition(
+            SmartClearCopy.modelNote("skipped_cap") == "The closer look is done for today.")
+        precondition(SmartClearCopy.why("skimmed_sender") == "From a sender you only glance at")
+        precondition(
+            SmartClearCopy.lines(byReason: ["skimmed_sender": 4]).map(\.spoken)
+                == ["4 from senders you only glance at"])
     }
 
     static func undoneSaysWhatCameBack() {

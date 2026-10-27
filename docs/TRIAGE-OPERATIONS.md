@@ -313,7 +313,7 @@ access, rather than silently truncated. Its token usage is recorded separately a
 `agent_access`, using the notification model's price configuration. Human TUI
 reads remain available while assessments are pending.
 
-### Reading attention and the per-sender purge read
+### Reading attention and per-sender statistics
 
 `POST /client/v2/messages/{id}/attention` takes `{"dwell_ms": n, "link_clicks": n}`
 (either may be omitted) and ADDS the report to that message's totals in
@@ -336,47 +336,26 @@ make an in-flight triage commit stale. Human door only.
 What is stored is two counts per message. No URL, link host, scroll position or
 timestamp of a report is kept, and only the owner's own client can write them.
 
-`GET /client/v2/reading/senders` lists each sender that has open mail in Reading
-(the same inventory `/client/v2/feed?destination=reading` returns, with the same
-`limit`), at most 100 senders, most purge-worthy first:
-
-```
-{ "window_days": 90, "ledger_days": 37, "total_senders": 12,
-  "senders": [ {
-    "sender": "news@example.com", "display_name": "Example News",
-    "open_count": 3, "open_message_ids": [812, 790, 771],
-    "signals": { "received": 23, "opened": 1, "cleared_unopened": 4,
-                 "dwell_sample": 1, "median_dwell_ms": 4000, "clicks": 0,
-                 "read_sample": 1, "median_read_fraction": 0.02,
-                 "median_words": 900, "per_month": 18.6 },   // per_month: number | null
-    "known_contact": false,
-    "rule": null,
-    "unsubscribe": { "message_id": 812, "auto": true },
-    "unsubscribed": null,
-    "score": 71,
-    "reasons": [ { "code": "rarely_opened", "opened": 1, "received": 23 } ]
-  } ] }
-```
+Smart clear scores each sender with open mail in Reading (the same inventory
+`/client/v2/feed?destination=reading` returns), at most 100 senders, from
+per-sender statistics read in `store/sqlite/reading_senders.rs`. Nothing about
+them is served to a client.
 
 - Counts cover the sender's inbound, non-spam mail that the owner did not write,
   received since the later of 90 days ago and the start of the open ledger
   (`app_settings.opened_ledger_since`, else the account's `created_at`).
-  `ledger_days` is how many days that actually is.
-- Mail that is kept close is not counted and is never the unsubscribe
-  representative. The definition lives in one place (`store/sqlite/mod.rs`), in
-  two layers. `known_sealed_mail_sql!`: the stored decision is auth mail, or it
+- Mail that is kept close is not counted. The definition lives in one place
+  (`store/sqlite/mod.rs`), in two layers. `known_sealed_mail_sql!`: the stored decision is auth mail, or it
   restricts external access, or a correction does, or the access assessment
   came back `restricted`, or the legacy `triage.sensitivity` column says
   sealed. Nothing in the agent pipeline writes that column any more, so a guard
   on the column alone protects nothing that arrives today. `sealed_mail_sql!`
   is that plus mail whose access assessment is still pending. Readers (these
-  counts, the unsubscribe candidates, smart clear's scan and write) use the
-  strict one: unassessed mail does not count for its sender and is not swept,
+  counts, smart clear's scan and write) use the strict one: unassessed mail does not count for its sender and is not swept,
   which corrects itself when triage commits. The attention write alone uses the
   looser one.
 - Mail that failed authentication (`messages.auth_pass = 0`) is not counted
-  either, and is never the unsubscribe representative: the sender is the From
-  address, and a forgery in a sender's name is not that sender's record. Mail
+  either: the sender is the From address, and a forgery in a sender's name is not that sender's record. Mail
   never checked (`NULL`) still counts.
 - `per_month` scales `received` by the days the ledger covers. Under 7 covered
   days it is `null`, with no volume term in the score and no `high_volume`
@@ -402,78 +381,19 @@ timestamp of a report is kept, and only the owner's own client can write them.
   `kept_recently`, `rarely_opened`, `cleared_unopened`, `skimmed`, `brief_looks`,
   `read_closely`, `never_clicked`, `high_volume`) live in
   `squelch-core/src/triage/sender_fatigue.rs`.
-  Reasons carry numbers only; the client writes the sentence.
-- `unsubscribe` names the first of up to three of the sender's messages
-  (authenticated ones first, then newest) that has a usable unsubscribe link,
-  found by the same classification
-  `POST /client/unsubscribe` uses. `auto` is true only when that route's automatic
-  path would run for it. Nothing is fetched to decide either.
-- `unsubscribed` is the sender's row in the unsubscribe ledger; `status` is
-  `browser` for a row with no job status.
 - Opens, dwell and clicks are recorded by Passband clients only. Mail read
-  elsewhere looks ignored here, so the scores lean high. This list only
-  suggests. Smart clear (below) does act on the score: a sender at 75 or more
-  has their unopened open Reading mail marked done. That is why 75 needs a
-  second signal on top of "never opened", why the sweep is undoable, and why
-  someone who reads a newsletter in another client should keep that sender.
+  elsewhere looks ignored here, so the scores lean high. Smart clear (below)
+  acts on the score: a sender at 75 or more has their unopened open Reading
+  mail marked done. That is why 75 needs a second signal on top of "never
+  opened", and why the sweep is undoable.
 
-- `kept_at` is when the owner last chose to keep the sender (below), or `null`.
+### Kept senders
 
-The read writes nothing: it does not stamp `surfaced_at` or `opened_at`.
-
-### Keeping a sender
-
-`POST /client/v2/reading/senders/keep` with `{"sender": "<address>"}` answers
-`204` and records, in `reading_sender_keeps`, that the owner looked at this
-sender in the purge flow and chose to stay subscribed. For 60 days the sender
-scores 0 with the single reason `kept_recently` and smart clear never takes
-their mail. After 60 days the keep stops affecting anything; `kept_at` is still
-returned. A second keep moves the date. The write is audited as
-`reading.keep_sender` with the address as its target. The sender must be one
-address of at most 320 characters with no control or formatting characters;
-anything else is `400`.
-
-A keep is never deleted. If the owner later unsubscribes from the sender, or
-writes a squelch rule that governs them, the newer decision wins when the list
-is read and the keep is ignored; keeping again after that makes the keep the
-newer decision.
-
-### Rule suggestions for a sender
-
-`GET /client/rules/suggest?sender=<address>&count=<1..=3>` (human door) asks the
-small notify model what rule the owner might write about one sender. It reads
-the sender's 15 most recent subjects inside the untrusted fence, plus the
-owner's own record with them, through the sender digest, which leaves out
-sealed mail. Always `200` with `Cache-Control: no-store`; an empty `sender` is
-`400`.
-
-- `count` absent or `1`: `{"suggestion": "<sentence>" | null}`. One sentence,
-  which may be a blanket verdict ("mute them"). This is the rule card's
-  placeholder and the only form older clients know.
-- `count` `2` or `3`: `{"suggestion": "<first>" | null, "suggestions": [...]}`.
-  Up to that many narrowing rules, each naming kinds of mail to keep from the
-  sender ("only order confirmations and delivery updates"), for the purge deck
-  to offer beside its unsubscribe button. Never a blanket verdict. The list is
-  often shorter than asked, and empty when the sender sends one kind of mail or
-  there is no clear pattern. `suggestion` is its first entry.
-- A `count` below 1 is read as 1 and above 3 as 3. One that is not a number is
-  `400`.
-
-Either form is one model call, billed once to the `rule_suggest` ledger
-category and counted once against its cap of 300 calls a day per account. Past
-the cap, with no model configured, with fewer than two messages from the
-sender, or when the model refuses or answers badly, the answer is the empty one
-(a refusal or a bad answer that reported usage is still billed).
-
-The model's list is not trusted. An entry is dropped if it is empty, repeats an
-earlier one (ignoring case and spacing), is longer than 110 characters, spans
-more than one line or holds a control character, or is a blanket verdict: a
-sentence made only of words like mute, block, unsubscribe, always, never, show,
-them, that names no kind of mail.
-
-These sentences are written by a model from subjects the sender wrote. They are
-only ever shown to the owner, who may choose one and save it. The daemon never
-saves one itself.
+A row in `reading_sender_keeps` records that the owner chose to keep a sender.
+For 60 days the sender scores 0 with the single reason `kept_recently` and
+smart clear never takes their mail. After 60 days the keep stops affecting
+anything. If the owner later unsubscribes from the sender, or writes a squelch
+rule that governs them, the newer decision wins and the keep is ignored.
 
 ### Who resolved a row: `triage.resolved_by`
 
@@ -665,8 +585,6 @@ Known limits:
 - The one-press-at-a-time guard is released when the request ends. A client that
   disconnects while the first locked read is still running frees it before that
   read finishes.
-- `GET /client/v2/reading/senders` has no throttle; each call measures up to 100
-  senders under the store mutex.
 - The stale-score check reads a sender's newest open over their whole history
   through the sender index, not just the 90-day window.
 - The per-sender resolve (unsubscribe, mute) matches the sender with

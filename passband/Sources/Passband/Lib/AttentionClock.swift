@@ -1,9 +1,9 @@
 // How long a message was actually in front of somebody, and whether they
-// clicked anything in it. The purge flow's reasons ("about 4 seconds each",
-// "never clicked") are only as honest as these two numbers, and both are easy
-// to get wrong in ways no build notices: time that kept running behind another
-// app, an arrow-key pass counted as a read, one forgotten window outweighing a
-// year of mail. So the arithmetic lives here, as a value with no clock of its
+// clicked anything in it. The sender scores smart clear acts on ("brief
+// looks", "never clicked") are only as honest as these two numbers, and both
+// are easy to get wrong in ways no build notices: time that kept running
+// behind another app, an arrow-key pass counted as a read, one forgotten
+// window outweighing a year of mail. So the arithmetic lives here, as a value with no clock of its
 // own, and the reader only tells it what happened and when.
 //
 // COUNTS ONLY. Nothing in here ever holds a URL, a host, a subject or any

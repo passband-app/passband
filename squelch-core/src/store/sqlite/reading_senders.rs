@@ -63,11 +63,6 @@ pub const STATS_WINDOW_DAYS: i64 = 90;
 /// holds the store mutex.
 pub const MAX_SENDERS: usize = 100;
 
-/// How many of a sender's newest messages are offered as the place to
-/// unsubscribe from. The newest is nearly always the one; the next two cover a
-/// transactional mail that happened to arrive last and carries no link.
-pub const UNSUB_CANDIDATES: usize = 3;
-
 /// The most opened messages per sender that enter the dwell sample, newest
 /// open first. A median settles long before this, and each one costs a body
 /// read under the lock.
@@ -148,36 +143,11 @@ pub(crate) const SENDER_OPENS_SQL: &str = concat!(
       LIMIT ?4"
 );
 
-/// The messages a sender's unsubscribe link may be read from, with the header
-/// half of what the classifier reads. No body: the handler fetches that,
-/// outside this lock, only for a candidate whose header named no link.
-///
-/// AUTHENTICATED MAIL FIRST, then newest. The shared universe above already
-/// drops mail that failed authentication; among what is left, a message the
-/// provider verified is the sender naming its own endpoint, and one never
-/// checked only probably is.
-pub(crate) const SENDER_UNSUB_CANDIDATES_SQL: &str = concat!(
-    "SELECT m.id, m.list_unsubscribe, m.list_unsub_one_click, m.auth_pass",
-    sender_mail_sql!(),
-    " ORDER BY (m.auth_pass IS 1) DESC, m.received_at DESC, m.id DESC
-      LIMIT ?4"
-);
-
 /// The flattened plain text of one message, by primary key. `messages.body` is
 /// what ingest feeds triage (`sync::ingest`: the plain part, else the HTML
 /// through `html_to_text`), so a word count over it measures what a reader
 /// reads and not the markup around it.
 const MESSAGE_BODY_SQL: &str = "SELECT body FROM messages WHERE account_id = ?1 AND id = ?2";
-
-/// A message a sender's unsubscribe link may be read from. The classification
-/// itself lives in squelch-api and is not repeated here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsubCandidate {
-    pub message_id: i64,
-    pub list_unsubscribe: Option<String>,
-    pub list_unsub_one_click: bool,
-    pub auth_pass: Option<bool>,
-}
 
 /// The `unsubscribes` row for a sender the owner already asked to stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,7 +169,6 @@ pub struct ReadingSender {
     pub signals: SenderSignals,
     /// The rule Stage-1 would apply to this address today.
     pub rule: Option<SenderRule>,
-    pub unsub_candidates: Vec<UnsubCandidate>,
     pub unsubscribed: Option<SenderUnsubscribed>,
     /// When the owner last chose to keep this sender, however long ago.
     pub kept_at: Option<DateTime<Utc>>,
@@ -267,7 +236,6 @@ pub(super) struct SenderMeasurer<'c> {
     body: rusqlite::Statement<'c>,
     unsubscribed: rusqlite::Statement<'c>,
     kept: rusqlite::Statement<'c>,
-    pub(super) window_floor: DateTime<Utc>,
     floor_text: String,
     dwell_floor: DateTime<Utc>,
     /// How long the statistics actually cover.
@@ -301,7 +269,6 @@ impl<'c> SenderMeasurer<'c> {
                 "SELECT kept_at FROM reading_sender_keeps
                  WHERE account_id = ?1 AND sender_addr = ?2",
             )?,
-            window_floor,
             floor_text: floor.to_rfc3339(),
             dwell_floor: dwell_ledger_since(conn, account_id)?,
             covered: (now - floor).max(chrono::Duration::zero()),
@@ -500,30 +467,10 @@ impl SqliteStore {
         let (total_senders, groups) = busiest_senders(&items);
 
         let mut measurer = SenderMeasurer::new(&conn, account_id, now)?;
-        let mut candidates = conn.prepare(SENDER_UNSUB_CANDIDATES_SQL)?;
-        let window_floor = measurer.window_floor.to_rfc3339();
 
         let mut senders = Vec::with_capacity(groups.len());
         for (sender, display_name, open_message_ids) in groups {
             let measured = measurer.measure(&sender)?;
-
-            // WHERE TO UNSUBSCRIBE FROM reads the ninety-day window and NOT
-            // the ledger floor. The floor exists to keep a rate honest; a link
-            // in a footer is not a rate, and on a young ledger the mail
-            // sitting open in Reading is exactly the mail from before it.
-            let unsub_candidates = candidates
-                .query_map(
-                    params![account_id, sender, window_floor, UNSUB_CANDIDATES as i64],
-                    |r| {
-                        Ok(UnsubCandidate {
-                            message_id: r.get(0)?,
-                            list_unsubscribe: r.get(1)?,
-                            list_unsub_one_click: r.get::<_, i64>(2)? != 0,
-                            auth_pass: r.get::<_, Option<i64>>(3)?.map(|v| v != 0),
-                        })
-                    },
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
 
             senders.push(ReadingSender {
                 sender,
@@ -531,7 +478,6 @@ impl SqliteStore {
                 open_message_ids,
                 signals: measured.signals,
                 rule: measured.rule,
-                unsub_candidates,
                 unsubscribed: measured.unsubscribed,
                 kept_at: measured.kept_at,
                 score: measured.score,

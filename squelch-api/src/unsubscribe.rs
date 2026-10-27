@@ -29,42 +29,6 @@ pub fn classify_unsubscribe(list_unsubscribe: Option<&str>) -> UnsubPlan {
     }
 }
 
-/// The link to unsubscribe with, and whether the HEADER named it.
-///
-/// HEADER FIRST, body second. `List-Unsubscribe` is the sender NAMING its own
-/// endpoint; a footer link is us reading the mail and picking one. Plenty of
-/// senders ship no header at all, and telling those readers "there is no
-/// unsubscribe link" while one sits visible at the bottom of the message is
-/// simply wrong.
-///
-/// One function because two doors ask: `POST /client/unsubscribe` acts on the
-/// answer and `GET /client/v2/reading/senders` only reports whether there is
-/// one, and the second must never promise a link the first would not find.
-pub fn link_for(list_unsubscribe: Option<&str>, body_html: Option<&str>) -> (UnsubPlan, bool) {
-    match classify_unsubscribe(list_unsubscribe) {
-        UnsubPlan::None => (classify_unsubscribe_body(body_html), false),
-        header => (header, true),
-    }
-}
-
-/// Why the AUTOMATIC path may not run for this mail, `None` when it may.
-///
-/// Spam is refused because fetching a spammer's link tells them the address is
-/// live; unauthenticated mail because the link's sender may not be who the
-/// From line says. The strings are wire values (`auto_refused`).
-pub fn auto_refusal(is_spam: bool, auth_pass: Option<bool>) -> Option<&'static str> {
-    if is_spam {
-        return Some("spam");
-    }
-    match auth_pass {
-        Some(true) => None,
-        Some(false) => Some("unverified"),
-        // Mail from before the verdict was recorded: never checked, which
-        // is not the same claim as "failed", and the client says so.
-        None => Some("unchecked"),
-    }
-}
-
 /// Anchor phrases that mean "stop sending me this", matched against a link's
 /// TEXT. Kept short and unambiguous: every extra phrase is another chance to
 /// hand the reader a link they did not ask for.

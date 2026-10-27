@@ -716,37 +716,6 @@ run_suite capability-probe \
   Sources/Passband/Model/APIError.swift \
   Tests/CapabilityProbeTests.swift
 
-# The purge deck: who is offered, what each card may be asked and is nudged
-# toward, what a set of staged decisions comes to, and the sentences the
-# evidence is put in. Purge.swift is Foundation-only so this builds with just
-# the wire types, which ride along so the page is decoded from real JSON: an
-# unknown reason code from a newer daemon must cost one reason, not the deck.
-# The canned senders ride along so the suite can say that everything worth
-# keeping or unsure in them is absent from the deck.
-run_suite purge \
-  Sources/Passband/Model/SubjectText.swift \
-  Sources/Passband/Model/WireTypes.swift \
-  Sources/Passband/Lib/Purge.swift \
-  Sources/Passband/Lib/SmartClear.swift \
-  Sources/Passband/Lib/PurgeFixture.swift \
-  Tests/PurgeTests.swift
-
-# LOOKING AT A SENDER'S MAIL IN THE PURGE IS NOT READING IT. The page renders
-# the selected email as a reference, and it must never stamp that email
-# opened, time it or count a click: doing so would make a sender the owner
-# ignores look read, and corrupt the evidence drawn beside it. The view file
-# is held to that by name, and its one use of the renderer to inert links.
-echo "==> purge-preview-is-not-reading"
-if grep -nE 'markMessageOpened|attentionFocus|attentionClick|attentionMessageId|openThread\(|Opener\.open' \
-    Sources/Passband/Views/PurgeDeck.swift; then
-  echo "purge preview touches the read/attention path" >&2
-  exit 1
-fi
-[ "$(grep -c 'EmailWebView(' Sources/Passband/Views/PurgeDeck.swift)" = "1" ] \
-  && grep -A3 'EmailWebView(' Sources/Passband/Views/PurgeDeck.swift | grep -q 'inertLinks: true' \
-  || { echo "purge preview must render with inertLinks: true, once" >&2; exit 1; }
-echo "ok: the purge preview stamps, times and opens nothing"
-
 # The smart clear receipt: the headline, one line per reason in good-news
 # terms, the plurals, and that the lines account for everything cleared even
 # when a newer daemon names a reason this build has no words for.

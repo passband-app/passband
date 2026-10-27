@@ -115,14 +115,6 @@ struct RootView: View {
         // connected to. Hung on the daemon's answer for the same reason as the
         // share ask: it arrives with the first stats and not before.
         .overlay { TestFlightNudgeModal() }
-        // Screenshots of the purge and smart clear over canned senders. A
-        // beat after launch so the first connect's wipe cannot clear it; a
-        // no-op unless the launch environment asked (Lib/PurgeFixture.swift).
-        .task {
-            guard PurgeFixture.active else { return }
-            try? await Task.sleep(for: .milliseconds(2500))
-            store.applyLaunchFixture()
-        }
         .onChange(of: store.iosConnected) { _, connected in
             TestFlightNudge.shared.askIfEarned(
                 iosConnected: connected,
@@ -403,12 +395,12 @@ struct MainShell: View {
                     if store.daemonDown && store.activeView != .settings {
                         DaemonDownPane()
                     } else {
-                        // THE PURGE, ITS END PAGE AND THE SMART CLEAR LIST ARE
-                        // OCCUPANTS OF THIS PANE, like any routed page: the
-                        // same backdrop, the same header on the dots' line,
-                        // the rail's top edge cut to it. The page they are
-                        // over stays mounted and undrawn (it keeps its scroll
-                        // and state), as a page under a settled reader does.
+                        // THE SMART CLEAR LIST IS AN OCCUPANT OF THIS PANE,
+                        // like any routed page: the same backdrop, the same
+                        // header on the dots' line, the rail's top edge cut
+                        // to it. The page it is over stays mounted and
+                        // undrawn (it keeps its scroll and state), as a page
+                        // under a settled reader does.
                         let page = contentPage
                         ZStack {
                             routedBody
@@ -693,15 +685,6 @@ struct MainShell: View {
     @ViewBuilder
     /// A page that takes the content pane over whatever is routed there.
     private var contentPage: AnyView? {
-        if let session = store.purgeShown { return AnyView(PurgeOverlay(session: session)) }
-        if let finish = store.purgeFinished {
-            return AnyView(
-                // Clears only ITS OWN finish, as the walk's card does.
-                PurgeBoard(finish: finish) {
-                    if store.purgeFinished?.id == finish.id { store.dismissPurgeFinished() }
-                }
-                .id(finish.id))
-        }
         if store.smartClearListOpen, let receipt = store.smartClearReceipt {
             return AnyView(SmartClearListPage(receipt: receipt))
         }
@@ -831,15 +814,6 @@ struct MainShell: View {
                 }
                 guard !store.undos.isEmpty else { return false }
                 Task { await store.fireUndo() }
-                return true
-            })
-        // A PARKED PURGE IS RESUMED WITH `p` FROM ANY PAGE that has not bound
-        // the letter itself (a surface's own binding is consulted before this
-        // one). Declining, so with nothing parked the key stays free.
-        bindings.append(
-            KeyBinding(declining: "p", "resume purge") {
-                guard store.purgeParked != nil else { return false }
-                store.resumePurge()
                 return true
             })
         bindings.append(

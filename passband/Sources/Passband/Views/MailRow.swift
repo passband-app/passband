@@ -24,38 +24,8 @@ struct MailRow: View {
     /// The selected row's key hint, or nil for none. Only the spam page
     /// passes one (its `i` has no other affordance on the Mac).
     var verbHint: String? = nil
-    /// False for a list that is ALL ONE SENDER (the purge's): the gutter,
-    /// the avatar, the sender column and the zone pill would be the same on
-    /// every row, so the row leads with what differs, the subject and the
-    /// date. Everything it does draw is this row's own, unchanged.
-    var showsSender = true
-    /// False for a row that is only there to be recognised: no hover wash,
-    /// no click, nothing that says "this opens".
-    var opens = true
     let onHover: () -> Void
     let onOpen: () -> Void
-
-    /// The read-only, single-sender form.
-    init(recognising update: AttentionUpdate) {
-        self.init(
-            update: update, selected: false, showsSender: false, opens: false, onHover: {},
-            onOpen: {})
-    }
-
-    init(
-        update: AttentionUpdate, selected: Bool, done: Bool = false, verbHint: String? = nil,
-        showsSender: Bool = true, opens: Bool = true, onHover: @escaping () -> Void,
-        onOpen: @escaping () -> Void
-    ) {
-        self.update = update
-        self.selected = selected
-        self.done = done
-        self.verbHint = verbHint
-        self.showsSender = showsSender
-        self.opens = opens
-        self.onHover = onHover
-        self.onOpen = onOpen
-    }
 
     /// The mail's own subject, when the daemon sent one that says something
     /// the one-liner does not. A summary that IS the subject (an untriaged
@@ -118,29 +88,25 @@ struct MailRow: View {
         let gist = Self.gist(update, subject: subject)
         ListRow(
             selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 7,
-            hoverFill: opens,
-            onHoverChange: opens ? { if $0 { onHover() } } : nil,
+            onHoverChange: { if $0 { onHover() } },
             action: {
-                guard opens else { return }
                 onHover()
                 onOpen()
             }
         ) { selected, _ in
             HStack(spacing: Space.s10) {
-                if showsSender {
-                    gutter
-                        .lineLimit(1)
-                        .fixedSize()
-                        .frame(width: 36, alignment: .leading)
+                gutter
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(width: 36, alignment: .leading)
 
-                    Avatar(sender: update.senderString, size: 20)
+                Avatar(sender: update.senderString, size: 20)
 
-                    Text(SenderCache.resolved(update.senderString).displayName)
-                        .font(Typo.ui(12.5, weight: emphasized ? .semibold : .regular))
-                        .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
-                        .lineLimit(1)
-                        .frame(width: Typo.measure(168), alignment: .leading)
-                }
+                Text(SenderCache.resolved(update.senderString).displayName)
+                    .font(Typo.ui(12.5, weight: emphasized ? .semibold : .regular))
+                    .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
+                    .lineLimit(1)
+                    .frame(width: Typo.measure(168), alignment: .leading)
 
                 // THE COLUMN THAT CARRIES THE ROW, so it is the last to give
                 // way: a floor and a priority over the chips beside it, which
@@ -191,7 +157,7 @@ struct MailRow: View {
                     // aligned against the fixed time column, so the pills'
                     // right edges line up down the list and every point a
                     // short name does not use goes to the summary instead.
-                    if showsSender, let zone = SitrepZone(update.placement) {
+                    if let zone = SitrepZone(update.placement) {
                         PlacementPill(zone: zone, muted: finished)
                     }
                     // ARRIVAL ONLY. A daemon that does not send `received_at`
@@ -209,9 +175,6 @@ struct MailRow: View {
                 .layoutPriority(3)
             }
         }
-        // A row that does not open takes no clicks at all, so it shows no
-        // pressed state and the list under it scrolls as plain content.
-        .allowsHitTesting(opens)
         // No edge bar on the selected row: ListRow's fill already marks it,
         // and a one-sided stripe on a rounded row bends into an arc. Finished
         // rows are dimmed by INK alone, never opacity, which took their faint

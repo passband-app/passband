@@ -1,7 +1,7 @@
 // The reader's dwell clock: what counts as time in front of a message, and
-// what a click is filed under. Every rule here becomes a sentence the purge
-// flow says to somebody about a sender ("about 4 seconds each", "never
-// clicked"), so each one is pinned with the clock driven by hand.
+// what a click is filed under. Every rule here ends up in a score smart clear
+// acts on for a sender ("brief looks", "never clicked"), so each one is
+// pinned with the clock driven by hand.
 
 import Foundation
 

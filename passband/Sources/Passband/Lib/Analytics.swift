@@ -106,9 +106,6 @@ enum Analytics {
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
         "notification_opened", "sealed_revealed",
         "shipment_cleared",
-        // The purge deck: how many cards it opened with, and what a finished
-        // one came to. Counts and a duration; never a sender.
-        "purge_started", "purge_finished",
         // Smart clear on the Reading zone: how much it cleared, split by the
         // daemon's reason codes as counts, and whether it was taken back.
         "smart_clear", "smart_clear_undone",

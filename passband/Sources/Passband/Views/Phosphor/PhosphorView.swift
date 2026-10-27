@@ -32,9 +32,6 @@ final class PhosphorScene {
     /// The end of a Space walk's card: it lands over the sitrep, which can be
     /// showing the quiet board's own scene at the same moment.
     static let walkDone = PhosphorScene()
-    /// The end of a purge's card: it lands over the sitrep too, and a walk's
-    /// card can still be leaving when it does.
-    static let purgeDone = PhosphorScene()
 
     private(set) var renderer: PhosphorRenderer?
     private(set) var isUnavailable = false

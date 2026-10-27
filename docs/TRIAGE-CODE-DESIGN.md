@@ -299,8 +299,6 @@ Introduce a versioned human API and explicitly advertise its version/capabilitie
 | `GET /client/v2/messages/{message_id}` | Human message plus thread context/focus target; pending/restricted supported |
 | `POST /client/v2/messages/{message_id}/opened` | Exact displayed-message acknowledgement, independent of done state |
 | `POST /client/v2/messages/{message_id}/attention` | Additive, clamped dwell time and link-click counts for one message; always `204` for a well-formed report; never written for mail known to be kept close: auth, restricted, or legacy sealed. Written for mail whose access is still pending, which every reader then leaves out until it is assessed (see TRIAGE-OPERATIONS.md) |
-| `GET /client/v2/reading/senders` | Senders with open Reading mail, each with open/dwell/click counts, a 0 to 100 fatigue score with coded reasons, and whether an unsubscribe link exists; read-only |
-| `POST /client/v2/reading/senders/keep` | Record that the owner chose to stay subscribed; the sender scores 0 for 60 days |
 | `POST /client/v2/reading/smart_clear` | Mark expired and plainly unwanted open Reading mail done as one batch, message-scoped, stamped in `triage.resolved_by` |
 | `POST /client/v2/reading/smart_clear/{batch_id}/undo` | Reopen exactly the rows of that batch nobody has touched since |
 | `POST /client/v2/attention/{item_id}/actions` | Versioned done/snooze/reminder and undo operations |

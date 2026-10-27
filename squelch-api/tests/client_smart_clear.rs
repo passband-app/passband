@@ -1,6 +1,5 @@
-//! Contract tests for the Reading keep record (`POST
-//! /client/v2/reading/senders/keep`), smart clear (`POST
-//! /client/v2/reading/smart_clear`) and its undo.
+//! Contract tests for smart clear (`POST /client/v2/reading/smart_clear`) and
+//! its undo.
 mod common;
 use axum::http::StatusCode;
 use chrono::{Duration, Utc};
@@ -698,78 +697,9 @@ async fn rows_that_changed_during_the_model_call_are_not_written() {
 }
 
 #[tokio::test]
-async fn keeping_a_sender_zeroes_its_score_and_is_audited() {
-    let h = harness(|_, _| {});
-    h.store
-        .set_app_setting(
-            h.acct,
-            "opened_ledger_since",
-            &(Utc::now() - Duration::days(400)).to_rfc3339(),
-        )
-        .unwrap();
-    for i in 0..8 {
-        reading(
-            &h.store,
-            h.acct,
-            &format!("n{i}"),
-            i + 15,
-            "An issue",
-            |_| {},
-        );
-    }
-    let senders = |h: &Harness| {
-        let app = h.app.clone();
-        async move {
-            let response = app
-                .oneshot(authed("GET", "/client/v2/reading/senders"))
-                .await
-                .unwrap();
-            body_json(response).await["senders"][0].clone()
-        }
-    };
-    let before = senders(&h).await;
-    assert_eq!(before["kept_at"], Value::Null);
-    assert_eq!(before["score"], 55);
-
-    let keep = |body: Value| {
-        let app = h.app.clone();
-        async move {
-            app.oneshot(authed_json("POST", "/client/v2/reading/senders/keep", body))
-                .await
-                .unwrap()
-                .status()
-        }
-    };
-    // Whatever the case and padding, it is the one sender.
-    assert_eq!(
-        keep(json!({"sender": format!("  {} ", ADDRESS.to_uppercase())})).await,
-        StatusCode::NO_CONTENT
-    );
-    let after = senders(&h).await;
-    assert!(after["kept_at"].is_string(), "{after}");
-    assert_eq!(after["score"], 0);
-    assert_eq!(after["reasons"], json!([{"code": "kept_recently"}]));
-    assert_eq!(
-        audits(&h, "reading.keep_sender"),
-        [(Some(ADDRESS.to_string()), Some("kept".to_string()))]
-    );
-    // And smart clear leaves a kept sender's mail where it is, though every
-    // one of the eight is a stale promotion it would otherwise take.
-    assert_eq!(press(&h).await["cleared"], 0);
-
-    // Not an address: refused, and not recorded.
-    for bad in [json!({"sender": ""}), json!({"sender": "not an address"})] {
-        assert_eq!(keep(bad).await, StatusCode::BAD_REQUEST);
-    }
-    assert_eq!(keep(json!({})).await, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(audits(&h, "reading.keep_sender").len(), 1);
-}
-
-#[tokio::test]
-async fn the_three_writes_are_behind_the_bearer() {
+async fn both_writes_are_behind_the_bearer() {
     let h = harness(|_, _| {});
     for uri in [
-        "/client/v2/reading/senders/keep",
         "/client/v2/reading/smart_clear",
         "/client/v2/reading/smart_clear/1/undo",
     ] {
@@ -882,93 +812,6 @@ async fn a_second_press_while_one_is_running_is_refused() {
     assert_eq!(audits(&h, "reading.smart_clear").len(), 1);
     // And the next press, once it is over, is served.
     assert_eq!(post().await.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn the_keep_route_refuses_oversized_and_control_character_senders() {
-    let h = harness(|_, _| {});
-    let keep = |sender: String| {
-        let app = h.app.clone();
-        async move {
-            app.oneshot(authed_json(
-                "POST",
-                "/client/v2/reading/senders/keep",
-                json!({ "sender": sender }),
-            ))
-            .await
-            .unwrap()
-            .status()
-        }
-    };
-    let long = format!("{}@example.com", "a".repeat(320));
-    for bad in [
-        long,
-        "a\u{0}b@example.com".to_string(),
-        "a\u{1b}[31m@example.com".to_string(),
-        "a\u{202e}b@example.com".to_string(),
-        "@example.com".to_string(),
-        "someone@".to_string(),
-        "a@b@example.com".to_string(),
-    ] {
-        assert_eq!(keep(bad.clone()).await, StatusCode::BAD_REQUEST, "{bad:?}");
-    }
-    assert_eq!(
-        keep("news@example.com".into()).await,
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(audits(&h, "reading.keep_sender").len(), 1);
-}
-
-/// Under a week of ledger there is no monthly rate to state, and under two
-/// there is no score.
-#[tokio::test]
-async fn a_young_ledger_reports_no_rate_and_no_score() {
-    let h = harness(|_, _| {});
-    let senders = |h: &Harness| {
-        let app = h.app.clone();
-        async move {
-            let response = app
-                .oneshot(authed("GET", "/client/v2/reading/senders"))
-                .await
-                .unwrap();
-            body_json(response).await["senders"][0].clone()
-        }
-    };
-    let set_ledger = |days: i64| {
-        h.store
-            .set_app_setting(
-                h.acct,
-                "opened_ledger_since",
-                &(Utc::now() - Duration::days(days)).to_rfc3339(),
-            )
-            .unwrap();
-    };
-    for i in 0..8 {
-        reading(
-            &h.store,
-            h.acct,
-            &format!("n{i}"),
-            1,
-            &format!("Issue {i}"),
-            |_| {},
-        );
-    }
-    set_ledger(3);
-    let s = senders(&h).await;
-    assert_eq!(s["signals"]["received"], 8);
-    assert_eq!(s["signals"]["per_month"], Value::Null);
-    assert_eq!(s["score"], Value::Null);
-    assert_eq!(s["reasons"], json!([{"code": "not_enough_history"}]));
-
-    set_ledger(10);
-    let s = senders(&h).await;
-    assert_eq!(s["signals"]["per_month"], 24.0, "a rate from a week on");
-    assert_eq!(s["score"], Value::Null, "and still no score");
-
-    set_ledger(15);
-    let s = senders(&h).await;
-    assert_eq!(s["signals"]["per_month"], 16.0);
-    assert_eq!(s["score"], 60, "55 ignored and 5 for sixteen a month");
 }
 
 /// On a new account the backfill arrived before any open could be recorded.

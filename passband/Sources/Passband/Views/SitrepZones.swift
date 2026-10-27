@@ -679,9 +679,9 @@ struct ReadingZone: View {
         }
     }
 
-    /// The zone's two doors, smart clear and purge. Mac only for now, and
-    /// gone with the mail: on an empty zone there is nothing for either to
-    /// do. Not in the practice inbox, whose senders are fixtures.
+    /// The zone's door, smart clear. Mac only for now, and gone with the
+    /// mail: on an empty zone there is nothing for it to do. Not in the
+    /// practice inbox, whose senders are fixtures.
     private var actions: AnyView? {
         #if os(macOS)
             guard !senders.isEmpty, !RehearsalMode.isEnabled else { return nil }
@@ -727,8 +727,8 @@ struct ReadingZone: View {
 }
 
 #if os(macOS)
-    /// SMART CLEAR AND PURGE, in Reading's corner. A leaf of its own so the
-    /// zone above stays free of closures and of the store's working flags:
+    /// SMART CLEAR, in Reading's corner. A leaf of its own so the zone above
+    /// stays free of closures and of the store's working flags:
     /// a smart clear starting must not re-measure every card in the grid.
     private struct ReadingActions: View {
         @Environment(AppStore.self) private var store
@@ -743,41 +743,7 @@ struct ReadingZone: View {
                 ) {
                     Task { await store.runSmartClear() }
                 }
-                // A PARKED PURGE turns the pill into the way back: choices
-                // made (a count that is good news), and `p` resumes.
-                if let parked = store.purgeParked {
-                    ZonePill(
-                        symbol: "scissors",
-                        label: "\(PurgeCopy.resumePill) · \(PurgeCopy.chosen(parked.chosen))", key: "p",
-                        help: "Go back to your purge. Nothing has been sent yet (P)",
-                        accessibilityName: "Resume purge, \(PurgeCopy.chosen(parked.chosen)) made",
-                        emphasized: true
-                    ) {
-                        store.resumePurge()
-                    }
-                    .transition(.opacity)
-                }
-                // ONLY WITH A FEW CANDIDATES. The deck holds just the senders
-                // the evidence is confident about; with fewer than a handful
-                // there is no flow worth opening, so there is no door to it.
-                else if store.purgeOffered {
-                    ZonePill(
-                        symbol: "scissors", label: "purge", key: "p",
-                        help: "Go through the senders you have stopped reading, one at a time (P)",
-                        accessibilityName: "Purge",
-                        working: store.purgeStarting, workingLabel: "gathering"
-                    ) {
-                        Task { await store.beginPurge() }
-                    }
-                    .transition(.opacity)
-                }
             }
-            .animation(.easeOut(duration: 0.25), value: store.purgeParked != nil)
-            .animation(.easeOut(duration: 0.25), value: store.purgeOffered)
-            // The count behind the pill. Asked when the board first shows
-            // and then on the poll's tick, where the store lets it through
-            // at most every ten minutes: the route is not a cheap one.
-            .task(id: store.lastRefresh) { await store.refreshPurgeCandidates() }
         }
     }
 #endif

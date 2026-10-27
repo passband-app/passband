@@ -1,5 +1,5 @@
-//! What the Reading purge and smart clear must never count, never take, and
-//! never mistake for the owner. Each test here reproduces a review finding.
+//! What smart clear must never count, never take, and never mistake for the
+//! owner. Each test here reproduces a review finding.
 
 use super::super::*;
 use super::reading_senders::{
@@ -100,35 +100,6 @@ fn auth_and_restricted_mail_is_not_counted_for_its_sender() {
     let s = sender(&read, NEWS).signals;
     assert_eq!(s.received, 4, "the shop's codes are not its newsletter");
     assert_eq!(s.cleared_unopened, 0);
-}
-
-#[test]
-fn auth_and_restricted_mail_is_never_the_unsubscribe_representative() {
-    let (store, acct) = store();
-    old_ledgers(&store, acct);
-    let issue = triaged(acct, "issue", "issue")
-        .from(NEWS)
-        .received_at(Utc::now() - Duration::days(9))
-        .list_unsubscribe("<https://letters.example/u>", false)
-        .seed(&store);
-    into_reading(&store, acct, issue);
-    for (i, (name, seal)) in sealings().into_iter().enumerate() {
-        let id = triaged(acct, name, name)
-            .from(NEWS)
-            .received_at(Utc::now() - Duration::days(1 + i as i64))
-            .list_unsubscribe("<https://letters.example/code>", false)
-            .seed(&store);
-        decide(&store, acct, id, seal);
-    }
-    let read = senders(&store, acct);
-    assert_eq!(
-        sender(&read, NEWS)
-            .unsub_candidates
-            .iter()
-            .map(|c| c.message_id)
-            .collect::<Vec<_>>(),
-        [issue]
-    );
 }
 
 #[test]
@@ -300,19 +271,6 @@ fn mail_that_failed_authentication_is_not_the_senders() {
         "unchecked mail counts, forged does not"
     );
     assert_eq!(s.signals.cleared_unopened, 0);
-    // The representative is an authenticated issue, ahead of the newer
-    // unchecked one, and never a forged one.
-    assert_eq!(
-        s.unsub_candidates
-            .iter()
-            .map(|c| (c.message_id, c.auth_pass))
-            .collect::<Vec<_>>(),
-        [
-            (real[1], Some(true)),
-            (real[2], Some(true)),
-            (real[3], Some(true))
-        ]
-    );
 }
 
 #[test]

@@ -214,7 +214,7 @@
     // MARK: - the full list
 
     /// EVERYTHING ONE SMART CLEAR CLEARED, to audit: subject, sender and why,
-    /// grouped by why. A full-window page in the purge's family. Not a
+    /// grouped by why. A full page in the content pane. Not a
     /// reader: nothing here opens.
     ///
     /// THE UNDO CLOCK IS STOPPED WHILE THIS IS UP (the store stops it on the

@@ -2,7 +2,6 @@
 
 use super::super::reading_senders::{
     MAX_SENDERS, ReadingSender, ReadingSenders, SENDER_COUNTS_SQL, SENDER_OPENS_SQL,
-    SENDER_UNSUB_CANDIDATES_SQL,
 };
 use super::super::*;
 use super::support::*;
@@ -574,58 +573,6 @@ fn senders_sort_by_score_then_volume_then_address_with_unscored_last() {
 }
 
 #[test]
-fn unsubscribe_candidates_are_the_newest_three_and_ignore_the_ledger_floor() {
-    let (store, acct) = store();
-    // A ledger that started a moment ago: no statistics yet, but the mail in
-    // Reading still has a link to offer.
-    store
-        .set_app_setting(acct, OPEN_LEDGER_SINCE_KEY, &Utc::now().to_rfc3339())
-        .unwrap();
-    let mut ids = Vec::new();
-    for i in 0..5 {
-        ids.push(
-            triaged(acct, &format!("n{i}"), &format!("n{i}"))
-                .from(NEWS)
-                .received_at(Utc::now() - Duration::days(i + 1))
-                .list_unsubscribe(&format!("<https://letters.example/u/{i}>"), i == 0)
-                // One verified, the rest from before the verdict was kept.
-                .auth_pass((i == 0).then_some(true))
-                .seed(&store),
-        );
-    }
-    // Sealed mail is never a place to unsubscribe from, however new.
-    triaged(acct, "sealed", "sealed")
-        .from(NEWS)
-        .sealed(SealedKind::Otp)
-        .seed(&store);
-    into_reading(&store, acct, ids[0]);
-    store
-        .upsert_unsubscribe(acct, NEWS, "browser", Some(ids[0]), Utc::now())
-        .unwrap();
-
-    let read = senders(&store, acct);
-    let s = sender(&read, NEWS);
-    assert_eq!(s.signals.received, 0, "the ledger has seen nothing yet");
-    assert_eq!(
-        s.unsub_candidates
-            .iter()
-            .map(|c| c.message_id)
-            .collect::<Vec<_>>(),
-        ids[..3]
-    );
-    let first = &s.unsub_candidates[0];
-    assert_eq!(
-        first.list_unsubscribe.as_deref(),
-        Some("<https://letters.example/u/0>")
-    );
-    assert!(first.list_unsub_one_click);
-    assert_eq!(first.auth_pass, Some(true));
-    assert_eq!(s.unsub_candidates[1].auth_pass, None);
-    let asked = s.unsubscribed.as_ref().expect("the ledger row");
-    assert_eq!(asked.status, None, "a browser row has no job status");
-}
-
-#[test]
 fn only_the_senders_with_the_most_open_mail_are_measured() {
     let (store, acct) = store();
     old_ledgers(&store, acct);
@@ -647,7 +594,7 @@ fn only_the_senders_with_the_most_open_mail_are_measured() {
     assert_eq!(sender(&read, NEWS).open_message_ids.len(), 2);
 }
 
-/// All three per-sender statements SEEK the NOCASE sender index, pinned by
+/// Both per-sender statements SEEK the NOCASE sender index, pinned by
 /// plan like `rule_digest_seeks_the_nocase_sender_index`, and each names the
 /// index so that losing it is a loud prepare error and not a silent walk of
 /// the account under the store mutex.
@@ -655,11 +602,7 @@ fn only_the_senders_with_the_most_open_mail_are_measured() {
 fn the_per_sender_statements_seek_the_nocase_sender_index() {
     let (store, _acct) = store();
     let conn = store.lock().unwrap();
-    let statements = [
-        SENDER_COUNTS_SQL,
-        SENDER_OPENS_SQL,
-        SENDER_UNSUB_CANDIDATES_SQL,
-    ];
+    let statements = [SENDER_COUNTS_SQL, SENDER_OPENS_SQL];
     for sql in statements {
         let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
         let nulls = vec![rusqlite::types::Value::Null; stmt.parameter_count()];

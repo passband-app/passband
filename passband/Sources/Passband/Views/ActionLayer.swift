@@ -151,21 +151,15 @@ struct ActionLayer: View {
         .background { ViolationScanKeeper() }
     }
 
-    /// NOT WHILE A PURGE OR ITS END CARD IS UP. A commit starts a job per
-    /// automatic unsubscribe, and a column of spinners and "Unsubscribed from"
-    /// cards racing the celebration would be the same news told twice, in
-    /// two places, at once. The tray is there when the card leaves, with
-    /// whatever is still running or needs a person.
+    /// NOT WHILE THE SMART CLEAR LIST IS UP: it is a page in the content
+    /// pane, and the corner's cards belong to the board it covers.
     private var showsUnsubscribeTray: Bool {
-        store.showsSitrepCorner && !purgeUp && !UnsubscribeJobs.shared.items.isEmpty
+        store.showsSitrepCorner && !store.smartClearListOpen
+            && !UnsubscribeJobs.shared.items.isEmpty
     }
 
     private var showsSmartClearReceipt: Bool {
-        store.showsSitrepCorner && !purgeUp && store.smartClearReceipt != nil
-    }
-
-    private var purgeUp: Bool {
-        store.purgeShown != nil || store.purgeFinished != nil || store.smartClearListOpen
+        store.showsSitrepCorner && !store.smartClearListOpen && store.smartClearReceipt != nil
     }
 
     // MARK: - toasts
@@ -179,15 +173,6 @@ struct ActionLayer: View {
                     UnsubscribeViolationNotice(record: prompt)
                         .transition(.move(edge: .leading).combined(with: .opacity))
                 }
-                // A PARKED PURGE travels with the person, on every page, in
-                // the corner the undo chips use: choices made and not yet
-                // sent must not be forgotten on the mail page.
-                #if os(macOS)
-                    if let parked = store.purgeParked {
-                        PurgeParkedChip(chosen: parked.chosen)
-                            .transition(.move(edge: .leading).combined(with: .opacity))
-                    }
-                #endif
                 ForEach(store.toasts) { toast in
                     Button {
                         store.dismissToast(toast.id)
@@ -245,12 +230,6 @@ struct ActionLayer: View {
             }
         }
         .animation(.smooth(duration: 0.24), value: store.toasts.count)
-        .animation(.smooth(duration: 0.24), value: store.purgeParked != nil)
-        // "Your purge timed out", once, when the sitrep is the thing on
-        // screen: not fired into whatever they were doing when it lapsed.
-        .onChange(of: store.purgeExpiredNotice && store.showsSitrepCorner, initial: true) { _, due in
-            if due { store.takePurgeExpiredNotice() }
-        }
         .animation(.smooth(duration: 0.24), value: store.undos.count)
     }
 
@@ -351,10 +330,9 @@ struct ShortcutsOverlay: View {
 /// window closes. Drawn from the clock rather than animated to a value, like
 /// the reader's hold ring, so it empties on the same second the chip leaves
 /// even when it mounts late or the layer re-renders mid-sweep.
-struct UndoCountdown: View {
+private struct UndoCountdown: View {
     let startedAt: Date
     let expiresAt: Date
-    var tint: Color = Palette.warn
 
     private static let size: CGFloat = 11
 
@@ -367,7 +345,7 @@ struct UndoCountdown: View {
                     .stroke(Palette.hairlineStrong, lineWidth: 1.75)
                 Circle()
                     .trim(from: 0, to: left)
-                    .stroke(tint, style: StrokeStyle(lineWidth: 1.75, lineCap: .round))
+                    .stroke(Palette.warn, style: StrokeStyle(lineWidth: 1.75, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
             .frame(width: Self.size, height: Self.size)

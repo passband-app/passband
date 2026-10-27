@@ -2531,31 +2531,14 @@ fn may_resolve_sender_mail(resolved: &ResolvedDisposition, sweep: bool) -> bool 
 #[derive(Debug, Deserialize)]
 pub struct SuggestRuleQuery {
     sender: String,
-    /// How many suggestions the caller has room for. Absent is one, which is
-    /// the route as every shipped client knows it.
-    count: Option<i64>,
 }
 
-/// GET /client/rules/suggest?sender=addr[&count=1..=3]: the sentence the owner
-/// might write about this sender, for the rule card to offer as a placeholder.
-/// Always 200; `suggestion` is null when there is no model, too little history,
-/// or no clear pattern. It is only ever SHOWN: the owner accepts it with tab
-/// and saves it themselves, and its disposition is then inferred from the
-/// owner's sentence like any other. See [`squelch_core::triage::rule_suggest`].
-///
-/// `count` of 2 or 3 asks a different question for the purge deck: up to that
-/// many NARROWING rules, each keeping some kind of this sender's mail, and
-/// never a blanket verdict (the deck has an unsubscribe button for that). The
-/// answer gains `suggestions`, a list that is often shorter than asked and
-/// empty when there is no line to draw, and `suggestion` is its first entry.
-/// It is still ONE model call, one count against the day's cap and one bill.
-/// A `count` outside 1..=3 is clamped into it, and absent or 1 is the original
-/// route with the original body, so a client that never heard of the
-/// parameter sees no difference.
-///
-/// SECURITY: every sentence here is written by a model from subjects the
-/// sender wrote. They are only ever SHOWN to the owner, who may choose one; the
-/// daemon must never save one itself.
+/// GET /client/rules/suggest?sender=addr: the sentence the owner might write
+/// about this sender, for the rule card to offer as a placeholder. Always 200;
+/// `suggestion` is null when there is no model, too little history, or no
+/// clear pattern. It is only ever SHOWN: the owner accepts it with tab and
+/// saves it themselves, and its disposition is then inferred from the owner's
+/// sentence like any other. See [`squelch_core::triage::rule_suggest`].
 pub async fn suggest_rule(
     State(state): State<ApiState>,
     Query(params): Query<SuggestRuleQuery>,
@@ -2566,23 +2549,9 @@ pub async fn suggest_rule(
     if sender.is_empty() {
         return Err(ApiError::bad_request("sender must not be empty"));
     }
-    let count = params
-        .count
-        .unwrap_or(1)
-        .clamp(1, rule_suggest::MAX_SUGGESTIONS as i64) as usize;
-    // The list rides only when a list was asked for: the single-sentence body
-    // is what shipped clients decode, and it stays exactly that.
-    let answer = move |suggestions: Vec<String>| {
-        let first = suggestions.first().cloned();
-        let body = if count > 1 {
-            serde_json::json!({ "suggestion": first, "suggestions": suggestions })
-        } else {
-            serde_json::json!({ "suggestion": first })
-        };
-        (no_store(), Json(body))
-    };
+    let none = || (no_store(), Json(serde_json::json!({ "suggestion": null })));
     let Some(client) = state.rule_suggest.clone() else {
-        return Ok(answer(Vec::new()));
+        return Ok(none());
     };
     let addr = sender.clone();
     let digest = store_call(&state, move |store, account_id| {
@@ -2597,20 +2566,18 @@ pub async fn suggest_rule(
     })
     .await?;
     let Some((history, rules)) = digest else {
-        return Ok(answer(Vec::new()));
+        return Ok(none());
     };
     let existing = rules_in_the_owners_words(rules, &sender);
-    let input = rule_suggest::SuggestInput {
-        from_addr: &sender,
-        existing_rules: &existing,
-        history: &history,
-    };
-    let (suggestions, usage) = if count > 1 {
-        rule_suggest::narrowing_rules(&client, &input, count).await
-    } else {
-        let (suggestion, usage) = rule_suggest::suggest_rule(&client, &input).await;
-        (suggestion.into_iter().collect(), usage)
-    };
+    let (suggestion, usage) = rule_suggest::suggest_rule(
+        &client,
+        &rule_suggest::SuggestInput {
+            from_addr: &sender,
+            existing_rules: &existing,
+            history: &history,
+        },
+    )
+    .await;
     if let Some(u) = usage {
         let _ = store_call(&state, move |store, account_id| {
             bill_rule_suggest(store, account_id, u);
@@ -2618,7 +2585,10 @@ pub async fn suggest_rule(
         })
         .await;
     }
-    Ok(answer(suggestions))
+    Ok((
+        no_store(),
+        Json(serde_json::json!({ "suggestion": suggestion })),
+    ))
 }
 
 /// The suggester's runaway guard: past the day's cap its routes answer without
@@ -6544,17 +6514,37 @@ pub async fn unsubscribe(
     .ok_or_else(ApiError::not_found)?;
 
     let sender = fields.from_addr.trim().to_ascii_lowercase();
-    // Header first, body second: see `unsubscribe::link_for`.
-    let (plan, from_header) = crate::unsubscribe::link_for(
-        fields.list_unsubscribe.as_deref(),
-        fields.body_html.as_deref(),
-    );
+    // HEADER FIRST, body second. `List-Unsubscribe` is the sender NAMING its own
+    // endpoint; a footer link is us reading the mail and picking one. Plenty of
+    // senders ship no header at all, and telling those readers "there is no
+    // unsubscribe link" while one sits visible at the bottom of the message is
+    // simply wrong.
+    let (plan, from_header) =
+        match crate::unsubscribe::classify_unsubscribe(fields.list_unsubscribe.as_deref()) {
+            crate::unsubscribe::UnsubPlan::None => (
+                crate::unsubscribe::classify_unsubscribe_body(fields.body_html.as_deref()),
+                false,
+            ),
+            header => (header, true),
+        };
 
     // THE AUTOMATIC PATH, for a client that asked for it and mail we trust
-    // enough to act on (`unsubscribe::auto_refusal` has the two refusals). Both
-    // fall through to the browser response, with the reason, so the person
-    // decides with the address bar in front of them.
-    let mut refused = crate::unsubscribe::auto_refusal(fields.is_spam, fields.auth_pass);
+    // enough to act on. Spam is refused because fetching a spammer's link tells
+    // them the address is live; unauthenticated mail because the link's sender
+    // may not be who the From line says. Both fall through to the browser
+    // response, with the reason, so the person decides with the address bar in
+    // front of them.
+    let mut refused = if fields.is_spam {
+        Some("spam")
+    } else {
+        match fields.auth_pass {
+            Some(true) => None,
+            Some(false) => Some("unverified"),
+            // Mail from before the verdict was recorded: never checked, which
+            // is not the same claim as "failed", and the client says so.
+            None => Some("unchecked"),
+        }
+    };
     if body.auto
         && refused.is_none()
         && let crate::unsubscribe::UnsubPlan::Browser { url } = &plan

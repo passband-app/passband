@@ -97,11 +97,10 @@ macro_rules! known_sealed_mail_sql {
 /// OR mail whose access assessment is still pending.
 ///
 /// THE STRICT ANSWER, for everything that counts, scores or sweeps: the
-/// Reading purge's per-sender statistics and unsubscribe candidates, and smart
-/// done's scan and write. Unassessed mail might be a login code, so it does
-/// not count for its sender and is not swept until triage has said what it
-/// is. That costs nothing lasting: it corrects itself the moment the decision
-/// commits.
+/// per-sender Reading statistics, and smart done's scan and write. Unassessed
+/// mail might be a login code, so it does not count for its sender and is not
+/// swept until triage has said what it is. That costs nothing lasting: it
+/// corrects itself the moment the decision commits.
 ///
 /// THE ONE CALLER THAT USES THE LOOSER MACRO INSTEAD is the attention WRITE
 /// (`record_message_attention`), and the asymmetry is deliberate. A report
@@ -109,7 +108,7 @@ macro_rules! known_sealed_mail_sql {
 /// triage has reached it, is exactly when dwell is real. A report accepted
 /// onto a row that later turns out to be a login code harms nothing, BECAUSE
 /// every reader goes through this macro and drops that row once its decision
-/// lands (`tests::purge_guards::dwell_reported_before_an_auth_decision_
+/// lands (`tests::smart_clear_guards::dwell_reported_before_an_auth_decision_
 /// reaches_no_statistic`). Writers may be generous only as long as readers
 /// are strict; a new reader of `dwell_ms` or `link_clicks` owes this macro.
 macro_rules! sealed_mail_sql {

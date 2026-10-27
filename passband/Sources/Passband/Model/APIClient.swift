@@ -334,7 +334,7 @@ actor APIClient {
     }
 
     /// How long a received message was at the reader's focus and how many of
-    /// its links were clicked: the evidence behind the purge flow's reasons.
+    /// its links were clicked: the evidence behind smart clear's sender scores.
     ///
     /// DOES NOT THROW, unlike its neighbours, because there is no caller that
     /// could do anything with the failure. This is best-effort telemetry about
@@ -846,27 +846,6 @@ actor APIClient {
     }
 
     @discardableResult
-    /// Up to `count` narrowing rules for one sender ("only order
-    /// confirmations and delivery updates"), for the purge. Empty when the
-    /// daemon has none, predates `count`, or predates the route.
-    ///
-    /// ONE SMALL-MODEL CALL EACH, against a shared daily cap: the caller
-    /// asks only for the sender on screen and the one after.
-    func suggestRules(sender: String, count: Int) async throws -> [String] {
-        guard !RehearsalMode.isEnabled else { return [] }
-        do {
-            let answer: RuleSuggestion = try await get(
-                "/client/rules/suggest", query: ["sender": sender, "count": String(count)])
-            var seen = Set<String>()
-            return (answer.suggestions ?? [])
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
-                .prefix(count).map { $0 }
-        } catch let error as APIError where error.status == 404 {
-            return []
-        }
-    }
-
     func createRule(_ body: CreateRuleBody) async throws -> CreatedRule {
         try await post("/client/rules", body: body)
     }
@@ -928,36 +907,7 @@ actor APIClient {
             body: UnsubResolutionBody(sender: sender, resolution: resolution.rawValue))
     }
 
-    // MARK: - reading purge
-
-    /// The purge deck's senders, or nil when this daemon has no such route
-    /// (404). nil is "there is no purge to offer", which is a different thing
-    /// from a failed request: the caller hides the entry point for one and
-    /// may say so for the other.
-    ///
-    /// Never asked of the practice inbox. Its senders are fixtures, and a
-    /// purge would end by unsubscribing from companies that do not exist.
-    func getReadingSenders() async throws -> ReadingSendersPage? {
-        guard !RehearsalMode.isEnabled else { return nil }
-        do {
-            return try await get("/client/v2/reading/senders")
-        } catch let error as APIError where error.status == 404 {
-            return nil
-        }
-    }
-
-    /// The owner looked at this sender in a purge and chose to stay. The
-    /// daemon remembers so the next purge does not ask about them again.
-    ///
-    /// DOES NOT THROW. It is a note about a decision that has already taken
-    /// effect on screen (the mail is cleared either way); the worst a lost
-    /// one costs is being asked about the same newsletter again. An older
-    /// daemon answers 404 and that is the same nothing.
-    func keepReadingSender(_ sender: String) async {
-        guard !RehearsalMode.isEnabled else { return }
-        try? await postNoContent(
-            "/client/v2/reading/senders/keep", body: UnsubSenderBody(sender: sender))
-    }
+    // MARK: - reading smart clear
 
     /// The daemon's smart clear runs a model pass and may take about twenty
     /// seconds; the default idle timer would give up first and report a

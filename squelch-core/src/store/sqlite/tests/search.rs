@@ -2352,3 +2352,90 @@ fn first_keyword_page_only_counts_when_it_reaches_the_strict_seam() {
     assert_eq!(all.len(), 5);
     assert_eq!(count, Some(4));
 }
+
+/// A batch of vectors lands under one commit, every one of them, and a bad
+/// width anywhere in it writes nothing: the backfill drain hands eight at a
+/// time and must never leave half of them behind. Writing the same ids again
+/// replaces, never duplicates.
+#[test]
+fn a_vector_batch_is_all_or_nothing_and_idempotent() {
+    let (store, acct) = store();
+    let ids: Vec<i64> = (0..3)
+        .map(|i| triaged(acct, &format!("g{i}"), "t").upsert(&store))
+        .collect();
+    let count = |store: &SqliteStore| -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM message_vecs", [], |r| r.get(0))
+            .unwrap()
+    };
+    let stored = |store: &SqliteStore, id: i64| -> Vec<u8> {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT embedding FROM message_vecs WHERE message_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    let first = vec![0.5f32; VEC_DIMS];
+    let items: Vec<(i64, &[f32])> = ids.iter().map(|id| (*id, first.as_slice())).collect();
+    store.upsert_message_vectors(acct, &items).unwrap();
+    assert_eq!(count(&store), 3);
+
+    let second = vec![0.25f32; VEC_DIMS];
+    let items: Vec<(i64, &[f32])> = ids.iter().map(|id| (*id, second.as_slice())).collect();
+    store.upsert_message_vectors(acct, &items).unwrap();
+    assert_eq!(count(&store), 3, "a rewrite replaces, it does not add");
+    let bytes = stored(&store, ids[0]);
+    assert_eq!(bytes.len(), VEC_DIMS * 4);
+    assert_eq!(
+        &bytes[..4],
+        &0.25f32.to_le_bytes(),
+        "the new vector is the stored one"
+    );
+
+    // A short vector in the middle of a batch: the whole batch is refused
+    // before anything is written.
+    let short = vec![0.1f32; VEC_DIMS - 1];
+    let items: Vec<(i64, &[f32])> = vec![(ids[0], first.as_slice()), (ids[1], short.as_slice())];
+    assert!(store.upsert_message_vectors(acct, &items).is_err());
+    assert_eq!(count(&store), 3);
+    assert_eq!(
+        stored(&store, ids[0]),
+        bytes,
+        "nothing from the refused batch landed"
+    );
+
+    // A write that fails MID-batch, past the width check: the first row's new
+    // vector was already written inside the transaction, and the rollback
+    // takes it back. vec0 keeps its rowids in an ordinary shadow table, so a
+    // trigger there refuses the second row's insert the way a full disk or a
+    // constraint would.
+    store.execute_batch_for_test(&format!(
+        "CREATE TEMP TRIGGER refuse_second BEFORE INSERT ON message_vecs_rowids
+         WHEN NEW.rowid = {} BEGIN SELECT RAISE(ABORT, 'refused'); END",
+        ids[1]
+    ));
+    let items: Vec<(i64, &[f32])> = vec![(ids[0], first.as_slice()), (ids[1], first.as_slice())];
+    assert!(store.upsert_message_vectors(acct, &items).is_err());
+    store.execute_batch_for_test("DROP TRIGGER refuse_second");
+    assert_eq!(
+        count(&store),
+        3,
+        "the second row's delete was rolled back too"
+    );
+    assert_eq!(
+        stored(&store, ids[0]),
+        bytes,
+        "the first row's rewrite was rolled back with the batch"
+    );
+    assert!(
+        store.lock().unwrap().is_autocommit(),
+        "no transaction left open by the failure"
+    );
+}

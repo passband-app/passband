@@ -10,10 +10,10 @@ pub mod html;
 pub mod ingest;
 pub mod notify_lane;
 mod profile;
-mod triage_worker;
+pub(crate) mod triage_worker;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -21,11 +21,11 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::config::{Config, ResolvedLlm, Stage2Provider};
+use crate::config::{ARCHIVE_DAYS_MAX, Config, ResolvedLlm, Stage2Provider};
 use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
 use crate::gmail_budget::{GmailBudget, gmail_path};
-use crate::metrics::{GmailErrorKind, SyncMetrics};
+use crate::metrics::{ArchiveHold, GmailErrorKind, SyncMetrics};
 use crate::store::{ContactEntry, SPAM_SYNCED_AT_KEY, Store, SyncState, TriagedMessage};
 use crate::sync::ingest::{
     RawFetched, collect_mailboxes, format_recipients, ingest_with_rules, is_robot_address,
@@ -102,7 +102,7 @@ const BLANK_BODY_HEAL_MAX_FETCHES: usize = 400;
 
 /// `wake_budget.thread_id` sentinel for the per-account-per-day Stage-2 budget.
 /// Gmail thread ids are hex, so no real thread can collide with it.
-const GLOBAL_BUDGET_KEY: &str = "__global__";
+const GLOBAL_BUDGET_KEY: &str = crate::triage::agent_config::TOTAL_BUDGET_KEY;
 
 /// The `wake_budget` sentinel for the NOTIFY FAST LANE (docs/NOTIFY.md §11.5).
 /// Its own key beside the other three, and for the sharpest version of the same
@@ -138,6 +138,11 @@ enum IngestOrigin {
     Backfill,
     /// A history walk or a catch-up re-scan: mail that may be genuinely new.
     Incremental,
+    /// The archive walk: mail older than the backfill window, stored to be
+    /// found and for nothing else. Silent like a backfill, and beyond that it
+    /// queues no model work, wakes no lane and moves no catch-up gauge (see
+    /// [`Store::ingest_archive_message`]).
+    Archive,
 }
 
 /// Persisted message and optional local embedding input. Provider spam is
@@ -145,7 +150,16 @@ enum IngestOrigin {
 struct Ingested {
     id: i64,
     embed_text: Option<String>,
+    /// The row was stamped eligible to notify ([`notify_eligible_stamp`]),
+    /// so the ingest transaction queued its `notification` job: the one case
+    /// the notification lane is poked for.
+    notify_eligible: bool,
 }
+
+/// The longest the refine lane sleeps between looks at an empty queue. Its
+/// producers (ingest, the doors through `RefinePoke`) poke it awake, so this
+/// bounds only what nobody poked for.
+pub(crate) const MAX_LANE_IDLE_BACKOFF: Duration = Duration::from_secs(30);
 
 /// MAY THIS MESSAGE EVER NOTIFY, and from when — the whole of docs/NOTIFY.md
 /// §11.3, in one pure function so the engine and its tests cannot drift.
@@ -505,6 +519,32 @@ struct HistoryMessageAdded {
     message: MessageRef,
 }
 
+/// One label's `history.list` walk, as [`SyncEngine::history_walk_label`]
+/// returns it.
+struct LabelWalk {
+    /// The deduped `messageAdded` ids.
+    ids: Vec<String>,
+    /// The max historyId observed: the start, every record, the page ids.
+    cursor: u64,
+    /// The mailbox's current historyId as the last page reported it, `None`
+    /// if the page carried none. Current for the WHOLE mailbox, whatever the
+    /// walk's label: equal to the start cursor, it says nothing anywhere has
+    /// changed.
+    current: Option<u64>,
+}
+
+/// HOW LONG THE POLL LANE WAITS after a tick: `interval` after a tick that
+/// found the mailbox changed and after the first idle tick (one quiet poll is
+/// not an idle mailbox), then doubling per idle tick to `idle_cap`, whatever
+/// the cap. With the cap at or under the interval (the default,
+/// `idle_poll_secs` unset) every wait is the interval. Pure, so the ladder is
+/// testable without a clock.
+fn poll_wait(idle_rounds: u32, interval: Duration, idle_cap: Duration) -> Duration {
+    interval
+        .saturating_mul(2u32.saturating_pow(idle_rounds.saturating_sub(1)))
+        .min(idle_cap.max(interval))
+}
+
 /// Parse a decimal string historyId; malformed input yields 0 (treated as
 /// "unknown", forcing a full catch-up rather than a panic).
 fn parse_history_id(s: &str) -> u64 {
@@ -687,6 +727,15 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// Coalescing is intentional — several pokes during one in-flight poll
     /// collapse into a single extra tick.
     refresh: Arc<tokio::sync::Notify>,
+    /// HOW MANY CLIENTS ARE LISTENING: the open `GET /client/events` streams,
+    /// counted by the human door and shared through
+    /// [`SyncEngine::with_event_listeners`]. The poll lane's idle ladder
+    /// (`sync.idle_poll_secs`) stays on its first rung while this is nonzero:
+    /// an app that is open is a person waiting on their mail. Counted at the
+    /// door rather than read off the store's event notifier, whose receivers
+    /// include the daemon's own APNs pusher for the life of the process.
+    /// Without the handle (`squelchd run`, tests) nobody is ever listening.
+    event_listeners: Arc<std::sync::atomic::AtomicUsize>,
     /// POLL LANE -> REFINE LANE: poked once per poll tick that actually ingested
     /// something, so new mail starts through Stage-1 the moment it lands instead
     /// of waiting out whatever the refine lane is in the middle of.
@@ -701,6 +750,19 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`SyncEngine::refine_lane`]; see [`SyncEngine::run_lanes`] for why the
     /// two are separate futures at all.
     refine_wake: tokio::sync::Notify,
+    /// THE NOTIFICATION LANE'S WAKE: a job it claims may just have been
+    /// queued. Poked by the two producers, this engine's own ingest of an
+    /// incremental arrival (its `notification` job is queued inside the
+    /// ingest transaction) and the investigation lane's commit of an
+    /// arrival-eligible job (which queues the `deliberate_notification`),
+    /// and awaited by [`SyncEngine::agent_notification_lane`], which
+    /// otherwise backs off to `MAX_NOTIFY_IDLE_BACKOFF` between looks at an
+    /// empty queue. Coalesces like `refine_wake`: a window of fifty arrivals
+    /// is one extra round. The store's other producers of a push job (a
+    /// correction, a rule change, a heal, a sent reply re-evaluating its
+    /// thread) have no handle on this engine and do not poke; that cap is
+    /// sized for them.
+    notify_wake: tokio::sync::Notify,
     /// ON-DEMAND SPAM SIGNAL: notifying it makes the poll loop run ONE spam
     /// window sync on its next pass. Separate from `refresh` because it is a
     /// different request — `refresh` means "check my mail now", this means "go
@@ -708,6 +770,14 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// collapsing them would put the spam fetch back on every manual refresh,
     /// which is most of what this change removed.
     spam_refresh: Arc<tokio::sync::Notify>,
+    /// THE AGENT DOOR'S POKE at the refine lane: an agent search just queued
+    /// access checks for archive rows and is waiting on them (see
+    /// `store::archive_surface`). Its own handle rather than a second use of
+    /// `refine_wake`, which stays private to this engine's own ingest; the two
+    /// wake the same lane. It also carries the lane's answer to "would a poke
+    /// be acted on", which the door reads before it waits (see
+    /// [`Self::refine_lane`]).
+    refine_poke: crate::store::archive_surface::RefinePoke,
     /// Per-cap-kind last-warned UTC day. In-memory only; a restart re-arms them,
     /// and one fresh notice on restart is acceptable.
     ///
@@ -736,6 +806,22 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// (revoked scope, Gmail outage) says so ONCE instead of once per poll. The
     /// next success re-arms it.
     unread_warned: AtomicBool,
+    /// The account's creation time, read from the store once and kept: it
+    /// is stamped by `ensure_account` and never changes, and every triage
+    /// job used to re-read it under the store mutex to learn "not new".
+    /// Only a FOUND stamp is kept; a read that failed or found no row is
+    /// asked again next time, so a store hiccup on the first job cannot pin
+    /// a new account at the steady-state effort for its window.
+    account_created: std::sync::OnceLock<DateTime<Utc>>,
+    /// THE UNREAD COUNT IS OWED: fetch it on the next tick whether or not the
+    /// walk moved. Set at boot (the stored pair may be a day old), by a manual
+    /// refresh (somebody is looking), and by a fetch that failed (so the retry
+    /// is per tick, as it was when every tick fetched). Otherwise the count is
+    /// fetched only after a walk that found the mailbox changed: an idle
+    /// mailbox cannot change its unread count, so asking Gmail every five
+    /// seconds for a number that cannot have moved was a third of the idle
+    /// request rate.
+    unread_stale: AtomicBool,
     /// Unix seconds before which the Google profile (name and photo) is not
     /// re-fetched. Zero at start, so the first poll tick of a process tries.
     /// In memory on purpose: a restart costs one extra pair of small requests,
@@ -794,9 +880,59 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// the gauge is for display, and control flow hung off a display value
     /// comes back to bite when the display changes.
     window_in_flight: AtomicBool,
+    /// The archive walk's waits. [`ArchivePace::default`] outside the tests.
+    archive_pace: ArchivePace,
+    /// What the archive walk remembers between chunks and tells the other
+    /// lanes. See [`ArchiveRun`].
+    archive: ArchiveRun,
+    /// SOME MESSAGE MAY BE MISSING ITS VECTOR, so the next refine round should
+    /// run the drain. Raised at construction (rows ingested before this
+    /// process had an embedder, and failures from an earlier run, are what the
+    /// first drain is for), by every arm of [`SyncEngine::embed_and_store`]
+    /// that did not write a vector, and by a drain that stopped on an error;
+    /// lowered by a drain as it starts, so a failure that lands while it runs
+    /// is not lost under its clear. Without this the drain ran EVERY round,
+    /// and in steady state every non-spam row already has a vector, so its
+    /// `NOT EXISTS` never short-circuited: a walk of the whole account with a
+    /// vec0 probe per row, 50k probes every 30 s idle and every second while
+    /// triage was busy, under the store mutex, for nothing.
+    ///
+    /// An `Arc`, because the debt is a property of the STORE and more than
+    /// one engine writes to it: the daemon's sweeps engine runs the blank-body
+    /// heal, which deletes a healed row's vector for this drain to redo, and
+    /// its raise has to land on the flag the sync engine's refine lane reads.
+    /// [`SyncEngine::with_vectors_dirty`] hands one flag to every engine over
+    /// one store.
+    vectors_dirty: Arc<AtomicBool>,
     /// Shared cooldown after provider failure. Rejected configuration must not
     /// trigger one request per queued message or consume message retry attempts.
     agent_retry_after: AtomicI64,
+    /// How many provider probes have failed in a row since an investigation
+    /// last succeeded: the rung of the throttle cooldown's ladder
+    /// (`triage_worker::throttle_cooldown_secs`). The access lane's fast
+    /// model answering does not reset it.
+    agent_throttle_strikes: AtomicU32,
+    /// The access lane's own ladder: its fast model is another model,
+    /// throttled and recovering on its own, so its failures climb this one
+    /// and its successes reset it, and neither touches the investigation
+    /// lane's.
+    agent_access_strikes: AtomicU32,
+    /// Whether an investigation has answered since the last investigation
+    /// timed out: the account-level half of the "two timeouts in a row"
+    /// rule in `triage_worker::retry_agent`, which fails a job only when
+    /// one has. Raised when an investigation answers (a whole run, or an
+    /// earlier turn of a run that then failed), lowered by every timeout.
+    /// Starts lowered: a fresh process has seen no answer, and a job whose
+    /// previous attempt timed out before a roll must not be failed on the
+    /// strength of the restart. The access lane's fast model does not raise
+    /// it.
+    agent_answered_since_timeout: AtomicBool,
+    /// When the account's last provider cooldown ended (or will end), as a
+    /// timestamp: the throttle episode's own stamp, which no success clears
+    /// (a success clears `agent_retry_after`), so `open_cooldown` can tell
+    /// a fresh throttle hours after an old episode from the next probe of
+    /// a continuing one. Zero until a cooldown has been opened.
+    agent_last_cooldown_end: AtomicI64,
     /// Scrape-facing counters. Its own registry unless the daemon shares one
     /// via [`SyncEngine::with_metrics`], so an engine built anywhere (tests, the
     /// contacts harvest, `run`) still records rather than branching on absence.
@@ -809,6 +945,25 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`profile::PEOPLE_ME_URL`] in production; only the tests in that module
     /// assign it, for the same reason `api_base` has no public setter.
     profile_url: String,
+}
+
+/// The "a vector may be missing" flag's lifecycle across ONE drain pass:
+/// lowered by the pass as it starts, and raised again on drop unless the pass
+/// set `drained`, which it does only when the queue came back empty or short.
+/// Every other ending, a query error, a failed batch, or the future being
+/// dropped mid-pass when `run_lanes` restarts the lanes, leaves the debt on
+/// the books for the next round. See [`SyncEngine::backfill_missing_vectors`].
+struct DrainGuard<'a> {
+    flag: &'a AtomicBool,
+    drained: bool,
+}
+
+impl Drop for DrainGuard<'_> {
+    fn drop(&mut self) {
+        if !self.drained {
+            self.flag.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C> {
@@ -831,7 +986,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // 180s, not 60: the long pole on this client is now a reasoning-model
         // triage call at high effort, which legitimately thinks for minutes on a
         // hard row. A Gmail fetch that runs that long is already wedged, and
-        // this timeout only exists to unwedge it.
+        // this timeout only exists to unwedge it. An agent turn the operator
+        // allows to run longer sets its own request timeout
+        // (`llm::classify_agent_step`), so this one never cuts it.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .connect_timeout(Duration::from_secs(15))
@@ -862,18 +1019,30 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             embedder: None,
             embedder_gate: None,
             refresh: Arc::new(tokio::sync::Notify::new()),
+            event_listeners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             refine_wake: tokio::sync::Notify::new(),
+            notify_wake: tokio::sync::Notify::new(),
             spam_refresh: Arc::new(tokio::sync::Notify::new()),
+            refine_poke: Default::default(),
             warn_days: Arc::new(std::sync::Mutex::new(WarnDays::default())),
             notify_lane: std::sync::OnceLock::new(),
             unread_warned: AtomicBool::new(false),
+            account_created: std::sync::OnceLock::new(),
+            unread_stale: AtomicBool::new(true),
             profile_due: AtomicI64::new(0),
             profile_warned: AtomicBool::new(false),
             // Nothing has polled yet, so nothing may spend yet.
             poll_healthy: AtomicBool::new(false),
             polled_ok: AtomicBool::new(false),
             window_in_flight: AtomicBool::new(false),
+            archive_pace: ArchivePace::default(),
+            archive: ArchiveRun::default(),
+            vectors_dirty: Arc::new(AtomicBool::new(true)),
             agent_retry_after: AtomicI64::new(0),
+            agent_throttle_strikes: AtomicU32::new(0),
+            agent_access_strikes: AtomicU32::new(0),
+            agent_answered_since_timeout: AtomicBool::new(false),
+            agent_last_cooldown_end: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
             profile_url: profile::PEOPLE_ME_URL.to_string(),
@@ -923,12 +1092,34 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self
     }
 
+    /// Share the human door's count of open event streams
+    /// (`ApiState::with_event_listeners` in `squelch-api`), so the poll lane's
+    /// idle ladder stays at its interval while a client has the app open.
+    /// Create ONE at daemon startup and hand a clone to each side.
+    pub fn with_event_listeners(mut self, listeners: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.event_listeners = listeners;
+        self
+    }
+
     /// Share the ON-DEMAND SPAM signal, so the human door's spam page can ask
     /// for a fetch of a folder this loop otherwise never touches. Wire the same
     /// handle into `ApiState::with_spam_refresh`; without it the endpoint is a
     /// no-op and the page stays on whatever was last fetched.
     pub fn with_spam_refresh(mut self, spam_refresh: Arc<tokio::sync::Notify>) -> Self {
         self.spam_refresh = spam_refresh;
+        self
+    }
+
+    /// Share the REFINE POKE, so a door that just queued work somebody is
+    /// waiting on (an agent search surfacing archive mail) starts the refine
+    /// lane now instead of at its next interval. Wire the same handle into
+    /// `ApiState::with_refine_poke` and the agent door; without it that work
+    /// still runs, on the lane's own clock.
+    pub fn with_refine_poke(
+        mut self,
+        refine_poke: crate::store::archive_surface::RefinePoke,
+    ) -> Self {
+        self.refine_poke = refine_poke;
         self
     }
 
@@ -939,6 +1130,21 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     pub fn with_embedder(mut self, embedder: Arc<dyn crate::embed::Embedder>) -> Self {
         self.embedder = Some(embedder);
         self
+    }
+
+    /// Share the "a vector may be missing" flag with another engine over the
+    /// same store, so a raise on either lands where the drain reads it. The
+    /// daemon builds its sweeps engine with the sync engine's handle; see the
+    /// field.
+    pub fn with_vectors_dirty(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.vectors_dirty = flag;
+        self
+    }
+
+    /// This engine's "a vector may be missing" flag, to hand to another
+    /// engine through [`SyncEngine::with_vectors_dirty`].
+    pub fn vectors_dirty_handle(&self) -> Arc<AtomicBool> {
+        self.vectors_dirty.clone()
     }
 
     /// The EFFECTIVE embedder for this tick: the override, else whatever is
@@ -1048,7 +1254,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     ) -> Result<T> {
         let mut backoff = self.gmail_quota_backoff;
         for attempt in 0..=GMAIL_QUOTA_RETRIES {
-            let resp = self.send_get(url).await?;
+            let quiet = retry == GmailRetry::Archive;
+            let resp = self.send_get(url, quiet).await?;
             let status = resp.status();
             if status.is_success() {
                 self.gmail_budget.note_success();
@@ -1100,8 +1307,30 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 backoff = (backoff * 2).min(self.gmail_quota_retry_cap);
                 continue;
             }
-            self.metrics
-                .record_gmail_error_reason(kind, gmail_error_reason(&body));
+            // The archive walk's refusals are counted and nothing more: its
+            // lane waits and retries by itself, and "sync is failing" in front
+            // of a current inbox would be a lie. A credential failure is the
+            // mailbox's, whoever hit it first.
+            if quiet {
+                // Typed, for the walk's own bookkeeping: its lane backs off
+                // differently on a quota refusal, and neither kind is ever a
+                // message it may skip. See [`ArchiveRun`].
+                match kind {
+                    GmailErrorKind::Quota => {
+                        self.archive.quota_refusals.fetch_add(1, Ordering::Relaxed);
+                    }
+                    GmailErrorKind::Auth => {
+                        self.archive.auth_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    GmailErrorKind::Http | GmailErrorKind::Network => {}
+                }
+            }
+            if quiet && kind != GmailErrorKind::Auth {
+                self.metrics.count_gmail_error(kind);
+            } else {
+                self.metrics
+                    .record_gmail_error_reason(kind, gmail_error_reason(&body));
+            }
             return Err(CoreError::Other(anyhow::anyhow!(
                 "gmail api status {} (reason: {}{})",
                 status.as_u16(),
@@ -1113,26 +1342,33 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// Send a GET with a Bearer token, retrying once on 401 with a fresh token.
-    async fn send_get(&self, url: &str) -> Result<reqwest::Response> {
-        let token = self.token_for_request().await?;
-        let resp = self.bearer_get(url, &token.access_token).await?;
+    async fn send_get(&self, url: &str, quiet: bool) -> Result<reqwest::Response> {
+        let token = self.token_for_request(false).await?;
+        let resp = self.bearer_get(url, &token.access_token, quiet).await?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             // Redacted: the fact of a retry, never token/header content.
             eprintln!("squelch: gmail 401; refreshing token and retrying once");
-            let token = self.token_for_request().await?;
-            return self.bearer_get(url, &token.access_token).await;
+            // FRESH: past the store's in-memory copy, which is the token Gmail
+            // just refused; the backend may hold a newer one.
+            let token = self.token_for_request(true).await?;
+            return self.bearer_get(url, &token.access_token, quiet).await;
         }
         Ok(resp)
     }
 
-    /// The access token for one Gmail call. A credential failure never reaches
-    /// a status code — the refresh exchange is what failed, `invalid_grant`
-    /// included — so it is counted as `auth` on the typed variant here rather
-    /// than string-matched out of an error chain later.
-    async fn token_for_request(&self) -> Result<crate::credentials::OAuthToken> {
-        self.creds
-            .token(self.account_id)
-            .await
+    /// The access token for one Gmail call (`fresh`: past the credential
+    /// store's in-memory copy, for the retry after a 401). A credential
+    /// failure never reaches a status code — the refresh exchange is what
+    /// failed, `invalid_grant` included — so it is counted as `auth` on the
+    /// typed variant here rather than string-matched out of an error chain
+    /// later.
+    async fn token_for_request(&self, fresh: bool) -> Result<crate::credentials::OAuthToken> {
+        let token = if fresh {
+            self.creds.fresh_token(self.account_id).await
+        } else {
+            self.creds.token(self.account_id).await
+        };
+        token
             // The SUCCESS half, and it is not decoration: the failure below sets
             // a state a client renders as "your mailbox is disconnected", so
             // something has to clear it when the credential works again. Without
@@ -1146,7 +1382,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             })
     }
 
-    async fn bearer_get(&self, url: &str, access_token: &str) -> Result<reqwest::Response> {
+    async fn bearer_get(
+        &self,
+        url: &str,
+        access_token: &str,
+        quiet: bool,
+    ) -> Result<reqwest::Response> {
         // Admission is the mailbox's, not this engine's: every caller for the
         // account books against the same budget, 401 retries included.
         self.gmail_budget
@@ -1160,7 +1401,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             .map_err(|e| {
                 // No status ever arrived: DNS, TLS, connect or the client's own
                 // timeout. Distinct from `http` because the fix is different.
-                self.metrics.record_gmail_error(GmailErrorKind::Network);
+                if quiet {
+                    self.metrics.count_gmail_error(GmailErrorKind::Network);
+                } else {
+                    self.metrics.record_gmail_error(GmailErrorKind::Network);
+                }
                 CoreError::Other(anyhow::anyhow!("gmail request: {e}"))
             })
     }
@@ -1340,6 +1585,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     ) -> Result<()> {
         let mut refine_shutdown = shutdown.clone();
         let mut notify_shutdown = shutdown.clone();
+        let mut archive_shutdown = shutdown.clone();
         tokio::select! {
             polled = async {
                 if backfill_first {
@@ -1350,7 +1596,656 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             () = self.agent_notification_lane(&mut notify_shutdown) => Ok(()),
             // Only ever completes on shutdown; it has no error to report.
             () = self.refine_lane(&mut refine_shutdown) => Ok(()),
+            // The same: a Gmail error inside the walk is the walk's to wait
+            // out, never a reason to bounce the lifecycle.
+            () = self.archive_lane(&mut archive_shutdown) => Ok(()),
         }
+    }
+
+    /// THE ARCHIVE WALK: mail older than the backfill window, fetched once,
+    /// slowly, newest first, and stored to be found (see
+    /// [`Store::ingest_archive_message`]). One 7-day chunk at a time backwards
+    /// from the persisted cursor until it reaches `now - sync.archive_days`.
+    ///
+    /// No `Result`, for the refine lane's reason: this lane is no part of
+    /// "is the mailbox syncing", so nothing that goes wrong in it may end the
+    /// `select!`. An error is logged, waited out and the same chunk retried.
+    /// The poll lane stays the only future whose `Err` reaches [`Self::run`].
+    ///
+    /// CANCELLATION IS A RESUME. When the poll lane errors this future is
+    /// dropped at whatever await it is on. Each message is one synchronous
+    /// store transaction, so a row is either wholly there or absent; the
+    /// cursor only moves after a whole chunk, so the next lifecycle lists the
+    /// same chunk again, drops the ids already stored and fetches the rest. A
+    /// row cancelled between its commit and its vector write is picked up by
+    /// the refine lane's `backfill_missing_vectors`, like any other.
+    ///
+    /// It is idle until a poll has succeeded, for the same reason the refine
+    /// lane is (`poll_healthy`): a dead credential must not be retried by two
+    /// lanes. And it yields to a window of mail being fetched: a first
+    /// backfill or a catch-up is mail somebody is waiting for, and the two
+    /// would otherwise split one Gmail budget.
+    async fn archive_lane(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) {
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            let wait = match self.archive_walk_chunk(shutdown).await {
+                // Straight on to the next chunk; the rests are inside.
+                Ok(ArchiveStep::Walked) => Duration::ZERO,
+                Ok(ArchiveStep::Held) => self.archive_pace.held_recheck,
+                Ok(ArchiveStep::Done | ArchiveStep::Off) => self.archive_pace.done_recheck,
+                Err(e) => {
+                    let wait = self.archive_error_wait();
+                    // Error strings from this crate never carry secrets.
+                    eprintln!(
+                        "squelch: archive walk error ({e}); retrying in {}s",
+                        wait.as_secs()
+                    );
+                    wait
+                }
+            };
+            if !Self::archive_rest(wait, shutdown).await {
+                return;
+            }
+        }
+    }
+
+    /// Sleep `d` unless shutdown arrives first; `false` means it did.
+    async fn archive_rest(d: Duration, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+        if *shutdown.borrow() {
+            return false;
+        }
+        let sleep = tokio::time::sleep(d);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = &mut sleep => return true,
+                changed = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        return false;
+                    }
+                    // The sender is gone without ever saying stop: nothing
+                    // will wake this again, so the sleep is all that is left.
+                    if changed.is_err() {
+                        sleep.await;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// WHAT, IF ANYTHING, STOPS THE WALK TOUCHING GMAIL RIGHT NOW. See
+    /// [`Self::archive_lane`]. A poll that has not succeeded comes first: a
+    /// window is only ever in flight under one that has.
+    fn archive_gate(&self) -> Option<ArchiveHold> {
+        if !self.poll_healthy.load(Ordering::Relaxed) {
+            Some(ArchiveHold::Poll)
+        } else if self.window_in_flight.load(Ordering::Relaxed) {
+            Some(ArchiveHold::Window)
+        } else {
+            None
+        }
+    }
+
+    /// A HOLD IS SAID ONCE, WHEN IT STARTS OR CHANGES, and shown for as long
+    /// as it lasts. The lane looks again every thirty seconds, so the log gets
+    /// one line per stretch and the gauge carries the rest. `None` (walking,
+    /// finished, off) clears the gauge and says so if something had been
+    /// holding it. Returns [`ArchiveStep::Held`] for a hold, for the caller's
+    /// convenience.
+    fn archive_hold(&self, hold: Option<ArchiveHold>) -> ArchiveStep {
+        self.metrics.note_archive_hold(hold);
+        let (before, room) = {
+            let mut state = self.archive.state();
+            (
+                std::mem::replace(&mut state.hold, hold),
+                state.room_note.clone(),
+            )
+        };
+        if before != hold {
+            self.archive.hold_changes.fetch_add(1, Ordering::Relaxed);
+            match hold {
+                Some(hold) => eprintln!(
+                    "squelch: archive walk holding ({}): {}",
+                    hold.label(),
+                    match hold {
+                        ArchiveHold::Poll => "no poll has succeeded yet",
+                        ArchiveHold::Window => "a window of mail is being fetched",
+                        ArchiveHold::Embedder => "the embedder has not finished loading",
+                        // The numbers, from the check that just refused.
+                        ArchiveHold::Disk | ArchiveHold::DbSize => room.as_str(),
+                        ArchiveHold::Clock => "the clock reads before 2024",
+                        ArchiveHold::QuotaDay => "Gmail refused it three times today",
+                    }
+                ),
+                None => eprintln!("squelch: archive walk no longer holding"),
+            }
+        }
+        ArchiveStep::Held
+    }
+
+    /// May the refine lane drain missing vectors this round. See the call.
+    fn may_drain_vectors(&self) -> bool {
+        !self.window_in_flight.load(Ordering::Relaxed)
+            && !self.archive.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// HAS THE EMBEDDER INIT RESOLVED, whichever way. The first backfill waits
+    /// on the same gate ([`Self::with_embedder_gate`]) with a ceiling, because
+    /// a new user is looking at an empty mailbox; the walk has nobody waiting
+    /// and simply does not start until it has. A year of rows stored with no
+    /// embedder is a year of rows for the batch drain, which is the memory
+    /// profile the gate exists to avoid. No gate, or one whose sender is gone,
+    /// is nothing to wait for.
+    fn archive_embedder_settled(&self) -> bool {
+        match &self.embedder_gate {
+            None => true,
+            Some(gate) => *gate.borrow() || gate.has_changed().is_err(),
+        }
+    }
+
+    /// The walk's clock: the wall clock outside the tests.
+    fn archive_now(&self) -> DateTime<Utc> {
+        self.archive.state().clock.unwrap_or_else(Utc::now)
+    }
+
+    /// IS THERE ROOM TO STORE MORE, and if not, which guard says so. Asked
+    /// BEFORE EVERY BATCH as well as before every chunk: a chunk is a whole
+    /// week of mail, however much that is, and these are the only things
+    /// between a heavy week and a full volume. A number that cannot be read
+    /// is no room: the walk is the one writer here that can always wait.
+    /// Nothing else asks this. Live mail is stored whatever it answers.
+    ///
+    /// THE FREE-SPACE FLOOR is `sync.archive_min_free_mb` or a fifth of the
+    /// whole filesystem ([`ARCHIVE_FLOOR_VOLUME_SHARE`], capped at 5 GiB),
+    /// whichever is larger,
+    /// measured on the filesystem the database file is on. The share is there
+    /// because that filesystem can be one every tenant's database is on: a
+    /// fixed 2 GiB is then the fleet's last 2 GiB, and each walk would write
+    /// until it was. ONCE HELD it resumes only at the floor plus a tenth
+    /// ([`ARCHIVE_FLOOR_RESUME_MARGIN`]); without the margin a walk sitting
+    /// at the floor starts, stores a batch, and stops, every thirty seconds.
+    ///
+    /// THE DATABASE CEILING is `sync.archive_max_db_mb` on this database's own
+    /// file and log: the one limit that is this account's alone, where free
+    /// space on a shared volume is whatever the neighbours left.
+    ///
+    /// Says nothing itself. The numbers are left for [`Self::archive_hold`],
+    /// which logs a hold once, when it starts.
+    fn archive_room(&self) -> Option<ArchiveHold> {
+        const MIB: u64 = 1024 * 1024;
+        let sync = &self.config.sync;
+        if sync.archive_min_free_mb == 0 && sync.archive_max_db_mb == 0 {
+            self.archive.state().disk_short = false;
+            return None;
+        }
+        let disk = match self.archive.state().disk_probe {
+            Some(probe) => probe(),
+            None => self.store.archive_disk().ok(),
+        };
+        let mut state = self.archive.state();
+        let Some(disk) = disk else {
+            // With the free-space check switched off, an unreadable volume
+            // holds nothing, as it never did: 0 means "whatever the disk
+            // says". The ceiling goes unread with it, on the one kind of
+            // host (no `statvfs`) where nothing here can be measured.
+            if sync.archive_min_free_mb == 0 {
+                state.disk_short = false;
+                return None;
+            }
+            state.room_note = "the database volume could not be measured".into();
+            return Some(ArchiveHold::Disk);
+        };
+        if sync.archive_min_free_mb == 0 {
+            state.disk_short = false;
+        } else {
+            let floor = archive_floor_bytes(sync.archive_min_free_mb, disk.total_bytes);
+            let needed = if state.disk_short {
+                floor.saturating_add(floor / ARCHIVE_FLOOR_RESUME_MARGIN)
+            } else {
+                floor
+            };
+            state.disk_short = disk.free_bytes < needed;
+            if state.disk_short {
+                state.room_note = format!(
+                    "{} MiB free on the database volume; the floor is {} MiB (the larger of \
+                     sync.archive_min_free_mb and a fifth of the volume, capped at 5 GiB) and it resumes at {} MiB",
+                    disk.free_bytes / MIB,
+                    floor / MIB,
+                    floor.saturating_add(floor / ARCHIVE_FLOOR_RESUME_MARGIN) / MIB
+                );
+                return Some(ArchiveHold::Disk);
+            }
+        }
+        let ceiling = sync.archive_max_db_mb.saturating_mul(MIB);
+        if ceiling != 0 && disk.db_bytes >= ceiling {
+            state.room_note = format!(
+                "the database is {} MiB, at its {} MiB ceiling (sync.archive_max_db_mb)",
+                disk.db_bytes / MIB,
+                sync.archive_max_db_mb
+            );
+            return Some(ArchiveHold::DbSize);
+        }
+        None
+    }
+
+    /// How long the lane waits after the error the last chunk returned: the
+    /// quota backoff when Gmail refused it, the flat [`ArchivePace::
+    /// error_backoff`] for anything else.
+    fn archive_error_wait(&self) -> Duration {
+        self.archive
+            .state()
+            .quota_wait
+            .unwrap_or(self.archive_pace.error_backoff)
+    }
+
+    /// One step of the archive walk, or the reason there was none: every
+    /// reason to hold first, then the chunk itself, then the bookkeeping its
+    /// outcome calls for.
+    ///
+    /// A QUOTA REFUSAL backs the walk off for [`ArchivePace::quota_backoff`],
+    /// doubling per refusal up to [`ArchivePace::quota_backoff_cap`], and the
+    /// third in one UTC day ends the walk until the next. The refusal has
+    /// already paused and slowed the shared budget for the poll lane and the
+    /// write door; mail somebody is waiting for must not keep paying for mail
+    /// nobody is.
+    ///
+    /// ANY OTHER ERROR fails the chunk and leaves the cursor, to be tried
+    /// again whole. The one thing that ever lets a failing chunk through is a
+    /// MESSAGE that has itself failed on [`ArchivePace::poison_attempts`]
+    /// separate passes (see [`Self::archive_skip`]), so one message Gmail will
+    /// not serve cannot stop the walk at its week for good, and a bad quarter
+    /// of an hour at Gmail cannot make it drop mail it never retried.
+    async fn archive_walk_chunk(
+        &self,
+        shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<ArchiveStep> {
+        let days = self.config.sync.archive_days.min(ARCHIVE_DAYS_MAX);
+        if days == 0 {
+            return Ok(ArchiveStep::Off);
+        }
+        if let Some(gate) = self.archive_gate() {
+            return Ok(self.archive_hold(Some(gate)));
+        }
+        if !self.archive_embedder_settled() {
+            return Ok(self.archive_hold(Some(ArchiveHold::Embedder)));
+        }
+        let now = self.archive_now();
+        // A CLOCK THAT IS PLAINLY WRONG persists nothing. The walk's start is
+        // written once from this instant: a board that boots at 1970 would
+        // otherwise store a start decades back and read as finished for ever
+        // once the clock was set.
+        if now.timestamp() < ARCHIVE_CLOCK_FLOOR_UNIX {
+            return Ok(self.archive_hold(Some(ArchiveHold::Clock)));
+        }
+        let today = now.date_naive();
+        {
+            let mut state = self.archive.state();
+            if state.quota_day != Some(today) {
+                state.quota_day = Some(today);
+                state.quota_refusals_today = 0;
+            }
+            let refused = state.quota_refusals_today >= self.archive_pace.quota_refusals_per_day;
+            drop(state);
+            if refused {
+                return Ok(self.archive_hold(Some(ArchiveHold::QuotaDay)));
+            }
+        }
+        if let Some(full) = self.archive_room() {
+            return Ok(self.archive_hold(Some(full)));
+        }
+        self.archive_hold(None);
+
+        let refusals = self.archive.quota_refusals.load(Ordering::Relaxed);
+        self.archive.skipped.store(0, Ordering::Relaxed);
+        let out = self.archive_walk_step(shutdown, now, days).await;
+        let refused = self.archive.quota_refusals.load(Ordering::Relaxed) != refusals;
+        let pace = self.archive_pace;
+        let mut state = self.archive.state();
+        match &out {
+            Ok(ArchiveStep::Walked) => {
+                // The chunk is behind the cursor; so is what failed in it.
+                state.failing = None;
+                state.skips_counted.clear();
+                state.quota_wait = None;
+                state.quota_backoff = None;
+            }
+            Err(_) if refused => {
+                let wait = state.quota_backoff.unwrap_or(pace.quota_backoff);
+                state.quota_backoff = Some((wait * 2).min(pace.quota_backoff_cap));
+                state.quota_wait = Some(wait);
+                state.quota_refusals_today += 1;
+                if state.quota_refusals_today >= pace.quota_refusals_per_day {
+                    eprintln!(
+                        "squelch: archive walk stopped until tomorrow (UTC): Gmail refused it {} \
+                         times today",
+                        state.quota_refusals_today
+                    );
+                }
+            }
+            // Nothing is counted against the CHUNK. What may eventually be
+            // stepped over is one message that has itself failed, pass after
+            // pass, and that is booked where it fails ([`Self::archive_skip`]).
+            Err(_) => state.quota_wait = None,
+            Ok(_) => {}
+        }
+        out
+    }
+
+    /// The chunk [`Self::archive_walk_chunk`] wraps: a forward one when one is
+    /// due, else the next one backwards.
+    ///
+    /// LISTS ALL MAIL backwards, with no `labelIds`: the archive is everything
+    /// the mailbox holds, read or filed, received or sent, and `is_sent` comes
+    /// from each message's own labels. Gmail leaves spam and trash out of a
+    /// listing unless asked for them; drafts and chats are excluded by the
+    /// query.
+    ///
+    /// IDS ALREADY STORED ARE DROPPED BEFORE ANY FETCH. That is the quota
+    /// saving (a list call costs a quarter of one body) and it is the whole
+    /// resume mechanism: a chunk interrupted halfway is listed again and only
+    /// its unfetched half is paid for.
+    ///
+    /// `GmailRetry::Archive`: a quota refusal ends the chunk rather than being
+    /// slept on in place. Retrying in place (`CatchUp`) is for a window
+    /// somebody is waiting on, where losing position costs a re-list of
+    /// thousands; here position is the stored rows and costs nothing to
+    /// recover.
+    ///
+    /// THE CURSOR MOVES LAST, after every id of the chunk is ingested, so an
+    /// error or a cancellation anywhere above leaves it where it was.
+    async fn archive_walk_step(
+        &self,
+        shutdown: &mut tokio::sync::watch::Receiver<bool>,
+        now: DateTime<Utc>,
+        days: u32,
+    ) -> Result<ArchiveStep> {
+        let pace = self.archive_pace;
+        // Relative to NOW, every chunk: a walk that finished last month is
+        // still finished, and one resumed after a week away has a week less to
+        // do at the far end.
+        let target = now - ChronoDuration::days(i64::from(days));
+        let walked_to = match self.store.archive_walked_to(self.account_id)? {
+            Some(at) => at,
+            // FIRST USE. The walk starts where the backfill window ended, and
+            // the store leaves creating the row to the one caller that knows
+            // where that is. The forward edge starts at the same instant.
+            //
+            // AND NEVER NEARER TO NOW THAN THE FORWARD PASS'S OWN LAG. The
+            // backward listing carries no `-in:inbox`, so with a backfill
+            // window of zero days it would start at this instant and could
+            // store a message that arrived a second ago before the poll
+            // ingests it: an archive row is write-once, so that message would
+            // never be triaged or notified. A day back, the live paths have
+            // long since had their turn.
+            None => {
+                let start = (now - ChronoDuration::days(i64::from(self.config.sync.backfill_days)))
+                    .min(now - pace.forward_lag);
+                self.store.set_archive_walked_to(self.account_id, start)?;
+                start
+            }
+        };
+        let done = walked_to <= target;
+        self.metrics.note_archive_walk(walked_to, done);
+
+        if let Some(step) = self.archive_forward_chunk(shutdown, now).await? {
+            return Ok(step);
+        }
+        if done {
+            return Ok(ArchiveStep::Done);
+        }
+
+        let from = (walked_to - pace.chunk).max(target);
+        // Epoch seconds, which Gmail reads as exact instants (a bare date is a
+        // day in the ACCOUNT's timezone, which this daemon does not know). The
+        // lower bound is one second early so two neighbouring chunks overlap
+        // by that second whichever way Gmail rounds the boundary; the overlap
+        // costs nothing, because its ids are already stored.
+        let q = format!(
+            "after:{} before:{} -in:draft -in:chats",
+            from.timestamp() - 1,
+            walked_to.timestamp()
+        );
+        let key = (false, walked_to.timestamp());
+        let Some((stored, rest)) = self.archive_ingest_listing(&q, key, shutdown).await? else {
+            return Ok(ArchiveStep::Held);
+        };
+
+        self.store.set_archive_walked_to(self.account_id, from)?;
+        self.metrics.note_archive_walk(from, from <= target);
+        // One line per chunk that fetched something: a count and a date,
+        // nothing of the mail. An empty week says nothing.
+        if stored > 0 {
+            eprintln!(
+                "squelch: archive walk stored {stored} message(s), back to {}",
+                from.format("%Y-%m-%d")
+            );
+        }
+        // A chunk is hundreds of raw bodies parsed and dropped; hand the pages
+        // back before the long rest rather than holding them through it.
+        crate::mem::trim_off_runtime().await;
+        Self::archive_rest(rest, shutdown).await;
+        Ok(ArchiveStep::Walked)
+    }
+
+    /// THE FORWARD PASS: mail newer than the walk's start that carries neither
+    /// INBOX nor SENT. The live paths list those two labels and nothing else,
+    /// so mail a filter filed past the inbox, or that was archived before this
+    /// daemon first synced, is in no listing they make and behind the edge the
+    /// backward walk started from. `None` when no pass is due.
+    ///
+    /// IT MUST NEVER TAKE A MESSAGE THE LIVE PATH WOULD HAVE TRIAGED. An
+    /// archive row is write-once and a live sighting of one is a no-op, so a
+    /// message stored here first would stay untriaged for good. Three things
+    /// keep it from that, and it needs all three:
+    ///
+    /// - `-in:inbox -in:sent`: a message that carries either label now is the
+    ///   live paths' (history walks those labels, a catch-up lists them) and
+    ///   is never listed here.
+    /// - The upper bound is a day behind THE LAST SUCCESSFUL POLL, not behind
+    ///   the clock. A poll that succeeded has replayed every arrival up to
+    ///   that instant, whatever labels the mail has since lost; a message
+    ///   older than that which the store still does not hold was never going
+    ///   to arrive by history. Measured from the clock instead, a daemon
+    ///   suspended for two days (a laptop lid) would wake with this lane and
+    ///   the poll lane both due, and the walk could store mail that arrived in
+    ///   the inbox and was archived on a phone during the gap, a moment before
+    ///   the poll replayed it. No poll yet this lifecycle is no pass at all.
+    /// - The day itself, for whatever is still settling at the head of the
+    ///   mailbox: a message delivered but not yet in a history page, a send
+    ///   whose SENT label lands after its first sighting.
+    ///
+    /// What is left is mail that had neither label when it was listed and is
+    /// given INBOX by hand afterwards: see the note on [`ArchivePace::
+    /// forward_lag`].
+    ///
+    /// One chunk of [`ArchivePace::chunk`] per call, like the backward walk,
+    /// until the edge reaches the bound; then nothing for [`ArchivePace::
+    /// done_recheck`], so a caught-up walk costs one small listing an hour.
+    async fn archive_forward_chunk(
+        &self,
+        shutdown: &mut tokio::sync::watch::Receiver<bool>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ArchiveStep>> {
+        let pace = self.archive_pace;
+        if self
+            .archive
+            .state()
+            .forward_caught_up
+            .is_some_and(|at| at.elapsed() < pace.done_recheck)
+        {
+            return Ok(None);
+        }
+        let polled = self.archive.last_poll_ok_unix.load(Ordering::Relaxed);
+        let Some(polled) = DateTime::from_timestamp(polled, 0).filter(|_| polled > 0) else {
+            return Ok(None);
+        };
+        let bound = polled.min(now) - pace.forward_lag;
+        let Some(covered_to) = self.store.archive_covered_to(self.account_id)? else {
+            return Ok(None);
+        };
+        self.metrics.note_archive_covered_to(covered_to);
+        if covered_to >= bound {
+            self.archive.state().forward_caught_up = Some(tokio::time::Instant::now());
+            return Ok(None);
+        }
+        let to = (covered_to + pace.chunk).min(bound);
+        let q = format!(
+            "after:{} before:{} -in:inbox -in:sent -in:draft -in:chats",
+            covered_to.timestamp() - 1,
+            to.timestamp()
+        );
+        let key = (true, covered_to.timestamp());
+        let Some((stored, rest)) = self.archive_ingest_listing(&q, key, shutdown).await? else {
+            return Ok(Some(ArchiveStep::Held));
+        };
+        self.store.set_archive_covered_to(self.account_id, to)?;
+        self.metrics.note_archive_covered_to(to);
+        if stored > 0 {
+            eprintln!(
+                "squelch: archive walk stored {stored} unlabelled message(s), forward to {}",
+                to.format("%Y-%m-%d")
+            );
+        }
+        crate::mem::trim_off_runtime().await;
+        Self::archive_rest(rest, shutdown).await;
+        Ok(Some(ArchiveStep::Walked))
+    }
+
+    /// List `q` over all mail, drop the ids already stored and ingest the rest
+    /// as archive rows, paced. `Some((new ids, the rest the caller owes after
+    /// it has persisted its cursor))`, or `None` when the walk had to stop
+    /// between batches (a window of mail started, or shutdown): nothing may be
+    /// persisted then, and what was stored is skipped on the way back.
+    ///
+    /// TWO LIMITS, and the slower one wins. The rest after each batch (twice
+    /// its own elapsed time) keeps the walk to a third of whatever pace the
+    /// shared [`GmailBudget`] is allowing. [`ArchivePace::per_minute`] is the
+    /// absolute one: however fast the budget would let it go, the walk fetches
+    /// no more than that many messages in any minute.
+    async fn archive_ingest_listing(
+        &self,
+        q: &str,
+        chunk: (bool, i64),
+        shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Option<(usize, Duration)>> {
+        let pace = self.archive_pace;
+        let mut burst = tokio::time::Instant::now();
+        let listed = self
+            .list_message_ids_in(None, Some(q), None, GmailRetry::Archive)
+            .await?;
+        // AFTER the listing, so a listing that fails is no pass at all: the
+        // per-message failures below are of THIS chunk (another chunk's are
+        // forgotten here), and each id counts at most once per pass.
+        self.archive.state().begin_pass(chunk);
+        let stored = self.store.stored_gmail_msg_ids(self.account_id, &listed)?;
+        let ids: Vec<String> = listed
+            .into_iter()
+            .filter(|id| !stored.contains(id))
+            .collect();
+
+        let per_batch = pace.batch.max(1);
+        let batches = ids.len().div_ceil(per_batch);
+        for (i, batch) in ids.chunks(per_batch).enumerate() {
+            // Between batches, never inside one: a catch-up that starts now
+            // gets the budget back within one batch, and the rows this chunk
+            // has already stored are skipped when the walk comes back to it.
+            if let Some(gate) = self.archive_gate() {
+                self.archive_hold(Some(gate));
+                return Ok(None);
+            }
+            // THE DISK GUARDS, PER BATCH. One chunk is a week of mail and can
+            // be thousands of bodies; asked only at its start, a heavy week
+            // would be written straight through the floor or the ceiling.
+            // Stopping here loses nothing: the cursor has not moved, and what
+            // this chunk already stored is skipped when the walk comes back.
+            if let Some(full) = self.archive_room() {
+                self.archive_hold(Some(full));
+                return Ok(None);
+            }
+            let wait =
+                self.archive
+                    .state()
+                    .admit(batch.len(), pace.per_minute, pace.per_minute_window);
+            if !wait.is_zero() {
+                if !Self::archive_rest(wait, shutdown).await {
+                    return Ok(None);
+                }
+                // The minute's wait is not work, and must not be rested for.
+                burst = tokio::time::Instant::now();
+            }
+            {
+                // Raised for the batch and no longer: the refine lane's vector
+                // drain stays out while bodies are being parsed and embedded.
+                let _in_flight = ArchiveBatchGuard::new(&self.archive);
+                self.fetch_raw_and_ingest(
+                    batch,
+                    Mailbox::Inbox,
+                    IngestOrigin::Archive,
+                    GmailRetry::Archive,
+                )
+                .await?;
+            }
+            // The last batch's rest comes after the cursor is safe.
+            if i + 1 == batches {
+                break;
+            }
+            if !Self::archive_rest(burst.elapsed() * pace.rest_factor, shutdown).await {
+                return Ok(None);
+            }
+            burst = tokio::time::Instant::now();
+        }
+        Ok(Some((ids.len(), burst.elapsed() * pace.rest_factor)))
+    }
+
+    /// MAY THE WALK SKIP THIS MESSAGE and go on to the next. Always for a 404:
+    /// the message was deleted between the listing and the fetch, and there is
+    /// nothing to come back for.
+    ///
+    /// OTHERWISE ONLY A MESSAGE THAT HAS ITSELF FAILED BEFORE, on
+    /// [`ArchivePace::poison_attempts`] separate passes over this chunk: its
+    /// own fetch, or its own write to the store. Never on a first failure,
+    /// whatever else has gone wrong with the chunk. Neither cursor ever looks
+    /// back, so a skip is for good, and what earns one has to be evidence
+    /// about that message: a transient Gmail error fails the pass, is booked
+    /// against the one id it hit, and the whole chunk is tried again.
+    ///
+    /// NOT ABOUT THE MESSAGE, and so neither booked nor skipped: a credential
+    /// error, and anything in a batch where Gmail has refused the walk for
+    /// quota or auth. (A failed LISTING never reaches here at all.)
+    ///
+    /// AT MOST [`ArchivePace::poison_skips`] A PASS. A message Gmail will not
+    /// serve is one or two; more than a handful failing over and over is an
+    /// outage or a broken store, and the chunk stays where it is.
+    ///
+    /// COUNTED ONCE. A chunk that fails for some other reason is walked again,
+    /// and a message already stepped over is stepped over again on every one
+    /// of those passes; the counter is of messages, not of steps.
+    fn archive_skip(&self, id: &str, error: &CoreError, quota_or_auth_before: u64) -> bool {
+        if matches!(error, CoreError::NotFound) {
+            if self.archive.state().count_skip(id) {
+                self.metrics.count_archive_skipped();
+            }
+            return true;
+        }
+        if matches!(error, CoreError::Credential(_))
+            || self.archive.quota_or_auth() != quota_or_auth_before
+        {
+            return false;
+        }
+        let earlier = self.archive.state().book_failure(id);
+        if earlier < self.archive_pace.poison_attempts
+            || self.archive.skipped.fetch_add(1, Ordering::Relaxed)
+                >= self.archive_pace.poison_skips
+        {
+            return false;
+        }
+        if self.archive.state().count_skip(id) {
+            self.metrics.count_archive_skipped();
+        }
+        true
     }
 
     /// Poll `history.list` every `poll_secs`, ingesting `messageAdded` INBOX
@@ -1362,54 +2257,36 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// `refine_wake` the moment this lane ingests anything.
     async fn poll_lane(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> Result<()> {
         let interval = Duration::from_secs(self.config.sync.poll_secs);
+        let idle_cap = Duration::from_secs(self.config.sync.idle_poll_secs);
+        let mut idle_rounds = 0u32;
         loop {
             if *shutdown.borrow() {
                 return Ok(());
             }
-            // BEFORE the walk, not after: the walk is what can return Err and
-            // bounce the whole lifecycle, and a mailbox stuck in that retry loop
-            // should still have a fresh unread count for the human door.
-            self.refresh_inbox_unread().await;
-            // The account's Google name and photo. Due once a day, so nearly
-            // every tick this is a single atomic load; it sits here because a
-            // mailbox whose walk keeps failing should still have a face.
-            self.refresh_profile().await;
-            // BEFORE the walk too, and for the same reason: the sweep is purely
-            // local — one indexed UPDATE, no Gmail, no model spend — so hanging
-            // it off a call that can Err would let a bad credential or a Gmail
-            // outage starve it for as long as the outage lasts.
-            self.reminder_pass();
-            self.poll_once().await?;
-            // GMAIL ANSWERED, so the refine lane may spend again. Set AFTER the
-            // walk and before anything else, because this is the only proof in
-            // the process that the credential works; `fetch_raw_and_ingest` has
-            // already poked `refine_wake` from inside that call if it ingested
-            // anything, and `Notify` holds the permit, so the lane wakes on the
-            // poke and reads a flag that is true by the time it does. See the
-            // field's own doc for what this is protecting.
-            self.poll_healthy.store(true, Ordering::Relaxed);
-            self.polled_ok.store(true, Ordering::Relaxed);
-            // THE freshness stamp for a healthy daemon: `run()` only records one
-            // on its way out, and a mailbox that polls happily for a month never
-            // goes there — staleness alerts would fire on the boot timestamp.
-            //
-            // IT STAYS IN THIS LANE, deliberately. Sync freshness measures
-            // POLLING, not refinement: that is what the staleness alert was
-            // always meant to mean, and stamping it from the refine lane would
-            // let a wedged Gmail credential keep looking healthy for as long as
-            // there were queued rows left to classify.
-            //
-            // `note_poll_ok` also ends the failure streak and clears the last
-            // error, so the client stops reporting an outage that is over.
-            self.metrics.note_poll_ok();
+            let moved = self.poll_tick().await?;
+            // THE IDLE LADDER (off unless `sync.idle_poll_secs` says
+            // otherwise): a tick that found the mailbox unchanged lengthens the
+            // next wait, a tick that found a change, or a client with the app
+            // open (an event stream connected), puts it back to the interval.
+            let listening = self.event_listeners.load(Ordering::Relaxed) > 0;
+            idle_rounds = if moved || listening {
+                0
+            } else {
+                idle_rounds.saturating_add(1)
+            };
+            let wait = poll_wait(idle_rounds, interval, idle_cap);
 
             // A refresh poke that arrives mid-poll is not lost: `Notify` stores
             // one permit, so the next `notified()` returns at once and the loop
             // runs one more immediate tick.
             tokio::select! {
-                _ = tokio::time::sleep(interval) => {}
+                _ = tokio::time::sleep(wait) => {}
                 _ = self.refresh.notified() => {
                     eprintln!("squelch: manual refresh — polling now");
+                    // Somebody asked: the next tick is at the fast interval and
+                    // fetches the unread count whether or not the walk moves.
+                    idle_rounds = 0;
+                    self.unread_stale.store(true, Ordering::Relaxed);
                 }
                 // THE SPAM PAGE ASKED. Run the window sync right here and then
                 // fall through to an ordinary tick, so one click costs one spam
@@ -1424,6 +2301,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     if let Err(e) = self.sync_spam_window().await {
                         eprintln!("squelch: spam sync failed ({e})");
                     }
+                    // Somebody is looking at the spam page: the same signal
+                    // as a refresh for the ladder, if not for the unread count.
+                    idle_rounds = 0;
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return Ok(()); }
@@ -1453,10 +2333,25 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     async fn refine_lane(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) {
         let interval = Duration::from_secs(self.config.triage.agent.worker_poll_secs);
         let mut idle_rounds = 0u32;
+        // Whatever ends this lane (shutdown, or `run_lanes` dropping it when
+        // the poll lane errors), a door must stop waiting on it.
+        struct NotRunnable<'a>(&'a crate::store::archive_surface::RefinePoke);
+        impl Drop for NotRunnable<'_> {
+            fn drop(&mut self) {
+                self.0.set_runnable(false);
+            }
+        }
+        let _withdrawn = NotRunnable(&self.refine_poke);
         loop {
             if *shutdown.borrow() {
                 return;
             }
+            // TELL THE DOORS WHETHER A POKE WOULD BUY ANYTHING, once a round
+            // and from the same three facts that gate the spending below: a
+            // poll has succeeded, a model is configured, the provider circuit
+            // is closed. An agent search waits on its access checks only
+            // while this is true.
+            self.refine_poke.set_runnable(self.refine_can_spend());
             if self.poll_healthy.load(Ordering::Relaxed) {
                 if self.agent_triage_pass().await {
                     idle_rounds = 0;
@@ -1485,7 +2380,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 // of after it, which is the exact watermark `crate::mem` is
                 // built to avoid. The first round after the guard drops drains
                 // whatever the window left behind, beside the first poll.
-                if !self.window_in_flight.load(Ordering::Relaxed) {
+                //
+                // NOR WHILE AN ARCHIVE BATCH IS, for both of the same reasons:
+                // the walk embeds each row a moment after its commit, and a
+                // walk with no embedder leaves rows whose batch drain must not
+                // land on top of the bodies it is parsing. The walk rests
+                // between batches for twice as long as it works, and the drain
+                // has that.
+                //
+                // AND ONLY WHEN SOMETHING MAY BE MISSING: the drain's query
+                // walks the whole account when nothing is, which in steady
+                // state is every round. See `vectors_dirty`.
+                if self.may_drain_vectors() && self.vectors_dirty.load(Ordering::Relaxed) {
                     self.backfill_missing_vectors().await;
                 }
             }
@@ -1496,12 +2402,44 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // during one long round are one extra round, not twenty.
             tokio::select! {
                 _ = self.refine_wake.notified() => { idle_rounds = 0; }
-                _ = tokio::time::sleep(interval.saturating_mul(1 << idle_rounds).min(Duration::from_secs(30))) => {}
+                _ = self.refine_poke.poked() => { idle_rounds = 0; }
+                _ = tokio::time::sleep(self.refine_idle_sleep(interval, idle_rounds)) => {}
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return; }
                 }
             }
         }
+    }
+
+    /// How long the refine lane sleeps between rounds: the idle backoff, cut
+    /// to the moment a provider cooldown lapses when that is sooner, so the
+    /// recovery probe runs when the cooldown says (seven seconds after a
+    /// `retry-after: 7`) and not at the next idle tick, up to thirty
+    /// seconds later. A round that found the cooldown open counts as idle,
+    /// which is what would otherwise stretch the sleep.
+    fn refine_idle_sleep(&self, interval: Duration, idle_rounds: u32) -> Duration {
+        let backoff = Duration::from_secs(triage_worker::doubling_backoff_secs(
+            interval.as_secs(),
+            idle_rounds,
+            MAX_LANE_IDLE_BACKOFF.as_secs(),
+        ));
+        let until = self.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+        if until > 0 {
+            // A second past the stamp, which is whole seconds: a wake just
+            // short of it would find the cooldown still open.
+            backoff.min(Duration::from_secs(until as u64 + 1))
+        } else {
+            backoff
+        }
+    }
+
+    /// Whether a refine round started now would run an access check: the gates
+    /// of [`Self::refine_lane`] and [`Self::agent_triage_pass`], read without
+    /// taking any of them.
+    fn refine_can_spend(&self) -> bool {
+        self.poll_healthy.load(Ordering::Relaxed)
+            && self.stage2_llm.is_some()
+            && Utc::now().timestamp() >= self.agent_retry_after.load(Ordering::Relaxed)
     }
 
     /// FETCH THE PROVIDER'S SPAM FOLDER, ONCE, ON REQUEST.
@@ -1552,23 +2490,96 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         Ok(n)
     }
 
-    /// A single poll tick: consult the cursor, either run the incremental
-    /// history walk or (on absent/expired cursor) a fresh catch-up.
-    async fn poll_once(&self) -> Result<()> {
+    /// ONE TICK OF THE POLL LANE, everything between two sleeps: the daily
+    /// profile, the reminder sweep, the walk, the stamps a successful walk
+    /// leaves, and the unread count when it is owed. Returns whether the walk
+    /// found the mailbox changed, which is what the lane's idle ladder and
+    /// the unread fetch both key on. Its own function so a test can run a
+    /// tick without the lane's clock.
+    async fn poll_tick(&self) -> Result<bool> {
+        // The account's Google name and photo. Due once a day, so nearly
+        // every tick this is a single atomic load; it sits before the walk
+        // because a mailbox whose walk keeps failing should still have a face.
+        self.refresh_profile().await;
+        // BEFORE the walk, for the same reason: the sweep is purely local —
+        // one indexed UPDATE, no Gmail, no model spend — so hanging it off a
+        // call that can Err would let a bad credential or a Gmail outage
+        // starve it for as long as the outage lasts.
+        self.reminder_pass();
+        // THE UNREAD COUNT WHEN IT IS OWED (see `unread_stale`), BEFORE the
+        // walk as every tick's fetch used to be: the walk is what can return
+        // Err and bounce the whole lifecycle, and a mailbox stuck in that
+        // retry loop still gets the count it is owed.
+        let owed = self.unread_stale.load(Ordering::Relaxed);
+        if owed {
+            self.refresh_inbox_unread().await;
+        }
+        let moved = self.poll_once().await?;
+        // AND AFTER A WALK THAT FOUND THE MAILBOX CHANGED, which is the only
+        // time an unread count can have moved: an idle mailbox is not asked,
+        // and a tick that already fetched above is not asked twice (Gmail's
+        // count already reflected the mail the walk went on to find). Before
+        // the stamps below, as the fetch always was: it is cosmetic, and its
+        // failure must not be the "last error" a poll that just succeeded
+        // reports.
+        if moved && !owed {
+            self.refresh_inbox_unread().await;
+        }
+        // GMAIL ANSWERED, so the refine lane may spend again. Set AFTER the
+        // walk and before anything else, because this is the only proof in
+        // the process that the credential works; `fetch_raw_and_ingest` has
+        // already poked `refine_wake` from inside that call if it ingested
+        // anything, and `Notify` holds the permit, so the lane wakes on the
+        // poke and reads a flag that is true by the time it does. See the
+        // field's own doc for what this is protecting.
+        self.poll_healthy.store(true, Ordering::Relaxed);
+        self.polled_ok.store(true, Ordering::Relaxed);
+        // WHEN, for the archive walk's forward pass: every arrival up to
+        // this instant has been through the live path, so mail older than
+        // this (less a day) that the store does not hold was never going
+        // to be. See [`Self::archive_forward_chunk`].
+        self.archive
+            .last_poll_ok_unix
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
+        // THE freshness stamp for a healthy daemon: `run()` only records one
+        // on its way out, and a mailbox that polls happily for a month never
+        // goes there — staleness alerts would fire on the boot timestamp.
+        //
+        // IT STAYS IN THIS LANE, deliberately. Sync freshness measures
+        // POLLING, not refinement: that is what the staleness alert was
+        // always meant to mean, and stamping it from the refine lane would
+        // let a wedged Gmail credential keep looking healthy for as long as
+        // there were queued rows left to classify.
+        //
+        // `note_poll_ok` also ends the failure streak and clears the last
+        // error, so the client stops reporting an outage that is over.
+        self.metrics.note_poll_ok();
+        Ok(moved)
+    }
+
+    /// A single poll: consult the cursor, either run the incremental history
+    /// walk or (on absent/expired cursor) a fresh catch-up. `Ok(false)` is a
+    /// walk that found the mailbox exactly where it left it; a catch-up
+    /// always counts as a change, since it re-establishes the cursor.
+    async fn poll_once(&self) -> Result<bool> {
         let cursor = self.load_history_cursor()?;
         match history_poll_decision(cursor, false) {
             HistoryDecision::Incremental(start) => {
                 match self.history_walk(start).await {
-                    Ok(()) => Ok(()),
+                    Ok(moved) => Ok(moved),
                     // Expired historyId (404): fall back to a fresh catch-up.
                     Err(CoreError::NotFound) => {
                         eprintln!("squelch: historyId expired; falling back to catch-up");
-                        self.catch_up().await
+                        self.catch_up().await?;
+                        Ok(true)
                     }
                     Err(e) => Err(e),
                 }
             }
-            HistoryDecision::FullCatchUp => self.catch_up().await,
+            HistoryDecision::FullCatchUp => {
+                self.catch_up().await?;
+                Ok(true)
+            }
         }
     }
 
@@ -1590,12 +2601,27 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// depend on that clause holding. INBOX therefore runs FIRST and its ids are
     /// subtracted from both later batches, making the visible copy authoritative.
     ///
+    /// AN IDLE MAILBOX COSTS ONE REQUEST. Every `history.list` answer carries
+    /// the mailbox's CURRENT historyId whatever label it was filtered by, so
+    /// when the INBOX walk returns no record and that id is exactly the
+    /// cursor, nothing in the mailbox has changed since the last poll: no
+    /// sent mail, no spam, no read state. The SENT walk would answer the
+    /// same and the cursor write would store the value already stored, so
+    /// both are skipped and the walk reports `false`. Anything else (a record
+    /// in either walk, or an id past the cursor with no record, which is
+    /// mail outside INBOX or a change of read state) runs the SENT walk as
+    /// before and reports `true`.
+    ///
     /// Propagates [`CoreError::NotFound`] on an expired historyId so the caller
     /// can fall back to a catch-up.
-    async fn history_walk(&self, start_history_id: u64) -> Result<()> {
-        let (inbox_ids, inbox_cursor) = self
+    async fn history_walk(&self, start_history_id: u64) -> Result<bool> {
+        let inbox = self
             .history_walk_label(start_history_id, LABEL_INBOX)
             .await?;
+        if inbox.ids.is_empty() && inbox.current == Some(start_history_id) {
+            return Ok(false);
+        }
+        let (inbox_ids, inbox_cursor) = (inbox.ids, inbox.cursor);
         if !inbox_ids.is_empty() {
             let n = self
                 .fetch_raw_and_ingest(
@@ -1624,13 +2650,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // re-walk costs one indexed probe per message and still changes nothing.
         let (sent_ids, sent_cursor) =
             match self.history_walk_label(start_history_id, LABEL_SENT).await {
-                Ok(v) => v,
+                Ok(walk) => (walk.ids, walk.cursor),
                 // An expired historyId is not a SENT-specific failure: the cursor
                 // itself is gone and only a catch-up can recover it.
                 Err(CoreError::NotFound) => return Err(CoreError::NotFound),
                 Err(e) => {
                     eprintln!("squelch: sent history walk failed ({e}); holding the cursor");
-                    return Ok(());
+                    return Ok(true);
                 }
             };
 
@@ -1655,7 +2681,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 Ok(n) => eprintln!("squelch: ingested {n} new SENT messages"),
                 Err(e) => {
                     eprintln!("squelch: sent ingest failed ({e}); holding the cursor");
-                    return Ok(());
+                    return Ok(true);
                 }
             }
         }
@@ -1669,19 +2695,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             start_history_id,
             [inbox_cursor, sent_cursor],
         ))?;
-        Ok(())
+        Ok(true)
     }
 
     /// Walk `history.list` from `start_history_id` under ONE label filter,
-    /// returning the deduped `messageAdded` ids and the max historyId observed.
+    /// returning the deduped `messageAdded` ids, the max historyId observed,
+    /// and the mailbox's current historyId as the last page reported it.
     /// Persists nothing: the caller owns the single cursor commit that covers
     /// every label. Propagates [`CoreError::NotFound`] on an expired historyId.
-    async fn history_walk_label(
-        &self,
-        start_history_id: u64,
-        label: &str,
-    ) -> Result<(Vec<String>, u64)> {
+    async fn history_walk_label(&self, start_history_id: u64, label: &str) -> Result<LabelWalk> {
         let mut cursor = start_history_id;
+        let mut current;
         let mut page_token: Option<String> = None;
         let mut new_ids: Vec<String> = Vec::new();
 
@@ -1695,6 +2719,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 url.push_str(&format!("&pageToken={tok}"));
             }
             let page: HistoryListResp = self.get_json(&url).await?;
+            current = page.history_id.as_deref().map(parse_history_id);
 
             // Advance the cursor from every observed historyId (records + the
             // page-level newest id).
@@ -1721,7 +2746,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // dedup at the store keys on (account_id, gmail_msg_id).
         new_ids.sort_unstable();
         new_ids.dedup();
-        Ok((new_ids, cursor))
+        Ok(LabelWalk {
+            ids: new_ids,
+            cursor,
+            current,
+        })
     }
 
     /// Fresh catch-up: re-run the backfill-window INBOX fetch, then the SENT
@@ -2013,8 +3042,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let rules = self.store.list_sender_rules(self.account_id)?;
         // The cutover's own window: what it re-triaged is what a re-read is
         // worth re-investigating.
-        let history_cutoff =
-            Utc::now() - ChronoDuration::days(i64::from(self.config.sync.backfill_days));
+        let history_cutoff = self.backfill_since();
 
         let mut fetched = 0usize;
         let mut re_read = 0usize;
@@ -2107,6 +3135,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 };
                 match self.store.ingest_message_fresh(&triaged, scope)? {
                     Some(_) => {
+                        // The heal DELETES the row's vector (it was computed
+                        // from the subject alone) for the drain to redo from
+                        // the real text, so the drain must know there is one
+                        // to redo. This engine is the daemon's SWEEPS engine;
+                        // the flag it raises is the sync engine's, shared.
+                        self.vectors_dirty.store(true, Ordering::Relaxed);
                         if scope == crate::store::HealScope::TextAndTriage {
                             re_read += 1;
                         } else {
@@ -2326,15 +3360,37 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         cap: Option<usize>,
         retry: GmailRetry,
     ) -> Result<Vec<String>> {
+        self.list_message_ids_in(Some(label), q, cap, retry).await
+    }
+
+    /// The one paging loop behind every `messages.list` here. `label` is
+    /// `None` only for the archive walk, which lists ALL MAIL: no `labelIds`
+    /// at all, so read, filed and sent mail are in it, and Gmail itself leaves
+    /// spam and trash out.
+    async fn list_message_ids_in(
+        &self,
+        label: Option<&str>,
+        q: Option<&str>,
+        cap: Option<usize>,
+        retry: GmailRetry,
+    ) -> Result<Vec<String>> {
         let mut ids = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
-            let mut url = format!("{}/messages?labelIds={label}", self.api_base);
+            let mut params = Vec::new();
+            if let Some(label) = label {
+                params.push(format!("labelIds={label}"));
+            }
             if let Some(q) = q {
-                url.push_str(&format!("&q={}", urlencode(q)));
+                params.push(format!("q={}", urlencode(q)));
             }
             if let Some(tok) = &page_token {
-                url.push_str(&format!("&pageToken={tok}"));
+                params.push(format!("pageToken={tok}"));
+            }
+            let mut url = format!("{}/messages", self.api_base);
+            if !params.is_empty() {
+                url.push('?');
+                url.push_str(&params.join("&"));
             }
             let page: ListMessagesResp = self.get_json_with_retry(&url, retry).await?;
             ids.extend(page.messages.into_iter().map(|m| m.id));
@@ -2391,11 +3447,37 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         for id in queue.by_ref().take(width) {
             window.push_back(self.fetch_raw_message(id, retry));
         }
+        // Read before the first GET: a quota or auth refusal anywhere in this
+        // batch means no error in it is about one message. See
+        // [`Self::archive_skip`].
+        let quota_or_auth = self.archive.quota_or_auth();
 
-        while let Some(next) = window.next().await {
+        while let Some((id, fetched)) = window.next().await {
+            // THE WALK MAY STEP OVER A MESSAGE; nothing else may. A live path
+            // that dropped an id would have lost mail somebody is owed.
+            let skip = match &fetched {
+                Err(e) if origin == IngestOrigin::Archive => {
+                    self.archive_skip(id, e, quota_or_auth)
+                }
+                _ => false,
+            };
             // AFTER the `?`, so a failed fetch does not push one more GET
             // through the budget only to drop it with the window.
-            let (id, msg, now) = next?;
+            let (msg, now) = match fetched {
+                Ok(fetched) => fetched,
+                Err(e) if skip => {
+                    // Redacted: the id and the kind of error, never content.
+                    eprintln!(
+                        "squelch: archive walk skipping message {id} ({})",
+                        archive_skip_kind(&e)
+                    );
+                    if let Some(id) = queue.next() {
+                        window.push_back(self.fetch_raw_message(id, retry));
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             if let Some(id) = queue.next() {
                 window.push_back(self.fetch_raw_message(id, retry));
             }
@@ -2405,7 +3487,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // rather than every message: enough to prove movement in a log
             // somebody is tailing, few enough not to bury the lines that mean
             // something.
-            if let Some((_, total)) = self.metrics.catchup_progress() {
+            //
+            // Not for the archive walk, which runs beside a catch-up's
+            // aftermath and is no part of its denominator.
+            if origin != IngestOrigin::Archive
+                && let Some((_, total)) = self.metrics.catchup_progress()
+            {
                 let done = self.metrics.catchup_step();
                 if done.is_multiple_of(50) {
                     eprintln!("squelch: catch-up {done}/{total} messages");
@@ -2469,24 +3556,44 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // network round trip. `ingest_with_rules` reads the same value; it
             // is a pure function of the message and the clock, so per-message is
             // simply the more truthful "now" for it too.
-            let Some(ingested) = self.ingest_one(&fetched, &rules, now, origin)? else {
+            let ingested = match self.ingest_one(&fetched, &rules, now, origin) {
+                Ok(ingested) => ingested,
+                // A message the store will not take is the walk's to step
+                // over on the same terms as one Gmail will not serve.
+                Err(e)
+                    if origin == IngestOrigin::Archive
+                        && self.archive_skip(id, &e, quota_or_auth) =>
+                {
+                    eprintln!(
+                        "squelch: archive walk skipping message {id} ({})",
+                        archive_skip_kind(&e)
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let Some(ingested) = ingested else {
                 count += 1;
                 continue;
             };
-            // THE FAST LANE, SPAWNED AND NEVER AWAITED (docs/NOTIFY.md §11.5).
-            //
-            // Here rather than after `embed_and_store` because the embedder is
-            // ONNX inference on a `spawn_blocking` thread and can take seconds
-            // per message: a notification queued behind it would be a
-            // notification arriving after the thing it was about. And spawned
-            // rather than awaited because the whole point of the lane is that a
-            // model call in front of a user does not become a model call in
-            // front of the next message's fetch.
-            //
-            // The candidate is built HERE, on the poll lane, because it is pure
-            // and cheap and because it is the gate: most messages are not
-            // candidates at all, and a `None` costs one spawn we never make.
-            // The ingest transaction queues independent durable notification work.
+            // POLL LANE -> NOTIFICATION LANE, BEFORE THE EMBED. The fast push
+            // used to be spawned from this spot (docs/NOTIFY.md §11.5 still
+            // describes that shape); it is a durable `notification` job now,
+            // queued inside the ingest transaction that just committed, and
+            // the lane that claims it is poked from the same spot for the
+            // same reason: the embedder below is ONNX inference on a
+            // `spawn_blocking` thread that can take seconds per message, and a
+            // poke behind it would be a notification arriving after the thing
+            // it was about. Only a row the ingest stamped eligible, which is
+            // the row it queued a push for: a backfill's rows, the user's own
+            // sent copies and a catch-up's stale rows are stamped ineligible
+            // and queue nothing, and a poke per such row would be a lane
+            // round per row (a read over the tenant's pending queue, under
+            // the store mutex the ingest itself needs) for the length of a
+            // first backfill or a post-outage catch-up.
+            if ingested.notify_eligible && !mailbox.is_spam() {
+                self.notify_wake.notify_one();
+            }
             if let Some(text) = ingested.embed_text {
                 self.embed_and_store(ingested.id, text).await;
             }
@@ -2508,7 +3615,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // Not for spam: those rows queue no agent work, so a poke per spam
             // row is a round that claims nothing, two hundred times over when
             // somebody opens the Spam page.
-            if !mailbox.is_spam() {
+            //
+            // Nor for the archive, for the same reason at a larger scale: a
+            // year of rows that queue nothing.
+            if !mailbox.is_spam() && origin != IngestOrigin::Archive {
                 self.refine_wake.notify_one();
             }
         }
@@ -2523,10 +3633,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         &self,
         id: &'a str,
         retry: GmailRetry,
-    ) -> Result<(&'a str, GmailMessage, DateTime<Utc>)> {
+    ) -> (&'a str, Result<(GmailMessage, DateTime<Utc>)>) {
         let url = format!("{}/messages/{id}?format=raw", self.api_base);
-        let msg: GmailMessage = self.get_json_with_retry(&url, retry).await?;
-        Ok((id, msg, Utc::now()))
+        let fetched = self
+            .get_json_with_retry::<GmailMessage>(&url, retry)
+            .await
+            .map(|msg| (msg, Utc::now()));
+        (id, fetched)
     }
 
     /// Parse and atomically persist one message plus its durable model jobs.
@@ -2552,7 +3665,25 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         triaged.foreground_triage = origin == IngestOrigin::Incremental
             && !triaged.message.is_sent
             && !triaged.message.is_spam;
-        let id = self.store.ingest_message(&triaged)?;
+        let id = if origin == IngestOrigin::Archive {
+            // Insert-only: an id the store already holds is left as it is, and
+            // there is nothing to embed for a row this call did not write.
+            let Some(id) = self.store.ingest_archive_message(&triaged)? else {
+                return Ok(None);
+            };
+            id
+        } else {
+            let id = self.store.ingest_message(&triaged)?;
+            // A LIVE SIGHTING OF AN ARCHIVE ROW wrote nothing (the store keeps
+            // archive rows write-once), so there is nothing new to embed and
+            // nothing queued to wake the refine lane for. Without this the row
+            // was re-embedded and the lane poked on every overlap at the
+            // window's edge.
+            if self.store.message_is_archive(self.account_id, id)? {
+                return Ok(None);
+            }
+            id
+        };
         // Embeddings are internal evidence. Agent search separately checks the
         // current access assessment before releasing results.
         let embed_text = if triaged.message.is_spam {
@@ -2572,7 +3703,29 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 self.config.embed.max_chars,
             ))
         };
-        Ok(Some(Ingested { id, embed_text }))
+        Ok(Some(Ingested {
+            id,
+            embed_text,
+            notify_eligible: triaged.notify_eligible_at.is_some(),
+        }))
+    }
+
+    /// When the account was created, from the store the first time and from
+    /// [`SyncEngine::account_created`] after. `None` when the store could not
+    /// say, which reads as "not new" wherever it is asked.
+    fn account_created_at(&self) -> Option<DateTime<Utc>> {
+        if let Some(created) = self.account_created.get() {
+            return Some(*created);
+        }
+        let found = self
+            .store
+            .account_created_at(self.account_id)
+            .ok()
+            .flatten();
+        if let Some(created) = found {
+            let _ = self.account_created.set(created);
+        }
+        found
     }
 
     /// The fast lane, built on first use. See the [`SyncEngine::notify_lane`]
@@ -2601,6 +3754,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// backfill pass recovers the vector, so ingest must not block on it.
     async fn embed_and_store(&self, message_id: i64, text: String) {
         let Some(embedder) = self.embedder() else {
+            // No vector written: the drain owes this row one once an embedder
+            // is attached.
+            self.vectors_dirty.store(true, Ordering::Relaxed);
             return;
         };
         let account_id = self.account_id;
@@ -2611,12 +3767,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             store.upsert_message_vector(account_id, message_id, &vec)
         })
         .await;
-        match result {
+        match &result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => eprintln!(
                 "squelch: embed failed for message {message_id} (recoverable via backfill): {e}"
             ),
             Err(e) => eprintln!("squelch: embed task join error for message {message_id}: {e}"),
+        }
+        // Anything but a written vector is a row the drain owes.
+        if !matches!(result, Ok(Ok(()))) {
+            self.vectors_dirty.store(true, Ordering::Relaxed);
         }
     }
 
@@ -2625,9 +3785,28 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// content is structurally absent — `messages_missing_vectors` selects only
     /// `sensitivity='normal'` (see docs/SECURITY.md). A failed batch logs a
     /// redacted one-liner and is retried on a later pass. No-op with no embedder.
+    ///
+    /// Runs only while [`SyncEngine::vectors_dirty`] says a vector may be
+    /// missing; the flag's lifecycle across one pass is [`DrainGuard`]'s.
     async fn backfill_missing_vectors(&self) {
         let Some(embedder) = self.embedder() else {
+            // Leave `vectors_dirty` standing: the rows are still owed, and the
+            // round after an embedder is attached is the one to pay them.
             return;
+        };
+        // Lowered BEFORE the first query, not after the last: a failure that
+        // lands on the poll lane while this drain is between awaits raises it
+        // again, and a clear at the end would erase that. The guard raises it
+        // back for every way this pass can end short of draining the queue:
+        // a query error, a failed batch, and CANCELLATION, which is not an
+        // arm anywhere: when the poll lane errors, `run_lanes` drops this
+        // future wherever it is parked, and a flag left lowered then would
+        // leave every row past the dropped batch without a vector until the
+        // next restart.
+        self.vectors_dirty.store(false, Ordering::Relaxed);
+        let mut pass = DrainGuard {
+            flag: &self.vectors_dirty,
+            drained: false,
         };
         let batch = self.config.embed.backfill_batch.max(1);
         let max_chars = self.config.embed.max_chars;
@@ -2643,6 +3822,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 }
             };
             if missing.is_empty() {
+                pass.drained = true;
                 break;
             }
             let n = missing.len();
@@ -2656,10 +3836,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .map(|m| crate::embed::message_embed_text(&m.subject, &m.body, max_chars))
                     .collect();
                 let vecs = embedder.embed_batch(&texts)?;
-                for (m, vec) in missing.iter().zip(vecs.iter()) {
-                    store.upsert_message_vector(account_id, m.message_id, vec)?;
-                }
-                Ok(())
+                // One commit for the batch, not two per vector.
+                let items: Vec<(i64, &[f32])> = missing
+                    .iter()
+                    .zip(vecs.iter())
+                    .map(|(m, vec)| (m.message_id, vec.as_slice()))
+                    .collect();
+                store.upsert_message_vectors(account_id, &items)
             })
             .await;
 
@@ -2677,6 +3860,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
             // A short batch means we drained the queue; stop before re-querying.
             if n < batch {
+                pass.drained = true;
                 break;
             }
             // Throttle between batches so a large backfill doesn't peg the CPU
@@ -2758,11 +3942,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             Err(e) => Err(format!("inbox unread count fetch failed ({e})")),
         };
         match outcome {
-            // Re-armed only by a whole cycle that worked, fetch and write both.
-            Ok(()) => self.unread_warned.store(false, Ordering::Relaxed),
+            // Re-armed only by a whole cycle that worked, fetch and write both;
+            // and the count is no longer owed.
+            Ok(()) => {
+                self.unread_warned.store(false, Ordering::Relaxed);
+                self.unread_stale.store(false, Ordering::Relaxed);
+            }
             // `swap` is the arm-and-test: only the transition into failure
-            // prints. Error strings from this crate carry no secrets.
+            // prints. Error strings from this crate carry no secrets. The
+            // count stays owed, so the next tick tries again.
             Err(why) => {
+                self.unread_stale.store(true, Ordering::Relaxed);
                 if !self.unread_warned.swap(true, Ordering::Relaxed) {
                     eprintln!("squelch: {why}; keeping the last known counts");
                 }
@@ -2797,6 +3987,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         )
     }
 
+    /// THE HISTORY WINDOW's far edge, and the only place it is computed: the
+    /// first backfill, the triage cutover (`agent_triage_pass`) and the
+    /// blank-body heal all measure from here. `sync.archive_days` is not in
+    /// it, which `archive_days_moves_no_other_window` pins.
     fn backfill_since(&self) -> DateTime<Utc> {
         Utc::now() - ChronoDuration::days(self.config.sync.backfill_days as i64)
     }
@@ -2872,12 +4066,308 @@ fn lifecycle_backoff(current: Duration, polled_ok: bool) -> Duration {
     if polled_ok { BACKOFF_START } else { current }
 }
 
+/// HOW THE ARCHIVE WALK SPENDS TIME. Its own struct, on the engine, so the
+/// tests can shrink every wait to nothing and assert on the wire instead of
+/// sleeping; production only ever builds [`ArchivePace::default`].
+#[derive(Clone, Copy)]
+struct ArchivePace {
+    /// How much mail one chunk lists: the cursor moves back this far per
+    /// persisted step. A week is small enough that a restart mid-chunk re-lists
+    /// little, and large enough that a year is about fifty list calls.
+    chunk: ChronoDuration,
+    /// Ids fetched between two rests, and between two looks at shutdown and
+    /// `window_in_flight`.
+    batch: usize,
+    /// After each burst the walk rests this many times the burst's own elapsed
+    /// time. 2 is a one-third duty cycle: whatever pace the shared
+    /// [`GmailBudget`] is currently allowing, the walk takes about a third of
+    /// it and the poll lane, the sweeps and the write door queue behind an
+    /// archive request at most a third of the time.
+    rest_factor: u32,
+    /// The wait after any error inside the walk before the same chunk is tried
+    /// again.
+    error_backoff: Duration,
+    /// How often an idle walk looks again while it is held off (no poll has
+    /// succeeded yet, or a window of mail is being fetched).
+    held_recheck: Duration,
+    /// How often a finished (or switched-off) walk looks again. The target is
+    /// `now - archive_days`, so a finished walk stays finished as time passes;
+    /// this exists so a lane that outlives a config change still notices. Also
+    /// how often a caught-up forward pass lists the hour that has gone by.
+    done_recheck: Duration,
+    /// THE ABSOLUTE CEILING: messages fetched in any one minute, whatever the
+    /// shared budget would allow. 30 is a tenth of the standard quota
+    /// profile's 300 bodies a minute, so the walk at full tilt leaves nine
+    /// tenths of the published limit to the mail somebody is waiting for.
+    per_minute: usize,
+    /// The minute itself, a field so a test can make it short.
+    per_minute_window: Duration,
+    /// The first wait after Gmail refuses the walk for quota. Doubles per
+    /// refusal up to `quota_backoff_cap`; a walked chunk resets it.
+    quota_backoff: Duration,
+    quota_backoff_cap: Duration,
+    /// Quota refusals in one UTC day after which the walk stops until the next.
+    quota_refusals_per_day: u32,
+    /// Separate passes on which ONE MESSAGE must have failed before the next
+    /// pass may step over it. See [`SyncEngine::archive_skip`].
+    poison_attempts: u32,
+    /// The most such messages one pass may step over before it fails instead.
+    poison_skips: u32,
+    /// How far behind the last successful poll the forward pass stays. See
+    /// [`SyncEngine::archive_forward_chunk`] for what the day is for.
+    ///
+    /// WHAT IT DOES NOT COVER, on purpose. Mail that carried neither INBOX nor
+    /// SENT a day after it arrived is stored as archive, and a hand that moves
+    /// it into the inbox later does not change that: a catch-up that then
+    /// lists it sees a row it must leave alone. The owner's way out is the
+    /// human door's re-triage of that one message.
+    forward_lag: ChronoDuration,
+}
+
+impl Default for ArchivePace {
+    fn default() -> Self {
+        Self {
+            chunk: ChronoDuration::days(7),
+            // A third of the minute's allowance, so the ceiling is met in
+            // three even bursts rather than one of 25 and a long wait.
+            batch: 10,
+            rest_factor: 2,
+            error_backoff: Duration::from_secs(5 * 60),
+            held_recheck: Duration::from_secs(30),
+            done_recheck: Duration::from_secs(60 * 60),
+            per_minute: 30,
+            per_minute_window: Duration::from_secs(60),
+            quota_backoff: Duration::from_secs(5 * 60),
+            quota_backoff_cap: Duration::from_secs(60 * 60),
+            quota_refusals_per_day: 3,
+            poison_attempts: 3,
+            poison_skips: 5,
+            forward_lag: ChronoDuration::hours(24),
+        }
+    }
+}
+
+/// 2024-01-01T00:00:00Z. A clock reading earlier than this is wrong, and the
+/// archive walk writes nothing by it. See [`SyncEngine::archive_walk_chunk`].
+const ARCHIVE_CLOCK_FLOOR_UNIX: i64 = 1_704_067_200;
+
+/// The archive walk's free-space floor is never less than the filesystem's
+/// size divided by this: a fifth. See [`SyncEngine::archive_room`].
+const ARCHIVE_FLOOR_VOLUME_SHARE: u64 = 5;
+
+/// The most the volume share may ask for. A fifth of a 50 GiB tenant volume
+/// is a sensible reserve; a fifth of a laptop's terabyte is 200 GiB the walk
+/// has no claim on, and would hold it on any ordinarily full disk.
+const ARCHIVE_FLOOR_SHARE_CAP: u64 = 5 * 1024 * 1024 * 1024;
+
+/// The free-space floor in bytes: the configured floor, or the volume share
+/// capped at [`ARCHIVE_FLOOR_SHARE_CAP`], whichever is larger.
+fn archive_floor_bytes(min_free_mb: u64, total_bytes: u64) -> u64 {
+    min_free_mb
+        .saturating_mul(1024 * 1024)
+        .max((total_bytes / ARCHIVE_FLOOR_VOLUME_SHARE).min(ARCHIVE_FLOOR_SHARE_CAP))
+}
+
+/// A walk held by the free-space floor resumes at the floor plus the floor
+/// divided by this: a tenth more.
+const ARCHIVE_FLOOR_RESUME_MARGIN: u64 = 10;
+
+/// What the archive walk keeps between chunks, and the two flags it raises
+/// for the rest of the engine. All of it is in memory and none of it is the
+/// walk's position (that is the stored cursor): a restart forgets a backoff
+/// and a failure count, which costs one more attempt and nothing else.
+#[derive(Default)]
+struct ArchiveRun {
+    /// AN ARCHIVE BATCH IS BEING FETCHED AND INGESTED. Read by the refine lane,
+    /// which does not drain vectors while it is. Deliberately not
+    /// `window_in_flight`: that flag also stops the walk itself and drives the
+    /// catch-up gauges, and the walk is no window anybody is waiting on.
+    in_flight: AtomicBool,
+    /// Messages the pass now running has stepped over for failing repeatedly.
+    skipped: std::sync::atomic::AtomicU32,
+    /// How many times the hold has started, changed or ended, which is how
+    /// many lines [`SyncEngine::archive_hold`] has logged.
+    hold_changes: AtomicU64,
+    /// Quota and credential refusals Gmail has given the walk, ever. Counters
+    /// rather than a last-error slot so a caller compares before and after its
+    /// own work and concurrent fetches cannot overwrite each other.
+    quota_refusals: AtomicU64,
+    auth_errors: AtomicU64,
+    /// Unix seconds of the last poll that succeeded in this process; 0 before
+    /// the first. The forward pass's upper bound hangs off it.
+    last_poll_ok_unix: AtomicI64,
+    /// Everything read and written only between awaits.
+    state: std::sync::Mutex<ArchiveState>,
+}
+
+#[derive(Default)]
+struct ArchiveState {
+    /// THE MESSAGES THAT HAVE FAILED IN THE CHUNK BEING WALKED: the chunk, as
+    /// (forward?, cursor epoch), and for each Gmail id that failed in it, on
+    /// how many separate passes. Per message and never per chunk: what it
+    /// licenses is skipping that one message. Dropped when the chunk is
+    /// walked or another chunk is begun.
+    failing: Option<((bool, i64), std::collections::HashMap<String, u32>)>,
+    /// The ids already booked in the pass now running, so one pass counts
+    /// once however many times it meets an id.
+    failed_this_pass: std::collections::HashSet<String>,
+    /// The ids of the chunk being walked that the skipped-messages counter
+    /// has already counted. Kept and dropped with `failing`.
+    skips_counted: std::collections::HashSet<String>,
+    /// What the walk last said was holding it off; `None` for nothing.
+    hold: Option<ArchiveHold>,
+    /// The wait the next quota refusal earns; `None` is the starting one.
+    quota_backoff: Option<Duration>,
+    /// The wait the LAST error earned, when it was a quota refusal.
+    quota_wait: Option<Duration>,
+    quota_day: Option<chrono::NaiveDate>,
+    quota_refusals_today: u32,
+    /// The current minute of the absolute ceiling: when it began and how many
+    /// messages it has admitted.
+    minute: Option<(tokio::time::Instant, usize)>,
+    /// When the forward pass last found nothing left to cover.
+    forward_caught_up: Option<tokio::time::Instant>,
+    /// THE FREE-SPACE FLOOR IS HOLDING THE WALK. While it is, room means the
+    /// floor plus its margin; see [`SyncEngine::archive_room`].
+    disk_short: bool,
+    /// What the last disk guard to refuse measured, for the hold's log line.
+    /// Numbers and setting names only.
+    room_note: String,
+    /// Test seams: a fixed clock, and a stand-in for the store's disk numbers.
+    clock: Option<DateTime<Utc>>,
+    disk_probe: Option<fn() -> Option<crate::store::ArchiveDisk>>,
+}
+
+impl ArchiveRun {
+    fn state(&self) -> std::sync::MutexGuard<'_, ArchiveState> {
+        // Plain bookkeeping with no invariant a panic could break halfway.
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn quota_or_auth(&self) -> u64 {
+        self.quota_refusals.load(Ordering::Relaxed) + self.auth_errors.load(Ordering::Relaxed)
+    }
+}
+
+impl ArchiveState {
+    /// A pass over `chunk` is starting: keep its failures so far, forget any
+    /// other chunk's, and open a fresh pass.
+    fn begin_pass(&mut self, chunk: (bool, i64)) {
+        if self
+            .failing
+            .as_ref()
+            .is_none_or(|(failing, _)| *failing != chunk)
+        {
+            self.failing = Some((chunk, std::collections::HashMap::new()));
+            self.skips_counted.clear();
+        }
+        self.failed_this_pass.clear();
+    }
+
+    /// `id` is being stepped over. Returns whether this is the first time in
+    /// this chunk, which is when it is counted.
+    fn count_skip(&mut self, id: &str) -> bool {
+        self.skips_counted.insert(id.to_string())
+    }
+
+    /// `id` failed in the pass now running. Returns on how many EARLIER
+    /// passes it had failed, and books this one (once per pass).
+    fn book_failure(&mut self, id: &str) -> u32 {
+        let Some((_, failures)) = self.failing.as_mut() else {
+            return 0;
+        };
+        let count = failures.entry(id.to_string()).or_insert(0);
+        if self.failed_this_pass.insert(id.to_string()) {
+            *count += 1;
+            *count - 1
+        } else {
+            count.saturating_sub(1)
+        }
+    }
+
+    /// Book `n` messages against the minute's ceiling. Zero means go now;
+    /// anything else is how long until the minute turns, and the booking then
+    /// stands for the minute that starts when the caller wakes.
+    fn admit(&mut self, n: usize, per_minute: usize, minute: Duration) -> Duration {
+        let now = tokio::time::Instant::now();
+        match self.minute {
+            Some((began, taken)) if now.duration_since(began) < minute => {
+                // A batch larger than the whole allowance still goes, alone.
+                if taken + n <= per_minute.max(n) {
+                    self.minute = Some((began, taken + n));
+                    Duration::ZERO
+                } else {
+                    let wait = minute - now.duration_since(began);
+                    self.minute = Some((now + wait, n));
+                    wait
+                }
+            }
+            _ => {
+                self.minute = Some((now, n));
+                Duration::ZERO
+            }
+        }
+    }
+}
+
+/// Holds [`ArchiveRun::in_flight`] for one batch, and lowers it however the
+/// batch ends: an error, or the lane's future being dropped at an await when
+/// the poll lane bounces the lifecycle.
+struct ArchiveBatchGuard<'a>(&'a ArchiveRun);
+
+impl<'a> ArchiveBatchGuard<'a> {
+    fn new(run: &'a ArchiveRun) -> Self {
+        run.in_flight.store(true, Ordering::Relaxed);
+        Self(run)
+    }
+}
+
+impl Drop for ArchiveBatchGuard<'_> {
+    fn drop(&mut self) {
+        self.0.in_flight.store(false, Ordering::Relaxed);
+    }
+}
+
+/// What a skipped archive message is logged as: a kind, never the error text
+/// (a decode error can quote the body it choked on).
+fn archive_skip_kind(error: &CoreError) -> &'static str {
+    match error {
+        CoreError::NotFound => "gone",
+        CoreError::Sqlite(_) => "unstorable",
+        _ => "unreadable",
+    }
+}
+
+/// What one call of [`SyncEngine::archive_walk_chunk`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveStep {
+    /// A chunk was listed, ingested and the cursor moved back over it.
+    Walked,
+    /// Not now: no poll has succeeded yet, a window of mail is being fetched,
+    /// the embedder has not settled, the disk is short, the clock is wrong,
+    /// Gmail has refused the walk enough for one day, or shutdown arrived
+    /// mid-chunk. Nothing was persisted.
+    Held,
+    /// The cursor has reached `now - archive_days`.
+    Done,
+    /// `sync.archive_days` is 0.
+    Off,
+}
+
 /// Only backfills/catch-up retain a request across quota pauses. Poll helpers,
-/// spam browsing and metadata sweeps leave retry scheduling to their caller.
+/// spam browsing, metadata sweeps and the archive walk leave retry scheduling
+/// to their caller.
+///
+/// `Archive` schedules like `None` and differs in one thing: its errors are
+/// counted but never set the client-visible last sync error (see
+/// `SyncMetrics::count_gmail_error`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GmailRetry {
     None,
     CatchUp,
+    Archive,
 }
 
 const GMAIL_QUOTA_RETRIES: usize = 2;
@@ -3822,6 +5312,14 @@ mod tests {
         /// two timestamps the engine wrote, which is the only deterministic way
         /// to tell a per-message clock from a per-batch one.
         slow: HashMap<String, Duration>,
+        /// ALL MAIL, for a `messages.list` with no `labelIds` (the archive
+        /// walk): `(internalDate in unix seconds, id)`, served by the `after:`
+        /// and `before:` bounds of the request's `q`.
+        all_mail: Vec<(i64, String)>,
+        /// How many label-less listings still answer 500 before one succeeds.
+        all_mail_failures: usize,
+        /// The `q` of every `messages.list` served, as `(labelIds, q)`.
+        list_queries: Vec<(String, String)>,
         /// Every call this mock served, in order, as `verb:key`.
         seen: Vec<String>,
     }
@@ -3851,6 +5349,23 @@ mod tests {
                 labels.iter().map(|s| s.to_string()).collect(),
             );
             self
+        }
+        /// One message that is in no listing by label, only in all mail,
+        /// dated `at`: what the archive walk exists to find.
+        fn old_mail(&self, id: &str, at: DateTime<Utc>, eml: String) -> &Self {
+            let mut st = self.0.lock().unwrap();
+            st.all_mail.push((at.timestamp(), id.to_string()));
+            st.bodies.insert(id.to_string(), eml);
+            self
+        }
+        /// The `q` of each listing served for `label` (`""` is all mail).
+        fn queries(&self, label: &str) -> Vec<String> {
+            let st = self.0.lock().unwrap();
+            st.list_queries
+                .iter()
+                .filter(|(l, _)| l == label)
+                .map(|(_, q)| q.clone())
+                .collect()
         }
         /// Make `messages.get` for `id` take `d` before it answers.
         fn slow_body(&self, id: &str, d: Duration) -> &Self {
@@ -3935,14 +5450,51 @@ mod tests {
     async fn mock_messages_list(
         State(g): State<MockGmail>,
         Query(q): Query<HashMap<String, String>>,
-    ) -> Json<Value> {
-        let label = q.get("labelIds").cloned().unwrap_or_default();
+    ) -> Response {
+        let query = q.get("q").cloned().unwrap_or_default();
         let mut st = g.0.lock().unwrap();
-        st.seen.push(format!("list:{label}"));
-        let ids = st.listing.get(&label).cloned().unwrap_or_default();
+        let ids = match q.get("labelIds") {
+            Some(label) => {
+                st.seen.push(format!("list:{label}"));
+                st.list_queries.push((label.clone(), query));
+                st.listing.get(label).cloned().unwrap_or_default()
+            }
+            // No label at all: all mail, narrowed only by the query's bounds.
+            None => {
+                st.seen.push("list-all".to_string());
+                st.list_queries.push((String::new(), query.clone()));
+                if st.all_mail_failures > 0 {
+                    st.all_mail_failures -= 1;
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+                let bound = |name: &str| {
+                    query
+                        .split_whitespace()
+                        .find_map(|term| term.strip_prefix(name)?.parse::<i64>().ok())
+                };
+                let (after, before) = (bound("after:"), bound("before:"));
+                // `-in:inbox` and `-in:sent`, by the labels the message has
+                // at the moment of THIS listing, as Gmail does.
+                let wears = |id: &String, label: &str| {
+                    st.message_labels
+                        .get(id)
+                        .is_some_and(|labels| labels.iter().any(|l| l == label))
+                };
+                let term = |t: &str| query.split_whitespace().any(|term| term == t);
+                st.all_mail
+                    .iter()
+                    .filter(|(at, _)| after.is_none_or(|a| *at >= a))
+                    .filter(|(at, _)| before.is_none_or(|b| *at < b))
+                    .filter(|(_, id)| !(term("-in:inbox") && wears(id, "INBOX")))
+                    .filter(|(_, id)| !(term("-in:sent") && wears(id, "SENT")))
+                    .map(|(_, id)| id.clone())
+                    .collect()
+            }
+        };
         Json(json!({
             "messages": ids.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
         }))
+        .into_response()
     }
 
     async fn mock_message_get(
@@ -4182,6 +5734,65 @@ mod tests {
             assert!(metrics.contains("squelchd_gmail_quota_retries_total 1\n"));
             assert!(metrics.contains("squelchd_gmail_api_errors_total{kind=\"quota\"} 0\n"));
         }
+    }
+
+    /// A credential store that counts how often the engine asked past its
+    /// in-memory copy ([`CredentialStore::fresh_token`]).
+    #[derive(Clone, Default)]
+    struct CountingToken {
+        fresh: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl CredentialStore for CountingToken {
+        async fn token(&self, _account: AccountId) -> Result<crate::credentials::OAuthToken> {
+            Ok(crate::credentials::OAuthToken {
+                access_token: "cached-token".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            })
+        }
+        async fn fresh_token(&self, account: AccountId) -> Result<crate::credentials::OAuthToken> {
+            self.fresh.fetch_add(1, Ordering::SeqCst);
+            self.token(account).await
+        }
+    }
+
+    /// THE 401 RETRY ASKS PAST THE CACHE: the first attempt takes the token
+    /// the store has in memory, and the retry after Gmail refuses it asks
+    /// for a fresh one, so a token rotated behind the daemon's back is picked
+    /// up on the retry rather than at expiry.
+    #[tokio::test]
+    async fn a_401_retries_once_with_a_token_read_past_the_cache() {
+        let g = MockGmail::default();
+        g.0.lock()
+            .unwrap()
+            .errors
+            .insert("label:INBOX".into(), [(401, "authError".into())].into());
+        g.label(LABEL_INBOX, Some((2, 1)));
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        let creds = CountingToken::default();
+        let e = SyncEngine::new(
+            store.clone(),
+            Arc::new(creds.clone()),
+            acct,
+            "me@example.com".to_string(),
+            Config::default(),
+        )
+        .with_api_base(base);
+        e.refresh_inbox_unread().await;
+        assert_eq!(g.calls("label:INBOX"), 2, "refused once, retried once");
+        assert_eq!(
+            creds.fresh.load(Ordering::SeqCst),
+            1,
+            "the retry, and only the retry, asked past the cache"
+        );
+        assert_eq!(
+            store.inbox_unread(acct).unwrap().unwrap().messages,
+            2,
+            "and the retry succeeded"
+        );
     }
 
     #[tokio::test]
@@ -4469,6 +6080,437 @@ mod tests {
         assert_eq!(g.calls("get:a"), 1);
     }
 
+    /// AN IDLE TICK IS ONE REQUEST AND NO WRITE. The INBOX walk's answer
+    /// carries the mailbox's current historyId; at the cursor with no record,
+    /// nothing anywhere has changed, so the SENT walk, the cursor write and
+    /// the unread fetch are all skipped. The first tick fetches the unread
+    /// count once because it is owed at boot.
+    #[tokio::test]
+    async fn an_idle_tick_costs_one_request_and_writes_nothing() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.label(LABEL_INBOX, Some((3, 2)));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+
+        assert!(!eng.poll_tick().await.unwrap(), "nothing changed");
+        assert_eq!(g.calls("history:INBOX"), 1);
+        assert_eq!(g.calls("history:SENT"), 0, "it would answer the same");
+        assert_eq!(g.calls("label:INBOX"), 1, "owed at boot, fetched once");
+        let first = store.inbox_unread(acct).unwrap().expect("stored");
+        assert_eq!((first.messages, first.threads), (3, 2));
+
+        for _ in 0..19 {
+            assert!(!eng.poll_tick().await.unwrap());
+        }
+        assert_eq!(g.calls("history:INBOX"), 20, "one request per tick");
+        assert_eq!(g.calls("history:SENT"), 0);
+        assert_eq!(g.calls("label:INBOX"), 1);
+        assert_eq!(cursor_of(&store, acct), Some(100), "not rewritten");
+        assert_eq!(
+            store.inbox_unread(acct).unwrap().unwrap().fetched_at,
+            first.fetched_at,
+            "the count was not re-stored"
+        );
+    }
+
+    /// A CHANGED MAILBOX IS THE OLD TICK: a current historyId past the cursor
+    /// with no INBOX record (mail outside INBOX, or read state) walks SENT,
+    /// commits the cursor and fetches the unread count after the walk; the
+    /// next idle tick leaves all three alone.
+    #[tokio::test]
+    async fn a_changed_mailbox_walks_sent_commits_the_cursor_and_refreshes_the_count() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(120));
+        g.history(LABEL_SENT, LabelHistory::quiet(120));
+        g.label(LABEL_INBOX, Some((3, 2)));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+
+        assert!(eng.poll_tick().await.unwrap(), "the mailbox moved");
+        assert_eq!(g.calls("history:SENT"), 1);
+        assert_eq!(cursor_of(&store, acct), Some(120));
+        assert_eq!(
+            g.calls("label:INBOX"),
+            1,
+            "owed at boot and fetched once, not again for the move: {:?}",
+            g.seen()
+        );
+
+        // Somebody reads mail in Gmail: the id moves, the count changes.
+        g.label(LABEL_INBOX, Some((1, 1)));
+        g.history(LABEL_INBOX, LabelHistory::quiet(130));
+        g.history(LABEL_SENT, LabelHistory::quiet(130));
+        assert!(eng.poll_tick().await.unwrap());
+        assert_eq!(store.inbox_unread(acct).unwrap().unwrap().messages, 1);
+        assert_eq!(cursor_of(&store, acct), Some(130));
+        assert_eq!(
+            g.seen().last().map(String::as_str),
+            Some("label:INBOX"),
+            "the count is fetched after the walk: {:?}",
+            g.seen()
+        );
+
+        assert!(!eng.poll_tick().await.unwrap(), "and then nothing");
+        assert_eq!(g.calls("history:SENT"), 2);
+        assert_eq!(g.calls("label:INBOX"), 2);
+    }
+
+    /// A FAILED UNREAD FETCH STAYS OWED: the next tick tries again whether
+    /// or not the mailbox moved, as every tick did before; once it succeeds
+    /// an idle tick stops asking.
+    #[tokio::test]
+    async fn a_failed_unread_fetch_is_retried_on_the_next_idle_tick() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        // No label scripted: `labels.get` answers 500.
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+
+        assert!(!eng.poll_tick().await.unwrap());
+        assert!(!eng.poll_tick().await.unwrap());
+        assert_eq!(g.calls("label:INBOX"), 2, "owed until it succeeds");
+        assert!(store.inbox_unread(acct).unwrap().is_none());
+        g.label(LABEL_INBOX, Some((4, 4)));
+        assert!(!eng.poll_tick().await.unwrap());
+        assert_eq!(store.inbox_unread(acct).unwrap().unwrap().messages, 4);
+        assert!(!eng.poll_tick().await.unwrap());
+        assert_eq!(g.calls("label:INBOX"), 3, "paid, and not asked again idle");
+    }
+
+    /// THE POLL LANE'S WAIT, as a table: the interval while the cap is the
+    /// interval (the default), doubling to the cap otherwise, back to the
+    /// interval after a tick that found a change.
+    #[test]
+    fn the_poll_wait_is_the_interval_unless_a_cap_lets_it_back_off() {
+        let s = Duration::from_secs;
+        for (idle_rounds, interval, cap, expected, why) in [
+            (0, s(5), s(5), s(5), "the interval"),
+            (3, s(5), s(5), s(5), "no backoff without a cap above it"),
+            (
+                2,
+                s(5),
+                s(3),
+                s(5),
+                "a cap under the interval is the interval",
+            ),
+            (0, s(5), s(60), s(5), "a tick that found a change"),
+            (
+                1,
+                s(5),
+                s(60),
+                s(5),
+                "and the first idle tick keep the interval",
+            ),
+            (2, s(5), s(60), s(10), "the second doubles"),
+            (4, s(5), s(60), s(40), "and keeps doubling"),
+            (5, s(5), s(60), s(60), "to the cap"),
+            (9, s(5), s(60), s(60), "which more ticks cannot pass"),
+            (
+                8,
+                s(5),
+                s(600),
+                s(600),
+                "whatever the cap: the ladder reaches it",
+            ),
+            (40, s(5), s(600), s(600), "and does not overflow on the way"),
+        ] {
+            assert_eq!(
+                poll_wait(idle_rounds, interval, cap),
+                expected,
+                "{why}: idle_rounds={idle_rounds} interval={interval:?} cap={cap:?}"
+            );
+        }
+    }
+
+    /// THE LADDER IN THE LANE: with `idle_poll_secs` set, an idle mailbox is
+    /// polled at 0, 1, 3 and 7 s (interval 1 s, cap 4 s: the waits are 1, 2,
+    /// 4, 4...) where the fixed interval would poll six times in the same
+    /// five and a half seconds; a manual refresh polls at once and starts
+    /// the ladder over.
+    #[tokio::test]
+    async fn an_idle_mailbox_backs_the_poll_off_and_a_refresh_starts_it_over() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.label(LABEL_INBOX, Some((0, 0)));
+        let base = serve_mock(g.clone()).await;
+        let mut config = Config::default();
+        config.sync.poll_secs = 1;
+        config.sync.idle_poll_secs = 4;
+        let eng = Arc::new(engine_with_config(store.clone(), acct, &base, config));
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+        let (stop, mut rx) = tokio::sync::watch::channel(false);
+        let lane = {
+            let eng = eng.clone();
+            tokio::spawn(async move { eng.poll_lane(&mut rx).await })
+        };
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+        assert_eq!(
+            g.calls("history:INBOX"),
+            3,
+            "ticks at 0, 1 and 3 s; the next is at 7: {:?}",
+            g.seen()
+        );
+        eng.refresh.notify_one();
+        wait_for(2, "the refresh tick", || g.calls("history:INBOX") == 4).await;
+        assert_eq!(
+            g.calls("label:INBOX"),
+            2,
+            "a refresh fetches the unread count whether or not the walk moved"
+        );
+        // The ladder restarted: the next tick is one interval on (1 s), not
+        // the cap's four.
+        wait_for(3, "the tick after the refresh, one interval on", || {
+            g.calls("history:INBOX") == 5
+        })
+        .await;
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lane)
+            .await
+            .expect("the lane stops on shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A CONNECTED EVENT STREAM KEEPS THE POLL AT ITS INTERVAL: the human
+    /// door's count of open streams is a client with the app open, and the
+    /// ladder never leaves its first rung while it is nonzero.
+    #[tokio::test]
+    async fn a_connected_event_stream_keeps_the_poll_at_its_interval() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let listeners = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.label(LABEL_INBOX, Some((0, 0)));
+        let base = serve_mock(g.clone()).await;
+        let mut config = Config::default();
+        config.sync.poll_secs = 1;
+        config.sync.idle_poll_secs = 4;
+        let eng = Arc::new(
+            engine_with_config(store.clone(), acct, &base, config)
+                .with_event_listeners(listeners.clone()),
+        );
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+        let (stop, mut rx) = tokio::sync::watch::channel(false);
+        let lane = {
+            let eng = eng.clone();
+            tokio::spawn(async move { eng.poll_lane(&mut rx).await })
+        };
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        assert!(
+            g.calls("history:INBOX") >= 4,
+            "ticks at 0, 1, 2, 3 and 4 s where the ladder would have made three: {:?}",
+            g.seen()
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lane)
+            .await
+            .expect("the lane stops on shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// IDLE COST OF THE POLL LANE, ignored by default: twenty ticks of the
+    /// lane's body over a mailbox where nothing changes, on a FILE-backed
+    /// store against the mock Gmail, printing the requests per tick by
+    /// endpoint and the process CPU. Run it under
+    /// `strace -f -c -e trace=fsync,fdatasync,pwrite64` on the test binary to
+    /// count what those ticks wrote; `SQUELCH_BENCH_SKIP=1` runs the setup
+    /// alone so the two counts can be subtracted.
+    ///
+    /// ```text
+    /// cargo test -p squelch-core --lib sync::tests::poll_lane_idle_cost -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn poll_lane_idle_cost() {
+        let dir = std::env::temp_dir().join(format!("squelch-poll-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(SqliteStore::open(dir.join("store.sqlite3")).unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        store
+            .set_sync_state(
+                acct,
+                HISTORY_KEY,
+                &SyncState {
+                    uidvalidity: 0,
+                    last_uid: 100,
+                },
+            )
+            .unwrap();
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.label(LABEL_INBOX, Some((3, 2)));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        // The daily profile refresh is not the idle tick's cost: park it.
+        eng.profile_due.store(i64::MAX, Ordering::Relaxed);
+        if std::env::var_os("SQUELCH_BENCH_SKIP").is_some() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // CPU consumed by the whole process so far, user and system.
+        let process_cpu = || {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            // SAFETY: `usage` is a valid, writable rusage for the call's duration.
+            let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+            assert_eq!(rc, 0, "getrusage(RUSAGE_SELF)");
+            let secs = |tv: libc::timeval| {
+                Duration::from_secs(tv.tv_sec as u64) + Duration::from_micros(tv.tv_usec as u64)
+            };
+            secs(usage.ru_utime) + secs(usage.ru_stime)
+        };
+        const TICKS: usize = 20;
+        let cpu_start = process_cpu();
+        let start = std::time::Instant::now();
+        for _ in 0..TICKS {
+            eng.poll_tick().await.unwrap();
+        }
+        let elapsed = start.elapsed();
+        let cpu = process_cpu() - cpu_start;
+        let mut by_key: std::collections::BTreeMap<String, usize> = Default::default();
+        for call in g.seen() {
+            *by_key.entry(call).or_default() += 1;
+        }
+        eprintln!(
+            "BENCH poll_lane_idle: {TICKS} ticks in {elapsed:?}, {cpu:?} process cpu; requests per tick {:.2}; by endpoint {by_key:?}",
+            g.seen().len() as f64 / TICKS as f64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE POKE REACHES THE LANE. Idle for a hundred-odd seconds of paused
+    /// time, the notification lane has backed off to its five-second sleep,
+    /// four seconds of which remain. An arrival's `notification` job is then
+    /// queued and the wake poked (by hand here; the producers' pokes are
+    /// [`an_incremental_arrival_pokes_the_notification_lane_but_a_backfill_does_not`]
+    /// and the applied-commit assertion in
+    /// [`agent_worker_commits_model_decision_without_legacy_placement`]),
+    /// and the job is claimed and run inside the next few milliseconds of
+    /// the clock: the poke ended the sleep, the timer did not.
+    ///
+    /// MUTATION: dropping the `notified()` arm from the lane's `select!`
+    /// leaves the job for the timer, four seconds on, and the elapsed-time
+    /// assertion fails.
+    #[tokio::test(start_paused = true)]
+    async fn a_poke_claims_a_queued_notification_inside_the_backoff() {
+        let (store, acct) = store_at_cursor(None);
+        let eng = Arc::new(engine(store.clone(), acct, "http://127.0.0.1:9"));
+        let (stop, mut rx) = tokio::sync::watch::channel(false);
+        let lane = {
+            let eng = eng.clone();
+            tokio::spawn(async move { eng.agent_notification_lane(&mut rx).await })
+        };
+        // Rounds at 0, 2, 6, then every five seconds (11, 16, ... 101) of
+        // the paused clock: the next timer is at 106 s.
+        tokio::time::sleep(Duration::from_secs(102)).await;
+        use crate::store::agent_triage::AgentTriageStore;
+        let kinds = ["notification", "deliberate_notification"];
+        assert_eq!(store.next_agent_jobs_due(acct, &kinds).unwrap(), []);
+        // A fresh incremental arrival queues its push job inside the ingest.
+        let raw = "From: friend@example.com\r\nTo: me@example.com\r\nSubject: now\r\n\r\nhello\r\n";
+        eng.ingest_one(
+            &fixture(acct, "g-now", raw, false),
+            &[],
+            Utc::now(),
+            IngestOrigin::Incremental,
+        )
+        .unwrap()
+        .expect("ingested");
+        let queued = store.next_agent_jobs_due(acct, &kinds).unwrap();
+        assert_eq!(queued.len(), 1, "the arrival queued a notification job");
+        assert_eq!(queued[0].0, "notification");
+        assert!(queued[0].1 <= Utc::now(), "due now");
+        let poked_at = tokio::time::Instant::now();
+        eng.notify_wake.notify_one();
+        // Claimed and run (no model configured: recorded unavailable and
+        // completed) in the same poll, so the queue reads empty again.
+        wait_for(5, "the lane to claim and complete the job", || {
+            store.next_agent_jobs_due(acct, &kinds).unwrap().is_empty()
+        })
+        .await;
+        let waited = poked_at.elapsed();
+        assert!(
+            waited < Duration::from_secs(1),
+            "claimed on the poke, not the timer: {waited:?}"
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lane)
+            .await
+            .expect("the lane stops on shutdown")
+            .unwrap();
+    }
+
+    /// IDLE COST OF THE NOTIFICATION LANE, ignored by default: ten seconds of
+    /// the lane over an empty queue on a FILE-backed store, printing the
+    /// process CPU it burned. Run it under
+    /// `strace -f -c -e trace=fcntl,pread64,pwrite64,fdatasync` on the test
+    /// binary to count what those seconds asked the kernel for:
+    ///
+    /// ```text
+    /// cargo test -p squelch-core --lib sync::tests::notification_lane_idle_cost -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn notification_lane_idle_cost() {
+        let dir = std::env::temp_dir().join(format!("squelch-notify-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(SqliteStore::open(dir.join("store.sqlite3")).unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        let eng = engine(store, acct, "http://127.0.0.1:9");
+        let (stop, mut rx) = tokio::sync::watch::channel(false);
+        // `SQUELCH_BENCH_SKIP=1` runs the setup alone, so a syscall count of
+        // the two runs differs by the lane's own.
+        if std::env::var_os("SQUELCH_BENCH_SKIP").is_some() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let cpu_start = process_cpu();
+        let start = std::time::Instant::now();
+        let lane = eng.agent_notification_lane(&mut rx);
+        tokio::pin!(lane);
+        tokio::select! {
+            _ = &mut lane => {}
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+        }
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lane)
+            .await
+            .expect("the lane stops on shutdown");
+        eprintln!(
+            "BENCH notification_lane_idle: {:?} wall, {:?} process cpu",
+            start.elapsed(),
+            process_cpu() - cpu_start
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CPU consumed by the whole process so far, user and system.
+    fn process_cpu() -> Duration {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: `usage` is a valid, writable rusage for the call's duration.
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        assert_eq!(rc, 0, "getrusage(RUSAGE_SELF)");
+        let secs = |tv: libc::timeval| {
+            Duration::from_secs(tv.tv_sec as u64) + Duration::from_micros(tv.tv_usec as u64)
+        };
+        secs(usage.ru_utime) + secs(usage.ru_stime)
+    }
+
     /// Poll `cond` every 10ms until it holds, or panic after `secs`.
     async fn wait_for(secs: u64, what: &str, cond: impl Fn() -> bool) {
         tokio::time::timeout(Duration::from_secs(secs), async {
@@ -4647,8 +6689,10 @@ mod tests {
     async fn a_poll_tick_never_touches_the_spam_label() {
         let (store, acct) = store_at_cursor(Some(100));
         let g = MockGmail::default();
-        g.history(LABEL_INBOX, LabelHistory::quiet(100));
-        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        // The mailbox's id has moved (the spam arrival moved it), so the
+        // walk runs in full rather than stopping at the idle check.
+        g.history(LABEL_INBOX, LabelHistory::quiet(140));
+        g.history(LABEL_SENT, LabelHistory::quiet(140));
         // Scripted so a walk WOULD find something, which is what makes the
         // absence of the call meaningful.
         g.history(LABEL_SPAM, LabelHistory::added(140, &[(140, "g-spam")]));
@@ -4810,7 +6854,10 @@ mod tests {
         let now = Utc::now();
 
         let g = MockGmail::default();
-        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        // The mailbox's current historyId is at least the SENT record's: an
+        // INBOX walk that reports it still at the cursor would say nothing
+        // anywhere changed, and the SENT walk would rightly be skipped.
+        g.history(LABEL_INBOX, LabelHistory::quiet(140));
         g.history(LABEL_SENT, LabelHistory::added(140, &[(140, "g-phone")]));
         g.body(
             "g-phone",
@@ -5224,7 +7271,11 @@ mod tests {
         assert!(!job.foreground, "behind live arrivals, not ahead of them");
         assert!(!job.arrival_eligible);
         assert!(queued_job(&store, acct, "notification").is_none());
-        // Not embedded inline: the vector backfill picks it up, batched.
+        // Not embedded inline: the vector backfill picks it up, batched. The
+        // whole contract, not only the query: the heal raised the drain's
+        // flag (on the SWEEPS engine, which the daemon builds over the sync
+        // engine's handle), a drain that fails leaves it raised, and a drain
+        // that succeeds writes the vector and lowers it.
         assert!(
             store
                 .messages_missing_vectors(acct, 10)
@@ -5232,6 +7283,38 @@ mod tests {
                 .iter()
                 .any(|m| m.message_id == id)
         );
+        assert!(
+            eng.vectors_dirty.load(Ordering::Relaxed),
+            "the heal raises the drain's flag"
+        );
+        {
+            use crate::embed::StubEmbedder;
+            use crate::store::sqlite::VEC_DIMS;
+            let failing = engine(store.clone(), acct, &base)
+                .with_vectors_dirty(eng.vectors_dirty_handle())
+                .with_embedder(Arc::new(StubEmbedder::new(0)));
+            failing.backfill_missing_vectors().await;
+            assert!(
+                eng.vectors_dirty.load(Ordering::Relaxed),
+                "a drain that fails its batch leaves the debt standing"
+            );
+            let drainer = engine(store.clone(), acct, &base)
+                .with_vectors_dirty(eng.vectors_dirty_handle())
+                .with_embedder(Arc::new(StubEmbedder::new(VEC_DIMS)));
+            drainer.backfill_missing_vectors().await;
+            assert!(
+                !store
+                    .messages_missing_vectors(acct, 10)
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.message_id == id),
+                "the drain re-embeds the healed row"
+            );
+            assert!(
+                !eng.vectors_dirty.load(Ordering::Relaxed),
+                "a drain that finishes lowers the shared flag"
+            );
+        }
 
         // Once per install: the walk finished, so the cursor says done and a
         // second start makes not one more Gmail call.
@@ -5474,7 +7557,8 @@ mod tests {
         );
 
         let g = MockGmail::default();
-        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        // Current historyId at the SENT record's, as a real mailbox reports it.
+        g.history(LABEL_INBOX, LabelHistory::quiet(170));
         g.history(
             LABEL_SENT,
             LabelHistory::added(170, &[(170, "g-sealed-out")]),
@@ -6054,7 +8138,8 @@ mod tests {
         .expect("the echo commits a row");
 
         let g = MockGmail::default();
-        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        // Current historyId at the SENT record's, as a real mailbox reports it.
+        g.history(LABEL_INBOX, LabelHistory::quiet(160));
         g.history(LABEL_SENT, LabelHistory::added(160, &[(160, "g-echo")]));
         g.body("g-echo", eml);
         let base = serve_mock(g.clone()).await;
@@ -6374,6 +8459,2205 @@ mod tests {
         );
     }
 
+    /// THE NOTIFICATION LANE'S PRODUCER POKE, through `fetch_raw_and_ingest`.
+    /// A backfill queues no `notification` job (its rows are stamped
+    /// ineligible), so it does not poke: a poke per backfilled row would be a
+    /// lane round per row of the first backfill. Neither does the user's own
+    /// sent copy. An incremental arrival does, and the permit is stored
+    /// before `poll_once` returns, so a lane that is mid-round when the row
+    /// lands wakes as soon as it finishes. One permit, however many rows:
+    /// the lane's rounds coalesce.
+    #[tokio::test]
+    async fn an_incremental_arrival_pokes_the_notification_lane_but_a_backfill_does_not() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let now = Utc::now();
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::added(140, &[(140, "g-new")]));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.listing(LABEL_INBOX, &["g-old"]);
+        g.listing(LABEL_SENT, &[]);
+        g.body("g-new", alert_eml(now));
+        g.body(
+            "g-old",
+            alert_eml(now).replace("checkout api", "billing api"),
+        );
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+
+        let poked = || tokio::time::timeout(Duration::ZERO, eng.notify_wake.notified());
+        assert!(poked().await.is_err(), "a fresh engine holds no permit");
+
+        let n = eng
+            .fetch_raw_and_ingest(
+                &["g-old".to_string()],
+                Mailbox::Inbox,
+                IngestOrigin::Backfill,
+                GmailRetry::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "the backfill really did ingest a row");
+        assert!(
+            poked().await.is_err(),
+            "a backfilled row queues no push and must not wake the lane"
+        );
+
+        // Nor does the user's own sent copy, incremental or not: never
+        // eligible, never queued.
+        g.body("g-sent", alert_eml(now).replace("checkout api", "sent api"));
+        let n = eng
+            .fetch_raw_and_ingest(
+                &["g-sent".to_string()],
+                Mailbox::Sent,
+                IngestOrigin::Incremental,
+                GmailRetry::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "the sent copy really did ingest");
+        assert!(
+            poked().await.is_err(),
+            "a sent copy queues no push and must not wake the lane"
+        );
+
+        eng.poll_once().await.unwrap();
+        assert!(
+            poked().await.is_ok(),
+            "an incremental arrival's push job must be claimed now, not at \
+             the lane's next timer"
+        );
+        assert!(
+            poked().await.is_err(),
+            "the permit was consumed by the wait above; Notify holds exactly one"
+        );
+    }
+
+    /// THE ARCHIVE ORIGIN, through the engine: the row lands as archive with no
+    /// work behind it, the refine lane is not woken for it, a catch-up's gauge
+    /// does not count it, and a second sighting of the same id ingests nothing.
+    #[tokio::test]
+    async fn an_archive_ingest_wakes_no_lane_moves_no_gauge_and_queues_no_work() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.body("g-old", alert_eml(Utc::now()));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        // A catch-up is under way, as it may be when the walk's batch lands.
+        eng.metrics.catchup_begin(10);
+
+        let n = eng
+            .fetch_raw_and_ingest(
+                &["g-old".to_string()],
+                Mailbox::Inbox,
+                IngestOrigin::Archive,
+                GmailRetry::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, eng.refine_wake.notified())
+                .await
+                .is_err(),
+            "an archive row queues nothing, so there is nothing to wake for"
+        );
+        assert_eq!(eng.metrics.catchup_progress(), Some((0, 10)));
+        assert_eq!(
+            store
+                .stored_gmail_msg_ids(acct, &["g-old".to_string()])
+                .unwrap()
+                .len(),
+            1
+        );
+        // Fresh by its Date, on a path that is not Backfill: still no stamp,
+        // no job, no notification.
+        assert!(
+            store
+                .claim_agent_job(acct, "investigation", Utc::now(), 120)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .claim_agent_job(acct, "notification", Utc::now(), 120)
+                .unwrap()
+                .is_none()
+        );
+
+        // The same id again is counted as handled and writes nothing.
+        let raw = "From: alice@example.com\r\nSubject: Note\r\n\r\nHello";
+        assert!(
+            eng.ingest_one(
+                &fixture(acct, "g-old", raw, false),
+                &[],
+                Utc::now(),
+                IngestOrigin::Archive,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    // ---- the archive walk ---------------------------------------------------
+
+    /// Every wait in the walk shrunk to nothing, so these tests assert on the
+    /// wire and the store instead of sleeping.
+    fn instant_pace() -> ArchivePace {
+        ArchivePace {
+            rest_factor: 0,
+            error_backoff: Duration::from_millis(10),
+            held_recheck: Duration::from_millis(5),
+            ..ArchivePace::default()
+        }
+    }
+
+    /// An engine whose poll has "succeeded" and whose walk does not rest.
+    fn archive_engine(
+        store: Arc<SqliteStore>,
+        acct: AccountId,
+        base: &str,
+        archive_days: u32,
+    ) -> SyncEngine<SqliteStore, FixedToken> {
+        let mut config = Config::default();
+        config.sync.archive_days = archive_days;
+        let mut eng = engine_with_config(store, acct, base, config);
+        eng.archive_pace = instant_pace();
+        eng.poll_healthy.store(true, Ordering::Relaxed);
+        eng
+    }
+
+    /// Disk numbers in MiB, for the walk's `disk_probe`.
+    fn disk_mb(free: u64, total: u64, db: u64) -> crate::store::ArchiveDisk {
+        const MIB: u64 = 1024 * 1024;
+        crate::store::ArchiveDisk {
+            free_bytes: free * MIB,
+            total_bytes: total * MIB,
+            db_bytes: db * MIB,
+        }
+    }
+
+    /// A shutdown channel nobody fires. The sender is returned to be held: a
+    /// dropped one reads as "changed" forever.
+    fn never_shutdown() -> (
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::watch::Receiver<bool>,
+    ) {
+        tokio::sync::watch::channel(false)
+    }
+
+    /// A whole-second instant `days` ago, so it survives the cursor's round
+    /// trip and the query's epoch seconds exactly.
+    fn days_ago(days: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp((Utc::now() - ChronoDuration::days(days)).timestamp(), 0).unwrap()
+    }
+
+    fn archive_q(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+        format!(
+            "after:{} before:{} -in:draft -in:chats",
+            from.timestamp() - 1,
+            to.timestamp()
+        )
+    }
+
+    /// THE WALK, end to end: mail older than the backfill window, in no label
+    /// the live paths list, lands as archive rows (received and sent alike)
+    /// with no model work behind any of them, and the walk then reports done.
+    #[tokio::test]
+    async fn the_archive_walk_stores_old_mail_as_archive_rows_and_queues_nothing() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.old_mail("g-old-in", days_ago(40), alert_eml(days_ago(40)));
+        g.old_mail(
+            "g-old-out",
+            days_ago(55),
+            sent_eml(days_ago(55), "alice@friends.com", "the lease"),
+        );
+        g.message_labels("g-old-out", &["SENT"]);
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 60);
+        let (_tx, mut rx) = never_shutdown();
+
+        let mut steps = 0;
+        while eng.archive_walk_chunk(&mut rx).await.unwrap() == ArchiveStep::Walked {
+            steps += 1;
+            assert!(steps < 20, "the walk must reach its target");
+        }
+        // 30 days of backfill to 60 days of archive, a week at a time.
+        assert_eq!(steps, 5);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Done
+        );
+
+        for (gmail_id, sent) in [("g-old-in", false), ("g-old-out", true)] {
+            let view = store.thread_view_with_html(acct, gmail_id).unwrap();
+            assert_eq!(view.messages.len(), 1, "{gmail_id} is openable");
+            assert!(
+                store.message_is_archive(acct, view.messages[0].id).unwrap(),
+                "{gmail_id} is an archive row"
+            );
+            assert_eq!(
+                view.messages[0].is_sent, sent,
+                "{gmail_id}: its own labels decide"
+            );
+        }
+        for kind in ["investigation", "notification"] {
+            assert!(
+                store
+                    .claim_agent_job(acct, kind, Utc::now(), 120)
+                    .unwrap()
+                    .is_none(),
+                "no {kind} job for a year of old mail"
+            );
+        }
+        // A contact is someone the user writes to NOW; the archive seeds none.
+        assert!(!store.is_known_contact(acct, "alice@friends.com").unwrap());
+        // Its own gauges, and not the catch-up's.
+        let (at, complete) = eng.metrics.archive_walk().unwrap();
+        assert!(complete);
+        assert!(at <= days_ago(60).timestamp() + 5);
+        assert_eq!(eng.metrics.catchup_progress(), None);
+    }
+
+    /// ON THE WIRE: all mail, so no `labelIds`, bounded to exactly one week
+    /// back from the cursor in epoch seconds, drafts and chats excluded.
+    #[tokio::test]
+    async fn the_archive_listing_carries_no_label_and_one_week_of_bounds() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.seen(), vec!["list-all"], "one listing, with no labelIds");
+        assert_eq!(
+            g.queries(""),
+            vec![archive_q(cursor - ChronoDuration::days(7), cursor)]
+        );
+    }
+
+    /// THE QUOTA SAVING AND THE RESUME: an id the store already holds, from
+    /// the live window or from an earlier pass over this chunk, is never
+    /// fetched again.
+    #[tokio::test]
+    async fn the_archive_walk_does_not_fetch_ids_it_already_holds() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-have", at, alert_eml(at));
+        g.old_mail("g-new", at, alert_eml(at));
+        let base = serve_mock(g.clone()).await;
+        ingest_into(
+            &store,
+            acct,
+            &fixture(acct, "g-have", &alert_eml(at), false),
+            at,
+        );
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+
+        eng.archive_walk_chunk(&mut rx).await.unwrap();
+        assert_eq!(g.calls("get:g-have"), 0, "already stored, so not fetched");
+        assert_eq!(g.calls("get:g-new"), 1);
+        let have = store.thread_view_with_html(acct, "g-have").unwrap();
+        assert!(
+            !store.message_is_archive(acct, have.messages[0].id).unwrap(),
+            "and a live row is never demoted"
+        );
+    }
+
+    /// THE CURSOR: created at the backfill window's edge on first use, moved
+    /// back one chunk per fully ingested chunk, and picked up by the next run
+    /// (a new engine over the same store) without re-fetching anything.
+    #[tokio::test]
+    async fn the_archive_cursor_is_persisted_per_chunk_and_resumed() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.old_mail("g-week1", days_ago(33), alert_eml(days_ago(33)));
+        g.old_mail("g-week2", days_ago(40), alert_eml(days_ago(40)));
+        let base = serve_mock(g.clone()).await;
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(store.archive_walked_to(acct).unwrap(), None);
+        let first = archive_engine(store.clone(), acct, &base, 365);
+        // The row is written on first use, before the first listing, so a walk
+        // whose first chunk fails still has a fixed place to start from.
+        g.0.lock().unwrap().all_mail_failures = 1;
+        assert!(first.archive_walk_chunk(&mut rx).await.is_err());
+        let start = store.archive_walked_to(acct).unwrap().unwrap();
+        assert!(
+            (start - (Utc::now() - ChronoDuration::days(30)))
+                .num_seconds()
+                .abs()
+                < 30,
+            "created at the backfill window's edge, got {start}"
+        );
+        assert_eq!(
+            first.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        let walked = store.archive_walked_to(acct).unwrap().unwrap();
+        let expected = Utc::now() - ChronoDuration::days(30 + 7);
+        assert!(
+            (walked - expected).num_seconds().abs() < 30,
+            "one chunk back from the backfill window's edge, got {walked}"
+        );
+        assert_eq!(g.calls("get:g-week1"), 1);
+        assert_eq!(g.calls("get:g-week2"), 0, "the next chunk's mail");
+
+        // A restart: nothing of the first engine survives but the store.
+        let second = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(
+            second.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(
+            g.queries("")[2],
+            archive_q(walked - ChronoDuration::days(7), walked),
+            "the second run starts where the first one stopped"
+        );
+        assert_eq!(g.calls("get:g-week1"), 1, "not fetched a second time");
+        assert_eq!(g.calls("get:g-week2"), 1);
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap().unwrap(),
+            walked - ChronoDuration::days(7)
+        );
+    }
+
+    /// THE FAR END: the last chunk is cut at `now - archive_days` rather than
+    /// running a week past it, and a finished walk asks Gmail nothing.
+    #[tokio::test]
+    async fn the_archive_walk_stops_at_its_target() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        // Past the target: listed by nothing, so never fetched.
+        g.old_mail("g-too-old", days_ago(44), alert_eml(days_ago(44)));
+        let base = serve_mock(g.clone()).await;
+        // 30 days of backfill, 40 of archive: one whole week and one of three days.
+        let eng = archive_engine(store.clone(), acct, &base, 40);
+        let (_tx, mut rx) = never_shutdown();
+
+        for _ in 0..2 {
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Walked
+            );
+        }
+        let walked = store.archive_walked_to(acct).unwrap().unwrap();
+        let target = Utc::now() - ChronoDuration::days(40);
+        assert!(
+            (walked - target).num_seconds().abs() < 30,
+            "the cursor stops at the target, got {walked}"
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Done
+            );
+        }
+        assert_eq!(g.calls("list-all"), 2, "a finished walk lists nothing");
+        assert_eq!(g.calls("get:g-too-old"), 0);
+        assert_eq!(eng.metrics.archive_walk().map(|(_, done)| done), Some(true));
+
+        // RAISING archive_days resumes it from the same cursor.
+        let wider = archive_engine(store.clone(), acct, &base, 60);
+        assert_eq!(
+            wider.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-too-old"), 1);
+    }
+
+    /// `archive_days = 0` IS OFF: no listing, no cursor row, no gauge.
+    #[tokio::test]
+    async fn an_archive_of_zero_days_does_nothing() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.old_mail("g-old", days_ago(40), alert_eml(days_ago(40)));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 0);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Off
+        );
+        assert!(g.seen().is_empty(), "saw {:?}", g.seen());
+        assert_eq!(store.archive_walked_to(acct).unwrap(), None);
+        assert_eq!(eng.metrics.archive_walk(), None);
+    }
+
+    /// THE WALK YIELDS. Before a poll has succeeded and while a window of mail
+    /// is being fetched it asks Gmail nothing; and a window that opens in the
+    /// middle of a chunk stops the chunk at the next batch boundary with the
+    /// cursor where it was.
+    #[tokio::test]
+    async fn the_archive_walk_holds_off_while_a_window_is_in_flight() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-a", at, alert_eml(at));
+        g.old_mail("g-b", at, alert_eml(at));
+        // The first batch takes long enough that its rest (twice its elapsed
+        // time) is a window the test can reliably land a flag in.
+        g.slow_body("g-a", Duration::from_millis(60));
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.archive_pace.batch = 1;
+        eng.archive_pace.rest_factor = 2;
+        let (_tx, mut rx) = never_shutdown();
+
+        eng.poll_healthy.store(false, Ordering::Relaxed);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held,
+            "no poll has succeeded"
+        );
+        eng.poll_healthy.store(true, Ordering::Relaxed);
+        eng.window_in_flight.store(true, Ordering::Relaxed);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held,
+            "a catch-up is running"
+        );
+        assert!(
+            g.seen().is_empty(),
+            "held means off the wire: {:?}",
+            g.seen()
+        );
+
+        // Now mid-chunk: the window opens while the walk rests after g-a.
+        eng.window_in_flight.store(false, Ordering::Relaxed);
+        let (step, ()) = tokio::join!(eng.archive_walk_chunk(&mut rx), async {
+            while g.calls("get:g-a") == 0 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            eng.window_in_flight.store(true, Ordering::Relaxed);
+        });
+        assert_eq!(step.unwrap(), ArchiveStep::Held);
+        assert_eq!(g.calls("get:g-b"), 0, "the second batch was not started");
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor),
+            "an unfinished chunk does not move the cursor"
+        );
+
+        // The window closes; the chunk is finished from where it stopped.
+        eng.window_in_flight.store(false, Ordering::Relaxed);
+        eng.archive_pace.rest_factor = 0;
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-a"), 1);
+        assert_eq!(g.calls("get:g-b"), 1);
+    }
+
+    /// THE DUTY CYCLE: a burst of work is followed by a rest of twice its own
+    /// length, so the walk holds about a third of whatever the shared budget
+    /// allows. Measured on a real clock because the fetch is real I/O.
+    #[tokio::test]
+    async fn the_archive_walk_rests_twice_as_long_as_it_worked() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        for id in ["g-slow-a", "g-slow-b"] {
+            g.old_mail(id, at, alert_eml(at));
+            g.slow_body(id, Duration::from_millis(50));
+        }
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        // Two batches, so both rests are in the measurement: the one between
+        // batches and the one after the cursor is written.
+        eng.archive_pace.batch = 1;
+        eng.archive_pace.rest_factor = 2;
+        let (_tx, mut rx) = never_shutdown();
+
+        let started = std::time::Instant::now();
+        eng.archive_walk_chunk(&mut rx).await.unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "twice 50ms of work, each followed by at least 100ms of rest, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A GMAIL ERROR MID-CHUNK leaves the cursor where it was, keeps what was
+    /// already ingested, and the retry pays only for the rest.
+    #[tokio::test]
+    async fn a_gmail_error_in_the_archive_walk_does_not_advance_the_cursor() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-ok", at, alert_eml(at));
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-bad".to_string(),
+            std::collections::VecDeque::from([(500, "backendError".to_string())]),
+        );
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor - ChronoDuration::days(7))
+        );
+        assert_eq!(
+            g.calls("get:g-ok"),
+            1,
+            "ingested before the error, not re-fetched"
+        );
+        assert_eq!(g.calls("get:g-bad"), 2);
+    }
+
+    /// A REFUSAL INSIDE THE WALK IS NOT A SYNC OUTAGE. It is counted, and the
+    /// client-visible last error stays clear: the inbox is current, and a 500
+    /// on a year-old week is the walk's to retry.
+    #[tokio::test]
+    async fn a_gmail_error_in_the_archive_walk_is_counted_but_not_shown_as_a_sync_error() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-bad".to_string(),
+            std::collections::VecDeque::from([(500, "backendError".to_string())]),
+        );
+        g.0.lock().unwrap().all_mail_failures = 1;
+        let base = serve_mock(g.clone()).await;
+        let metrics = SyncMetrics::new();
+        let eng = archive_engine(store.clone(), acct, &base, 365).with_metrics(metrics.clone());
+        let (_tx, mut rx) = never_shutdown();
+        let http_errors = |n: u32| format!("squelchd_gmail_api_errors_total{{kind=\"http\"}} {n}");
+
+        // The listing is refused, then the fetch is.
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(metrics.sync_last_error(), None);
+        assert_eq!(metrics.sync_consecutive_failures(), 0);
+        let rendered = crate::metrics::render(&metrics, None);
+        assert!(rendered.contains(&http_errors(2)), "{rendered}");
+
+        // The same refusal on a live path is one, so the difference is the walk.
+        g.0.lock().unwrap().errors.insert(
+            "g-live".to_string(),
+            std::collections::VecDeque::from([(500, "backendError".to_string())]),
+        );
+        assert!(
+            eng.fetch_raw_and_ingest(
+                &["g-live".to_string()],
+                Mailbox::Inbox,
+                IngestOrigin::Incremental,
+                GmailRetry::None
+            )
+            .await
+            .is_err()
+        );
+        assert!(metrics.sync_last_error().is_some());
+    }
+
+    /// THE AGENT DOOR'S POKE, through the real refine lane and the real access
+    /// job: a search that surfaced an archive row wakes the lane, the lane
+    /// spends ONE small model call on it, and the search's wait returns with
+    /// the row readable. The lane's own clock here is 30 seconds, so only the
+    /// poke can explain the answer arriving inside the wait.
+    #[tokio::test]
+    async fn the_agent_doors_poke_wakes_the_refine_lane_to_run_the_archive_access_check() {
+        use crate::store::agent_triage::AgentTriageStore;
+        use crate::store::archive_surface::{SurfaceWait, surface_archive_matches};
+        let (store, account) = store_at_cursor(Some(100));
+        let at = days_ago(200);
+        let mut fetched = fixture(account, "g-old", &alert_eml(at), false);
+        fetched.internal_date = Some(at);
+        let parsed = ingest_with_rules(&fetched, &Stage1Config::default(), at, &[], |_| false);
+        let id = store.ingest_archive_message(&parsed).unwrap().unwrap();
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move |Json(_): Json<serde_json::Value>| {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    let verdict = json!({"restricted":false,"reason":"An ordinary alert"});
+                    Json(json!({"choices":[{"message":{"content":verdict.to_string()},"finish_reason":"stop"}],
+                        "usage":{"prompt_tokens":20,"completion_tokens":10}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut config = Config::default();
+        config.triage.agent.worker_poll_secs = 3600;
+        let poke = crate::store::archive_surface::RefinePoke::new();
+        let mut eng = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config)
+            .with_refine_poke(poke.clone());
+        eng.stage2_llm = Some(llm);
+        eng.poll_healthy.store(true, Ordering::Relaxed);
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        assert!(!poke.runnable(), "no lane has spoken for it yet");
+
+        let ((), surfaced) = tokio::join!(eng.refine_lane(&mut rx), async {
+            // Let the lane finish its first, empty round and park.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            // THE LANE SAID IT CAN RUN, which is the only reason the door
+            // below waits at all.
+            assert!(poke.runnable());
+            let surfacing = crate::store::archive_surface::ArchiveSurfacing {
+                archive_days: 365,
+                poke: Some(poke.clone()),
+                wait: SurfaceWait {
+                    deadline: Duration::from_secs(10),
+                    idle: Duration::from_secs(10),
+                    interval: Duration::from_millis(20),
+                },
+                caps: Default::default(),
+            };
+            let started = std::time::Instant::now();
+            let rerun = surface_archive_matches(&store, account, &[id], &surfacing)
+                .await
+                .unwrap();
+            let waited = started.elapsed();
+            tx.send(true).unwrap();
+            (rerun, waited)
+        });
+        let (rerun, waited) = surfaced;
+        assert!(rerun);
+        assert!(
+            !poke.runnable(),
+            "the lane withdrew its word on the way out"
+        );
+        assert!(
+            waited < Duration::from_secs(8),
+            "the check finished inside the wait: {waited:?}"
+        );
+        assert!(store.agent_access_allowed(account, id).unwrap());
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "one small model call");
+        assert_eq!(
+            store.agent_diagnostics(account, id).unwrap()["jobs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "and one job"
+        );
+        server.abort();
+    }
+
+    /// WHAT THE LANE TELLS THE DOORS. A door waits on its access checks only
+    /// while the lane says a poke would be acted on, and the lane says so from
+    /// the three facts that gate its own spending: a poll has succeeded, a
+    /// model is configured, the provider circuit is closed. Each one missing
+    /// is a lane that would sit on the queue while the caller's wait ran out.
+    #[tokio::test]
+    async fn the_refine_lane_says_whether_a_poke_would_be_acted_on() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let llm = || ResolvedLlm {
+            url: "http://127.0.0.1:1/".into(),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        // (poll healthy, a model, circuit open) -> runnable
+        for (healthy, model, cooling, expected) in [
+            (true, true, false, true),
+            (false, true, false, false),
+            (true, false, false, false),
+            (true, true, true, false),
+        ] {
+            let mut config = Config::default();
+            config.triage.agent.worker_poll_secs = 3600;
+            let poke = crate::store::archive_surface::RefinePoke::new();
+            let mut eng = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config)
+                .with_refine_poke(poke.clone());
+            eng.stage2_llm = model.then(llm);
+            eng.poll_healthy.store(healthy, Ordering::Relaxed);
+            if cooling {
+                eng.agent_retry_after
+                    .store(Utc::now().timestamp() + 600, Ordering::Relaxed);
+            }
+            let (tx, mut rx) = tokio::sync::watch::channel(false);
+            let ((), said) = tokio::join!(eng.refine_lane(&mut rx), async {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let said = poke.runnable();
+                tx.send(true).unwrap();
+                said
+            });
+            assert_eq!(
+                said, expected,
+                "healthy={healthy} model={model} cooling={cooling}"
+            );
+            assert!(!poke.runnable(), "withdrawn when the lane ends");
+        }
+    }
+
+    /// THE LANE, inside the real `select!`: a Gmail error in the walk is waited
+    /// out and retried by the walk, and the lifecycle neither ends nor errors
+    /// for it. It ends here because the test says stop, with `Ok`.
+    #[tokio::test]
+    async fn a_failing_archive_walk_does_not_bounce_the_lifecycle() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(100));
+        g.history(LABEL_SENT, LabelHistory::quiet(100));
+        g.old_mail("g-old", at, alert_eml(at));
+        g.0.lock().unwrap().all_mail_failures = 2;
+        let base = serve_mock(g.clone()).await;
+        // 47 days: the one chunk under test and then done, so the lane goes
+        // quiet instead of walking a year of empty weeks behind the assertions.
+        let mut eng = archive_engine(store.clone(), acct, &base, 47);
+        // The lane must earn this from the poll lane, as in production.
+        eng.poll_healthy.store(false, Ordering::Relaxed);
+        eng.archive_pace.done_recheck = Duration::from_secs(3600);
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+
+        let (lifecycle, landed) = tokio::join!(eng.run_lanes(&mut rx, false), async {
+            let landed = tokio::time::timeout(Duration::from_secs(10), async {
+                while g.calls("get:g-old") == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_ok();
+            tx.send(true).unwrap();
+            landed
+        });
+        assert!(
+            lifecycle.is_ok(),
+            "the walk's errors are not the lifecycle's"
+        );
+        assert!(
+            landed,
+            "the walk retried past two failed listings: {:?}",
+            g.seen()
+        );
+        // Two refused listings, then whatever the forward pass listed on its
+        // way to the bound, then the one backward chunk under test.
+        assert!(g.calls("list-all") >= 3, "{:?}", g.seen());
+        let backward = g
+            .queries("")
+            .into_iter()
+            .filter(|q| !q.contains("-in:inbox"))
+            .count();
+        assert!(backward >= 1, "{:?}", g.queries(""));
+        assert!(
+            g.at("history:INBOX") < g.at("list-all"),
+            "the walk waited for a poll to succeed: {:?}",
+            g.seen()
+        );
+    }
+
+    // ---- the walk's limits: disk, embedder, clock, quota, poison -----------
+
+    /// A message with one real attachment of `bytes` bytes, base64 on the wire.
+    fn attachment_eml(at: DateTime<Utc>, bytes: usize) -> String {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(vec![0x5a_u8; bytes]);
+        let mut wrapped = String::with_capacity(encoded.len() + encoded.len() / 38);
+        for line in encoded.as_bytes().chunks(76) {
+            wrapped.push_str(std::str::from_utf8(line).unwrap());
+            wrapped.push_str("\r\n");
+        }
+        format!(
+            "From: Scans <scans@office.example>\r\n\
+             To: me@example.com\r\n\
+             Subject: the signed lease\r\n\
+             Date: {}\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"mix\"\r\n\
+             \r\n\
+             --mix\r\n\
+             Content-Type: text/plain; charset=utf-8\r\n\
+             \r\n\
+             The countersigned copy is attached.\r\n\
+             --mix\r\n\
+             Content-Type: application/pdf; name=\"lease.pdf\"\r\n\
+             Content-Disposition: attachment; filename=\"lease.pdf\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\
+             \r\n\
+             {wrapped}--mix--\r\n",
+            at.to_rfc2822()
+        )
+    }
+
+    /// AN ARCHIVE ATTACHMENT IS A NAME AND A SIZE. A real 3 MB part, well
+    /// under the ingest cap, keeps its bytes on the live path and none in the
+    /// archive: the reader lists it as not downloadable and the byte read
+    /// answers "not stored", which the endpoint turns into a 410.
+    #[tokio::test]
+    async fn the_archive_walk_stores_attachments_as_metadata_only() {
+        const SIZE: usize = 3 * 1024 * 1024;
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-old", at, attachment_eml(at, SIZE));
+        g.body("g-live", attachment_eml(Utc::now(), SIZE));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        eng.fetch_raw_and_ingest(
+            &["g-live".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            GmailRetry::None,
+        )
+        .await
+        .unwrap();
+
+        let part = |gmail_id: &str| {
+            let view = store.thread_view_with_html(acct, gmail_id).unwrap();
+            let listed = view.messages[0].attachments.clone();
+            assert_eq!(listed.len(), 1, "{gmail_id}: the part is listed");
+            assert_eq!(listed[0].filename, "lease.pdf");
+            assert_eq!(listed[0].size, SIZE as i64, "{gmail_id}: the real size");
+            let (_, _, bytes) = store
+                .attachment_bytes(acct, listed[0].id)
+                .unwrap()
+                .expect("the row exists");
+            (listed[0].downloadable, bytes.map(|b| b.len()))
+        };
+        assert_eq!(part("g-live"), (true, Some(SIZE)), "live mail keeps it");
+        assert_eq!(part("g-old"), (false, None), "the archive keeps no blob");
+    }
+
+    /// THE DISK FLOOR: under `sync.archive_min_free_mb` the walk is off the
+    /// wire and writes nothing, a number that cannot be read counts as no
+    /// room, and 0 switches the check off.
+    #[tokio::test]
+    async fn the_archive_walk_stores_nothing_while_the_disk_is_short() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(eng.config.sync.archive_min_free_mb, 2048);
+        let (_tx, mut rx) = never_shutdown();
+
+        for short in [
+            (|| Some(disk_mb(2047, 0, 0))) as fn() -> Option<crate::store::ArchiveDisk>,
+            || None,
+        ] {
+            eng.archive.state().disk_probe = Some(short);
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Held
+            );
+        }
+        assert!(g.seen().is_empty(), "held means off the wire");
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        // Nothing free on a volume of any size: 0 switches off the fifth too.
+        eng.archive.state().disk_probe = Some(|| Some(disk_mb(0, 50 * 1024, 0)));
+        eng.config.sync.archive_min_free_mb = 0;
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked,
+            "0 is no floor, whatever the disk says"
+        );
+        eng.archive.state().disk_probe = Some(|| None);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked,
+            "or cannot say"
+        );
+        eng.config.sync.archive_min_free_mb = 2048;
+        eng.archive.state().disk_probe = Some(|| Some(disk_mb(2048, 0, 0)));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked,
+            "exactly the floor is room"
+        );
+        // With no probe the engine asks the store, and an in-memory database
+        // has no disk to fill.
+        eng.archive.state().disk_probe = None;
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+    }
+
+    /// THE EMBEDDER GATE: the walk does not start while the embedder init is
+    /// unresolved, so a year of rows is never stored vectorless for the batch
+    /// drain. It has no ceiling, because nobody is waiting on it; a gate whose
+    /// sender is gone is nothing to wait for.
+    #[tokio::test]
+    async fn the_archive_walk_waits_for_the_embedder_to_settle() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let eng = archive_engine(store.clone(), acct, &base, 365).with_embedder_gate(gate_rx);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert!(g.seen().is_empty(), "held means off the wire");
+        gate_tx.send(true).unwrap();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+
+        let (dropped_tx, dropped_rx) = tokio::sync::watch::channel(false);
+        drop(dropped_tx);
+        let eng = archive_engine(store.clone(), acct, &base, 365).with_embedder_gate(dropped_rx);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked,
+            "nothing will ever open a dropped gate"
+        );
+    }
+
+    /// THE VECTOR DRAIN STAYS OUT OF AN ARCHIVE BATCH, by a flag of the walk's
+    /// own: `window_in_flight` never moves, so the catch-up gauges and the
+    /// walk's own gate see nothing. The flag falls when the batch ends.
+    #[tokio::test]
+    async fn the_vector_drain_stays_out_of_an_archive_batch() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-a", at, alert_eml(at));
+        g.slow_body("g-a", Duration::from_millis(150));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+        assert!(eng.may_drain_vectors());
+
+        let (step, seen) = tokio::join!(eng.archive_walk_chunk(&mut rx), async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !eng.archive.in_flight.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                (
+                    eng.may_drain_vectors(),
+                    eng.window_in_flight.load(Ordering::Relaxed),
+                )
+            })
+            .await
+        });
+        assert_eq!(step.unwrap(), ArchiveStep::Walked);
+        assert_eq!(
+            seen.expect("the batch raised its flag"),
+            (false, false),
+            "no drain mid-batch, and not by borrowing the window's flag"
+        );
+        assert!(eng.may_drain_vectors(), "the flag falls with the batch");
+        eng.window_in_flight.store(true, Ordering::Relaxed);
+        assert!(!eng.may_drain_vectors(), "a window still stops it too");
+    }
+
+    /// A CLOCK BEFORE 2024 PERSISTS NOTHING. The start is written once, from
+    /// the clock: a 1970 start would read as a finished walk for ever.
+    #[tokio::test]
+    async fn the_archive_walk_holds_on_a_clock_that_is_plainly_wrong() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+        eng.archive.state().clock = DateTime::from_timestamp(ARCHIVE_CLOCK_FLOOR_UNIX - 1, 0);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(store.archive_walked_to(acct).unwrap(), None);
+        assert!(g.seen().is_empty());
+
+        eng.archive.state().clock = DateTime::from_timestamp(ARCHIVE_CLOCK_FLOOR_UNIX, 0);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+    }
+
+    /// AN ENGINE HANDED AN UNCLAMPED DEPTH (a config built in code rather than
+    /// loaded) still does no date arithmetic on it.
+    #[tokio::test]
+    async fn an_absurd_archive_depth_does_not_overflow_the_walk() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, u32::MAX);
+        let (_tx, mut rx) = never_shutdown();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+    }
+
+    /// A MESSAGE DELETED BETWEEN THE LISTING AND THE FETCH is stepped over by
+    /// the walk, first time, and the chunk completes. On a live path the same
+    /// 404 is still an error: nothing there may drop an id.
+    #[tokio::test]
+    async fn a_message_gone_before_its_fetch_is_skipped_by_the_walk_alone() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        // Listed, and no body behind it: the mock answers 404.
+        g.0.lock()
+            .unwrap()
+            .all_mail
+            .push((at.timestamp(), "g-gone".to_string()));
+        g.old_mail("g-ok", at, alert_eml(at));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor - ChronoDuration::days(7))
+        );
+        assert_eq!(g.calls("get:g-gone"), 1);
+        assert_eq!(
+            store
+                .thread_view_with_html(acct, "g-ok")
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert!(matches!(
+            eng.fetch_raw_and_ingest(
+                &["g-gone".to_string()],
+                Mailbox::Inbox,
+                IngestOrigin::Incremental,
+                GmailRetry::None,
+            )
+            .await,
+            Err(CoreError::NotFound)
+        ));
+    }
+
+    /// How many separate passes `id` has failed on in the chunk being walked.
+    fn booked(eng: &SyncEngine<SqliteStore, FixedToken>, id: &str) -> u32 {
+        eng.archive
+            .state()
+            .failing
+            .as_ref()
+            .and_then(|(_, failures)| failures.get(id).copied())
+            .unwrap_or(0)
+    }
+
+    fn stored(store: &SqliteStore, acct: AccountId, gmail_id: &str) -> bool {
+        store.thread_view_with_html(acct, gmail_id).is_ok()
+    }
+
+    /// A POISON MESSAGE HOLDS ITS CHUNK FOR THREE PASSES AND NO MORE. One body
+    /// Gmail will not serve used to stop the walk at its week for good. Once
+    /// THAT MESSAGE has failed on three separate passes, the fourth steps over
+    /// it, stores the rest and moves the cursor.
+    #[tokio::test]
+    async fn a_message_that_has_itself_failed_three_passes_is_stepped_over_on_the_fourth() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.old_mail("g-ok", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-bad".to_string(),
+            std::iter::repeat_n((500, "backendError".to_string()), 10).collect(),
+        );
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.config.sync.fetch_concurrency = 1;
+        let (_tx, mut rx) = never_shutdown();
+
+        for pass in 1..=3 {
+            assert!(
+                eng.archive_walk_chunk(&mut rx).await.is_err(),
+                "pass {pass} still fails whole"
+            );
+            assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+            assert_eq!(booked(&eng, "g-bad"), pass, "booked against the message");
+            assert_eq!(booked(&eng, "g-ok"), 0);
+            assert_eq!(
+                eng.archive_error_wait(),
+                eng.archive_pace.error_backoff,
+                "not a quota refusal, so the flat wait"
+            );
+            assert!(!eng.archive.in_flight.load(Ordering::Relaxed));
+            assert_eq!(eng.metrics.archive_skipped(), 0);
+        }
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor - ChronoDuration::days(7))
+        );
+        assert_eq!(g.calls("get:g-bad"), 4);
+        assert!(!stored(&store, acct, "g-bad"));
+        assert!(stored(&store, acct, "g-ok"));
+        assert_eq!(eng.metrics.archive_skipped(), 1, "and counted");
+        assert!(
+            eng.archive.state().failing.is_none(),
+            "what failed in a chunk is forgotten with the chunk"
+        );
+    }
+
+    /// m4. A SKIPPED MESSAGE IS COUNTED ONCE. A chunk holds a message deleted
+    /// before its fetch and one Gmail will not serve. The chunk is walked
+    /// four times before it passes, and the deleted message is stepped over
+    /// on every one of them: two messages were skipped, and the counter says
+    /// two, not five.
+    #[tokio::test]
+    async fn a_message_stepped_over_on_every_pass_is_counted_once() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        // Listed, and no body behind it: the mock answers 404.
+        g.0.lock()
+            .unwrap()
+            .all_mail
+            .push((at.timestamp(), "g-gone".to_string()));
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-bad".to_string(),
+            std::iter::repeat_n((500, "backendError".to_string()), 10).collect(),
+        );
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.config.sync.fetch_concurrency = 1;
+        let (_tx, mut rx) = never_shutdown();
+
+        for _ in 1..=3 {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+            assert_eq!(eng.metrics.archive_skipped(), 1, "the deleted one, once");
+        }
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-gone"), 4, "stepped over on every pass");
+        assert_eq!(g.calls("get:g-bad"), 4);
+        assert_eq!(eng.metrics.archive_skipped(), 2, "two messages, two counts");
+
+        // The next chunk is its own: a message gone from it is counted.
+        let at = cursor - ChronoDuration::days(8);
+        g.0.lock()
+            .unwrap()
+            .all_mail
+            .push((at.timestamp(), "g-gone-2".to_string()));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(eng.metrics.archive_skipped(), 3);
+    }
+
+    /// A TRANSIENT ERROR NEVER COSTS A MESSAGE. Gmail fails one body for a
+    /// quarter of an hour and then a different one once. Counted per CHUNK,
+    /// the fourth pass was "tolerant" and dropped the second message on its
+    /// very first failure, for good: neither cursor ever looks back. Counted
+    /// per MESSAGE, the second one has failed once, the pass fails, and the
+    /// next pass stores them both.
+    #[tokio::test]
+    async fn a_message_is_never_stepped_over_on_its_first_failure() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-a", at, alert_eml(at));
+        g.old_mail("g-b", at, alert_eml(at));
+        {
+            let mut st = g.0.lock().unwrap();
+            st.errors.insert(
+                "g-a".to_string(),
+                std::iter::repeat_n((500, "backendError".to_string()), 3).collect(),
+            );
+            st.errors.insert(
+                "g-b".to_string(),
+                std::collections::VecDeque::from([(503, "backendError".to_string())]),
+            );
+            // And a listing that fails first: no pass, nothing booked.
+            st.all_mail_failures = 2;
+        }
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        // One GET at a time, so which message a pass reaches is not a race.
+        eng.config.sync.fetch_concurrency = 1;
+        let (_tx, mut rx) = never_shutdown();
+
+        for _ in 0..2 {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        }
+        assert!(
+            eng.archive.state().failing.is_none(),
+            "a failed listing is not a pass over any message"
+        );
+        assert_eq!(g.calls("get:g-a") + g.calls("get:g-b"), 0);
+
+        for pass in 1..=3 {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+            assert_eq!((booked(&eng, "g-a"), booked(&eng, "g-b")), (pass, 0));
+        }
+        // The fourth pass: g-a is served at last, and g-b fails for the first
+        // time. It is not stepped over.
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        assert!(stored(&store, acct, "g-a"));
+        assert!(!stored(&store, acct, "g-b"));
+        assert_eq!(booked(&eng, "g-b"), 1);
+        assert_eq!(eng.metrics.archive_skipped(), 0);
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert!(stored(&store, acct, "g-b"), "nothing was lost");
+        assert_eq!(eng.metrics.archive_skipped(), 0);
+        assert_eq!(g.calls("get:g-a"), 4, "stored once, never fetched again");
+    }
+
+    /// REPEATED FAILURE IS STILL NOT A LICENCE FOR EVERYTHING. A message that
+    /// has failed three passes is not stepped over when Gmail refuses the walk
+    /// for quota (that is not about the message, and is not booked against
+    /// it), nor when more than a handful are in the same state (that is an
+    /// outage, not a poison message). Either way the cursor stays.
+    #[tokio::test]
+    async fn repeated_failure_does_not_excuse_a_quota_refusal_or_an_outage() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-refused", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-refused".to_string(),
+            std::collections::VecDeque::from([(429, "rateLimitExceeded".to_string())]),
+        );
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.config.sync.fetch_concurrency = 1;
+        let (_tx, mut rx) = never_shutdown();
+        // Every id here has already failed on three separate passes.
+        let thrice = |ids: &[&str]| {
+            Some((
+                (false, cursor.timestamp()),
+                ids.iter().map(|id| (id.to_string(), 3)).collect(),
+            ))
+        };
+
+        eng.archive.state().failing = thrice(&["g-refused"]);
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        assert_eq!(booked(&eng, "g-refused"), 3, "a refusal is not booked");
+        assert_eq!(eng.metrics.archive_skipped(), 0);
+
+        // Six bodies that all fail again: one more than a pass may step over.
+        let down: Vec<String> = (0..6).map(|i| format!("g-down-{i}")).collect();
+        for id in &down {
+            g.old_mail(id, at, alert_eml(at));
+            g.0.lock().unwrap().errors.insert(
+                id.clone(),
+                std::iter::repeat_n((500, "backendError".to_string()), 2).collect(),
+            );
+        }
+        // The refused one is served now; start the day's refusals afresh.
+        eng.archive.state().quota_refusals_today = 0;
+        let ids: Vec<&str> = down.iter().map(String::as_str).collect();
+        eng.archive.state().failing = thrice(&ids);
+        assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        // Five of them: a pass may step over those, and does.
+        g.0.lock().unwrap().errors.remove("g-down-5");
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert!(stored(&store, acct, "g-down-5"));
+        assert!(!stored(&store, acct, "g-down-0"));
+    }
+
+    /// A MESSAGE THE STORE WILL NOT TAKE is stepped over on the same terms as
+    /// one Gmail will not serve: three separate passes first. It used to be
+    /// the one failure that held a chunk for good.
+    #[tokio::test]
+    async fn a_message_the_store_refuses_three_passes_running_is_stepped_over_too() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-bad", at, alert_eml(at));
+        g.old_mail("g-ok", at, alert_eml(at));
+        store.execute_batch_for_test(
+            "CREATE TRIGGER refuse_one BEFORE INSERT ON messages
+             WHEN NEW.gmail_msg_id='g-bad'
+             BEGIN SELECT RAISE(ABORT,'refused'); END;",
+        );
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.config.sync.fetch_concurrency = 1;
+        let (_tx, mut rx) = never_shutdown();
+
+        for pass in 1..=3 {
+            assert!(matches!(
+                eng.archive_walk_chunk(&mut rx).await,
+                Err(CoreError::Sqlite(_))
+            ));
+            assert_eq!(booked(&eng, "g-bad"), pass);
+            assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        }
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert!(stored(&store, acct, "g-ok"));
+        assert!(!stored(&store, acct, "g-bad"));
+        assert_eq!(eng.metrics.archive_skipped(), 1);
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor - ChronoDuration::days(7))
+        );
+    }
+
+    /// W2. THE WALK NEVER STARTS NEARER TO NOW THAN A DAY. With a backfill
+    /// window of zero days the start used to be this instant, and the first
+    /// backward listing (all mail, no `-in:inbox`) could store a message that
+    /// arrived a second ago before the poll ingested it: write-once, so never
+    /// triaged and never notified.
+    #[tokio::test]
+    async fn a_zero_day_backfill_does_not_start_the_walk_at_now() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let now = days_ago(0);
+        let g = MockGmail::default();
+        let just_now = now - ChronoDuration::minutes(1);
+        g.old_mail("g-new", just_now, alert_eml(just_now));
+        g.message_labels("g-new", &["INBOX"]);
+        let older = now - ChronoDuration::days(2);
+        g.old_mail("g-older", older, alert_eml(older));
+        let base = serve_mock(g.clone()).await;
+        let mut config = Config::default();
+        config.sync.archive_days = 365;
+        config.sync.backfill_days = 0;
+        let mut eng = engine_with_config(store.clone(), acct, &base, config);
+        eng.archive_pace = instant_pace();
+        eng.poll_healthy.store(true, Ordering::Relaxed);
+        eng.archive.state().clock = Some(now);
+        let (_tx, mut rx) = never_shutdown();
+
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        let start = now - eng.archive_pace.forward_lag;
+        assert_eq!(
+            g.queries(""),
+            vec![archive_q(start - ChronoDuration::days(7), start)],
+            "the first week listed ends a day ago, not now"
+        );
+        assert_eq!(g.calls("get:g-new"), 0);
+        assert!(!stored(&store, acct, "g-new"), "the poll's, not the walk's");
+        assert!(stored(&store, acct, "g-older"));
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(start - ChronoDuration::days(7))
+        );
+
+        // A real backfill window is older than a day and is where it starts.
+        let (store, acct) = store_at_cursor(Some(100));
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.archive.state().clock = Some(now);
+        assert_eq!(eng.config.sync.backfill_days, 30);
+        eng.archive_walk_chunk(&mut rx).await.unwrap();
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(now - ChronoDuration::days(37))
+        );
+    }
+
+    /// W4. THE DISK FLOOR IS ASKED BEFORE EVERY BATCH. A chunk is a week of
+    /// mail, however much that is; asked only at its start, a heavy week was
+    /// written straight through the floor. The walk stops between batches,
+    /// the cursor stays, and what the chunk already stored is not fetched
+    /// again when there is room.
+    #[tokio::test]
+    async fn the_disk_floor_stops_a_chunk_between_batches() {
+        use std::sync::atomic::AtomicUsize;
+        // Room for the chunk's own check and the first batch's, then none.
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        fn filling_up() -> Option<crate::store::ArchiveDisk> {
+            Some(if ASKED.fetch_add(1, Ordering::SeqCst) < 2 {
+                disk_mb(2048, 0, 0)
+            } else {
+                disk_mb(2047, 0, 0)
+            })
+        }
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        let ids: Vec<String> = (0..25).map(|i| format!("g-{i:02}")).collect();
+        for id in &ids {
+            g.old_mail(id, at, alert_eml(at));
+        }
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(eng.archive_pace.batch, 10);
+        let (_tx, mut rx) = never_shutdown();
+        let fetched = |g: &MockGmail| g.seen().iter().filter(|s| s.starts_with("get:")).count();
+
+        eng.archive.state().disk_probe = Some(filling_up);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(
+            ASKED.load(Ordering::SeqCst),
+            3,
+            "the chunk, then each batch"
+        );
+        assert_eq!(fetched(&g), 10, "one batch and no more");
+        assert_eq!(ids.iter().filter(|id| stored(&store, acct, id)).count(), 10);
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::Disk));
+
+        // Still short: nothing at all, not even the listing.
+        let served = g.seen().len();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(g.seen().len(), served, "held means off the wire");
+
+        // Room again: the other fifteen, and only those.
+        eng.archive.state().disk_probe = Some(|| Some(crate::store::ArchiveDisk::UNBOUNDED));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(fetched(&g), 25);
+        assert!(ids.iter().all(|id| stored(&store, acct, id)));
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(cursor - ChronoDuration::days(7))
+        );
+        assert_eq!(eng.metrics.archive_hold(), None);
+    }
+
+    /// F3. ON A VOLUME OTHER DATABASES SHARE, THE FLOOR IS A FIFTH OF IT. The
+    /// configured 2 GiB is everybody's last 2 GiB there, so the floor in force
+    /// is the larger of the two. AND IT DOES NOT FLAP: once held, the walk
+    /// resumes at the floor plus a tenth, and the hold is said once when it
+    /// starts and once when it ends. Live mail is stored throughout.
+    #[tokio::test]
+    async fn the_disk_floor_is_a_fifth_of_the_volume_and_resumes_with_a_margin() {
+        use std::sync::atomic::AtomicU64;
+        // A 25 GiB volume: the floor is 5 GiB and the walk resumes at 5.5.
+        const GIB: u64 = 1024;
+        static FREE_MB: AtomicU64 = AtomicU64::new(0);
+        fn shared() -> Option<crate::store::ArchiveDisk> {
+            Some(disk_mb(FREE_MB.load(Ordering::SeqCst), 25 * GIB, 0))
+        }
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let g = MockGmail::default();
+        let live_at = days_ago(1);
+        g.old_mail("g-live", live_at, alert_eml(live_at));
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(eng.config.sync.archive_min_free_mb, 2048);
+        let (_tx, mut rx) = never_shutdown();
+        eng.archive.state().disk_probe = Some(shared);
+        let changes = || eng.archive.hold_changes.load(Ordering::Relaxed);
+        let mut step = async |free_mb: u64| {
+            FREE_MB.store(free_mb, Ordering::SeqCst);
+            eng.archive_walk_chunk(&mut rx).await.unwrap()
+        };
+
+        // Twice the configured floor free, and still short of a fifth.
+        assert_eq!(step(4 * GIB).await, ArchiveStep::Held);
+        assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::Disk));
+        assert_eq!(changes(), 1);
+        assert!(g.seen().is_empty(), "held means off the wire");
+        // Back at the floor, and anywhere under floor plus a tenth: held, and
+        // nothing more said about it.
+        for free_mb in [5 * GIB - 1, 5 * GIB, 5 * GIB + 256, 5 * GIB + 511] {
+            assert_eq!(step(free_mb).await, ArchiveStep::Held, "{free_mb} MiB free");
+        }
+        assert_eq!(changes(), 1, "one line for the whole stretch");
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+
+        // LIVE MAIL IS NOT THE WALK'S TO HOLD: it is stored under the floor.
+        eng.fetch_raw_and_ingest(
+            &["g-live".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            GmailRetry::None,
+        )
+        .await
+        .unwrap();
+        assert!(stored(&store, acct, "g-live"));
+        assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::Disk));
+
+        // The margin reached: it walks, and says so once.
+        assert_eq!(step(5 * GIB + 512).await, ArchiveStep::Walked);
+        assert_eq!(eng.metrics.archive_hold(), None);
+        assert_eq!(changes(), 2);
+        // Not held, so the floor itself is room again: no second threshold
+        // for a walk that never stopped.
+        assert_eq!(step(5 * GIB).await, ArchiveStep::Walked);
+        assert_eq!(changes(), 2);
+        assert_eq!(step(5 * GIB - 1).await, ArchiveStep::Held);
+        assert_eq!(changes(), 3);
+    }
+
+    /// The volume share stops growing at 5 GiB, so a large, ordinarily full
+    /// disk does not hold the walk; the configured floor still wins when it
+    /// is the larger.
+    #[test]
+    fn the_volume_share_of_the_disk_floor_is_capped() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(archive_floor_bytes(2048, 5 * GIB), 2 * GIB);
+        assert_eq!(archive_floor_bytes(2048, 20 * GIB), 4 * GIB);
+        assert_eq!(archive_floor_bytes(2048, 50 * GIB), 5 * GIB);
+        assert_eq!(archive_floor_bytes(2048, 926 * GIB), 5 * GIB);
+        assert_eq!(archive_floor_bytes(20 * 1024, 926 * GIB), 20 * GIB);
+    }
+
+    /// F3. THE ACCOUNT'S OWN CEILING. Free space on a shared volume is what
+    /// the neighbours left; the size of this database is this account's
+    /// alone. At `sync.archive_max_db_mb` the walk holds, with its own reason,
+    /// before a chunk and between its batches; 0 is no ceiling; and live mail
+    /// is stored regardless.
+    #[tokio::test]
+    async fn the_archive_walk_holds_at_its_own_database_ceiling() {
+        use std::sync::atomic::AtomicUsize;
+        // Under the ceiling for the chunk's own check and the first batch's,
+        // then at it. All the free space in the world throughout.
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        fn growing() -> Option<crate::store::ArchiveDisk> {
+            Some(if ASKED.fetch_add(1, Ordering::SeqCst) < 2 {
+                disk_mb(u64::MAX >> 20, 0, 4095)
+            } else {
+                disk_mb(u64::MAX >> 20, 0, 4096)
+            })
+        }
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        let ids: Vec<String> = (0..25).map(|i| format!("g-{i:02}")).collect();
+        for id in &ids {
+            g.old_mail(id, at, alert_eml(at));
+        }
+        let live_at = days_ago(1);
+        g.old_mail("g-live", live_at, alert_eml(live_at));
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        assert_eq!(eng.config.sync.archive_max_db_mb, 4096);
+        let (_tx, mut rx) = never_shutdown();
+        let fetched = |g: &MockGmail| g.seen().iter().filter(|s| s.starts_with("get:")).count();
+
+        eng.archive.state().disk_probe = Some(growing);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(fetched(&g), 10, "one batch and no more");
+        assert_eq!(store.archive_walked_to(acct).unwrap(), Some(cursor));
+        assert_eq!(eng.metrics.archive_hold(), Some(ArchiveHold::DbSize));
+        assert_eq!(eng.archive.hold_changes.load(Ordering::Relaxed), 1);
+
+        // Still at it: nothing at all, not even the listing.
+        let served = g.seen().len();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        assert_eq!(g.seen().len(), served, "held means off the wire");
+        assert_eq!(eng.archive.hold_changes.load(Ordering::Relaxed), 1);
+        // The free-space floor switched off does not switch this off.
+        eng.config.sync.archive_min_free_mb = 0;
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held
+        );
+        eng.config.sync.archive_min_free_mb = 2048;
+
+        // LIVE MAIL IS NOT THE WALK'S TO HOLD.
+        eng.fetch_raw_and_ingest(
+            &["g-live".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            GmailRetry::None,
+        )
+        .await
+        .unwrap();
+        assert!(stored(&store, acct, "g-live"));
+
+        // 0 is no ceiling: the other fifteen, and only those.
+        eng.config.sync.archive_max_db_mb = 0;
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(fetched(&g), 26);
+        assert!(ids.iter().all(|id| stored(&store, acct, id)));
+        assert_eq!(eng.metrics.archive_hold(), None);
+        // And one MiB under it is room.
+        eng.config.sync.archive_max_db_mb = 4096;
+        eng.archive.state().disk_probe = Some(|| Some(disk_mb(u64::MAX >> 20, 0, 4095)));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+    }
+
+    /// W3. A HELD WALK SAYS WHY. Each reason the walk can hold for reaches the
+    /// gauge (and the log, once, when it changes); a walk that then runs
+    /// clears it. Without this a walk waiting on a hung embedder or a wrong
+    /// clock looked exactly like a walk that was switched off.
+    #[tokio::test]
+    async fn a_held_walk_reports_the_reason_it_is_holding() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let eng = archive_engine(store.clone(), acct, &base, 365).with_embedder_gate(gate_rx);
+        let (_tx, mut rx) = never_shutdown();
+        let now = Utc::now();
+        assert_eq!(eng.metrics.archive_hold(), None, "nothing said yet");
+
+        // Every reason at once, lifted one at a time in the order the walk
+        // checks them.
+        eng.poll_healthy.store(false, Ordering::Relaxed);
+        eng.window_in_flight.store(true, Ordering::Relaxed);
+        {
+            let mut state = eng.archive.state();
+            state.clock = DateTime::from_timestamp(ARCHIVE_CLOCK_FLOOR_UNIX - 1, 0);
+            state.disk_probe = Some(|| None);
+        }
+        let mut seen = Vec::new();
+        for lift in 0..7 {
+            match lift {
+                0 => {}
+                1 => eng.poll_healthy.store(true, Ordering::Relaxed),
+                2 => eng.window_in_flight.store(false, Ordering::Relaxed),
+                3 => gate_tx.send(true).unwrap(),
+                4 => {
+                    let mut state = eng.archive.state();
+                    state.clock = Some(now);
+                    state.quota_day = Some(now.date_naive());
+                    state.quota_refusals_today = eng.archive_pace.quota_refusals_per_day;
+                }
+                5 => eng.archive.state().quota_refusals_today = 0,
+                _ => {
+                    eng.archive.state().disk_probe = Some(|| Some(disk_mb(u64::MAX >> 20, 0, 4096)))
+                }
+            }
+            assert_eq!(
+                eng.archive_walk_chunk(&mut rx).await.unwrap(),
+                ArchiveStep::Held
+            );
+            let hold = eng
+                .metrics
+                .archive_hold()
+                .expect("a held walk has a reason");
+            assert_eq!(eng.archive.state().hold, Some(hold));
+            seen.push(hold);
+        }
+        assert_eq!(
+            seen,
+            [
+                ArchiveHold::Poll,
+                ArchiveHold::Window,
+                ArchiveHold::Embedder,
+                ArchiveHold::Clock,
+                ArchiveHold::QuotaDay,
+                ArchiveHold::Disk,
+                ArchiveHold::DbSize,
+            ]
+        );
+        assert_eq!(seen.len(), ArchiveHold::ALL.len(), "every reason there is");
+        assert!(g.seen().is_empty(), "held means off the wire, every time");
+        assert_eq!(
+            eng.archive.hold_changes.load(Ordering::Relaxed),
+            7,
+            "said once per change"
+        );
+
+        eng.archive.state().disk_probe = Some(|| Some(crate::store::ArchiveDisk::UNBOUNDED));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(eng.metrics.archive_hold(), None);
+        assert_eq!(eng.archive.state().hold, None);
+    }
+
+    /// A QUOTA REFUSAL BACKS THE WALK OFF, LONGER EACH TIME, AND THREE IN A DAY
+    /// END IT UNTIL THE NEXT. Five minutes, ten, and then nothing on the wire
+    /// until the UTC date changes. None of it counts as a poison attempt.
+    #[tokio::test]
+    async fn a_quota_refusal_backs_the_walk_off_and_three_in_a_day_stop_it() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        g.old_mail("g-a", at, alert_eml(at));
+        g.0.lock().unwrap().errors.insert(
+            "g-a".to_string(),
+            std::iter::repeat_n((429, "rateLimitExceeded".to_string()), 3).collect(),
+        );
+        let base = serve_mock(g.clone()).await;
+        let eng = archive_engine(store.clone(), acct, &base, 365);
+        let (_tx, mut rx) = never_shutdown();
+        let noon = Utc::now()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
+        eng.archive.state().clock = Some(noon);
+
+        for minutes in [5, 10, 20] {
+            assert!(eng.archive_walk_chunk(&mut rx).await.is_err());
+            assert_eq!(
+                eng.archive_error_wait(),
+                Duration::from_secs(minutes * 60),
+                "the wait doubles"
+            );
+        }
+        assert_eq!(
+            booked(&eng, "g-a"),
+            0,
+            "a refusal is not a failure of the message"
+        );
+        let served = g.seen().len();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Held,
+            "three refusals end the day"
+        );
+        assert_eq!(g.seen().len(), served, "held means off the wire");
+
+        eng.archive.state().clock = Some(noon + ChronoDuration::days(1));
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(
+            eng.archive_error_wait(),
+            eng.archive_pace.error_backoff,
+            "a walked chunk clears the backoff"
+        );
+    }
+
+    /// The backoff's ceiling: an hour, however many refusals came before.
+    #[test]
+    fn the_quota_backoff_is_capped_at_an_hour() {
+        let pace = ArchivePace::default();
+        let mut wait = pace.quota_backoff;
+        for _ in 0..10 {
+            wait = (wait * 2).min(pace.quota_backoff_cap);
+        }
+        assert_eq!(wait, Duration::from_secs(3600));
+        assert_eq!(pace.per_minute, 30);
+        assert_eq!(pace.per_minute_window, Duration::from_secs(60));
+        assert!(pace.batch <= pace.per_minute);
+    }
+
+    /// THE ABSOLUTE CEILING, on a virtual clock: 30 in a minute and the 31st
+    /// waits for the minute to turn, then the count starts again.
+    #[tokio::test(start_paused = true)]
+    async fn the_archive_ceiling_admits_thirty_a_minute() {
+        const MINUTE: Duration = Duration::from_secs(60);
+        let mut state = ArchiveState::default();
+        for _ in 0..3 {
+            assert_eq!(state.admit(10, 30, MINUTE), Duration::ZERO);
+        }
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let wait = state.admit(10, 30, MINUTE);
+        assert_eq!(wait, Duration::from_secs(40), "until the minute turns");
+        tokio::time::advance(wait).await;
+        // That batch is booked against the new minute; two more fit.
+        assert_eq!(state.admit(10, 30, MINUTE), Duration::ZERO);
+        assert_eq!(state.admit(10, 30, MINUTE), Duration::ZERO);
+        assert_eq!(state.admit(1, 30, MINUTE), MINUTE);
+        // A quiet minute later the count is fresh.
+        tokio::time::advance(MINUTE * 3).await;
+        assert_eq!(state.admit(10, 30, MINUTE), Duration::ZERO);
+    }
+
+    /// THE CEILING IS IN THE WALK, not just beside it: with two messages
+    /// allowed per (shortened) minute, the third waits the minute out even
+    /// though the budget and the rest would let it go at once.
+    #[tokio::test]
+    async fn the_archive_walk_waits_out_its_ceiling() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let cursor = days_ago(40);
+        store.set_archive_walked_to(acct, cursor).unwrap();
+        let at = cursor - ChronoDuration::days(1);
+        let g = MockGmail::default();
+        for id in ["g-a", "g-b", "g-c"] {
+            g.old_mail(id, at, alert_eml(at));
+        }
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 365);
+        eng.archive_pace.batch = 1;
+        eng.archive_pace.per_minute = 2;
+        eng.archive_pace.per_minute_window = Duration::from_millis(400);
+        let (_tx, mut rx) = never_shutdown();
+        let began = std::time::Instant::now();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert!(
+            began.elapsed() >= Duration::from_millis(350),
+            "the third fetch waited for the window: {:?}",
+            began.elapsed()
+        );
+        assert_eq!(g.calls("get:g-c"), 1);
+    }
+
+    // ---- the forward pass ---------------------------------------------------
+
+    fn forward_queries(g: &MockGmail) -> Vec<String> {
+        g.queries("")
+            .into_iter()
+            .filter(|q| q.contains("-in:inbox"))
+            .collect()
+    }
+
+    /// THE FORWARD PASS: mail newer than the walk's start that carries neither
+    /// INBOX nor SENT is stored as archive, up to a day behind the last poll.
+    /// Mail in either label is never listed (the live path owns it), nor is
+    /// anything from the last day.
+    #[tokio::test]
+    async fn the_forward_pass_stores_unlabelled_mail_and_leaves_the_live_paths_theirs() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let start = days_ago(30);
+        store.set_archive_walked_to(acct, start).unwrap();
+        assert_eq!(store.archive_covered_to(acct).unwrap(), Some(start));
+        let g = MockGmail::default();
+        g.old_mail("g-filed", days_ago(10), alert_eml(days_ago(10)));
+        g.old_mail("g-inbox", days_ago(10), alert_eml(days_ago(10)));
+        g.message_labels("g-inbox", &["INBOX"]);
+        g.old_mail(
+            "g-sent",
+            days_ago(9),
+            sent_eml(days_ago(9), "alice@friends.com", "the lease"),
+        );
+        g.message_labels("g-sent", &["SENT"]);
+        let fresh = Utc::now() - ChronoDuration::hours(2);
+        g.old_mail("g-fresh", fresh, alert_eml(fresh));
+        let base = serve_mock(g.clone()).await;
+        // 30 days of archive on 30 of backfill: nothing to walk backwards, so
+        // every listing here is the forward pass's.
+        let eng = archive_engine(store.clone(), acct, &base, 30);
+        let (_tx, mut rx) = never_shutdown();
+
+        // NO POLL HAS SUCCEEDED IN THIS PROCESS: no forward pass at all.
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Done
+        );
+        assert!(g.seen().is_empty(), "{:?}", g.seen());
+
+        let polled = Utc::now();
+        eng.archive
+            .last_poll_ok_unix
+            .store(polled.timestamp(), Ordering::Relaxed);
+        let mut steps = 0;
+        while eng.archive_walk_chunk(&mut rx).await.unwrap() == ArchiveStep::Walked {
+            steps += 1;
+            assert!(steps < 20, "the pass must catch up");
+        }
+        // 29 days to cover, a week at a time.
+        assert_eq!(steps, 5);
+        let queries = forward_queries(&g);
+        assert_eq!(queries.len(), 5);
+        assert_eq!(queries.len(), g.queries("").len(), "nothing backwards");
+        assert_eq!(
+            queries[0],
+            format!(
+                "after:{} before:{} -in:inbox -in:sent -in:draft -in:chats",
+                start.timestamp() - 1,
+                (start + ChronoDuration::days(7)).timestamp()
+            )
+        );
+
+        let filed = store.thread_view_with_html(acct, "g-filed").unwrap();
+        assert!(
+            store
+                .message_is_archive(acct, filed.messages[0].id)
+                .unwrap()
+        );
+        for live in ["g-inbox", "g-sent", "g-fresh"] {
+            assert_eq!(
+                g.calls(&format!("get:{live}")),
+                0,
+                "{live} is not the walk's"
+            );
+            assert!(store.thread_view_with_html(acct, live).is_err());
+        }
+        let covered = store.archive_covered_to(acct).unwrap().unwrap();
+        assert_eq!(
+            covered.timestamp(),
+            polled.timestamp() - 24 * 3600,
+            "a day behind the poll, to the second"
+        );
+        assert_eq!(
+            store.archive_walked_to(acct).unwrap(),
+            Some(start),
+            "the backward edge is not the forward pass's to move"
+        );
+        assert_eq!(
+            eng.metrics.archive_covered_to(),
+            covered.timestamp(),
+            "and the gauge shows the forward edge"
+        );
+
+        // CAUGHT UP: nothing more on the wire until the recheck comes round.
+        let served = g.seen().len();
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Done
+        );
+        assert_eq!(g.seen().len(), served);
+    }
+
+    /// THE RACE THE FORWARD PASS MUST LOSE. A daemon suspended for three days
+    /// wakes with a message that arrived in the inbox during the gap and was
+    /// archived on a phone since: it carries no label now and is more than a
+    /// day old, and the poll that will replay its arrival has not run yet. The
+    /// pass is bounded by the last poll that SUCCEEDED, so it does not take
+    /// it; the live path ingests it, with its triage job; and the pass, once
+    /// the poll has caught up, finds it stored and leaves it alone.
+    #[tokio::test]
+    async fn the_forward_pass_never_takes_mail_the_poll_has_not_replayed_yet() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, acct) = store_at_cursor(Some(100));
+        let start = days_ago(30);
+        store.set_archive_walked_to(acct, start).unwrap();
+        let g = MockGmail::default();
+        g.old_mail("g-gap", days_ago(2), alert_eml(days_ago(2)));
+        let base = serve_mock(g.clone()).await;
+        let mut eng = archive_engine(store.clone(), acct, &base, 30);
+        // One chunk reaches the bound, so each call below is one whole pass.
+        eng.archive_pace.chunk = ChronoDuration::days(60);
+        eng.archive_pace.done_recheck = Duration::ZERO;
+        let (_tx, mut rx) = never_shutdown();
+
+        let last_poll = days_ago(3);
+        eng.archive
+            .last_poll_ok_unix
+            .store(last_poll.timestamp(), Ordering::Relaxed);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-gap"), 0, "newer than the last poll's reach");
+        assert_eq!(
+            store.archive_covered_to(acct).unwrap(),
+            Some(last_poll - ChronoDuration::hours(24))
+        );
+
+        // The poll lane replays the gap: the arrival is ingested live.
+        eng.fetch_raw_and_ingest(
+            &["g-gap".to_string()],
+            Mailbox::Inbox,
+            IngestOrigin::Incremental,
+            GmailRetry::None,
+        )
+        .await
+        .unwrap();
+        eng.archive
+            .last_poll_ok_unix
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
+        assert_eq!(
+            eng.archive_walk_chunk(&mut rx).await.unwrap(),
+            ArchiveStep::Walked
+        );
+        assert_eq!(g.calls("get:g-gap"), 1, "stored ids are never re-fetched");
+        let view = store.thread_view_with_html(acct, "g-gap").unwrap();
+        assert!(
+            !store.message_is_archive(acct, view.messages[0].id).unwrap(),
+            "the live path's row, with its triage"
+        );
+        assert!(
+            store
+                .claim_agent_job(acct, "investigation", Utc::now(), 120)
+                .unwrap()
+                .is_some(),
+            "and its job"
+        );
+    }
+
+    /// `archive_days` IS ITS OWN WINDOW. The catch-up and spam listings, and
+    /// the instant the backfill, cutover and heal measure from, are the same
+    /// whether the archive is off, a year or a decade.
+    ///
+    /// The heal is run for real: a blank row inside the 30 days is handed back
+    /// to triage and one outside gets its text and an access check only, at
+    /// every archive depth. The cutover is held to the same instant by
+    /// construction (it and the heal both call `backfill_since`, asserted
+    /// below); its pass needs a model and is not run here.
+    #[tokio::test]
+    async fn archive_days_moves_no_other_window() {
+        let mut wire = Vec::new();
+        for archive_days in [0, 365, 3650] {
+            let (store, acct) = store_at_cursor(None);
+            let g = MockGmail::default();
+            g.listing(LABEL_INBOX, &[]);
+            g.listing(LABEL_SENT, &[]);
+            g.listing(LABEL_SPAM, &[]);
+            g.profile(900);
+            let base = serve_mock(g.clone()).await;
+            let eng = archive_engine(store.clone(), acct, &base, archive_days);
+            // No cursor, so this poll is a catch-up over the backfill window.
+            eng.poll_once().await.unwrap();
+            eng.sync_spam_window().await.unwrap();
+            let since = eng.backfill_since();
+            assert!(
+                (since - (Utc::now() - ChronoDuration::days(30)))
+                    .num_seconds()
+                    .abs()
+                    < 30
+            );
+            assert!(g.queries("").is_empty(), "none of these list all mail");
+
+            let recent = blank_bill_row(&store, acct, "g-recent", ChronoDuration::days(20));
+            let old = blank_bill_row(&store, acct, "g-old", ChronoDuration::days(60));
+            g.body("g-recent", html_only_eml(Utc::now(), GARMIN_HTML));
+            g.body("g-old", html_only_eml(Utc::now(), GARMIN_HTML));
+            eng.heal_blank_bodies().await.unwrap();
+            let triage = queued_job(&store, acct, "triage").expect("inside the window");
+            assert_eq!(
+                (triage.message_id, triage.trigger.as_str()),
+                (recent, "heal")
+            );
+            assert!(
+                queued_job(&store, acct, "triage").is_none(),
+                "archive_days={archive_days}: 60 days is outside the heal's window"
+            );
+            let access = queued_job(&store, acct, "access").expect("text only");
+            assert_eq!(access.message_id, old);
+            wire.push((
+                g.queries(LABEL_INBOX),
+                g.queries(LABEL_SENT),
+                g.queries(LABEL_SPAM),
+            ));
+        }
+        let thirty = vec!["newer_than:30d".to_string()];
+        for seen in &wire {
+            assert_eq!(seen, &(thirty.clone(), thirty.clone(), thirty.clone()));
+        }
+    }
+
+    /// A LIVE PATH RE-SEEING AN ARCHIVE ROW is a true no-op: the store writes
+    /// nothing, and the engine neither re-embeds the row nor wakes the refine
+    /// lane for work that was never queued.
+    #[tokio::test]
+    async fn a_live_sighting_of_an_archive_row_embeds_nothing_and_wakes_no_lane() {
+        let (store, acct) = store_at_cursor(Some(100));
+        let g = MockGmail::default();
+        g.body("g-old", alert_eml(Utc::now()));
+        g.body("g-live", alert_eml(Utc::now()));
+        let base = serve_mock(g.clone()).await;
+        let eng = engine(store.clone(), acct, &base);
+        let poked = || tokio::time::timeout(Duration::ZERO, eng.refine_wake.notified());
+        let fetch = |id: &str, origin| {
+            let ids = [id.to_string()];
+            let eng = &eng;
+            async move {
+                eng.fetch_raw_and_ingest(&ids, Mailbox::Inbox, origin, GmailRetry::None)
+                    .await
+                    .unwrap()
+            }
+        };
+        fetch("g-old", IngestOrigin::Archive).await;
+
+        // A catch-up overlapping the archive's edge finds the same id.
+        assert_eq!(fetch("g-old", IngestOrigin::Incremental).await, 1);
+        assert!(poked().await.is_err(), "nothing was queued to wake for");
+        let raw = alert_eml(Utc::now());
+        assert!(
+            eng.ingest_one(
+                &fixture(acct, "g-old", &raw, false),
+                &[],
+                Utc::now(),
+                IngestOrigin::Incremental,
+            )
+            .unwrap()
+            .is_none(),
+            "no embed text for a row this call did not write"
+        );
+
+        // The control: a row the live path DID write is embedded and wakes it.
+        assert_eq!(fetch("g-live", IngestOrigin::Incremental).await, 1);
+        assert!(poked().await.is_ok());
+    }
+
     /// THE BOARD FILLS WHILE THE DOWNLOAD IS STILL GOING. A first run used to
     /// hold every model call until the last message of the window had landed;
     /// now the refine lane runs beside the backfill and claims rows as ingest
@@ -6512,6 +10796,13 @@ mod tests {
             .await;
         assert_eq!(store.agent_reading(account, 20).unwrap()[0].message_id, id);
         assert!(
+            tokio::time::timeout(Duration::ZERO, engine.notify_wake.notified())
+                .await
+                .is_ok(),
+            "an applied commit of an arrival-eligible job wakes the notification \
+             lane for the deliberate push it queued"
+        );
+        assert!(
             store
                 .agent_fye(account, 20, &Default::default(), Utc::now())
                 .unwrap()
@@ -6625,6 +10916,983 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    /// The onboarding effort goes to the jobs on the foreground lane, from
+    /// the account's first day: an arrival (the incremental origin) and a
+    /// person's one-message request. The history a new account backfills
+    /// (the backfill origin), the `migration` jobs the cutover queues for an
+    /// account that predates the agent, and a person's window re-triage (a
+    /// `manual:` trigger the store keeps off the lane) go out at the
+    /// steady-state effort. Driven through the real ingest origins and
+    /// `process_agent_job`, with the effort read off the request the mock
+    /// model received for each.
+    #[tokio::test]
+    async fn only_the_jobs_somebody_waits_on_go_out_at_the_onboarding_effort() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        let now = Utc::now();
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        assert_eq!(
+            engine.config.stage2.onboarding_effort.as_deref(),
+            Some("xhigh"),
+            "the default onboarding effort is what this test measures against"
+        );
+        // Five messages in five threads: the claim hands out one job per
+        // thread at a time, and a job it has already handed out stays leased.
+        let raw = |msgid: &str| {
+            let mut raw = fixture(
+                account,
+                msgid,
+                "From: alice@example.com\r\nSubject: A note\r\n\r\nHello",
+                false,
+            );
+            raw.gmail_thread_id = Some(format!("thread-{msgid}"));
+            raw
+        };
+        let stored = |msgid: &str| {
+            let parsed =
+                ingest_with_rules(&raw(msgid), &Stage1Config::default(), now, &[], |_| false);
+            store.upsert_message(&parsed.message).unwrap()
+        };
+        // A row that predates the agent (no state row), which the cutover
+        // queues as `migration`; then the two origins; then a person's
+        // window re-triage (one row of it, enqueued as `retriage_reset`
+        // enqueues a window: off the lane) and a person's one-message
+        // request (through `retriage_reset` itself, which puts it on the
+        // lane) on a backfilled row.
+        stored("old");
+        store
+            .initialize_agent_cutover(account, now - ChronoDuration::days(30))
+            .unwrap();
+        engine
+            .ingest_one(&raw("history"), &[], now, IngestOrigin::Backfill)
+            .unwrap();
+        engine
+            .ingest_one(&raw("arrival"), &[], now, IngestOrigin::Incremental)
+            .unwrap();
+        let window = stored("window");
+        store
+            .enqueue_agent_triage(account, window, "manual:window", false)
+            .unwrap();
+        let asked = engine
+            .ingest_one(&raw("asked"), &[], now, IngestOrigin::Backfill)
+            .unwrap()
+            .expect("ingested")
+            .id;
+        assert_eq!(store.retriage_reset(account, Some(asked), 7).unwrap(), 1);
+
+        let efforts: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let seen = efforts.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move |Json(body): Json<serde_json::Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock()
+                        .unwrap()
+                        .push(body["output_config"]["effort"].clone());
+                    // Nothing a step can use: the job retries, the request
+                    // is what this test is about.
+                    Json(json!({}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            // The effort rides the Anthropic wire (`output_config.effort`).
+            provider: Stage2Provider::Anthropic,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let day = now.format("%Y-%m-%d").to_string();
+        let mut sent = std::collections::BTreeMap::new();
+        // One job per claim, in the claim's own order; a failed step's retry
+        // is scheduled past this claim time, so each is seen exactly once.
+        // A job makes several requests (every step the agent retries before
+        // giving the job up), all at the one effort.
+        for _ in 0..5 {
+            let job = store
+                .claim_agent_job(
+                    account,
+                    "investigation",
+                    Utc::now() + ChronoDuration::seconds(1),
+                    120,
+                )
+                .unwrap()
+                .expect("a job to run");
+            // A one-message request's trigger carries its timestamp; the
+            // lane is what tells it from the window.
+            let trigger = match (job.trigger.as_str(), job.foreground) {
+                (t, true) if t.starts_with("manual:") => "manual (one message)".to_string(),
+                (t, false) if t.starts_with("manual:") => "manual (window)".to_string(),
+                (t, _) => t.to_string(),
+            };
+            let before = efforts.lock().unwrap().len();
+            engine.process_agent_job(job, &llm, &day).await;
+            // An empty answer is the job's failure, not a provider outage:
+            // nothing here may put the account on a cooldown that would
+            // keep the next job from making its request.
+            assert_eq!(engine.agent_retry_after.load(Ordering::Relaxed), 0);
+            let requests = efforts.lock().unwrap();
+            let made = &requests[before..];
+            let effort = made
+                .first()
+                .cloned()
+                .unwrap_or_else(|| panic!("{trigger} made no request"));
+            assert!(
+                made.iter().all(|e| *e == effort),
+                "{trigger} changed effort between steps: {made:?}"
+            );
+            sent.insert(trigger, effort);
+        }
+        assert_eq!(
+            sent,
+            std::collections::BTreeMap::from([
+                ("backfill".to_string(), json!("low")),
+                ("ingest".to_string(), json!("xhigh")),
+                ("manual (one message)".to_string(), json!("xhigh")),
+                ("manual (window)".to_string(), json!("low")),
+                ("migration".to_string(), json!("low")),
+            ])
+        );
+        server.abort();
+    }
+
+    /// The engine keeps the account's creation time once it has one, and
+    /// keeps asking while it has none: a store that could not say on the
+    /// first job must not pin a new account at the steady-state effort for
+    /// its window.
+    #[tokio::test]
+    async fn the_creation_time_is_kept_only_once_found() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        // The engine is built for the account the store is about to hold,
+        // before it holds it: the first ask finds nothing.
+        let engine = engine(store.clone(), 1, "http://127.0.0.1:1");
+        assert_eq!(engine.account_created_at(), None);
+        let account = store.ensure_account("me@example.com").unwrap();
+        assert_eq!(account, 1);
+        let created = engine.account_created_at().expect("found now");
+        // Kept: the store's answer no longer matters, even once it has none.
+        store.test_set_account_created_at(account, "not a stamp");
+        assert_eq!(store.account_created_at(account).unwrap(), None);
+        assert_eq!(engine.account_created_at(), Some(created));
+    }
+
+    /// A throttle stands the account off for what the provider asked, a
+    /// server error (and a throttle that named no time) for a short spread
+    /// wait, and a configuration failure for the outage interval. The one
+    /// 429 that used to cost every job on the account five minutes now
+    /// costs the seconds the provider named.
+    #[tokio::test]
+    async fn a_throttle_stands_the_account_off_for_the_providers_retry_after() {
+        use crate::store::agent_triage::AgentTriageStore;
+        for (status, retry_after, lo, hi) in [
+            (StatusCode::TOO_MANY_REQUESTS, Some("7"), 6, 23),
+            (StatusCode::TOO_MANY_REQUESTS, None, 14, 30),
+            (StatusCode::SERVICE_UNAVAILABLE, None, 14, 30),
+            (StatusCode::FORBIDDEN, None, 284, 300),
+        ] {
+            let (store, account) = store_at_cursor(Some(100));
+            ingest_into(
+                &store,
+                account,
+                &fixture(
+                    account,
+                    "throttled",
+                    "From: alice@example.com\r\nSubject: Hello\r\n\r\nA note",
+                    false,
+                ),
+                Utc::now(),
+            );
+            let app = Router::new().route(
+                "/",
+                axum::routing::post(move || async move {
+                    let mut resp =
+                        (status, Json(json!({"error": {"type": "unavailable"}}))).into_response();
+                    if let Some(after) = retry_after {
+                        resp.headers_mut()
+                            .insert("retry-after", after.parse().unwrap());
+                    }
+                    resp
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let llm = ResolvedLlm {
+                url: format!("http://{}/", listener.local_addr().unwrap()),
+                api_key: "test".into(),
+                provider: Stage2Provider::OpenAI,
+            };
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+            let day = Utc::now().format("%Y-%m-%d").to_string();
+            let job = store
+                .claim_agent_job(account, "investigation", Utc::now(), 120)
+                .unwrap()
+                .unwrap();
+            engine.process_agent_job(job, &llm, &day).await;
+            let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+            assert!(
+                (lo..=hi).contains(&wait),
+                "{status}, retry-after {retry_after:?}: stood off {wait}s"
+            );
+            server.abort();
+        }
+    }
+
+    /// A throttle that does not lift (a spent monthly budget answers 429 to
+    /// every probe) is probed on a doubling ladder up to the outage
+    /// interval, not every fifteen seconds for the rest of the month.
+    #[tokio::test]
+    async fn a_throttle_that_does_not_lift_backs_off_to_the_outage_interval() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "throttled-for-good",
+                "From: alice@example.com\r\nSubject: Hello\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error": {"type": "rate_limit_error"}})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        assert_eq!(engine.config.triage.agent.outage_retry_secs, 300);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        // Two jobs fail together in the first pass, as `concurrency` jobs do
+        // when the provider goes: one rung, not two.
+        let second = ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "throttled-too",
+                "From: bob@example.com\r\nSubject: Other\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        assert_ne!(second, 0);
+        let claim = || {
+            store
+                .claim_agent_job(
+                    account,
+                    "investigation",
+                    Utc::now() + ChronoDuration::hours(2),
+                    120,
+                )
+                .unwrap()
+                .expect("deferred, never failed")
+        };
+        let (one, two) = (claim(), claim());
+        assert_ne!(one.id, two.id);
+        futures::future::join(
+            engine.process_agent_job(one, &llm, &day),
+            engine.process_agent_job(two, &llm, &day),
+        )
+        .await;
+        let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+        assert!((14..=30).contains(&wait), "first rung: stood off {wait}s");
+        assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
+        for rung in [30, 60, 120, 240, 285, 285] {
+            // The previous cooldown has lapsed: this probe is admitted.
+            engine.agent_retry_after.store(0, Ordering::Relaxed);
+            let job = claim();
+            assert_eq!(job.attempts, 1, "a cooldown spends no attempt");
+            engine.process_agent_job(job, &llm, &day).await;
+            let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+            assert!(
+                (rung - 1..=rung + 15).contains(&wait),
+                "rung {rung}: stood off {wait}s"
+            );
+        }
+        server.abort();
+    }
+
+    /// A run dropped before it wrote the job's state (the lane is dropped at
+    /// shutdown) hands the job back at once, keeping the attempt it took and
+    /// due after the ladder's wait for it, instead of holding its lease, and
+    /// every job on its thread, for the eight minutes the lease now covers.
+    #[tokio::test]
+    async fn a_run_dropped_at_shutdown_hands_its_job_back() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "interrupted",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let lease = engine.config.triage.agent.run_deadline_secs() as i64 + 30;
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), lease)
+            .unwrap()
+            .unwrap();
+        let id = job.id;
+        // Nothing else can claim it while it runs...
+        assert!(
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), lease)
+                .unwrap()
+                .is_none()
+        );
+        // ...and dropping the run mid-request is the shutdown.
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(300),
+            engine.process_agent_job(job, &llm, &day),
+        )
+        .await;
+        assert!(dropped.is_err(), "the run was still in flight");
+        // Handed back at once, due after the retry ladder's wait for the
+        // attempt it took: not re-run on the spot.
+        assert!(
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), lease)
+                .unwrap()
+                .is_none()
+        );
+        let again = store
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                lease,
+            )
+            .unwrap()
+            .expect("handed back the moment the run was dropped");
+        assert_eq!(again.id, id);
+        assert_eq!(again.attempts, 2, "the hand-back kept the attempt it took");
+        // A hand-back is not a push-back: `last_error` stays as it was, so an
+        // `archive_access` check keeps its place at the head of the claim
+        // order (CLAIM_JOB_SQL reads `last_error IS NULL`).
+        assert_eq!(again.last_error, None);
+        server.abort();
+    }
+
+    /// A job dropped on its last allowed attempt is failed, not handed
+    /// back: the claim has no attempts filter and a retry's check runs only
+    /// after a failed attempt, so a hand-back there would run it again.
+    #[tokio::test]
+    async fn a_job_dropped_on_its_last_attempt_is_failed_not_handed_back() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "interrupted-again",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let max_attempts = engine.config.triage.agent.max_attempts;
+        assert_eq!(max_attempts, 6);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let claim = |at: DateTime<Utc>| {
+            store
+                .claim_agent_job(account, "investigation", at, 120)
+                .unwrap()
+        };
+        // Five interruptions, each keeping its attempt and handing the job
+        // back on the ladder's spacing (claimed here from the future)...
+        for expected in 1..max_attempts {
+            let job = claim(Utc::now() + ChronoDuration::hours(2)).expect("handed back");
+            assert_eq!(job.attempts, i64::from(expected));
+            let dropped = tokio::time::timeout(
+                Duration::from_millis(200),
+                engine.process_agent_job(job, &llm, &day),
+            )
+            .await;
+            assert!(dropped.is_err());
+        }
+        // ...and the sixth, on the last allowed attempt, is the end.
+        let job = claim(Utc::now() + ChronoDuration::hours(2)).expect("one attempt left");
+        assert_eq!(job.attempts, i64::from(max_attempts));
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(200),
+            engine.process_agent_job(job, &llm, &day),
+        )
+        .await;
+        assert!(dropped.is_err());
+        assert!(
+            claim(Utc::now() + ChronoDuration::hours(2)).is_none(),
+            "failed, not handed back a seventh time"
+        );
+        server.abort();
+    }
+
+    /// A fresh throttle hours after an old episode starts the ladder over
+    /// at the provider's own number, even when the episode's ladder was
+    /// never reset (its recovery probe was an access check, or the queue
+    /// drained on a failure); the next probe of a continuing episode does
+    /// not.
+    #[tokio::test]
+    async fn a_fresh_throttle_hours_after_an_episode_starts_the_ladder_over() {
+        use super::triage_worker::JobStart;
+        let (store, account) = store_at_cursor(Some(100));
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let asked = Some(Duration::from_secs(7));
+        let hours_ago = Utc::now().timestamp() - 7 * 3600;
+        engine.agent_throttle_strikes.store(4, Ordering::Relaxed);
+        engine
+            .agent_last_cooldown_end
+            .store(hours_ago, Ordering::Relaxed);
+        // The episode ended by a success: the cooldown stamp was cleared.
+        engine.agent_retry_after.store(0, Ordering::Relaxed);
+        let start = JobStart {
+            generation: hours_ago,
+            at: Utc::now(),
+        };
+        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        assert!((7..=22).contains(&wait), "the provider's number: {wait}s");
+        assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
+        // A continuing episode: its last cooldown lapsed moments before
+        // this probe started, so the rung reached stands.
+        let engine = super::tests::engine(store.clone(), account, "http://127.0.0.1:1");
+        let lapsed = Utc::now().timestamp() - 2;
+        engine.agent_throttle_strikes.store(4, Ordering::Relaxed);
+        engine
+            .agent_last_cooldown_end
+            .store(lapsed, Ordering::Relaxed);
+        engine.agent_retry_after.store(lapsed, Ordering::Relaxed);
+        let start = JobStart {
+            generation: lapsed,
+            at: Utc::now(),
+        };
+        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        assert!((239..=255).contains(&wait), "the fifth rung: {wait}s");
+        assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 5);
+        // And a probe that itself ran long before failing is still that
+        // episode's probe: its start is what is measured.
+        let engine = super::tests::engine(store.clone(), account, "http://127.0.0.1:1");
+        engine.agent_throttle_strikes.store(4, Ordering::Relaxed);
+        engine
+            .agent_last_cooldown_end
+            .store(lapsed, Ordering::Relaxed);
+        engine.agent_retry_after.store(lapsed, Ordering::Relaxed);
+        let start = JobStart {
+            generation: lapsed,
+            at: DateTime::from_timestamp(lapsed + 1, 0).unwrap(),
+        };
+        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        assert!((239..=255).contains(&wait), "still the fifth rung: {wait}s");
+    }
+
+    /// The access lane's failures climb a ladder of their own, the
+    /// investigation lane's untouched: its model is another model, so a
+    /// throttle whose recovery probes are access checks is still probed as
+    /// the outage it is, and a throttled fast model does not park the
+    /// investigation lane's ladder at the ceiling.
+    #[tokio::test]
+    async fn an_access_failure_climbs_the_access_lanes_own_ladder() {
+        use super::triage_worker::JobStart;
+        let (store, account) = store_at_cursor(Some(100));
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        for rung in [15, 30, 60] {
+            engine.agent_retry_after.store(0, Ordering::Relaxed);
+            let start = JobStart {
+                generation: engine.agent_last_cooldown_end.load(Ordering::Relaxed),
+                at: Utc::now(),
+            };
+            let (_, wait) = engine.open_cooldown(None, false, start, false);
+            assert!(
+                (rung - 1..=rung + 15).contains(&wait),
+                "rung {rung}: stood off {wait}s"
+            );
+            assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(engine.agent_access_strikes.load(Ordering::Relaxed), 3);
+    }
+
+    /// A job that times out twice while the provider answered another job
+    /// in between is failed: two billed attempts at the long message, not
+    /// `max_attempts` (six), and the account is never paused.
+    #[tokio::test]
+    async fn a_job_that_times_out_twice_is_failed_not_retried_four_more_times() {
+        use crate::store::agent_triage::AgentTriageStore;
+        use crate::triage::decision::*;
+        let (store, account) = store_at_cursor(Some(100));
+        let slow = ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "slow-mail",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let quick = ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "quick-mail",
+                "From: bob@example.com\r\nSubject: Quick\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let evidence = vec![EvidenceRef {
+            message_id: quick,
+            location: "body".into(),
+        }];
+        let decision = MessageDecision {
+            kinds: vec![EmailKind::Correspondence],
+            summary: "A note".into(),
+            reason: "Personal mail".into(),
+            external_access: AccessAssessment {
+                restricted: false,
+                reason: "No credentials".into(),
+                evidence: evidence.clone(),
+            },
+            attention: ThreadAttentionDecision {
+                relevant_message_ids: vec![quick],
+                evidence,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                let decision = decision.clone();
+                async move {
+                    // The slow message's two attempts never answer; the quick
+                    // one, between them, does.
+                    if counted.fetch_add(1, Ordering::Relaxed) != 1 {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        return Json(json!({})).into_response();
+                    }
+                    let answer = json!({"result": {"step": "finish", "decision": decision}});
+                    Json(json!({
+                        "choices": [{
+                            "message": {"content": answer.to_string()},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 8}
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = Config::default();
+        config.triage.agent.timeout_secs = 1;
+        assert_eq!(config.triage.agent.max_attempts, 6, "the default allowance");
+        let engine = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let claim = |at: DateTime<Utc>| {
+            store
+                .claim_agent_job(account, "investigation", at, 120)
+                .unwrap()
+        };
+        let (one, two) = (claim(Utc::now()).unwrap(), claim(Utc::now()).unwrap());
+        let (first, other) = if one.message_id == slow {
+            (one, two)
+        } else {
+            (two, one)
+        };
+        assert_eq!(other.message_id, quick);
+        engine.process_agent_job(first, &llm, &day).await;
+        engine.process_agent_job(other, &llm, &day).await;
+        assert_eq!(engine.agent_retry_after.load(Ordering::Relaxed), 0);
+        // The retry is scheduled ahead; claiming from the future sees it.
+        let again = claim(Utc::now() + ChronoDuration::hours(2)).expect("retried once");
+        assert_eq!((again.message_id, again.attempts), (slow, 2));
+        engine.process_agent_job(again, &llm, &day).await;
+        assert_eq!(engine.agent_retry_after.load(Ordering::Relaxed), 0);
+        assert!(
+            claim(Utc::now() + ChronoDuration::hours(2)).is_none(),
+            "failed, not retried a third time"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        server.abort();
+    }
+
+    /// The headline case, alone on a quiet queue: a message whose first
+    /// turn answers and whose second overruns is failed after two attempts,
+    /// the answered turn being the provider's proof that the message is
+    /// what is slow.
+    #[tokio::test]
+    async fn a_message_whose_second_turn_times_out_twice_is_failed() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "two-turns",
+                "From: alice@example.com\r\nSubject: Long\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                async move {
+                    // Odd calls answer with a step of no known shape, which
+                    // costs a repair turn; even calls (that turn) never answer.
+                    if counted.fetch_add(1, Ordering::Relaxed) % 2 == 1 {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        return Json(json!({})).into_response();
+                    }
+                    let answer = json!({"result": {"step": "ponder"}});
+                    Json(json!({
+                        "choices": [{
+                            "message": {"content": answer.to_string()},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 8}
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = Config::default();
+        config.triage.agent.timeout_secs = 1;
+        let engine = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let mut attempts = 0;
+        while let Some(job) = store
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                120,
+            )
+            .unwrap()
+        {
+            attempts += 1;
+            assert!(attempts <= 3, "the job keeps coming back");
+            engine.process_agent_job(job, &llm, &day).await;
+        }
+        assert_eq!(attempts, 2);
+        assert_eq!(calls.load(Ordering::Relaxed), 4, "two turns per attempt");
+        server.abort();
+    }
+
+    /// A provider that answers nothing is not a long message: with no
+    /// success between its timeouts a job walks the ordinary attempts and
+    /// stays pending, so a slow quarter hour at the provider does not leave
+    /// the head of the queue failed for a person to re-triage.
+    #[tokio::test]
+    async fn a_slow_provider_leaves_timed_out_work_pending_not_failed() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "slow-provider",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = Config::default();
+        config.triage.agent.timeout_secs = 1;
+        config.triage.agent.max_attempts = 4;
+        let engine = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let mut attempts = 0;
+        while let Some(job) = store
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                120,
+            )
+            .unwrap()
+        {
+            attempts += 1;
+            assert!(attempts <= 4, "the allowance holds");
+            assert_eq!(job.attempts, attempts);
+            engine.process_agent_job(job, &llm, &day).await;
+            assert_eq!(engine.agent_retry_after.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(attempts, 4, "every attempt, not two");
+        assert!(
+            !engine.agent_answered_since_timeout.load(Ordering::Relaxed),
+            "nothing answered"
+        );
+        server.abort();
+    }
+
+    /// A job whose previous attempt timed out before a restart is not
+    /// failed on its first timeout after it: the new process has seen no
+    /// answer, so it cannot say the message rather than the provider is
+    /// what is slow.
+    #[tokio::test]
+    async fn a_restart_does_not_fail_a_job_on_its_first_timeout() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        ingest_into(
+            &store,
+            account,
+            &fixture(
+                account,
+                "before-the-roll",
+                "From: alice@example.com\r\nSubject: Slow\r\n\r\nA note",
+                false,
+            ),
+            Utc::now(),
+        );
+        // The previous process: one attempt, timed out, retried.
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .retry_agent_job(&job, Utc::now(), crate::triage::agent::AGENT_TIMEOUT)
+                .unwrap()
+        );
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Json(json!({}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = Config::default();
+        config.triage.agent.timeout_secs = 1;
+        // The new process.
+        let engine = engine_with_config(store.clone(), account, "http://127.0.0.1:1", config);
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let job = store
+            .claim_agent_job(account, "investigation", Utc::now(), 120)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (job.attempts, job.last_error.as_deref()),
+            (2, Some(crate::triage::agent::AGENT_TIMEOUT))
+        );
+        engine.process_agent_job(job, &llm, &day).await;
+        let again = store
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                120,
+            )
+            .unwrap()
+            .expect("retried, not failed");
+        assert_eq!(again.attempts, 3);
+        server.abort();
+    }
+
+    /// A job in flight when another opened a cooldown is the same probe
+    /// even when that cooldown has lapsed by the time its own request
+    /// fails: no strike of its own, so the ladder does not skip a rung.
+    #[tokio::test]
+    async fn a_sibling_of_a_lapsed_cooldown_adds_no_strike() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let (store, account) = store_at_cursor(Some(100));
+        for name in ["opener", "sibling"] {
+            ingest_into(
+                &store,
+                account,
+                &fixture(
+                    account,
+                    name,
+                    "From: alice@example.com\r\nSubject: Hello\r\n\r\nA note",
+                    false,
+                ),
+                Utc::now(),
+            );
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                async move {
+                    // The first request to arrive is throttled at once; the
+                    // second is slow, and then fails too.
+                    if counted.fetch_add(1, Ordering::Relaxed) > 0 {
+                        tokio::time::sleep(Duration::from_millis(2000)).await;
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error": {"type": "overloaded"}})),
+                        );
+                    }
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(json!({"error": {"type": "rate_limit_error"}})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let claim = || {
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), 120)
+                .unwrap()
+                .unwrap()
+        };
+        let (one, two) = (claim(), claim());
+        let lapse = async {
+            // The opener's cooldown lapses before the sibling fails (a
+            // second in: well after the opener's instant 429, well before
+            // the sibling's 2 s).
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            engine
+                .agent_retry_after
+                .store(Utc::now().timestamp() - 1, Ordering::Relaxed);
+        };
+        futures::future::join3(
+            engine.process_agent_job(one, &llm, &day),
+            engine.process_agent_job(two, &llm, &day),
+            lapse,
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            engine.agent_throttle_strikes.load(Ordering::Relaxed),
+            1,
+            "one cooldown, one strike"
+        );
+        let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
+        assert!(
+            (14..=30).contains(&wait),
+            "the sibling waits the opener's rung: {wait}s"
+        );
+        server.abort();
+    }
+
+    /// Between rounds the refine lane sleeps its idle backoff, or until a
+    /// provider cooldown lapses when that is sooner: the recovery probe is
+    /// not left to the next idle tick.
+    #[tokio::test]
+    async fn the_refine_lane_sleeps_until_the_recovery_probe_is_due() {
+        let (store, account) = store_at_cursor(Some(100));
+        let engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        let interval = Duration::from_secs(engine.config.triage.agent.worker_poll_secs);
+        assert_eq!(engine.refine_idle_sleep(interval, 5), MAX_LANE_IDLE_BACKOFF);
+        engine
+            .agent_retry_after
+            .store(Utc::now().timestamp() + 7, Ordering::Relaxed);
+        let sleep = engine.refine_idle_sleep(interval, 5);
+        assert!(
+            (Duration::from_secs(7)..=Duration::from_secs(8)).contains(&sleep),
+            "{sleep:?}"
+        );
+        assert_eq!(engine.refine_idle_sleep(interval, 0), interval.min(sleep));
+        engine
+            .agent_retry_after
+            .store(Utc::now().timestamp() - 1, Ordering::Relaxed);
+        assert_eq!(engine.refine_idle_sleep(interval, 5), MAX_LANE_IDLE_BACKOFF);
     }
 
     #[tokio::test]
@@ -6978,6 +12246,9 @@ mod tests {
         );
         unavailable.store(false, Ordering::Relaxed);
         engine.agent_retry_after.store(0, Ordering::Relaxed);
+        // As if the probes above had been throttles: the ladder is reset by
+        // the success below.
+        engine.agent_throttle_strikes.store(3, Ordering::Relaxed);
         let job = store
             .claim_agent_job(
                 account,
@@ -6989,6 +12260,7 @@ mod tests {
             .unwrap();
         engine.process_agent_job(job, &llm, &day).await;
         assert!(store.agent_access_allowed(account, id).unwrap());
+        assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 0);
         assert_eq!(
             store
                 .stage2_budget_used(account, GLOBAL_BUDGET_KEY, &day)
@@ -6998,5 +12270,77 @@ mod tests {
         let diagnostics = store.agent_diagnostics(account, id).unwrap().to_string();
         assert!(!diagnostics.contains("\"state\":\"failed\""));
         server.abort();
+    }
+
+    /// The vector drain runs only while something may be missing. A fresh
+    /// engine owes one (rows from before this process had an embedder, and
+    /// an earlier run's failures); a clean drain lowers the flag; every arm of
+    /// `embed_and_store` that wrote no vector raises it, including "no
+    /// embedder at all", which a drain must then leave standing rather than
+    /// clear, so the round after an embedder is attached pays the debt.
+    #[tokio::test]
+    async fn vector_drain_runs_only_while_something_may_be_missing() {
+        use crate::embed::StubEmbedder;
+        use crate::store::sqlite::VEC_DIMS;
+
+        let (store, acct) = store_at_cursor(None);
+        let base = "http://127.0.0.1:9";
+
+        let eng =
+            engine(store.clone(), acct, base).with_embedder(Arc::new(StubEmbedder::new(VEC_DIMS)));
+        assert!(
+            eng.vectors_dirty.load(Ordering::Relaxed),
+            "a fresh engine owes the first drain"
+        );
+        eng.backfill_missing_vectors().await;
+        assert!(
+            !eng.vectors_dirty.load(Ordering::Relaxed),
+            "a clean drain lowers the flag"
+        );
+        eng.embed_and_store(1, "hello there".to_string()).await;
+        assert!(
+            !eng.vectors_dirty.load(Ordering::Relaxed),
+            "a successful ingest-time embed leaves it down"
+        );
+
+        // dims=0 is the stub's failure mode: `embed` returns Err.
+        let failing =
+            engine(store.clone(), acct, base).with_embedder(Arc::new(StubEmbedder::new(0)));
+        failing.vectors_dirty.store(false, Ordering::Relaxed);
+        failing.embed_and_store(2, "hello there".to_string()).await;
+        assert!(
+            failing.vectors_dirty.load(Ordering::Relaxed),
+            "a failed embed raises it"
+        );
+
+        // No embedder anywhere: the store has none and the engine overrides none.
+        let bare = engine(store, acct, base);
+        bare.vectors_dirty.store(false, Ordering::Relaxed);
+        bare.embed_and_store(3, "hello there".to_string()).await;
+        assert!(
+            bare.vectors_dirty.load(Ordering::Relaxed),
+            "an embed skipped for want of an embedder raises it"
+        );
+        bare.backfill_missing_vectors().await;
+        assert!(
+            bare.vectors_dirty.load(Ordering::Relaxed),
+            "a drain with no embedder leaves the debt standing"
+        );
+
+        // The flag is the store's, not one engine's: a second engine built
+        // over the first one's handle (the daemon's sweeps engine) raises the
+        // flag the first one's refine lane reads.
+        let first = engine(store_at_cursor(None).0, acct, base)
+            .with_embedder(Arc::new(StubEmbedder::new(VEC_DIMS)));
+        first.backfill_missing_vectors().await;
+        assert!(!first.vectors_dirty.load(Ordering::Relaxed));
+        let second = engine(store_at_cursor(None).0, acct, base)
+            .with_vectors_dirty(first.vectors_dirty_handle())
+            .with_embedder(Arc::new(StubEmbedder::new(0)));
+        second.embed_and_store(4, "hello there".to_string()).await;
+        assert!(
+            first.vectors_dirty.load(Ordering::Relaxed),
+            "a raise on the sweeps engine lands on the sync engine's flag"
+        );
     }
 }

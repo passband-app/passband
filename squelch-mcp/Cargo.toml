@@ -59,6 +59,8 @@ futures = { workspace = true, optional = true }
 testing = ["dep:futures"]
 
 [dev-dependencies]
+# A recording `AgentMailer` in the server tests.
+async-trait = { workspace = true }
 # This crate's own integration tests use `testing` too.
 squelch-mcp = { path = ".", features = ["testing"] }
 tower = { version = "0.5", features = ["util"] }

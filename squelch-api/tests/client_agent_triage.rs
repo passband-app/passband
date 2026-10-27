@@ -271,3 +271,587 @@ async fn stats_do_not_count_a_scheduled_revisit_as_waiting() {
     assert_eq!(json["triage"]["queued"], 0, "{}", json["triage"]);
     assert_eq!(json["triage"]["leased"], 0);
 }
+
+/// An archive row through the real archive write: old mail, stored unassessed.
+fn old_mail(h: &Harness, gmail: &str, thread: &str, subject: &str) -> i64 {
+    use squelch_core::sync::ingest::{RawFetched, ingest};
+    let when = Utc::now() - chrono::Duration::days(200);
+    let fetched = RawFetched {
+        account_id: h.acct,
+        gmail_msg_id: gmail.into(),
+        gmail_thread_id: Some(thread.into()),
+        raw: format!(
+            "From: Zed Old <zed@old.example>\r\nTo: me@example.com\r\nSubject: {subject}\r\n\r\n{subject} ledgerbody\r\n"
+        )
+        .into_bytes(),
+        internal_date: Some(when),
+        is_sent: false,
+        is_spam: false,
+        account_addr: "me@example.com".into(),
+    };
+    let triaged = ingest(&fetched, &Default::default(), Utc::now(), |_| false);
+    h.store.ingest_archive_message(&triaged).unwrap().unwrap()
+}
+
+async fn get(h: &Harness, uri: &str) -> (StatusCode, serde_json::Value) {
+    let response = h.app.clone().oneshot(authed("GET", uri)).await.unwrap();
+    let status = response.status();
+    (status, body_json(response).await)
+}
+
+/// THE ARCHIVE TIER AT THE EMBEDDED AGENT'S ROUTES. An unassessed old
+/// ancestor is absent from the thread, the feed and the search of a live
+/// conversation; a search that matches old mail has it checked, waits, and
+/// returns what was allowed with the horizon it searched.
+#[tokio::test]
+async fn the_agent_routes_omit_unassessed_archive_mail_and_search_surfaces_it() {
+    use squelch_core::store::archive_surface::SurfaceWait;
+    use squelch_core::triage::access::AccessDecision;
+    let (state, store, acct) = state_with(|_, _| {});
+    // Not runnable yet: no lane has said it can spend, so nothing waits.
+    let poke = squelch_core::store::archive_surface::RefinePoke::new();
+    let state = state
+        .with_archive_days(365)
+        .with_refine_poke(poke.clone())
+        .with_surface_wait(SurfaceWait {
+            deadline: std::time::Duration::from_secs(20),
+            idle: std::time::Duration::from_secs(20),
+            interval: std::time::Duration::from_millis(10),
+        });
+    let h = Harness {
+        app: squelch_api::router(state),
+        store,
+        acct,
+    };
+    let ancestor = old_mail(&h, "g-anc", "mix", "heron ledger");
+    let live = h
+        .store
+        .upsert_message(&msg(
+            h.acct,
+            "g-live",
+            "mix",
+            "osprey plans",
+            "osprey meeting",
+        ))
+        .unwrap();
+    assess(&h, live, false);
+    let no_trace = |what: &str, body: &serde_json::Value| {
+        let wire = body.to_string();
+        for secret in ["heron", "ledger", "zed@old.example", "Zed Old"] {
+            assert!(!wire.contains(secret), "{what} carries {secret}: {wire}");
+        }
+    };
+
+    let (status, feed) = get(&h, "/client/agent/feed?destination=reading").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(feed["items"].as_array().unwrap().len(), 1, "{feed}");
+    no_trace("feed", &feed);
+    let (status, found) = get(&h, "/client/agent/search?q=osprey&mode=keyword").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(found["items"].as_array().unwrap().len(), 1);
+    no_trace("search", &found);
+    let (status, _) = get(&h, &format!("/client/agent/triage/{ancestor}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, thread) = get(&h, "/client/agent/thread/mix").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(thread["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(thread["subject"], "osprey plans");
+    no_trace("thread", &thread);
+    // The HUMAN reads both messages, so the thread is not one a client may
+    // cache as agent-readable while the ancestor is unchecked.
+    let (_, human) = get(&h, "/client/thread/mix").await;
+    assert_eq!(human["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(human["cache_allowed"], false);
+    let (_, opened) = get(&h, &format!("/client/v2/messages/{live}")).await;
+    assert_eq!(opened["thread"]["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(opened["thread"]["cache_allowed"], false);
+
+    // A stand-in refine lane: each poke runs the queued checks, allowing all
+    // but the one whose subject says it is a secret.
+    for i in 0..3 {
+        old_mail(&h, &format!("g-{i}"), &format!("t-{i}"), "heron survey");
+    }
+    let secret = old_mail(&h, "g-secret", "t-secret", "heron password");
+    let (worker_store, heard) = (h.store.clone(), poke.clone());
+    poke.set_runnable(true);
+    tokio::spawn(async move {
+        loop {
+            heard.poked().await;
+            while let Some(job) = worker_store
+                .claim_agent_job(acct, "access", Utc::now(), 120)
+                .unwrap()
+            {
+                let original = worker_store.load_agent_access_message(&job).unwrap();
+                let decision = AccessDecision {
+                    restricted: job.message_id == secret,
+                    reason: "test".into(),
+                };
+                worker_store
+                    .commit_agent_access(&job, &original, &decision, &serde_json::json!({}))
+                    .unwrap();
+            }
+        }
+    });
+
+    for _ in 0..2 {
+        let (status, found) = get(&h, "/client/agent/search?q=heron&mode=keyword").await;
+        assert_eq!(status, StatusCode::OK);
+        let items = found["items"].as_array().unwrap();
+        // The three surveys and the ancestor (its check was queued by the
+        // thread read above and ran with the rest); never the restricted one.
+        assert_eq!(items.len(), 4, "{found}");
+        assert!(items.iter().all(|item| item["id"] != secret));
+        assert!(!found.to_string().contains("password"));
+        // THE WHOLE SHAPE: the items and a horizon. No count, no flag.
+        let mut keys: Vec<&String> = found.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["archive", "indexed_since", "items", "match_kind", "sort"]
+        );
+        assert_eq!(found["indexed_since"].as_str().unwrap().len(), 10, "a date");
+        assert_eq!(
+            found["archive"],
+            serde_json::json!({
+                "target": (Utc::now() - chrono::Duration::days(365))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                "walk_complete": false,
+                "older_mail": "checked_on_first_match",
+            })
+        );
+    }
+    for id in [ancestor, secret] {
+        assert_eq!(
+            h.store.agent_diagnostics(h.acct, id).unwrap()["jobs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "one check each, however often the search runs"
+        );
+    }
+}
+
+/// Every job on `ids`, in every state.
+fn job_count(h: &Harness, ids: &[i64]) -> usize {
+    ids.iter()
+        .map(|id| {
+            h.store.agent_diagnostics(h.acct, *id).unwrap()["jobs"]
+                .as_array()
+                .unwrap()
+                .len()
+        })
+        .sum()
+}
+
+/// B1 + S2. THE SEARCH SAYS NOTHING ABOUT MAIL IT MAY NOT SHOW. Readable mail
+/// first, live and old, and every search recorded; then fifteen unassessed
+/// archive rows that match the same words better. Every search again, twice
+/// (never asked about, then queued and beyond the cap): the same items in the
+/// same order, byte for byte, in every mode, page size, phrase and operator.
+/// A mailbox with nothing readable in it cannot show a readable row being
+/// displaced or reordered, which is why this one has some.
+#[tokio::test]
+async fn agent_search_says_nothing_about_unassessed_archive_matches() {
+    use squelch_core::triage::access::AccessDecision;
+    let (state, store, acct) = state_with(|_, _| {});
+    let h = Harness {
+        app: squelch_api::router(state.with_archive_days(365)),
+        store,
+        acct,
+    };
+    for i in 0..3 {
+        let mut live = msg(
+            h.acct,
+            &format!("g-live-{i}"),
+            &format!("t-live-{i}"),
+            &format!("heron ledger {i}"),
+            "heron ledger memo",
+        );
+        live.from_addr = "zed@old.example".into();
+        live.received_at = Utc::now() - chrono::Duration::days(i + 1);
+        let id = h.store.upsert_message(&live).unwrap();
+        assess(&h, id, false);
+    }
+    let cleared: Vec<i64> = (0..2)
+        .map(|i| {
+            old_mail(
+                &h,
+                &format!("g-ok-{i}"),
+                &format!("t-ok-{i}"),
+                "heron count",
+            )
+        })
+        .collect();
+    assert_eq!(
+        h.store
+            .request_archive_access(h.acct, &cleared, Default::default(), Utc::now())
+            .unwrap()
+            .len(),
+        2
+    );
+    while let Some(job) = h
+        .store
+        .claim_agent_job(h.acct, "access", Utc::now(), 120)
+        .unwrap()
+    {
+        let original = h.store.load_agent_access_message(&job).unwrap();
+        let decision = AccessDecision {
+            restricted: false,
+            reason: "test".into(),
+        };
+        h.store
+            .commit_agent_access(&job, &original, &decision, &serde_json::json!({}))
+            .unwrap();
+    }
+    // Word, phrase, sender operator, date operator, operators alone, and a
+    // word nothing says.
+    //
+    // NOT HERE, AND NOT CLAIMED: a query of several words where no readable
+    // row has all of them. Its any-term ranking is bm25, whose term weights
+    // come from how many documents in the WHOLE index carry each word, so
+    // which readable row leads can shift with how common a word is in mail
+    // the caller cannot read. FTS5 keeps one set of statistics; see the
+    // accepted residuals in docs/SECURITY.md.
+    let queries = [
+        "heron",
+        "%22heron%20ledger%22",
+        "heron%20from:zed",
+        "heron%20after:2020-01-01",
+        "from:zed@old.example",
+        "after:2020-01-01",
+        "zzyzx",
+    ];
+    async fn all(h: &Harness, queries: &[&str]) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for q in queries {
+            for mode in ["keyword", "hybrid"] {
+                for limit in [2, 30] {
+                    let started = std::time::Instant::now();
+                    let (status, found) = get(
+                        h,
+                        &format!("/client/agent/search?q={q}&mode={mode}&limit={limit}"),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK, "q={q}");
+                    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+                    out.push(found);
+                }
+            }
+        }
+        out
+    }
+    let before = all(&h, &queries).await;
+    assert_eq!(
+        before[1]["items"].as_array().unwrap().len(),
+        5,
+        "{}",
+        before[1]
+    );
+    assert_eq!(before[0]["items"].as_array().unwrap().len(), 2);
+
+    let mut old = Vec::new();
+    for i in 0..15 {
+        old.push(old_mail(
+            &h,
+            &format!("g-{i}"),
+            &format!("t-{i}"),
+            "heron ledger heron count",
+        ));
+    }
+    for round in 0..2 {
+        let after = all(&h, &queries).await;
+        for (index, (was, is)) in before.iter().zip(&after).enumerate() {
+            assert_eq!(
+                was, is,
+                "search {index}, round {round}, tells the caller about unread mail"
+            );
+        }
+    }
+    let queued = job_count(&h, &old);
+    assert!(queued > 0, "the matches really were surfaced");
+    assert!(queued <= 15, "and never twice");
+
+    // Nothing readable at all: the same bytes as a search that matched
+    // nothing, spelled out.
+    let (state, store, acct) = state_with(|_, _| {});
+    let h = Harness {
+        app: squelch_api::router(state.with_archive_days(365)),
+        store,
+        acct,
+    };
+    for i in 0..3 {
+        old_mail(&h, &format!("g-{i}"), &format!("t-{i}"), "heron ledger");
+    }
+    let (_, nothing) = get(&h, "/client/agent/search?q=zzyzx&mode=keyword").await;
+    assert_eq!(
+        nothing,
+        serde_json::json!({
+            "items": [],
+            "match_kind": "keyword",
+            "sort": "recent",
+            "archive": {
+                "target": (Utc::now() - chrono::Duration::days(365))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                "walk_complete": false,
+                "older_mail": "checked_on_first_match",
+            },
+        })
+    );
+    for q in ["heron", "from:zed@old.example", "heron%20from:zed"] {
+        let (_, found) = get(&h, &format!("/client/agent/search?q={q}&mode=keyword")).await;
+        assert_eq!(found, nothing, "q={q}");
+    }
+
+    // Archive off: no horizon at all, and still nothing about the matches.
+    let off = harness(|_, _| {});
+    old_mail(&off, "g-old", "t-old", "heron ledger");
+    let (_, found) = get(&off, "/client/agent/search?q=heron&mode=keyword").await;
+    assert_eq!(
+        found,
+        serde_json::json!({"items": [], "match_kind": "keyword", "sort": "recent"})
+    );
+}
+
+/// S3. A SENDER OR A DATE RANGE IS NOT A KEYWORD MATCH. A query of operators
+/// alone runs no MATCH, so it buys no access check: otherwise the door could
+/// be walked through the archive one sender or one month at a time, on mail
+/// that matched nothing anybody was looking for. With a word beside them the
+/// operators narrow what is bought, exactly as they narrow what is returned.
+#[tokio::test]
+async fn a_filter_only_agent_search_buys_no_access_checks() {
+    let (state, store, acct) = state_with(|_, _| {});
+    let h = Harness {
+        app: squelch_api::router(state.with_archive_days(365)),
+        store,
+        acct,
+    };
+    let old: Vec<i64> = (0..5)
+        .map(|i| old_mail(&h, &format!("g-{i}"), &format!("t-{i}"), "heron ledger"))
+        .collect();
+    for q in [
+        "from:zed@old.example",
+        "before:2030-01-01",
+        "from:zed%20after:2020-01-01%20before:2030-01-01",
+    ] {
+        for mode in ["keyword", "hybrid", "semantic"] {
+            let (status, found) = get(&h, &format!("/client/agent/search?q={q}&mode={mode}")).await;
+            assert_eq!(status, StatusCode::OK, "q={q}");
+            assert_eq!(found["items"], serde_json::json!([]));
+        }
+    }
+    assert_eq!(job_count(&h, &old), 0, "operators alone matched no word");
+
+    // A word, narrowed to a sender who wrote none of it: still nothing.
+    let (_, _) = get(
+        &h,
+        "/client/agent/search?q=heron%20from:nobody&mode=keyword",
+    )
+    .await;
+    assert_eq!(job_count(&h, &old), 0);
+    // The word and the sender who did: every match is asked about, once.
+    for _ in 0..2 {
+        let (_, _) = get(&h, "/client/agent/search?q=heron%20from:zed&mode=keyword").await;
+    }
+    assert_eq!(job_count(&h, &old), 5);
+}
+
+/// A lane that leases every check and never finishes one.
+fn stalled_lane(
+    store: std::sync::Arc<squelch_core::store::SqliteStore>,
+    acct: i64,
+) -> squelch_core::store::archive_surface::RefinePoke {
+    let poke = squelch_core::store::archive_surface::RefinePoke::new();
+    poke.set_runnable(true);
+    let heard = poke.clone();
+    tokio::spawn(async move {
+        loop {
+            heard.poked().await;
+            while store
+                .claim_agent_job(acct, "access", Utc::now(), 600)
+                .unwrap()
+                .is_some()
+            {}
+        }
+    });
+    poke
+}
+
+/// B4. THE HTTP DOOR'S OWN CEILING. The Mac client gives a request fifteen
+/// seconds; whatever wait the host configured, a search here stops at six
+/// with a check still in flight.
+#[tokio::test]
+async fn the_http_agent_search_never_waits_past_its_own_six_seconds() {
+    use squelch_core::store::archive_surface::SurfaceWait;
+    let (state, store, acct) = state_with(|_, _| {});
+    let poke = stalled_lane(store.clone(), acct);
+    let state = state
+        .with_archive_days(365)
+        .with_refine_poke(poke)
+        .with_surface_wait(SurfaceWait {
+            deadline: std::time::Duration::from_secs(60),
+            idle: std::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_millis(50),
+        });
+    let h = Harness {
+        app: squelch_api::router(state),
+        store,
+        acct,
+    };
+    old_mail(&h, "g-old", "t-old", "heron ledger");
+    let started = std::time::Instant::now();
+    let (status, found) = get(&h, "/client/agent/search?q=heron&mode=keyword").await;
+    let waited = started.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(found["items"], serde_json::json!([]));
+    assert!(waited >= std::time::Duration::from_secs(5), "{waited:?}");
+    assert!(waited < std::time::Duration::from_secs(9), "{waited:?}");
+}
+
+/// B4. The thread route waits for the sibling check its own open queued, so
+/// the first answer is the final one: 404 when the ancestor is restricted,
+/// the whole thread when it is not.
+#[tokio::test]
+async fn the_agent_thread_route_waits_for_its_sibling_checks() {
+    use squelch_core::store::archive_surface::SurfaceWait;
+    use squelch_core::triage::access::AccessDecision;
+    for restricted in [true, false] {
+        let (state, store, acct) = state_with(|_, _| {});
+        let poke = squelch_core::store::archive_surface::RefinePoke::new();
+        poke.set_runnable(true);
+        let state = state
+            .with_archive_days(365)
+            .with_refine_poke(poke.clone())
+            .with_surface_wait(SurfaceWait {
+                deadline: std::time::Duration::from_secs(20),
+                idle: std::time::Duration::from_secs(20),
+                interval: std::time::Duration::from_millis(10),
+            });
+        let h = Harness {
+            app: squelch_api::router(state),
+            store,
+            acct,
+        };
+        let ancestor = old_mail(&h, "g-anc", "mix", "heron ledger");
+        let live = h
+            .store
+            .upsert_message(&msg(h.acct, "g-live", "mix", "osprey plans", "osprey"))
+            .unwrap();
+        assess(&h, live, false);
+        let worker_store = h.store.clone();
+        tokio::spawn(async move {
+            loop {
+                poke.poked().await;
+                while let Some(job) = worker_store
+                    .claim_agent_job(acct, "access", Utc::now(), 120)
+                    .unwrap()
+                {
+                    let original = worker_store.load_agent_access_message(&job).unwrap();
+                    let decision = AccessDecision {
+                        restricted,
+                        reason: "test".into(),
+                    };
+                    worker_store
+                        .commit_agent_access(&job, &original, &decision, &serde_json::json!({}))
+                        .unwrap();
+                }
+            }
+        });
+        let (status, thread) = get(&h, "/client/agent/thread/mix").await;
+        if restricted {
+            assert_eq!(status, StatusCode::NOT_FOUND, "served before its verdict");
+        } else {
+            assert_eq!(status, StatusCode::OK);
+            let ids: Vec<i64> = thread["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_i64().unwrap())
+                .collect();
+            assert_eq!(ids, vec![ancestor, live]);
+        }
+    }
+}
+
+/// A request whose answer is not the point: the status alone.
+async fn touch(h: &Harness, uri: &str) -> StatusCode {
+    h.app
+        .clone()
+        .oneshot(authed("GET", uri))
+        .await
+        .unwrap()
+        .status()
+}
+
+/// B10. PROMOTION IS THE OWNER'S, AT THE HUMAN DOOR. Every embedded-agent
+/// route, at an archive row before and after it is cleared, leaves it in the
+/// archive with nothing but access checks queued; the human's single-message
+/// re-triage promotes it.
+#[tokio::test]
+async fn only_the_human_door_promotes_an_archive_row() {
+    use squelch_core::triage::access::AccessDecision;
+    let (state, store, acct) = state_with(|_, _| {});
+    let h = Harness {
+        app: squelch_api::router(state.with_archive_days(365)),
+        store,
+        acct,
+    };
+    let old = old_mail(&h, "g-old", "t-old", "heron ledger");
+    let archived = || Store::message_is_archive(h.store.as_ref(), h.acct, old).unwrap();
+    for round in 0..2 {
+        for uri in [
+            "/client/agent/search?q=heron&mode=keyword".to_string(),
+            "/client/agent/search?q=heron&mode=hybrid".to_string(),
+            "/client/agent/search?q=from:zed".to_string(),
+            "/client/agent/thread/t-old".to_string(),
+            "/client/agent/feed?destination=fye".to_string(),
+            "/client/agent/feed?destination=reading".to_string(),
+            "/client/agent/feed?destination=records".to_string(),
+            "/client/agent/records".to_string(),
+            format!("/client/agent/triage/{old}"),
+        ] {
+            let status = touch(&h, &uri).await;
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "{uri}");
+            assert!(archived(), "round {round}: {uri}");
+        }
+        let jobs = h.store.agent_diagnostics(h.acct, old).unwrap()["jobs"].clone();
+        for job in jobs.as_array().unwrap() {
+            assert_eq!(job["kind"], "access", "round {round}: {job}");
+        }
+        // Second round: the same routes at a row the agent may now read.
+        while let Some(job) = h
+            .store
+            .claim_agent_job(h.acct, "access", Utc::now(), 120)
+            .unwrap()
+        {
+            let original = h.store.load_agent_access_message(&job).unwrap();
+            let decision = AccessDecision {
+                restricted: false,
+                reason: "test".into(),
+            };
+            h.store
+                .commit_agent_access(&job, &original, &decision, &serde_json::json!({}))
+                .unwrap();
+        }
+    }
+    // A human opening it is not a promotion either.
+    touch(&h, &format!("/client/v2/messages/{old}")).await;
+    touch(&h, "/client/thread/t-old").await;
+    assert!(archived());
+
+    // The owner asks for this one message to be triaged: now it is live.
+    let response = h
+        .app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/retriage",
+            serde_json::json!({"message_id": old}),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    assert!(!archived(), "promoted by the owner's re-triage");
+}

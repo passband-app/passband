@@ -180,6 +180,10 @@ struct ComposePane: View {
     @ViewBuilder
     private func composerPage(_ compose: ComposeState) -> some View {
         VStack(alignment: .leading, spacing: Space.s12) {
+            // ABOVE the fields it is about: who this goes to and what it says
+            // are the two things to check, and the notice belongs where the
+            // eye starts, not under the last line of the body.
+            if compose.fromAgent { AgentDraftNotice() }
             editPane(compose)
             // A held send came back blocked: the verdict, and with it
             // the override in the footer.
@@ -772,6 +776,12 @@ struct ComposePane: View {
                 // Not from the drafts page: the mail being sent is not on
                 // screen, and a send should never be of something unseen.
                 guard !modalAbove, store.compose?.page != .drafts else { return false }
+                // A draft an agent put on screen is sent with the button,
+                // never this chord: see `ComposeState.keyboardSendLocked`.
+                guard store.compose?.keyboardSendLocked != true else {
+                    store.noteKeyboardSendLocked()
+                    return true
+                }
                 send(override: false)
                 return true
             },
@@ -954,6 +964,33 @@ struct DiscardConfirm: View {
 /// THE outbound-guard verdict, rendered identically wherever a reply started.
 /// The one screen whose job is talking a reader out of a mistake must not read
 /// differently in the pane composer and in the reader's inline one.
+/// Says, inside the composer, that an agent wrote what is in it. The drafts
+/// list marks such a draft too, but a reply draft is restored straight into
+/// the reply box when the owner presses `r`, without the list ever being
+/// seen; this is the mark that travels with the words. Stays until the
+/// composer is sent or closed, whatever the owner edits.
+struct AgentDraftNotice: View {
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
+            Image(systemName: "sparkles")
+                .font(Typo.ui(10, weight: .medium))
+            Text("Your agent drafted this. Check who it goes to and what it says before you send.")
+                .font(Typo.micro)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(Palette.accent)
+        .padding(Space.s10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.accentSoft)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Palette.accent.opacity(0.4), lineWidth: 1))
+    }
+}
+
 struct GuardVerdictBox: View {
     /// The redacted kinds the guard matched. Never rendered as markup — they are
     /// server strings.

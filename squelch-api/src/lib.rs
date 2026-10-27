@@ -6,8 +6,11 @@
 //! docs/SECURITY.md §4.
 
 mod agent;
+mod agent_write;
 mod assistant;
 mod auth;
+mod calendar_connect;
+mod calendar_write;
 mod console;
 mod devices;
 mod error;
@@ -19,28 +22,42 @@ pub mod guard;
 mod handlers;
 mod http_metrics;
 mod invite_mail;
+pub mod limits;
 mod markdown;
 mod pair;
 mod scheduled_send;
+mod serve;
 mod sharing;
 mod state;
 pub mod tracking;
 mod triage;
+mod unsub_browser;
+mod unsub_cdp;
 mod unsub_fetch;
 mod unsub_html;
 mod unsub_job;
 pub mod unsubscribe;
 
 pub use assistant::AssistantRelay;
-pub use auth::require_bearer;
+pub use auth::{DEVICE_AUTH_CONCURRENCY, require_bearer};
 pub use error::ApiError;
 /// The auth-mail retention pass. Exported for the daemon's timer: it uses the
 /// WRITE credential, which the readonly-bound sync loop must never touch.
 pub use handlers::run_shred_pass;
 pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
-/// The scheduled-send worker's pass. Exported for the daemon's timer for the
+/// The ceilings a `/client/*` request runs under and the store-call cap.
+pub use limits::{
+    LONG_REQUEST_TIMEOUT, REQUEST_TIMEOUT, ROUTE_CEILINGS, RequestCeiling, RequestTimeouts,
+    STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
+};
+/// The scheduled-send worker and its pass. Exported for the daemon for the
 /// same reason as the shredder: it sends on the WRITE credential.
-pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
+pub use scheduled_send::{
+    ScheduledPassReport, ScheduledWorkerTiming, run_scheduled_send_pass, scheduled_send_worker,
+};
+/// The accept loop every daemon door runs on: `axum::serve` with a live
+/// hyper timer.
+pub use serve::{HEADER_READ_TIMEOUT, serve, serve_with_header_timeout};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
 pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
@@ -48,7 +65,7 @@ pub use state::{AgentDoorStatus, ApiState, StateError, attach_event_channel};
 
 use axum::{
     Router, middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 
 /// Build this crate's router: the bearer-authed `/client/*` tree, plus the TWO
@@ -83,6 +100,9 @@ pub fn router(state: ApiState) -> Router {
             "/",
             axum::routing::get(|| async { axum::response::Redirect::temporary("/console") }),
         )
+        // gzip over the whole door, outermost: one layer, and the predicate
+        // below decides per response what is left alone.
+        .layer(compression_layer())
 }
 
 /// The `/client/*` router. Bearer auth is layered over every route in it: the
@@ -190,6 +210,9 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/receipts", get(handlers::get_receipts))
         .route("/client/banking", get(handlers::get_banking))
         .route("/client/calendar", get(handlers::get_calendar))
+        // Everything behind the Calendar page, behind the `calendar` hidden
+        // feature: see `calendar_routes`.
+        .merge(calendar_routes(state.clone()))
         .route("/client/search", get(handlers::search))
         // The user's own sent mail. Human door only — this is the one listing
         // that reads `is_sent = 1`, and the agent door gets no such route: what
@@ -226,7 +249,7 @@ fn client_router(state: ApiState) -> Router {
         // learns the table exists. POST schedules (running every check a send
         // runs, guard included, while the user is there to answer), GET lists
         // what is still owed an outcome, DELETE pulls one back into the
-        // composer, and /now sends one on the next tick. Its own router so
+        // composer, and /now wakes the worker to send one. Its own router so
         // one `no-store` layer covers every response on it, an extractor's
         // rejection included.
         .merge(scheduled_send::routes())
@@ -350,12 +373,28 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/actions/not_spam", post(handlers::action_not_spam))
         .route("/client/actions/label", post(handlers::action_label))
         .route("/client/actions/send", post(handlers::action_send))
+        // What an agent on the agent door may write (issue #394). Set HERE,
+        // by the owner, and only read over there: the agent door has no route
+        // or tool that changes it.
+        .route(
+            "/client/settings/agent-access",
+            get(agent_write::get_agent_access).put(agent_write::put_agent_access),
+        )
         // Bearer auth wraps EVERY route above.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
         ))
-        // CORS wraps auth (outermost) so credential-less OPTIONS preflights are
+        // The per-route ceiling, over auth: a request that has not produced
+        // its response head by its ceiling is answered 504, the bearer check
+        // and any wait for a store-call slot included. Inside CORS, so the
+        // 504 carries the headers a browser caller needs to read it. See
+        // `limits` for why it never touches a streaming body.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            limits::request_timeout,
+        ))
+        // CORS wraps both (outermost) so credential-less OPTIONS preflights are
         // answered instead of 401ing. Permissive by design: bearer auth is the
         // security boundary and no cookies are involved.
         .layer(
@@ -365,4 +404,118 @@ fn client_router(state: ApiState) -> Router {
                 .allow_headers(tower_http::cors::Any),
         )
         .with_state(state)
+}
+
+/// gzip, for any caller that asks (`Accept-Encoding: gzip`), at the fastest
+/// level. The bodies this door serves are JSON and server-rendered or
+/// sanitized HTML, which gzip cuts 5-10x, and the Swift client's `URLSession`
+/// asks on every request and decodes transparently. gzip is the only encoding
+/// compiled in (`compression-gzip`), so nothing here has to be switched on.
+///
+/// What is NOT compressed is the predicate's call, per response, and three of
+/// its rules carry real weight:
+///
+/// - `text/event-stream` (tower-http's default): the events stream and the
+///   assistant relay, which mirrors the upstream content-type. An SSE frame
+///   has to leave the process the moment it is written, and a gzip encoder
+///   would hold it.
+/// - images (default): the tracking pixel, the account photo, and image
+///   attachments, already-compressed bytes.
+/// - `application/octet-stream` and `application/pdf` (ours): the attachment
+///   door serves everything that is not a PDF or a non-SVG image as
+///   octet-stream (`handlers::safe_content_type`), and a PDF or an
+///   archive deflated on a worker thread comes out the same size for the
+///   CPU spent.
+///
+/// Bodies under 32 bytes (default) are left alone too: a gzip header costs
+/// more than it saves there.
+fn compression_layer()
+-> tower_http::compression::CompressionLayer<impl tower_http::compression::Predicate> {
+    use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+    tower_http::compression::CompressionLayer::new()
+        .quality(tower_http::CompressionLevel::Fastest)
+        .compress_when(
+            DefaultPredicate::new()
+                .and(NotForContentType::const_new("application/octet-stream"))
+                .and(NotForContentType::const_new("application/pdf")),
+        )
+}
+
+/// The Calendar page's routes, ALL BEHIND THE `calendar` HIDDEN FEATURE
+/// ([`squelch_core::features::CALENDAR`]). Off is as if the feature did not
+/// exist: every route here answers [`ApiError::not_found`], the opaque 404 a
+/// missing thread or a hidden sealed message gets, asked at the moment of each request (a flag flipped under a running daemon
+/// changes the next answer), and BEFORE ANY OTHER WORK. The gate is a route
+/// layer rather than a line in each handler because the handlers' extractors
+/// (the query, the JSON body, the path) run before a handler body could ask,
+/// and a refused request should not have its body read at all. For the same
+/// reason a write refused here writes NO audit row: a path the daemon does
+/// not serve writes none either, and the audit log records attempts at
+/// actions that exist (the calendar writes audit their own refusals, from
+/// inside a feature that is on).
+///
+/// Merged inside [`client_router`], so bearer auth still runs first: a caller
+/// with no credential gets the 401 and learns nothing about the flag.
+fn calendar_routes(state: ApiState) -> Router<ApiState> {
+    Router::new()
+        // Calendar ghosts: the timeline read and the user's word on one ghost
+        // (dismissed, going, a corrected end). HUMAN DOOR ONLY in both
+        // directions: the agent door has no timeline route.
+        .route("/client/timeline", get(handlers::get_timeline))
+        .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
+        // Start a Google Calendar sync now (the calendar page opening), at
+        // most once per account per 30 seconds. HUMAN DOOR ONLY: the agent
+        // door neither reads the calendar nor spends its quota.
+        .route("/client/timeline/refresh", post(handlers::refresh_timeline))
+        // Connect Google Calendar on a SELF-HOST: the daemon runs the consent
+        // `squelchd auth --calendar` runs, on a loopback listener, and answers
+        // the consent URL. 409 on hosted, where the control plane runs it.
+        // HUMAN DOOR ONLY: the agent door can neither grant nor read calendar.
+        .route(
+            "/client/calendar/connect",
+            post(calendar_connect::connect_calendar),
+        )
+        // The user's own create, edit and delete of one event on their Google
+        // Calendar: Google first, then the local row, each attempt audited.
+        // HUMAN DOOR ONLY: the agent door and the in-app assistant can neither
+        // read nor write a calendar.
+        .route(
+            "/client/calendar/events",
+            post(calendar_write::create_event),
+        )
+        .route(
+            "/client/calendar/events/{calendar_id}/{id}",
+            patch(calendar_write::edit_event).delete(calendar_write::delete_event),
+        )
+        // The event pane's guest suggestion: people the user has written to
+        // whose name a title mentions. A read, and HUMAN DOOR ONLY: it is a
+        // lookup into who the user writes to, which the agent door, the agent
+        // routes and the assistant relay never get.
+        .route(
+            "/client/calendar/people",
+            get(handlers::get_calendar_people),
+        )
+        // The user's correction of a person's inferred timezone (docs/
+        // CALENDAR.md §7). A local write, human door only, for the reason the
+        // contact card is; part of the calendar feature, so it is here. The
+        // inference itself runs at ingest whatever the flag says, and
+        // `GET /client/person` serves the zone only while the flag is on.
+        .route(
+            "/client/person/timezone",
+            put(handlers::put_person_timezone),
+        )
+        .route_layer(middleware::from_fn_with_state(state, require_calendar))
+}
+
+/// The `calendar` gate itself. See [`calendar_routes`].
+async fn require_calendar(
+    axum::extract::State(state): axum::extract::State<ApiState>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.features().enabled(squelch_core::features::CALENDAR) {
+        return ApiError::not_found().into_response();
+    }
+    next.run(req).await
 }

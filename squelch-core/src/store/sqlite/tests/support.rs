@@ -14,6 +14,18 @@ pub(super) fn store() -> (SqliteStore, AccountId) {
     (store, acct)
 }
 
+/// A FILE-backed store in a fresh directory of its own, plus the standard
+/// test account, for a test that needs the journal, the fsyncs or a reopen
+/// (`:memory:` has none of them). The directory is the caller's to remove.
+pub(super) fn file_store(tag: &str) -> (SqliteStore, AccountId, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("squelch-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = SqliteStore::open(dir.join("store.sqlite3")).unwrap();
+    let acct = store.ensure_account("me@example.com").unwrap();
+    (store, acct, dir)
+}
+
 /// Same, with a semantic embedder attached at open (the vector-search tests).
 pub(super) fn store_with_embedder(embedder: Arc<dyn Embedder>) -> (SqliteStore, AccountId) {
     let store = SqliteStore::open_in_memory()
@@ -51,6 +63,10 @@ pub(super) struct TriagedBuilder {
     confident: bool,
     /// Applied through the Stage-1 categorizer by `ingest`, after the row lands.
     category: Option<String>,
+    /// The Date header's offset and the invitation, as ingest captures them.
+    /// Only `ingest` carries them: `upsert` writes the message row alone.
+    date_offset_minutes: Option<i32>,
+    invite_zone: Option<crate::timezone::InviteZone>,
 }
 
 /// A plain inbound message with a neutral triage shape — the base every other
@@ -91,6 +107,8 @@ pub(super) fn triaged(account_id: AccountId, gmail: &str, thread: &str) -> Triag
         ship_extract: false,
         confident: true,
         category: None,
+        date_offset_minutes: None,
+        invite_zone: None,
     }
 }
 
@@ -219,6 +237,19 @@ impl TriagedBuilder {
         self.category = Some(category.to_string());
         self
     }
+    /// The Date header's UTC offset in minutes (ingest only).
+    pub(super) fn date_offset(mut self, minutes: Option<i32>) -> Self {
+        self.date_offset_minutes = minutes;
+        self
+    }
+    /// An invitation organized by `organizer` in `zone` (ingest only).
+    pub(super) fn invite(mut self, organizer: &str, zone: &str) -> Self {
+        self.invite_zone = Some(crate::timezone::InviteZone {
+            organizer: organizer.to_string(),
+            zone: zone.to_string(),
+        });
+        self
+    }
 
     // -- terminals --
     pub(super) fn msg(&self) -> NewMessage {
@@ -259,6 +290,8 @@ impl TriagedBuilder {
             // an ingest was on; the engine's own tests own that decision. NULL
             // is also the shape every pre-existing row has after the migration.
             notify_eligible_at: None,
+            date_offset_minutes: self.date_offset_minutes,
+            invite_zone: self.invite_zone.clone(),
         }
     }
 
@@ -619,4 +652,19 @@ pub(super) fn stale_after(days: u32) -> crate::config::ShipmentListPolicy {
         stale_after_days: days,
         ..KEEP_ALL_SHIPMENTS
     }
+}
+
+// ---- query plans ---------------------------------------------------------
+
+/// `EXPLAIN QUERY PLAN` for `sql`, one line per step, with every placeholder
+/// bound to NULL: a plan does not depend on the values, but rusqlite still
+/// insists each parameter is bound. For the tests that pin a statement to its
+/// index rather than to a timing.
+pub(super) fn plan(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let nulls = vec![rusqlite::types::Value::Null; stmt.parameter_count()];
+    stmt.query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(|line| line.unwrap())
+        .collect()
 }

@@ -20,9 +20,10 @@
 # squelchd image instead (also in SETUP.md).
 #
 # It lands in the `tenants` namespace and so it spends that namespace's quota
-# (`70-tenant-limits.yaml`): one of the 25 PVC slots permanently, and one of the
-# 25 pod slots for as long as the seed pod is up. Delete the seed pod when the
-# copy is done and the pod slot comes back; the claim is meant to stay.
+# (`70-tenant-limits.yaml`): one of its PVC slots permanently, and one of its
+# pod slots for as long as the seed pod is up (40 of each on `carrier`, and the
+# quota's count lines are sized with this one taken). Delete the seed pod when
+# the copy is done and the pod slot comes back; the claim is meant to stay.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -74,7 +75,7 @@ spec:
       # 15-warden-config.yaml). Any image with a shell and tar would do, but the
       # squelchd image is the one already pulled on this node, so naming the
       # fleet's tag is a copy that starts immediately instead of a pull.
-      image: ghcr.io/passband-app/squelchd:daemon-0.0.12
+      image: ghcr.io/passband-app/squelchd:daemon-0.0.13
       command: ["/bin/sh", "-c", "sleep 3600"]
       # /seed is the only writable path in this pod, and it is all it needs:
       # the container sleeps, and `tar -x` streams into the volume without a

@@ -132,7 +132,7 @@ use crate::labels;
 use crate::oauth::{self, Flow, GoogleEndpoints};
 use crate::pages;
 use crate::seal;
-use crate::sessions::{self, InsertError, SessionKind};
+use crate::sessions::{self, InsertError, Purpose, SessionKind};
 use crate::share;
 use crate::state::ControlState;
 use crate::store::StoreError;
@@ -157,6 +157,12 @@ const MAX_CODE: usize = 512;
 /// silently mailing an invite there is the one failure mode worth spending a
 /// constant on.
 pub(crate) const MAX_EMAIL: usize = 254;
+
+/// The longest `hint` `/reconnect` will consider: RFC 3696's 64 + 1 + 255,
+/// rounded to the figure everyone quotes. Longer is not an address and is
+/// ignored rather than truncated, because a truncated address is a DIFFERENT
+/// address.
+pub(crate) const MAX_HINT: usize = 320;
 
 /// How much of a submitted name is READ off the wire, which is not how much is
 /// kept: the ceiling on what is STORED is
@@ -243,6 +249,23 @@ const RECONNECT_NO_TENANT_HEADING: &str = "No Passband mailbox for that Google a
 const RECONNECT_NO_TENANT: &str = "Nothing is set up for the account you approved. If your Passband mailbox reads a \
      different Google account, start again and pick that one.";
 
+/// What a reconnect or calendar consent gets when the link named a Google
+/// account (`hint`) and a DIFFERENT one consented. Names NEITHER address: the
+/// link is attacker-craftable, so echoing the hint would be reflecting a
+/// stranger's text, and echoing the consenting account would tell whoever
+/// crafted it which account this browser is signed in to.
+const WRONG_ACCOUNT_HEADING: &str = "That was a different Google account";
+const WRONG_ACCOUNT: &str = "That was a different Google account than this Passband mailbox. Go back to the app \
+     and try again.";
+
+/// What a calendar consent gets when Google's answer did not include calendar:
+/// the person unticked it. Calendar is optional, so this is an outcome and not
+/// an error, and NOTHING was installed: their mailbox's credential is the one it
+/// was before they clicked.
+const CALENDAR_NOT_GRANTED_HEADING: &str = "Calendar was not connected";
+const CALENDAR_NOT_GRANTED: &str = "Google did not include calendar access, so nothing about your Passband mailbox \
+     changed. To connect your calendar, start again from Passband and leave the calendar \
+     boxes checked.";
 /// [`CONSOLE_SESSION_REFUSED`] in the agent flow's words. The way back is the
 /// agent that started it: this service has no link to offer, because the only
 /// way into an agent login is AuthKit sending the browser here.
@@ -260,6 +283,14 @@ const AGENT_NO_TENANT_HEADING: &str = "No Passband mailbox for that Google accou
 const AGENT_NO_TENANT: &str = "This Google account has no Passband mailbox, so nothing was connected. \
      If your mailbox is on another Google account, go back to your agent, connect again, \
      and pick that account.";
+
+/// What a calendar consent gets when the mailbox it came back for does not
+/// have the `calendar` hidden feature yet. Shown only after Google has
+/// authenticated the reader as that mailbox, so it is about their own.
+/// NOTHING was installed: their mail keeps working as it was.
+const CALENDAR_NOT_AVAILABLE_HEADING: &str = "Calendar isn't available yet";
+const CALENDAR_NOT_AVAILABLE: &str = "Calendar isn't available for this mailbox yet. Nothing about your Passband \
+     mailbox changed.";
 
 /// The longest `external_auth_id` this service will carry. AuthKit's are ULIDs
 /// (26 characters) today; this is slack for a format change, and a bound on
@@ -879,12 +910,24 @@ pub async fn app_auth(State(state): State<ControlState>) -> Response {
 /// `GET /reconnect` — start a fresh Gmail grant for a mailbox that already has
 /// a tenant.
 ///
-/// TAKES NO INPUT, exactly like [`app_auth`], and for a stronger reason. An app
+/// NAMES NO TENANT, exactly like [`app_auth`], and for a stronger reason. An app
 /// login that let you name a tenant would be an oracle; a reconnect that let you
 /// name one would be an oracle AND a way to aim a credential you legitimately
 /// own at a mailbox you do not. The only mailbox this flow will ever install to
-/// is the one Google names on the way back, so there is nothing to type and
-/// nothing to tamper with.
+/// is the one Google names on the way back.
+///
+/// TWO OPTIONAL PARAMETERS, neither of which can pick a tenant:
+/// - `calendar=1` asks for Google Calendar too ([`Flow::Calendar`]). Any other
+///   value is a plain reconnect.
+/// - `hint=<address>` is the account the daemon's link was made for. It
+///   becomes Google's `login_hint` and is held in the server-side session as a
+///   GUARD: a consent from a different account installs nothing. It is
+///   attacker-controlled input like everything in a URL, which is why it is
+///   shape-checked here, never written into a page, never logged, and never
+///   used to look anything up. A hint that is not one bare address is ignored.
+///
+/// Both are kept SERVER SIDE in the session, so a session started as calendar
+/// can only finish as calendar and the browser cannot swap the hint.
 ///
 /// WHY THIS EXISTS: a refresh token can stop working while everything else is
 /// healthy — revoked by the user, or expired because the consent screen is still
@@ -893,8 +936,17 @@ pub async fn app_auth(State(state): State<ControlState>) -> Response {
 /// flow. Before this route the only repair was an operator running `squelchd
 /// auth` inside the tenant's pod, which does not scale past the people who have
 /// a shell on the cluster.
-pub async fn reconnect_start(State(state): State<ControlState>) -> Response {
+pub async fn reconnect_start(
+    State(state): State<ControlState>,
+    RawQuery(query): RawQuery,
+) -> Response {
     let config = state.config();
+    let query = query.as_deref();
+    let purpose = match param(query, "calendar").as_deref() {
+        Some("1") => Purpose::Calendar,
+        _ => Purpose::Reconnect,
+    };
+    let hint = param(query, "hint").and_then(|h| login_hint(&h));
 
     let (sid, csrf_state) = match (random_token(), random_token()) {
         (Ok(a), Ok(b)) => (a, b),
@@ -908,23 +960,29 @@ pub async fn reconnect_start(State(state): State<ControlState>) -> Response {
     // those is what makes this worth doing at all — without it Google recognises
     // a returning user and can answer with no refresh token, which is the exact
     // thing being replaced.
-    let consent = match oauth::consent_url(&endpoints(&state), csrf_state, Flow::Reconnect) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "building the reconnect consent url failed");
-            return reconnect_unavailable();
-        }
+    let flow = match purpose {
+        Purpose::Reconnect => Flow::Reconnect,
+        Purpose::Calendar => Flow::Calendar,
     };
+    let consent =
+        match oauth::consent_url_with_hint(&endpoints(&state), csrf_state, flow, hint.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "building the reconnect consent url failed");
+                return reconnect_unavailable();
+            }
+        };
 
-    let inserted = state.sessions().insert(
+    let inserted = state.sessions().insert_with_hint(
         sid.clone(),
-        SessionKind::Reconnect,
+        SessionKind::Reconnect { purpose },
         consent.state,
         consent.pkce_verifier,
         // EMPTY and it stays empty, as on an app login: this flow does not know
         // which tenant it is for until Google answers, so an empty label is a
         // fact both sides agree on rather than a value one of them made up.
         String::new(),
+        hint.clone(),
         Instant::now(),
     );
     if let Err(InsertError::Full) = inserted {
@@ -945,9 +1003,14 @@ pub async fn reconnect_start(State(state): State<ControlState>) -> Response {
     };
     let cookie_value = cookie::sign(&config.cookie_key, &claim);
 
-    // PRIVACY: a count and nothing else. No label exists on this path and the
-    // mailbox is not known yet.
-    tracing::info!(sessions = state.live_sessions(), "reconnect started");
+    // PRIVACY: a count, the purpose, and WHETHER a hint came: never the hint.
+    // No label exists on this path and the mailbox is not known yet.
+    tracing::info!(
+        sessions = state.live_sessions(),
+        purpose = purpose.as_db(),
+        hinted = hint.is_some(),
+        "reconnect started"
+    );
 
     (
         StatusCode::FOUND,
@@ -1282,8 +1345,17 @@ pub async fn oauth_callback(
         // everything after — no label was chosen, no invite is held, no tenant
         // is created, and the mailbox it acts on is not known until Google
         // answers.
-        SessionKind::Reconnect => {
-            return done(reconnect_install(&state, code, session.pkce_verifier).await);
+        SessionKind::Reconnect { purpose } => {
+            return done(
+                reconnect_install(
+                    &state,
+                    code,
+                    session.pkce_verifier,
+                    purpose,
+                    session.login_hint.as_deref(),
+                )
+                .await,
+            );
         }
         // The AGENT login forks with the app login it is built on: identity
         // only, nothing provisioned, no invite. The `external_auth_id` it
@@ -1317,7 +1389,14 @@ pub async fn oauth_callback(
 
     // ---- from here on, the irreversible half ----
 
-    let grant = match oauth::exchange_code(&endpoints(&state), code, session.pkce_verifier).await {
+    let grant = match oauth::exchange_code(
+        &endpoints(&state),
+        code,
+        session.pkce_verifier,
+        Flow::Signup,
+    )
+    .await
+    {
         Ok(g) => g,
         // A PARTIAL CONSENT is its own answer, and the only exchange failure a
         // user can act on: Google's screen lets the boxes be unchecked one by
@@ -1853,11 +1932,42 @@ async fn console_login(
 /// and it still presents the mailbox: a 409 from it is the warden independently
 /// refusing to hand this process a recipient for a mailbox the grant does not
 /// belong to. So custody is checked twice, by two services, from two records.
-async fn reconnect_install(state: &ControlState, code: String, pkce_verifier: String) -> Response {
+///
+/// THE CALENDAR GRANT IS THIS SAME PIPELINE, with two gates in front of it and
+/// nothing changed behind them. `purpose` came from the server-side session,
+/// never from the browser:
+/// - `login_hint`, when the link named an account, must be the account that
+///   consented, or nothing is installed. A guard and not an authority: passing
+///   it only lets the request reach the tenant DISCOVERY below, which is the
+///   same lookup a hintless reconnect makes.
+/// - A calendar consent that came back WITHOUT calendar installs nothing. The
+///   person unticked it; their working credential stays exactly as it was.
+async fn reconnect_install(
+    state: &ControlState,
+    code: String,
+    pkce_verifier: String,
+    purpose: Purpose,
+    login_hint: Option<&str>,
+) -> Response {
+    let flow = match purpose {
+        Purpose::Reconnect => Flow::Reconnect,
+        Purpose::Calendar => Flow::Calendar,
+    };
     // A FULL GMAIL GRANT, not an identity hop: this is the credential the daemon
     // will hold, so it is exchanged and scope-checked exactly as signup's is.
-    let grant = match oauth::exchange_code(&endpoints(state), code, pkce_verifier).await {
+    // The floor is the three Gmail scopes for both purposes.
+    let grant = match oauth::exchange_code(&endpoints(state), code, pkce_verifier, flow).await {
         Ok(g) => g,
+        Err(oauth::OAuthError::Scope) if purpose == Purpose::Calendar => {
+            tracing::info!("calendar consent granted only part of the Gmail scope set");
+            return pages::console_problem(
+                StatusCode::OK,
+                "Passband needs all three Gmail permissions",
+                "Nothing changed. Connecting your calendar also asks again for the three Gmail \
+                 permissions Passband already uses, so leave those boxes checked on Google's \
+                 screen and start again from Passband.",
+            );
+        }
         Err(oauth::OAuthError::Scope) => {
             // NOT `partial_consent_problem`: that page says "your invite code
             // has not been used", which is true of a signup and meaningless to
@@ -1876,6 +1986,32 @@ async fn reconnect_install(state: &ControlState, code: String, pkce_verifier: St
             return reconnect_refused();
         }
     };
+
+    // THE HINT GUARD. Case-insensitive like every account comparison in this
+    // codebase; the hint was shape-checked at `/reconnect` and is ASCII. The
+    // token is dropped unsealed: nothing of this grant survives the request.
+    if let Some(hint) = login_hint
+        && !hint.eq_ignore_ascii_case(grant.account_email.trim())
+    {
+        tracing::info!(
+            purpose = purpose.as_db(),
+            "reconnect consent came from a different account than its link named"
+        );
+        drop(grant.token);
+        return pages::console_problem(StatusCode::OK, WRONG_ACCOUNT_HEADING, WRONG_ACCOUNT);
+    }
+
+    // CALENDAR UNTICKED. Checked before the tenant is even looked up, so the
+    // whole of a declined calendar grant is one exchange and one page.
+    if purpose == Purpose::Calendar && !grant.grants_calendar() {
+        tracing::info!("calendar consent came back without calendar; nothing installed");
+        drop(grant.token);
+        return pages::console_problem(
+            StatusCode::OK,
+            CALENDAR_NOT_GRANTED_HEADING,
+            CALENDAR_NOT_GRANTED,
+        );
+    }
 
     // Normalized the way the store normalizes on insert, so a capitalized Google
     // answer finds the same row rather than none.
@@ -1900,6 +2036,44 @@ async fn reconnect_install(state: &ControlState, code: String, pkce_verifier: St
             return reconnect_unavailable();
         }
     };
+
+    // THE CALENDAR HIDDEN FEATURE. Calendar is behind the `calendar` flag
+    // (`squelch_core::features::CALENDAR`): a tenant without it (its own row
+    // or the Everyone default) gets no calendar grant installed, because its
+    // daemon would hide everything the grant is for.
+    //
+    // CHECKED HERE, AFTER GOOGLE, NOT AT `/reconnect`. The start of this flow
+    // names no tenant on purpose (see `reconnect_start`): the only input that
+    // could pick one is the `hint`, which is attacker-controlled and is never
+    // used to look anything up, so refusing at the start would turn the link
+    // into an oracle for "which mailboxes have calendar". Here the tenant is
+    // the one Google just authenticated this browser as, so the answer is
+    // only ever about the reader's own mailbox. The token is dropped unsealed
+    // and nothing is installed or queued: their working credential stays as
+    // it was.
+    if purpose == Purpose::Calendar {
+        match state
+            .store()
+            .tenant_has_feature(&label, squelch_core::features::CALENDAR)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(label = %label, "calendar consent for a tenant without the calendar feature; nothing installed");
+                drop(grant.token);
+                return pages::console_problem(
+                    StatusCode::OK,
+                    CALENDAR_NOT_AVAILABLE_HEADING,
+                    CALENDAR_NOT_AVAILABLE,
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, label = %label, "reading the calendar feature failed");
+                drop(grant.token);
+                return reconnect_unavailable();
+            }
+        }
+    }
 
     // Re-learn the recipient. Creates nothing and mutates nothing; what it does
     // is refuse if this mailbox is not the account the CLUSTER says owns the
@@ -1947,8 +2121,15 @@ async fn reconnect_install(state: &ControlState, code: String, pkce_verifier: St
     };
     // Save before starting work. A browser disconnect cannot cancel the job,
     // and a service restart resumes the same tenant-sealed ciphertext.
-    if let Err(e) =
-        crate::reconnect::enqueue(state, &token, &label, &grant.account_email, &ciphertext).await
+    if let Err(e) = crate::reconnect::enqueue_for(
+        state,
+        &token,
+        &label,
+        &grant.account_email,
+        &ciphertext,
+        purpose,
+    )
+    .await
     {
         tracing::error!(error = %e, label = %label, "saving reconnect work failed");
         return reconnect_unavailable();
@@ -2876,7 +3057,9 @@ impl Voice {
             SessionKind::Signup { .. } => Voice::Signup,
             SessionKind::Console => Voice::Console(label.to_string()),
             SessionKind::App => Voice::App,
-            SessionKind::Reconnect => Voice::Reconnect,
+            // Both purposes refuse in the reconnect's words: the cookie carries
+            // no purpose, so this is the only voice both sides can agree on.
+            SessionKind::Reconnect { .. } => Voice::Reconnect,
             SessionKind::Agent { .. }
             | SessionKind::AgentConfirm { .. }
             | SessionKind::AgentDone { .. }
@@ -2981,6 +3164,17 @@ pub(crate) fn field_capped(body: &Bytes, name: &str, cap: usize) -> String {
         .unwrap_or_default()
 }
 
+/// The `hint` `/reconnect` was given, if it is ONE bare address of at most
+/// [`MAX_HINT`] characters; `None` otherwise, which is the same as no hint.
+///
+/// Ignored rather than refused: the hint is a convenience, and a link with a
+/// mangled one should still reconnect (it just gets no account pre-selected and
+/// no guard). The shape is [`is_email`]'s, the same refusals included (no angle
+/// brackets, separators, quotes or control characters), at the longer ceiling.
+fn login_hint(raw: &str) -> Option<String> {
+    is_email_within(raw, MAX_HINT).then(|| raw.to_string())
+}
+
 /// Whether a submitted string is shaped like something we could mail.
 ///
 /// NOT an RFC 5322 validator: that grammar accepts things no mail provider will
@@ -2996,8 +3190,13 @@ pub(crate) fn field_capped(body: &Bytes, name: &str, cap: usize) -> String {
 /// mails the invite to the part after the angle bracket. Separators go with it,
 /// because a comma or a semicolon is how a second recipient gets in.
 pub(crate) fn is_email(email: &str) -> bool {
+    is_email_within(email, MAX_EMAIL)
+}
+
+/// [`is_email`] at a stated length ceiling.
+fn is_email_within(email: &str, max: usize) -> bool {
     const REFUSED: &[char] = &['<', '>', ',', ';', ':', '"', '(', ')', '[', ']', '\\', '`'];
-    if !(3..=MAX_EMAIL).contains(&email.len())
+    if !(3..=max).contains(&email.len())
         || !email.bytes().all(|b| b.is_ascii_graphic())
         || email.contains(REFUSED)
     {
@@ -3199,6 +3398,43 @@ mod tests {
             "adaexample.com",
         ] {
             assert!(!is_email(bad), "{bad:?}");
+        }
+    }
+
+    /// A hint is one bare address or nothing. Everything a crafted link could
+    /// try to smuggle in through it is ignored rather than passed to Google.
+    #[test]
+    fn a_hint_is_one_bare_address_or_nothing() {
+        assert_eq!(
+            login_hint("ada@example.com").as_deref(),
+            Some("ada@example.com")
+        );
+        assert_eq!(
+            login_hint("ADA@Example.com").as_deref(),
+            Some("ADA@Example.com")
+        );
+        let longest = format!(
+            "{}@example.com",
+            "a".repeat(MAX_HINT - "@example.com".len())
+        );
+        assert_eq!(longest.len(), MAX_HINT);
+        assert!(login_hint(&longest).is_some());
+        for bad in [
+            "".to_string(),
+            "ada".to_string(),
+            "ada@example".to_string(),
+            "ada@one.com,bob@two.com".to_string(),
+            "Ada <ada@example.com>".to_string(),
+            "ada@example.com\r\nSet-Cookie: x=1".to_string(),
+            "ada@example.com\n".to_string(),
+            " ada@example.com".to_string(),
+            "ada@@example.com".to_string(),
+            "\"><script>@x.com".to_string(),
+            "ada@exämple.com".to_string(),
+            format!("{longest}a"),
+            "a".repeat(10_000),
+        ] {
+            assert_eq!(login_hint(&bad), None, "{bad:?}");
         }
     }
 

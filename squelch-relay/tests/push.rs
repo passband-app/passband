@@ -138,7 +138,7 @@ async fn forwards_apns_headers_and_a_content_free_payload() {
     assert_eq!(header.kid.as_deref(), Some("KEYID12345"));
 
     // The whole point of the relay: an opaque id and a generic alert.
-    assert_eq!(c.body["aps"]["alert"]["title"], "squelch");
+    assert_eq!(c.body["aps"]["alert"]["title"], "Passband");
     assert_eq!(c.body["aps"]["alert"]["body"], "New mail surfaced");
     assert_eq!(c.body["aps"]["mutable-content"], 1);
     assert_eq!(c.body["aps"]["sound"], "default");

@@ -331,12 +331,14 @@ Organize settings by actual responsibility:
 max_model_turns = 4
 max_tool_calls = 8
 max_review_calls = 1
-timeout_secs = 90
+timeout_secs = 90  # per model turn
 concurrency = 2
 
 [triage.context]
 initial_thread_messages = 8
 max_related_messages = 20
+full_body_chars = 16000  # a body's cap in context; read_message pages the rest
+access_body_chars = 8000  # the access check's cap; links shortened, quotes kept
 # explicit byte/token and attachment limits selected with the provider adapter
 
 [notify]
@@ -358,6 +360,7 @@ waiting_saturation_days = 7
 
 [sync]
 backfill_days = 30
+archive_days = 365
 ```
 
 These are supported configuration fields; see [TRIAGE-OPERATIONS.md](TRIAGE-OPERATIONS.md) for enforced spend and revisit limits. Bound total input/output tokens and account spend as well as wall time; retain existing usage ledgers and gateway/model resolution rather than hardcoding a model or price in this design. Reserve model-turn budget for a final answer; exhaustion without a valid answer produces pending/retry, not an invented result. Keep fast-notification capacity separate from migration/investigation work.

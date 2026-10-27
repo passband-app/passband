@@ -43,7 +43,15 @@ struct PassbandApp: App {
                 // passband://pair links. Parked on the store rather than acted
                 // on here: only the Connect gate can pair, and an install that
                 // already has an identity must not re-pair over it.
-                .onOpenURL { store.receivePairLink($0) }
+                .onOpenURL { url in
+                    // passband://draft/<id>: a link an agent gave for a draft
+                    // it left. Anything else is a pair link or nothing.
+                    if let link = AgentDraftLink(url) {
+                        store.openAgentDraft(link)
+                    } else {
+                        store.receivePairLink(url)
+                    }
+                }
         }
         .defaultSize(width: 1320, height: 880)
         .windowStyle(.hiddenTitleBar)
@@ -67,6 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.
         Notifier.shared.install()
+        // Look at the floating code panel without waiting for a login code:
+        // same posture as PASSBAND_FORCE_TOUR, a launch environment only.
+        if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {
+            LoginCodePanel.shared.show(
+                .init(service: "GitHub", code: code), sender: "GitHub <noreply@github.com>",
+                account: nil, onMissed: {})
+        }
         // Attachment bytes staged for Quick Look are torn down when the panel
         // closes; this is the sweep for the ones a crash or a hard quit stranded.
         StagedAttachment.purgeRoot()
@@ -239,19 +254,28 @@ struct PassbandCommands: Commands {
         }
 
         CommandMenu("Go") {
-            // NO KEYBOARD SHORTCUT. These five used to hold ⌘1–⌘5; the digits
+            // NO KEYBOARD SHORTCUT. These used to hold ⌘1–⌘5; the digits
             // went to account switching, and the BARE `1`–`5` in
             // RootView.globalBindings do the routing — which they always did,
             // behind the dispatcher's input guard, so nothing was lost but the
             // menu's ability to advertise them.
-            ForEach(Array(MainView.mainViews.enumerated()), id: \.element) { _, view in
-                Button(view.label) { store.setView(view) }
+            // Calendar rides second when it is offered, and takes the 2:
+            // same list as the rail, from the same gate.
+            ForEach(MainView.railViews(calendar: store.calendarPageAvailable), id: \.view) { row in
+                Button(row.view.label) { store.setView(row.view) }
                     .disabled(blocked)
             }
             Divider()
             Button("Usage") { store.setView(.usage) }
                 .disabled(blocked)
             Button("Settings") { store.setView(.settings) }
+                .disabled(blocked)
+            // Settings panes, named here because they were destinations of
+            // their own until they left the rail, and a menu is where somebody
+            // looks for a page that is no longer where it was.
+            Button("Rules") { store.openSettings(.rules) }
+                .disabled(blocked)
+            Button("Groups") { store.openSettings(.groups) }
                 .disabled(blocked)
             Divider()
             Button("Back") { store.goBack() }

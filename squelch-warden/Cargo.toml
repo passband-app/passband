@@ -53,3 +53,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# The quota test reads the committed hosted manifests as the typed objects
+# the API server would make of them. This is the YAML reader `kube` already
+# links (its kubeconfig parser), pinned to the version kube-client requires
+# (a 0.0.x requirement is exact), so it adds no crate to the tree; a `kube`
+# bump that moves it must move this line too, or two copies are linked. It is
+# a dev-dependency because the rule above holds: nothing in the warden itself
+# reads or renders YAML.
+serde-saphyr = "0.0.29"

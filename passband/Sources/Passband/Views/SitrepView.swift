@@ -285,7 +285,16 @@ struct SitrepView: View {
         // Keyed on BOTH facts: a board that loads straight into items never
         // changes `isClear` (false before the load, false after), so watching
         // that alone would never arm.
-        .onChange(of: [ranked.isEmpty && readingSenders.isEmpty, quiet], initial: true) { _, now in
+        //
+        // NOT WHILE THE BOARD IS A SWITCH'S SNAPSHOT: its rows are what the
+        // mailbox held last time, and mail handled somewhere else since would
+        // arm on the repaint and chime when the daemon answered. The flag is
+        // a key so a snapshot that turns out to be current still arms, on the
+        // answer that confirms it.
+        .onChange(
+            of: [ranked.isEmpty && readingSenders.isEmpty, quiet, store.boardIsSnapshot], initial: true
+        ) { _, now in
+            if now[2] { return }
             if !now[0] {
                 QuietBoard.shared.armed = true
             } else if now[1], QuietBoard.shared.armed {

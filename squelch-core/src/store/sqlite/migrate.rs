@@ -77,8 +77,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     // Email-authentication verdict. NULL on every pre-existing row and NOT
-    // backfilled: NULL is the safe reading (no tracking-pixel bypass), and a
-    // re-sync refills it through the message upsert.
+    // backfilled: NULL is the safe reading (it grants nothing: no
+    // tracking-pixel bypass, no ghost sender scope, no timezone observation),
+    // and a re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
     // Automatic-unsubscribe job state. NULL on every pre-existing row, which is
     // exactly a legacy browser unsubscribe: no job, and the detector armed.
@@ -106,6 +107,52 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // already stored came from it. The first sync after the upgrade backfills
     // the label's window like any other.
     add_column_if_missing(conn, "messages", "is_spam", "INTEGER NOT NULL DEFAULT 0")?;
+    // The Date header's UTC offset, for the timezone inference. NULL on every
+    // pre-existing row and NOT backfilled: the raw mail is not stored, so only
+    // a Gmail fetch per message could fill it, and the inference learns
+    // forward instead. A re-sync of a message fills its row.
+    add_column_if_missing(conn, "messages", "date_offset_minutes", "INTEGER")?;
+    // The archive tier's marker. 0 on every pre-existing row, which is the
+    // honest reading: nothing stored before the walk existed came from it.
+    add_column_if_missing(conn, "messages", "is_archive", "INTEGER NOT NULL DEFAULT 0")?;
+    // The archive walk's forward edge. NULL on a cursor row written before it
+    // existed, which the store reads as that row's `walked_to`.
+    add_column_if_missing(conn, "archive_walk", "covered_to", "TEXT")?;
+    // ITS INDEX, partial: only mail with a non-zero offset is an observation,
+    // and most mail is stamped UTC, so the index holds a fraction of the table
+    // and costs nothing on the bulk mail it leaves out. COVERING: it carries
+    // every column `zones::OFFSETS_SQL` reads, so the recompute never visits a
+    // message row (whose later columns sit past the body on overflow pages).
+    // Keyed sender, then the flags the query pins (authenticated, inbound, not
+    // spam), then time, so the read seeks straight to one sender's countable
+    // observations, newest first, and stops at its cap. Every named column
+    // guarded, as for the spam index below.
+    //
+    // `idx_messages_zone_obs` was this index without the flags; it never
+    // shipped, but a development database may hold it, and it is dropped by
+    // name so the two never coexist.
+    conn.execute("DROP INDEX IF EXISTS idx_messages_zone_obs", [])?;
+    if has_columns(
+        conn,
+        "messages",
+        &[
+            "account_id",
+            "auth_pass",
+            "date_offset_minutes",
+            "from_addr",
+            "is_sent",
+            "is_spam",
+            "received_at",
+        ],
+    )? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_zone_offsets
+             ON messages(account_id, from_addr COLLATE NOCASE, auth_pass, is_sent, is_spam,
+                         received_at, date_offset_minutes)
+             WHERE date_offset_minutes != 0",
+            [],
+        )?;
+    }
     // The composer grew Cc and Bcc fields; a draft has to be able to hold what
     // the composer can show, or closing one silently drops recipients.
     add_column_if_missing(conn, "drafts", "cc_addr", "TEXT NOT NULL DEFAULT ''")?;
@@ -188,6 +235,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // schema.sql runs before this seam, so on an old DB it would reference a
     // column that does not exist yet and fail every open.
     add_column_if_missing(conn, "drafts", "forward_of_message_id", "INTEGER")?;
+    // Which drafts an agent wrote (issue #394). Every existing row is the
+    // owner's own, which is what the default says.
+    add_column_if_missing(conn, "drafts", "from_agent", "INTEGER NOT NULL DEFAULT 0")?;
     if has_columns(conn, "drafts", &["account_id", "forward_of_message_id"])? {
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_forward
@@ -212,6 +262,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "device_tokens", "client_platform", "TEXT")?;
     add_column_if_missing(conn, "device_tokens", "client_version", "TEXT")?;
     add_column_if_missing(conn, "device_tokens", "client_seen_at", "TEXT")?;
+    // When that app last wrote something. NULL on every pre-existing row and
+    // NOT backfilled: nothing recorded which app made a past write.
+    add_column_if_missing(conn, "device_tokens", "client_action_at", "TEXT")?;
     // Per-property triage reasons (JSON object). NULL on pre-existing rows.
     add_column_if_missing(conn, "triage", "field_reasons", "TEXT")?;
 
@@ -309,6 +362,22 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_triage_remind_at
              ON triage(account_id, remind_at) WHERE remind_at IS NOT NULL",
+            [],
+        )?;
+    }
+
+    // AND THE FIRED REMINDERS' INDEX, the same shape for the same reason. A
+    // fired reminder (`reminded_at` set, `remind_at` cleared) is a standing-
+    // band arm, and `append_due_reminders` asks for them on EVERY Standing
+    // read, which is the client's 10 s poll; without this the ask was a walk
+    // of every triage row in the account, 233 ms at 50k messages, under the
+    // mutex every request waits on. Partial because almost no row has ever
+    // had a reminder fire. Both columns in the guard, as `idx_messages_spam`
+    // below explains: an index names every column it covers.
+    if has_columns(conn, "triage", &["account_id", "reminded_at"])? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_triage_reminded_at
+             ON triage(account_id, reminded_at) WHERE reminded_at IS NOT NULL",
             [],
         )?;
     }
@@ -599,6 +668,75 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // the honest reading, which is also the column default: no backfill.
     add_column_if_missing(conn, "drafts", "bcc_addr", "TEXT NOT NULL DEFAULT ''")?;
 
+    // Per-calendar failure state and the cap's mark, added after the calendar
+    // tables first existed. The defaults read as "never failed, not cut",
+    // which a store that had never recorded either is: no backfill.
+    add_column_if_missing(
+        conn,
+        "calendar_calendars",
+        "failures",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "calendar_calendars", "retry_at", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "calendar_calendars",
+        "truncated",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // Colour and role per calendar, colour, organizer flag and description per
+    // event (calendar wave 3). The calendar tables have not shipped, so this
+    // only carries a development store forward: a calendar's role and colour
+    // are filled by the next pass, an event's fields by its next change or
+    // the daily full read. Until then a stored event reads as not the
+    // user's own, which only hides an Edit button.
+    add_column_if_missing(conn, "calendar_calendars", "color", "TEXT")?;
+    add_column_if_missing(conn, "calendar_calendars", "access_role", "TEXT")?;
+    add_column_if_missing(conn, "calendar_events", "color_id", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "calendar_events",
+        "organizer_self",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "calendar_events", "description", "TEXT")?;
+    // Guests (calendar wave 5). An events table from before them was filled
+    // by reads that asked Google for one attendee per event, and its sync
+    // tokens were minted by those requests ("All other query parameters
+    // should be the same as for the initial synchronization to avoid
+    // undefined behavior"). So when the column is new, every calendar forgets
+    // its token and its last full read: the next pass reads each in full with
+    // the new parameters and fills the guest lists. Until it has, a stored
+    // event reads as having no guests, and a guest edit still builds its list
+    // from a fresh read of Google, never from these rows.
+    if add_column_if_missing(
+        conn,
+        "calendar_events",
+        "guests_truncated",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        conn.execute(
+            "UPDATE calendar_calendars SET sync_token=NULL, full_synced_at=NULL",
+            [],
+        )?;
+    }
+    // The unreadable-organizer mark (calendar fix round 1). A stored row from
+    // before it reads as "no organizer named", which the edit guard treats
+    // as the user's own; so when the column is new every calendar forgets
+    // its token and last full read, and the next pass rereads each in full
+    // and sets the mark where Google sends such an organizer.
+    if add_column_if_missing(
+        conn,
+        "calendar_events",
+        "organizer_unreadable",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        conn.execute(
+            "UPDATE calendar_calendars SET sync_token=NULL, full_synced_at=NULL",
+            [],
+        )?;
+    }
+
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'
     // when the store opens belongs to a batch that died — a restart, a crash, a
@@ -627,9 +765,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // it something to read.
     //
     // Self-triggering and idempotent: the candidate predicate is "sent, has
-    // recipients, has no index rows", so a completed pass matches nothing and an
-    // interrupted one resumes where it stopped. No done-flag and no `added_*`
-    // gate — a plain re-run is free.
+    // recipients, has no index rows", so a completed pass matches nothing. It
+    // runs under one commit, so an interrupted one starts over on the next
+    // open rather than resuming. No done-flag and no `added_*` gate — a plain
+    // re-run is free.
     backfill_message_recipients(conn)?;
 
     // ---- THE FTS INDEX'S OPTIONS CHANGED ----------------------------------
@@ -1266,20 +1405,23 @@ fn clear_stale_no_extractor_markers(conn: &Connection) -> Result<()> {
         )?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let tx = conn.unchecked_transaction()?;
     for category in stranded {
         if crate::triage::extract::extractor_for_category(&category).is_some() {
-            conn.execute(
+            tx.execute(
                 "UPDATE triage SET extractor_model_used = NULL
                  WHERE extractor_model_used = 'skip-no-extractor' AND category = ?1",
                 params![category],
             )?;
         }
     }
+    tx.commit()?;
     Ok(())
 }
 
-/// ONE-SHOT (and resumable): fill `message_recipients` from the recipient
-/// display strings already on disk.
+/// ONE-SHOT (and re-runnable): fill `message_recipients` from the recipient
+/// display strings already on disk, under one commit, so an open that dies
+/// halfway leaves nothing and the next one does it all again.
 ///
 /// Local and parse-only — no network, unlike the recipients sweep in the sync
 /// engine that produced those strings in the first place. Rows with no
@@ -1324,16 +1466,20 @@ fn backfill_message_recipients(conn: &Connection) -> Result<()> {
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
+    // One commit for the whole backfill: a row per recipient, each its own
+    // fsync in autocommit, over every sent message on a first open.
+    let tx = conn.unchecked_transaction()?;
     for (message_id, account_id, to, cc, bcc) in rows {
         let joined = crate::sync::ingest::join_recipient_lists(&[&to, &cc, &bcc]);
         for addr in crate::sync::ingest::parse_stored_recipients(&joined) {
-            conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO message_recipients(account_id, message_id, addr)
                  VALUES(?1,?2,?3)",
                 params![account_id, message_id, addr],
             )?;
         }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1357,11 +1503,8 @@ fn resanitize_institutions(conn: &Connection) -> Result<usize> {
     // mid-loop.
     //
     // The two other one-shots in THIS file (`backfill_message_recipients` and
-    // `clear_stale_no_extractor_markers`) are still bare autocommit loops with
-    // the same problem; the store-side cleanups in `specialists.rs` are the ones
-    // that take a transaction. Said plainly because an earlier draft of this
-    // comment claimed both neighbours already did, which points a reader away
-    // from two functions that want the same treatment.
+    // `clear_stale_no_extractor_markers`) take one too, as do the store-side
+    // cleanups in `specialists.rs`.
     // `unchecked_transaction` rather than `transaction`, so this stays a
     // `&Connection` and the whole migrate() chain keeps its signature.
     let tx = conn.unchecked_transaction()?;

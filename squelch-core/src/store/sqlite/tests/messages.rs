@@ -2068,3 +2068,45 @@ fn a_read_message_with_no_cc_is_not_in_the_backfill_queue() {
     assert!(!queued.contains(&read), "{queued:?}");
     assert!(queued.contains(&unread), "{queued:?}");
 }
+
+/// The read-path assessment enqueues ride the caller's transaction when there
+/// is one and open their own when there is none: a thread read that queues
+/// ten sources commits once rather than thirty times, and a caller that rolls
+/// back takes the enqueues with it instead of finding them already committed.
+#[test]
+fn source_assessments_commit_once_and_join_an_open_transaction() {
+    let (store, acct) = store();
+    let ids: Vec<i64> = (0..3)
+        .map(|i| {
+            triaged(acct, &format!("g{i}"), "t")
+                .from("ext@example.net")
+                .upsert(&store)
+        })
+        .collect();
+    let jobs = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM agent_triage_jobs WHERE account_id = ?1",
+            [acct],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let conn = store.lock().unwrap();
+
+    // Inside a caller's transaction: queued there, and gone with its rollback.
+    let tx = conn.unchecked_transaction().unwrap();
+    agent_triage::ensure_agent_source_ids_conn(&tx, acct, &ids).unwrap();
+    assert_eq!(jobs(&tx), 3, "queued inside the caller's transaction");
+    tx.rollback().unwrap();
+    assert_eq!(jobs(&conn), 0, "nothing was committed on its own");
+
+    // On a bare connection: its own transaction, closed again on return.
+    agent_triage::ensure_agent_source_ids_conn(&conn, acct, &ids).unwrap();
+    assert!(conn.is_autocommit(), "no transaction left open");
+    assert_eq!(jobs(&conn), 3);
+
+    // Nothing left to queue: no write, and still no transaction left behind.
+    agent_triage::ensure_agent_source_ids_conn(&conn, acct, &ids).unwrap();
+    assert!(conn.is_autocommit());
+    assert_eq!(jobs(&conn), 3);
+}

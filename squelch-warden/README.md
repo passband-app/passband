@@ -119,23 +119,27 @@ in this pod's log.
 
 ## What a tenant is
 
-Seven objects in namespace `tenants`, all named from the label:
+Up to nine objects in namespace `tenants`, all named from the label:
 
 | Object | Name | Survives DELETE |
 |---|---|---|
 | Secret (age identity, recipient, address) | `<label>-identity` | yes |
 | Secret (sealed credentials) | `<label>-credential` | yes |
 | PersistentVolumeClaim | `<label>-data` | yes |
+| Secret (LLM gateway key, while one is minted) | `<label>-llm` | no |
+| Secret (share token, while one is minted) | `<label>-control` | no |
 | NetworkPolicy | `<label>` | no |
 | Service | `<label>` | no |
 | Deployment | `<label>` | no |
 | Ingress | `<label>` | no |
 
-Phase two applies them in that order bottom-up from the credential: volume
-first, policy before the pod it polices, Ingress last so a hostname only starts
-answering once something is behind it. `DELETE` removes them Ingress first and
-NetworkPolicy last, so a terminating pod stays policed for the whole of its
-termination.
+Phase two applies the provisioned five in that order bottom-up from the
+credential: volume first, policy before the pod it polices, Ingress last so a
+hostname only starts answering once something is behind it. The two Secrets
+between them arrive later, when the control plane mints the key and the share
+token. `DELETE` removes the workload Ingress first and NetworkPolicy last, so a
+terminating pod stays policed for the whole of its termination, and then the
+two minted Secrets.
 
 ### The pod
 
@@ -361,6 +365,7 @@ holds even for a tenant reconciled by hand.
 | `SQUELCH_WARDEN_IMAGE_PULL_SECRET` | unset | For a private squelchd image. |
 | `SQUELCH_WARDEN_RELAY_URL` | unset | APNs relay, passed on as `SQUELCH_RELAY_URL`. https only, and no `@`, `?` or `#`. Unset means no hosted iOS push. |
 | `SQUELCH_WARDEN_RELAY_SECRET_NAME` | `apns-relay` | Secret holding the relay's PUSH-ONLY bearer (key `token`; the relay's `SQUELCH_RELAY_PUSH_TOKEN`, never its auth token), passed on as an optional `SQUELCH_RELAY_TOKEN` reference. Rename it to deliver a new value. |
+| `SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME` | `browserbase` | Secret holding the fleet's Browserbase API key (key `api-key`), always passed to every tenant as an optional `SQUELCH_BROWSERBASE_API_KEY` reference. Not a switch: with no such Secret the daemons simply have no browser rung for the automatic unsubscribe. Rename it to deliver a new key. |
 | `SQUELCH_WARDEN_RELAY_TOPIC` | unset | Passed on as `SQUELCH_RELAY_TOPIC`. Refused without the URL. Hosted needs `app.passband.client.ios`: the relay's default is the Mac bundle id. |
 | `SQUELCH_WARDEN_NODE_CIDR` | unset | Lets the node reach 8848 and 9464, when the CNI drops kubelet probes. |
 | `SQUELCH_WARDEN_HTTP_READINESS` | `off` | Probe `/healthz` on 9464 instead of accepting on 8848. Turn on only once the whole fleet runs a daemon that serves it. |

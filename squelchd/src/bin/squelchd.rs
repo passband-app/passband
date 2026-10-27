@@ -93,6 +93,42 @@ enum Command {
     /// live per account at a time, it expires in minutes, and it is spent on
     /// first use or after a handful of failed claims.
     Pair(PairArgs),
+    /// See where this mailbox stands against its daily triage caps, and lift
+    /// one for the rest of the day.
+    Triage(TriageArgs),
+}
+
+#[derive(Args)]
+struct TriageArgs {
+    #[command(subcommand)]
+    command: TriageCommand,
+}
+
+#[derive(Subcommand)]
+enum TriageCommand {
+    /// Print today's runs against the daily caps and how many jobs they are
+    /// holding until tomorrow.
+    Status,
+    /// Allow RUNS more investigations today and let the held jobs run now.
+    ///
+    /// Works on a running daemon: the worker reads the grant on its next job.
+    /// The grant lasts until midnight UTC and REPLACES any earlier grant for
+    /// the day, so `grant 0` takes it back. Each run is a model job, so this
+    /// spends against the LLM budget.
+    Grant {
+        /// Extra runs for today, on top of the configured cap.
+        runs: u32,
+        /// Raise the background cap (backfill, refreshes, revisits) instead of
+        /// the total. Background runs still count toward the total, so this
+        /// only helps while the total has room.
+        #[arg(long)]
+        background: bool,
+        /// Raise the access lane's cap (the owner's sent mail, spam, archive
+        /// rows a caller asked to read) instead of the total. Access runs
+        /// count toward the total too.
+        #[arg(long, conflicts_with = "background")]
+        access: bool,
+    },
 }
 
 #[derive(Args)]
@@ -161,6 +197,18 @@ struct AuthArgs {
     /// read-only one, as two consent flows into two separate slots.
     #[arg(long)]
     write: bool,
+
+    /// Mint the CALENDAR credential (calendar.events +
+    /// calendar.calendarlist.readonly) into its own slot, and touch nothing
+    /// else: the Read and Write credentials stay exactly as they are.
+    ///
+    /// Optional, and only for the calendar page. Run plain `squelchd auth`
+    /// first: the consent is matched to this mailbox through the Gmail access
+    /// this OAuth client already has. Works with --headless, --broker and
+    /// --export. Conflicts with --write, which renews the Gmail pair, and with
+    /// --import, where the blob decides what is stored.
+    #[arg(long, conflicts_with_all = ["write", "import"])]
+    calendar: bool,
 
     /// Headless mode: do NOT auto-open a browser, and bind the loopback
     /// listener to a FIXED port so it can be SSH-forwarded.
@@ -403,11 +451,104 @@ fn other_err(msg: String) -> squelch_core::CoreError {
     squelch_core::CoreError::Other(anyhow::anyhow!(msg))
 }
 
+/// How long shutdown waits for the calendar sync loop before aborting it.
+const CALENDAR_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The floor on tokio worker threads, whatever the box reports.
+///
+/// Left to its default the runtime sizes itself by
+/// `available_parallelism()`, which honours the cgroup CPU quota, and the
+/// hosted tenant pod's limit is one CPU: ONE worker thread, on which both
+/// HTTP doors, every SSE pump, every timer, and the sync engine's and triage
+/// worker's direct store calls all run. The store is a `Mutex<Connection>`,
+/// so whenever a `spawn_blocking` handler, an embed or a triage commit holds
+/// it, that lone worker parks in `lock()` and nothing else progresses: no
+/// accept, no auth, no keep-alive, no tick.
+///
+/// Four, because three always-on tasks make direct store calls and can all
+/// be parked in `lock()` at the same moment (the sync engine, the triage
+/// worker, an MCP tool call), and the door should still answer then. Workers
+/// park when idle, so on a one-core box the extra three cost a stack each
+/// and nothing more. A floor and not a cap: a self-host box with eight cores
+/// keeps eight, as it always has.
+const MIN_WORKER_THREADS: usize = 4;
+
+/// tokio's own override. Read here, because calling `worker_threads` on the
+/// builder is exactly what makes tokio stop reading it, and an operator's
+/// no-rebuild knob for a stalled daemon should not vanish silently.
+const WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
+
+/// The box's parallelism as the runtime sees it: cgroup-quota-aware, so on a
+/// hosted pod it reads 1 whatever the node has.
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Worker threads for a runtime: the operator's override when it is set and a
+/// positive integer, else the box's `parallelism`; either floored at
+/// [`MIN_WORKER_THREADS`].
+fn worker_threads_for(parallelism: usize, env_override: Option<&str>) -> usize {
+    env_override
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(parallelism)
+        .max(MIN_WORKER_THREADS)
+}
+
+/// How long after boot the planner-statistics pass runs, then hourly.
+///
+/// A fresh install's first hour (the initial backfill and the first triage
+/// burst) is the heaviest of its life, and with no statistics at all it is
+/// exactly the pathology the pass exists to fix, so the first ticks come
+/// early; an upgraded install gets its first full pass a minute in, with the
+/// door already bound. Hourly after that keeps up with a process that runs
+/// for weeks while its tables grow.
+const STATISTICS_REFRESH_AFTER_SECS: [u64; 3] = [60, 540, 3000];
+
+/// Spawn the planner-statistics pass ([`SqliteStore::refresh_statistics`])
+/// on [`STATISTICS_REFRESH_AFTER_SECS`], then hourly, for both long-lived
+/// modes (`serve` and `run`). Off the open path on purpose: see the store
+/// method. Behind the mutex via `spawn_blocking`; never fatal; not
+/// shutdown-aware for the same reason the shredder is not: the next tick is
+/// minutes or an hour away and the runtime drop ends it.
+fn spawn_statistics_refresh(store: Arc<SqliteStore>) {
+    tokio::spawn(async move {
+        let mut early = STATISTICS_REFRESH_AFTER_SECS.into_iter();
+        loop {
+            let secs = early.next().unwrap_or(3600);
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            let store = store.clone();
+            match tokio::task::spawn_blocking(move || store.refresh_statistics()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("squelchd: planner statistics refresh failed: {e}"),
+                Err(_) => eprintln!("squelchd: planner statistics refresh panicked"),
+            }
+        }
+    });
+}
+
 fn build_runtime() -> Result<tokio::runtime::Runtime, squelch_core::CoreError> {
-    tokio::runtime::Builder::new_multi_thread()
+    let parallelism = available_parallelism();
+    let env_override = std::env::var(WORKER_THREADS_ENV).ok();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads_for(parallelism, env_override.as_deref()))
         .enable_all()
         .build()
-        .map_err(|e| other_err(format!("tokio runtime: {e}")))
+        .map_err(|e| other_err(format!("tokio runtime: {e}")))?;
+    // Said once at boot, by both long-lived modes, so a stall is diagnosed
+    // against the number that applies rather than the cores the node claims.
+    eprintln!(
+        "squelchd: tokio runtime: {} worker thread(s), quota-aware parallelism {}{}",
+        runtime.metrics().num_workers(),
+        parallelism,
+        env_override
+            .as_deref()
+            .map(|v| format!(", {WORKER_THREADS_ENV}={v}"))
+            .unwrap_or_default()
+    );
+    Ok(runtime)
 }
 
 /// Load config plus the Stage-2 cap sources, which `serve` reports as "default"
@@ -486,12 +627,6 @@ fn build_embedder(config: &Config, metrics: Option<Arc<SyncMetrics>>) -> Option<
 /// the next minute. The startup line below prints both numbers rather than
 /// leaving an operator who set 5 wondering why it took 65.
 const EMBEDDER_REAP_INTERVAL_SECS: u64 = 60;
-
-/// How often the scheduled-send worker looks for due mail. A scheduled mail
-/// goes out at most this late (plus the pass itself).
-const SCHEDULED_SEND_TICK_SECS: u64 = 10;
-/// The worker's first look, after startup.
-const SCHEDULED_SEND_FIRST_TICK_SECS: u64 = 5;
 
 /// How many consecutive contended ticks before the reaper says so. An embed
 /// holding the lock is normal and happens all day; a whole hour of them is a
@@ -649,6 +784,7 @@ fn main() -> ExitCode {
         Command::Serve(args) => cmd_serve(config, cap_sources, args),
         Command::Token(args) => cmd_token(&config, args),
         Command::Pair(args) => cmd_pair(&config, args),
+        Command::Triage(args) => cmd_triage(&config, args),
     };
 
     match result {
@@ -665,14 +801,21 @@ fn scope_word(scopes: AuthScopes) -> &'static str {
     match scopes {
         AuthScopes::Read => "READ",
         AuthScopes::Write => "WRITE",
+        AuthScopes::Calendar => "CALENDAR",
     }
 }
 
 /// Which credentials one `auth` invocation mints, in order. `--write` re-mints
 /// READ too so the pair cannot drift, but it stays two scope sets, two flows,
 /// two slots — the two-door split is never collapsed into one merged token.
+///
+/// `--calendar` mints the Calendar credential ALONE. Calendar is an optional
+/// grant on top of a working mailbox, so asking for it must never re-run (and
+/// so never risk) the Gmail consents.
 fn auth_plan(args: &AuthArgs) -> Vec<AuthScopes> {
-    if args.write {
+    if args.calendar {
+        vec![AuthScopes::Calendar]
+    } else if args.write {
         vec![AuthScopes::Write, AuthScopes::Read]
     } else {
         vec![AuthScopes::Read]
@@ -770,7 +913,7 @@ fn mint_credential(
 ) -> Result<(), squelch_core::CoreError> {
     let kind = scopes.kind();
     println!(
-        "Authorizing Gmail account: {email} [{}] via {:?} backend",
+        "Authorizing Google account: {email} [{}] via {:?} backend",
         scopes.label(),
         backend
     );
@@ -1220,6 +1363,72 @@ fn check_transfer_usable(transfer: &CredentialTransfer) -> Result<(), squelch_co
 // `token issue` prints its plaintext once, `pair` prints its code once, and
 // `token list` prints neither, not even the stored hashes.
 
+/// `triage status` and `triage grant`: the store directly, like `token`, so
+/// they work in a tenant pod beside the running daemon.
+fn cmd_triage(config: &Config, args: &TriageArgs) -> Result<(), squelch_core::CoreError> {
+    use squelch_core::triage::agent_config::{
+        ACCESS_BUDGET_KEY, BACKGROUND_BUDGET_KEY, TOTAL_BUDGET_KEY,
+    };
+    let (store, account_id) = open_account_store(config)?;
+    let agent = &config.triage.agent;
+    if let TriageCommand::Grant {
+        runs,
+        background,
+        access,
+    } = args.command
+    {
+        let (key, lane) = if background {
+            (BACKGROUND_BUDGET_KEY, "background")
+        } else if access {
+            (ACCESS_BUDGET_KEY, "access")
+        } else {
+            (TOTAL_BUDGET_KEY, "total")
+        };
+        let released = store.grant_daily_runs(account_id, key, runs, agent, chrono::Utc::now())?;
+        println!(
+            "granted {runs} extra {lane} runs until midnight UTC; released {released} held jobs"
+        );
+    }
+    let status = store.daily_budget_status(account_id, agent, chrono::Utc::now())?;
+    println!(
+        "total       {} of {} runs today",
+        status.total_used, status.total_cap
+    );
+    println!(
+        "background  {} of {} runs today",
+        status.background_used, status.background_cap
+    );
+    println!(
+        "access      {} of {} runs today",
+        status.access_used, status.access_cap
+    );
+    println!(
+        "held until tomorrow: {} new mail, {} background, {} access, {} revisits",
+        status.held_arrival, status.held_background, status.held_access, status.held_revisit
+    );
+    if status.total_used >= status.total_cap
+        && (status.held_background > 0
+            || status.held_access > 0
+            || matches!(
+                args.command,
+                TriageCommand::Grant {
+                    background: true,
+                    ..
+                } | TriageCommand::Grant { access: true, .. }
+            ))
+    {
+        println!(
+            "note: the total is spent, so no lane grant (--background, --access) helps until it has room: `squelchd triage grant <runs>`"
+        );
+    }
+    if status.held_revisit > 0 {
+        println!(
+            "note: revisits also answer to [revisit].daily_cap, which a grant does not raise; they run tomorrow"
+        );
+    }
+    Ok(())
+}
+
 /// The URL scheme Passband registers for pairing deep links.
 const PAIR_LINK_SCHEME: &str = "passband://pair";
 
@@ -1558,6 +1767,8 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
             }
         });
 
+        spawn_statistics_refresh(store.clone());
+
         let mut engine = SyncEngine::new(store, creds, account_id, email, config);
         if let Some(e) = embedder {
             spawn_embedder_reaper(e.clone(), idle_unload_secs, shutdown_rx.clone());
@@ -1843,6 +2054,7 @@ async fn gather_store_metrics(
         // Platform and version only, already folded: two phones on one build
         // are one entry, and nothing that names a device comes back.
         let clients = store.client_versions_seen(account_id)?;
+        let client_actions = store.client_actions_seen(account_id)?;
         Ok::<_, squelch_core::CoreError>(squelch_core::metrics::StoreSnapshot {
             llm_cost_usd: squelch_core::metrics::estimate_cost_usd(&llm, &config),
             stats,
@@ -1851,7 +2063,13 @@ async fn gather_store_metrics(
             wal_bytes,
             devices_paired,
             clients,
+            client_actions,
             triage_jobs: store.triage_job_counts(account_id)?,
+            triage_budget: store.daily_budget_status(
+                account_id,
+                &config.triage.agent,
+                chrono::Utc::now(),
+            )?,
             retriage: store.retriage_progress(account_id)?,
         })
     })
@@ -1948,9 +2166,13 @@ fn agent_door_status(auth: &squelch_mcp::AgentDoorAuth) -> squelch_api::AgentDoo
     }
 }
 
-/// The router hosting both doors: `/mcp` (agent door, read-only, sealed-absent)
-/// and `/client/*` (human door, bearer-authed, the only write capability). They
-/// share the store; the agent door never sees the write credential.
+/// The router hosting both doors: `/mcp` (agent door, sealed-absent; it can
+/// leave drafts unless the owner turned that off, and send only if the owner
+/// turned that on, in Settings > Agents) and
+/// `/client/*` (human door, bearer-authed, where every write to Gmail is
+/// performed). They share the store; the agent door never sees the write
+/// credential, and an allowed agent write is the human door's pipeline run on
+/// its behalf (`ApiState::agent_mailer`).
 ///
 /// The agent door's auth is `agent_door`, resolved once by the caller: Open
 /// (Host guard only, the self-host door), OAuth (bearer JWTs bound to this
@@ -1978,6 +2200,13 @@ fn build_serve_router(
         api_state.triage_ranking(),
         mcp_cancel,
         agent_door,
+        // The agent door's only way to write mail is the human door's own
+        // send pipeline, and only as far as the owner's setting allows
+        // (drafts unless they chose otherwise; sending only if they chose it).
+        // It never holds the write credential.
+        Some(api_state.agent_mailer()),
+        // And the human door's own archive settings: one depth, one poke.
+        api_state.archive_surfacing(),
     )?;
     // The latency histogram wraps BOTH doors, outermost, so the number it
     // records is everything the daemon did for the request including auth. It
@@ -2009,6 +2238,12 @@ fn cmd_serve(
 
     let backend = config.credential_backend;
     let creds_path = config.resolve_credentials_path();
+    // A writer that died between its temp write and its rename left a temp
+    // file holding a token; every write sweeps them too, but a daemon that
+    // never refreshes would otherwise keep one forever.
+    if backend == squelch_core::config::CredentialBackend::File {
+        squelch_core::credentials::remove_stale_temp_files(&creds_path);
+    }
 
     // Manual-refresh signal: `POST /client/refresh` fires it, the poll loop
     // wakes early.
@@ -2020,6 +2255,11 @@ fn cmd_serve(
     // deliberately does not track and folding the two together would put that
     // fetch back on every ordinary refresh.
     let spam_refresh = Arc::new(tokio::sync::Notify::new());
+
+    // Refine poke: an agent search that just queued access checks for archive
+    // mail fires it (MCP `search_mail`, `GET /client/agent/search`) and the
+    // refine lane starts on them now instead of at its next interval.
+    let refine_poke = squelch_core::store::archive_surface::RefinePoke::new();
 
     // Wake channel: the store pokes it on every real `append_event`, and each
     // open `GET /client/events` stream re-reads the table past its own cursor.
@@ -2129,11 +2369,18 @@ fn cmd_serve(
     // keeps the startup line and the console truthful about the same result.
     let agent_door = squelch_mcp::AgentDoorAuth::from_env().for_account(&email);
 
+    // The human door counts its open event streams here and the sync engine
+    // reads the count: a client with the app open keeps the poll at its
+    // interval whatever `sync.idle_poll_secs` says.
+    let event_listeners = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine_listeners = event_listeners.clone();
     let api_state = squelch_api::ApiState::from_config(store.clone(), &email, &config, cap_sources)
         .map_err(|e| other_err(format!("{e}")))?
         .with_agent_door(agent_door_status(&agent_door))
         .with_refresh(refresh.clone())
+        .with_event_listeners(event_listeners)
         .with_spam_refresh(spam_refresh.clone())
+        .with_refine_poke(refine_poke.clone())
         // THE SAME registry the sync engine writes, so `/client/stats` answers
         // "is this mailbox still connected" from live state rather than from a
         // copy taken at boot.
@@ -2145,6 +2392,36 @@ fn cmd_serve(
     // `/client/shipments/poll`, it just answers `kicked: false`.
     let api_state = match shipment_kick {
         Some((kick, carriers)) => api_state.with_shipment_poll_kick(kick, carriers),
+        None => api_state,
+    };
+
+    // Google Calendar sync, read only. Built over the human door's own token
+    // resolver whenever an OAuth client is configured, GRANTED OR NOT: without
+    // a grant the loop idles and looks again each minute, because a grant can
+    // arrive under a running daemon (`squelchd auth --calendar`). Its own task
+    // with its own backoff, never inside the Gmail sync loop: a calendar
+    // failure of any kind must not fail or delay Gmail sync, triage or ingest.
+    let calendar_sync = api_state.calendar().cloned().and_then(|creds| {
+        // The same live feature set the human door gates on: the loop asks it
+        // at every pass, so a flag flipped on the admin page reaches it with
+        // no restart.
+        match squelch_core::gcal::sync::CalendarSync::new(
+            store.clone(),
+            account_id,
+            creds,
+            api_state.features().clone(),
+        ) {
+            Ok(sync) => Some(sync),
+            Err(e) => {
+                eprintln!(
+                    "squelchd: calendar sync NOT started: its HTTP client could not be built: {e}"
+                );
+                None
+            }
+        }
+    });
+    let api_state = match &calendar_sync {
+        Some(sync) => api_state.with_calendar_sync_kick(sync.kick_handle()),
         None => api_state,
     };
 
@@ -2234,6 +2511,20 @@ fn cmd_serve(
             }
         };
 
+        // Reads Google Calendar. Same shape as the pollers above: shares the
+        // shutdown watch, awaited on the way out.
+        let calendar_handle = match calendar_sync {
+            Some(sync) => {
+                eprintln!("squelchd: calendar sync enabled (idles until calendar is granted)");
+                let shutdown_rx = shutdown_rx.clone();
+                Some(tokio::spawn(async move { sync.run(shutdown_rx).await }))
+            }
+            None => {
+                eprintln!("squelchd: calendar sync disabled (no OAuth client configured)");
+                None
+            }
+        };
+
         // READ-bound store, shared by the sync loop and the contacts harvest.
         let sync_creds =
             make_credential_store(backend, account_id, email.clone(), creds_path, client);
@@ -2245,6 +2536,12 @@ fn cmd_serve(
         // model is still downloading, and the vector pass then has to embed all
         // of it in batches, which is the memory that OOM-killed tenant daemons.
         // Only the first backfill waits; polling and catch-up never do.
+        // ONE "a vector may be missing" flag for both engines over this store:
+        // the sync engine's refine lane reads it, and the sweeps engine's
+        // blank-body heal raises it when it deletes a healed row's vector for
+        // the drain to redo. Two flags would be two engines each believing
+        // the other's debt is paid.
+        let vectors_dirty = Arc::new(AtomicBool::new(true));
         let sync_handle = {
             let store = store.clone();
             let email = email.clone();
@@ -2253,6 +2550,7 @@ fn cmd_serve(
             let creds = sync_creds.clone();
             let sync_metrics = sync_metrics.clone();
             let sync_budget = gmail_budget.clone();
+            let vectors_dirty = vectors_dirty.clone();
             // Taken before the spawn and dropped by the task, so readiness
             // tracks the engine and not the intention to start one.
             let sync_running = readiness.sync_started();
@@ -2261,9 +2559,12 @@ fn cmd_serve(
                 let _sync_running = sync_running;
                 mailbox_engine(store, creds, account_id, email, config, &sync_budget)
                     .with_refresh(refresh)
+                    .with_event_listeners(engine_listeners)
                     .with_spam_refresh(spam_refresh)
+                    .with_refine_poke(refine_poke)
                     .with_metrics(sync_metrics)
                     .with_embedder_gate(embedder_gate)
+                    .with_vectors_dirty(vectors_dirty)
                     .run(shutdown_rx)
                     .await
             })
@@ -2296,15 +2597,18 @@ fn cmd_serve(
             let creds = sync_creds.clone();
             let sweep_metrics = sync_metrics.clone();
             let sweep_budget = gmail_budget.clone();
+            let vectors_dirty = vectors_dirty.clone();
             let mut embedder_gate = readiness.embedder_gate();
             tokio::spawn(async move {
                 wait_for_embedder_gate(&mut embedder_gate).await;
                 tokio::time::sleep(std::time::Duration::from_secs(180)).await;
                 // The same metrics the sync loop reports into, so a Gmail
-                // refusal during a sweep lands on the same panel and alert.
+                // refusal during a sweep lands on the same panel and alert;
+                // the same vector flag, so the heal's deletions are drained.
                 let engine =
                     mailbox_engine(store, creds, account_id, email, config, &sweep_budget)
-                        .with_metrics(sweep_metrics);
+                        .with_metrics(sweep_metrics)
+                        .with_vectors_dirty(vectors_dirty);
                 if let Err(e) = engine.harvest_sent_contacts().await {
                     eprintln!(
                         "squelchd: sent-contacts harvest incomplete (retries next start): {e}"
@@ -2382,51 +2686,31 @@ fn cmd_serve(
             });
         }
 
+        spawn_statistics_refresh(store.clone());
+
         // SCHEDULED SEND fires here for the same reason the shredder runs
         // here: it sends on the WRITE credential (docs/SCHEDULED-SEND.md §4).
-        // The tick is the clock — no timer per row — so a restart costs
-        // punctuality and never a mail. Unlike the shredder it HONOURS THE
-        // SHUTDOWN WATCH: between ticks here, and between rows inside a pass
+        // The store is the clock — the worker sleeps until the next row's
+        // `send_at` and a handler's poke, no timer per row — so a restart
+        // costs punctuality and never a mail. Unlike the shredder it HONOURS
+        // THE SHUTDOWN WATCH: between rounds, and between rows inside a pass
         // (the pass reads the watch `api_state` carries), so a pass in flight
         // settles the row in hand and claims no more instead of leaving work
         // to lease recovery.
         let scheduled_handle = {
             let state = api_state.clone();
-            let mut shutdown_rx = shutdown_tx.subscribe();
+            let shutdown_rx = shutdown_tx.subscribe();
+            let timing = squelch_api::ScheduledWorkerTiming::daemon();
             eprintln!(
-                "squelchd: scheduled-send worker enabled ({SCHEDULED_SEND_TICK_SECS}s tick)"
+                "squelchd: scheduled-send worker enabled (sleeps to the next due send; \
+                 maintenance every {}s)",
+                timing.maintenance.as_secs()
             );
-            tokio::spawn(async move {
-                // First tick a few seconds in, past the bind and the first
-                // sync burst; then every tick.
-                let mut tick = tokio::time::interval_at(
-                    tokio::time::Instant::now()
-                        + std::time::Duration::from_secs(SCHEDULED_SEND_FIRST_TICK_SECS),
-                    std::time::Duration::from_secs(SCHEDULED_SEND_TICK_SECS),
-                );
-                // A pass that overran (a slow Gmail) is not followed by a burst
-                // of catch-up passes.
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    tokio::select! {
-                        _ = tick.tick() => {}
-                        // An Err is the sender dropped: the daemon is leaving.
-                        res = shutdown_rx.changed() => {
-                            if res.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                    if *shutdown_rx.borrow() {
-                        return;
-                    }
-                    let report = squelch_api::run_scheduled_send_pass(&state).await;
-                    if !report.is_idle() {
-                        // Counts only; the pass logged its own ids.
-                        eprintln!("squelchd: scheduled-send pass {report:?}");
-                    }
-                }
-            })
+            tokio::spawn(squelch_api::scheduled_send_worker(
+                state,
+                shutdown_rx,
+                timing,
+            ))
         };
 
         // Bind BEFORE building the embedder: its first-run model download must
@@ -2481,18 +2765,17 @@ fn cmd_serve(
                 // where in this block the sync engine took the original.
                 let mut shutdown_rx = shutdown_tx.subscribe();
                 Some(tokio::spawn(async move {
-                    axum::serve(listener, app)
-                        .with_graceful_shutdown(async move {
-                            loop {
-                                if *shutdown_rx.borrow() {
-                                    return;
-                                }
-                                if shutdown_rx.changed().await.is_err() {
-                                    return;
-                                }
+                    squelch_api::serve(listener, app, async move {
+                        loop {
+                            if *shutdown_rx.borrow() {
+                                return;
                             }
-                        })
-                        .await
+                            if shutdown_rx.changed().await.is_err() {
+                                return;
+                            }
+                        }
+                    })
+                    .await
                 }))
             }
             None => None,
@@ -2566,9 +2849,10 @@ fn cmd_serve(
             }
         };
 
-        let serve_result = axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal)
-            .await;
+        // `squelch_api::serve` rather than `axum::serve`: the same loop with
+        // a live hyper timer, so a connection that never finishes its request
+        // head is closed rather than held forever.
+        let serve_result = squelch_api::serve(listener, app, shutdown_signal).await;
 
         // Tell sync to stop even if the server exited for another reason, then
         // wait for it to flush.
@@ -2599,6 +2883,24 @@ fn cmd_serve(
                 Err(e) => eprintln!("squelchd: shipment poller task join error: {e}"),
             }
         }
+        // Bounded: the loop stops a pass in flight on the shutdown signal,
+        // and this is the backstop if anything in it ever stops listening.
+        // Its writes are each their own transaction, so aborting it leaves
+        // the store consistent; it holds nothing the mail engine needs.
+        if let Some(mut handle) = calendar_handle {
+            match tokio::time::timeout(CALENDAR_STOP_GRACE, &mut handle).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => eprintln!("squelchd: calendar sync ended with error: {e}"),
+                Ok(Err(e)) => eprintln!("squelchd: calendar sync task join error: {e}"),
+                Err(_) => {
+                    eprintln!(
+                        "squelchd: calendar sync did not stop within {}s; aborting it",
+                        CALENDAR_STOP_GRACE.as_secs()
+                    );
+                    handle.abort();
+                }
+            }
+        }
         if scheduled_handle.await.is_err() {
             eprintln!("squelchd: scheduled-send worker task join error");
         }
@@ -2623,6 +2925,28 @@ mod tests {
     use squelch_core::credentials::{CredentialKind, StoredToken};
 
     const BROKER: &str = "https://auth.passband.email";
+
+    /// A one-CPU quota (the hosted tenant pod) gets the floor, not one; a
+    /// wider box keeps its count; the operator's override is honoured and
+    /// floored like everything else; and the real runtime is sized by exactly
+    /// this rule, so dropping the builder call cannot pass on a wide CI box.
+    #[test]
+    fn the_runtime_never_runs_on_a_single_worker() {
+        assert_eq!(worker_threads_for(1, None), MIN_WORKER_THREADS);
+        assert_eq!(worker_threads_for(8, None), 8);
+        assert_eq!(worker_threads_for(8, Some("6")), 6);
+        assert_eq!(worker_threads_for(8, Some("1")), MIN_WORKER_THREADS);
+        assert_eq!(worker_threads_for(8, Some("nonsense")), 8);
+        assert_eq!(worker_threads_for(8, Some("")), 8);
+        let runtime = build_runtime().expect("a runtime");
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            worker_threads_for(
+                available_parallelism(),
+                std::env::var(WORKER_THREADS_ENV).ok().as_deref()
+            )
+        );
+    }
 
     /// PID 1 in the image stops on SIGTERM or not at all: the stop future must
     /// resolve on it, not only on Ctrl-C.
@@ -2649,6 +2973,7 @@ mod tests {
     fn bare_auth_args() -> AuthArgs {
         AuthArgs {
             write: false,
+            calendar: false,
             headless: false,
             port: DEFAULT_HEADLESS_PORT,
             broker: None,
@@ -2748,6 +3073,57 @@ mod tests {
             write_scopes.iter().all(|s| !read_scopes.contains(s)),
             "write and read scope sets must not be merged into one consent"
         );
+    }
+
+    /// `--calendar` mints the Calendar credential and NOTHING ELSE: no Read
+    /// or Write consent runs, so neither slot can be touched. Its own slot,
+    /// the two calendar scopes requested, only the events scope required.
+    #[test]
+    fn auth_plan_calendar_mints_only_the_calendar_credential() {
+        for transport in [None, Some(BROKER.to_string())] {
+            let plan = auth_plan(&AuthArgs {
+                calendar: true,
+                broker: transport,
+                ..bare_auth_args()
+            });
+            assert_eq!(plan, vec![AuthScopes::Calendar]);
+        }
+        let plan = auth_plan(&AuthArgs {
+            calendar: true,
+            headless: true,
+            ..bare_auth_args()
+        });
+        assert_eq!(plan, vec![AuthScopes::Calendar]);
+        assert_eq!(plan[0].kind(), CredentialKind::Calendar);
+        assert_eq!(
+            CredentialKind::Calendar.slot_key("you@x.com"),
+            "you@x.com#calendar"
+        );
+        assert_eq!(
+            plan[0].scopes(),
+            vec![
+                squelch_core::config::CALENDAR_EVENTS_SCOPE.to_string(),
+                squelch_core::config::CALENDAR_LIST_SCOPE.to_string(),
+            ]
+        );
+        assert!(
+            plan[0].scopes().iter().all(|s| !s.contains("gmail")),
+            "the calendar consent requests no Gmail scope"
+        );
+
+        // It parses with --headless, and refuses the flags that would renew
+        // the Gmail pair or let a blob decide.
+        let (args, _) = parse_auth(["squelchd", "auth", "--calendar", "--headless"].as_ref());
+        assert!(args.calendar && args.headless);
+        for clash in [
+            ["squelchd", "auth", "--calendar", "--write"],
+            ["squelchd", "auth", "--calendar", "--import"],
+        ] {
+            assert!(
+                Cli::command().try_get_matches_from(clash).is_err(),
+                "{clash:?} must be refused"
+            );
+        }
     }
 
     /// `--broker` REPLACES the loopback listener rather than decorating it, so
@@ -3051,6 +3427,7 @@ mod tests {
                     access_token: "access".to_string(),
                     refresh_token: Some("refresh".to_string()),
                     expires_at: None,
+                    scopes: None,
                 },
             }],
         ))
@@ -3209,6 +3586,7 @@ mod tests {
                 access_token: "access".to_string(),
                 refresh_token: refresh.map(|r| r.to_string()),
                 expires_at: None,
+                scopes: None,
             },
         };
 
@@ -3241,6 +3619,7 @@ mod tests {
                     access_token: "access".to_string(),
                     refresh_token: Some("refresh".to_string()),
                     expires_at: None,
+                    scopes: None,
                 },
             }],
         );
@@ -3396,6 +3775,47 @@ mod tests {
         // A name is not optional: an unlabeled token is one nobody can pick out
         // of `token list` to revoke.
         assert!(Cli::try_parse_from(["squelchd", "token", "issue"]).is_err());
+
+        match Cli::parse_from(["squelchd", "triage", "grant", "500", "--background"]).command {
+            Command::Triage(TriageArgs {
+                command:
+                    TriageCommand::Grant {
+                        runs,
+                        background,
+                        access,
+                    },
+            }) => assert_eq!((runs, background, access), (500, true, false)),
+            _ => panic!("expected triage grant"),
+        }
+        match Cli::parse_from(["squelchd", "triage", "grant", "50", "--access"]).command {
+            Command::Triage(TriageArgs {
+                command:
+                    TriageCommand::Grant {
+                        runs,
+                        background,
+                        access,
+                    },
+            }) => assert_eq!((runs, background, access), (50, false, true)),
+            _ => panic!("expected triage grant"),
+        }
+        // One lane at a time.
+        assert!(
+            Cli::try_parse_from([
+                "squelchd",
+                "triage",
+                "grant",
+                "5",
+                "--background",
+                "--access"
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            Cli::parse_from(["squelchd", "triage", "status"]).command,
+            Command::Triage(TriageArgs {
+                command: TriageCommand::Status
+            })
+        ));
 
         match Cli::parse_from(["squelchd", "pair"]).command {
             Command::Pair(args) => assert!(args.url.is_none()),

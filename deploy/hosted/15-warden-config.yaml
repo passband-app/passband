@@ -85,7 +85,7 @@ data:
   # silently upgrade every tenant's daemon on any pod restart. The warden
   # refuses to start without one. Changing this value and applying is what a
   # daemon rollout IS; the roller does the rest.
-  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.12"
+  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.13"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"
@@ -212,6 +212,16 @@ data:
   SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
   SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
   SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
+  # The automatic unsubscribe's browser rung needs NO entry here. Every tenant
+  # pod references the Secret `browserbase` (key `api-key`) in the tenant
+  # namespace as an optional SQUELCH_BROWSERBASE_API_KEY, so the rung is on for
+  # the whole fleet once that Secret exists and the pods have been rolled:
+  #   ... | kubectl -n tenants create secret generic browserbase \
+  #     --from-file=api-key=/dev/stdin
+  # The one reason to set the name is ROTATION: a Secret edited in place
+  # reaches no running pod, so create the new key as `browserbase-2` and point
+  # this at it, and the roller delivers it one tenant per tick.
+  # SQUELCH_WARDEN_BROWSERBASE_SECRET_NAME: "browserbase-2"
   # 3. EDIT ME. The control plane's origin, handed to every tenant daemon as
   # SQUELCH_CONSOLE_SSO_URL. It is what puts "Continue with Google" on a tenant's
   # own /console login page: Google forbids wildcard redirect URIs, so a
@@ -249,7 +259,8 @@ data:
   # comfortable number. With it, the tenant that will not fit is refused at
   # signup instead of a running mailbox being killed for it, and on this box
   # the thing doing the refusing is the quota in 70-tenant-limits.yaml, which
-  # is sized to five tenants at this request. Change one and redo the other.
+  # is sized to thirty tenants at this request on `carrier` (five on the 4 GB
+  # floor). Change one and redo the other.
   #
   # Revisit once the daemon unloads its embedder when idle; the constant in
   # squelch-warden/src/config.rs carries the measurements.

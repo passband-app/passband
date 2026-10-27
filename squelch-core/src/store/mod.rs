@@ -5,6 +5,7 @@
 //! `tokio::task::spawn_blocking`.
 
 pub mod agent_triage;
+pub mod archive_surface;
 pub mod recency;
 pub mod search_query;
 pub mod sqlite;
@@ -12,7 +13,11 @@ pub mod sqlite;
 pub use search_query::{
     FtsQuery, SearchDiagnostics, SearchFilter, SearchSort, TermDf, parse_search_query,
 };
-pub use sqlite::SqliteStore;
+pub use sqlite::{
+    ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX,
+    ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
+    EXTERNAL_RECALL_MAX, ExternalSearchMode, SqliteStore,
+};
 
 use crate::error::Result;
 // ONE closed vocabulary for the metric label and the stored ledger string; see
@@ -172,6 +177,31 @@ pub struct ContactEntry {
     pub last_sent_at: Option<DateTime<Utc>>,
 }
 
+/// How long a typed name is as [`Store::people_named`] will read it: the
+/// letters and digits of its FIRST word, the punctuation around the word
+/// dropped. `"s."`, `"(s)"`, `"s-"` and `". s"` are all one letter, whatever
+/// their length in characters, and one letter matches a large part of
+/// anybody's contacts: the calendar people route refuses a name shorter than
+/// two by THIS count, not by counting characters (verify8 V8-13).
+pub fn typed_name_len(name: &str) -> usize {
+    name.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .find(|w| !w.is_empty())
+        .map_or(0, |w| w.chars().filter(|c| c.is_alphanumeric()).count())
+}
+
+/// One person the user has written to whose name matches a typed given name:
+/// the calendar event pane's guest SUGGESTION (`/client/calendar/people`).
+/// HUMAN-DOOR ONLY, like [`ContactEntry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonNamed {
+    pub addr: String,
+    /// The name the match was made on: the one the user's own Sent mail used,
+    /// else the newest one on that address's readable, authenticated mail.
+    /// `None` when the match was made on the address itself.
+    pub display_name: Option<String>,
+}
+
 /// One row of the sender directory (`senders`): an address that has written to
 /// the account, as the search field's `from:` autocomplete hit shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,6 +310,14 @@ pub struct TriagedMessage {
     /// re-scan structurally unable to storm: a row it re-ingests already exists
     /// and keeps whatever it was stamped with, NULL included.
     pub notify_eligible_at: Option<DateTime<Utc>>,
+    /// The `Date` header's UTC offset in minutes, east positive, written to
+    /// `messages.date_offset_minutes`. `None` when no Date header parsed.
+    /// Header metadata, not content, so it is captured for every message;
+    /// what counts as an observation is the timezone inference's call.
+    pub date_offset_minutes: Option<i32>,
+    /// The first calendar invitation in the message that named a real zone,
+    /// credited to its ORGANIZER (not the From). See [`crate::timezone`].
+    pub invite_zone: Option<crate::timezone::InviteZone>,
 }
 
 /// The full body of one sealed message. HUMAN-DOOR-ONLY: returned solely by
@@ -374,6 +412,9 @@ pub struct MessageUnsub {
     /// Gmail filed it as spam. Never unsubscribed from automatically: fetching
     /// a spammer's link tells them the address is live.
     pub is_spam: bool,
+    /// The stored `To:` line, for telling which of the user's addresses this
+    /// mail was sent to (a plus address, usually) when a form asks.
+    pub to_addrs: Option<String>,
 }
 
 /// A row to append to the human-door audit log.
@@ -593,6 +634,15 @@ pub struct ClientSeen {
     pub seen_at: DateTime<Utc>,
 }
 
+/// One platform and the last time any of this account's devices acted as it.
+/// See
+/// [`SqliteStore::client_actions_seen`](sqlite::SqliteStore::client_actions_seen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientActed {
+    pub platform: ClientPlatform,
+    pub acted_at: DateTime<Utc>,
+}
+
 /// A device token at the ONE moment its plaintext exists.
 ///
 /// Returned by [`SqliteStore::issue_device_token`](sqlite::SqliteStore::issue_device_token)
@@ -719,6 +769,23 @@ pub struct Draft {
     pub parent_subject: Option<String>,
     pub parent_from_addr: Option<String>,
     pub parent_from_name: Option<String>,
+    /// An agent on the agent door wrote this draft (issue #394). Set at insert
+    /// by [`SqliteStore::create_agent_draft`](sqlite::SqliteStore::create_agent_draft)
+    /// and kept through every later edit.
+    pub from_agent: bool,
+}
+
+/// What [`SqliteStore::create_agent_draft`](sqlite::SqliteStore::create_agent_draft)
+/// did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentDraftOutcome {
+    /// Inserted, with its audit row, under this draft id.
+    Created(i64),
+    /// The message being replied to already has a draft. Nothing written.
+    ReplyDraftExists,
+    /// The account already holds the most unsent agent drafts it may.
+    /// Nothing written.
+    TooMany,
 }
 
 /// Which draft row a save addresses. Taken by
@@ -1460,6 +1527,27 @@ pub enum HealScope {
     TextAndTriage,
 }
 
+/// What the archive walk's disk guards measure, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveDisk {
+    /// Free to an unprivileged writer on the filesystem holding the database.
+    pub free_bytes: u64,
+    /// That whole filesystem's size. On a volume several tenants share it is
+    /// everybody's, which is why a share of it is part of the floor.
+    pub total_bytes: u64,
+    /// This database's own file plus its write-ahead log.
+    pub db_bytes: u64,
+}
+
+impl ArchiveDisk {
+    /// No disk to fill: all the room there is, and nothing used.
+    pub const UNBOUNDED: Self = Self {
+        free_bytes: u64::MAX,
+        total_bytes: 0,
+        db_bytes: 0,
+    };
+}
+
 /// The squelch local store. Implemented by [`SqliteStore`].
 ///
 /// SECURITY: every method that can feed the MCP surface (`ranked_updates`,
@@ -1602,6 +1690,43 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         shipment_id: i64,
         at: DateTime<Utc>,
         policy: crate::config::ShipmentListPolicy,
+    ) -> Result<bool>;
+
+    /// CALENDAR GHOSTS whose start falls in `[from, to)`, ordered by start,
+    /// HUMAN-DOOR ONLY, at most 2000. A timed start compares as an instant; a
+    /// date-only one is listed when its date is on or after `from`'s date in
+    /// `from`'s offset and before `to`'s date in `to`'s own offset, and sorts
+    /// at midnight in `from`'s offset. Each carries its eligible sources and
+    /// the duration prior for its venue and kind. A ghost with no start, or
+    /// whose facts came from a message that is not eligible right now (sent,
+    /// spam or restricted), is never listed: that test is in the SQL, so it
+    /// holds even when no rebuild has run since the message's status changed.
+    fn list_ghost_events(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>>;
+
+    /// The user's PATCH of a ghost, applied in ONE transaction. Each field is
+    /// `None` to leave it alone, `Some(None)` to clear it (a cleared state
+    /// clears its stamp), `Some(Some(_))` to set it. Returns `false` for an
+    /// unknown id or another account's, and
+    /// [`CoreError::InvalidInput`](crate::error::CoreError::InvalidInput) for
+    /// an end that is not after the start at the same precision, or a ghost
+    /// with no start; either way NOTHING is written, the state included. The
+    /// end is stored as a span from the current start, so mail that later
+    /// moves the start moves it too. A timed end on a timed ghost with a venue
+    /// also records the duration as the prior for that venue and kind;
+    /// clearing the end keeps what was learned. The projection never
+    /// overwrites either field.
+    fn patch_ghost_user(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        end: Option<Option<crate::triage::ghost::EventTime>>,
+        state: Option<Option<crate::types::GhostUserState>>,
+        at: DateTime<Utc>,
     ) -> Result<bool>;
 
     /// ONE-SHOT REPAIR: re-run shipment detection over every shipment row's
@@ -1966,6 +2091,63 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         scope: HealScope,
     ) -> Result<Option<i64>>;
 
+    /// [`Store::ingest_message`] for the ARCHIVE WALK: mail older than the
+    /// backfill window, stored to be found and for nothing else. INSERT-ONLY:
+    /// a message the store already holds, live or archive, is left exactly as
+    /// it is and the answer is `Ok(None)`.
+    ///
+    /// The row is marked `is_archive`, which is never changed afterwards (a
+    /// later [`Store::ingest_message`] of the same id is a no-op that returns
+    /// the stored id). It carries a neutral triage row with the same `n/a`
+    /// stage markers sent mail has and no notify stamp, its text is indexed
+    /// and its attachments stored, and its agent state is written at revision
+    /// 1 with access pending and NO job: no model reads it until an agent-door
+    /// caller explicitly surfaces it. Contacts, the unsubscribe ledger and
+    /// timezone observations are not touched.
+    fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>>;
+
+    /// The archive walk's cursor: the oldest instant the walk has fully
+    /// covered, or `None` before its first chunk.
+    fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
+    /// Persist the archive walk's cursor after a fully ingested chunk. The
+    /// call that creates the row also sets the forward edge to the same
+    /// instant; no later call moves it.
+    fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()>;
+
+    /// The archive walk's FORWARD edge: the newest instant up to which mail
+    /// carrying neither INBOX nor SENT has been stored, or `None` before the
+    /// walk's first use.
+    fn archive_covered_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
+
+    /// Move the forward edge after a fully ingested forward chunk. Writes
+    /// nothing when the walk has no cursor row yet.
+    fn set_archive_covered_to(
+        &self,
+        account_id: AccountId,
+        covered_to: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// The three numbers the archive walk's disk guards read: see
+    /// [`ArchiveDisk`]. A database that is not a file (in memory) has no disk
+    /// to fill and answers [`ArchiveDisk::UNBOUNDED`]. An `Err` means the
+    /// numbers could not be read, which the walk treats as "do not write".
+    fn archive_disk(&self) -> Result<ArchiveDisk>;
+
+    /// Whether the stored row `message_id` is an archive row. What a live
+    /// ingest asks after [`Store::ingest_message`] hands back an id, to tell a
+    /// row it wrote from an archive row it left alone.
+    fn message_is_archive(&self, account_id: AccountId, message_id: i64) -> Result<bool>;
+
+    /// Which of `gmail_msg_ids` this account already stores, in any tier. The
+    /// walk lists a chunk and fetches only what this does not return, so a
+    /// re-listed chunk costs no `messages.get`.
+    fn stored_gmail_msg_ids(
+        &self,
+        account_id: AccountId,
+        gmail_msg_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>>;
+
     /// True if `addr` appears in this account's Sent-derived contacts (the
     /// "people I know" signal the sync engine feeds to Stage-1).
     fn is_known_contact(&self, account_id: AccountId, addr: &str) -> Result<bool>;
@@ -1979,6 +2161,20 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         q: &str,
         limit: u32,
     ) -> Result<Vec<ContactEntry>>;
+
+    /// HUMAN-DOOR ONLY (`/client/calendar/people`): at most `limit` people
+    /// THE USER HAS WRITTEN TO whose name starts with the typed words, the
+    /// most recently exchanged-with first. The answer is offered as a
+    /// possible invitee, so somebody who has only written TO the user is
+    /// never in it, and neither is the account's own address. MUST NOT be
+    /// reachable from MCP, the agent routes or the assistant relay: it is a
+    /// lookup into who the user writes to.
+    fn people_named(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<PersonNamed>>;
 
     /// Merge the Sent-history harvest's per-address aggregate (MAX semantics —
     /// idempotent across harvest re-runs and overlap with ingest seeding).
@@ -2018,6 +2214,11 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// is NOT zero and callers must keep the distinction: zero unread is a real
     /// answer, "we do not know" is not.
     fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>>;
+
+    /// When this account was first created in the store, or `None` for an
+    /// unknown id or an unparseable stamp. The triage agent's onboarding
+    /// window counts from it.
+    fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>>;
 
     /// Overwrite this account's Gmail INBOX unread counts, stamping `fetched_at`
     /// now. Only ever called with numbers that came back from Gmail, so a failed
@@ -2973,6 +3174,17 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         message_id: i64,
         embedding: &[f32],
     ) -> Result<()>;
+
+    /// [`Store::upsert_message_vector`] for a batch, which a store may write
+    /// under one commit (the SQLite store does; the backfill drain hands it
+    /// eight at a time). The default is the one-at-a-time loop, so a store
+    /// that has no cheaper shape is still correct. Same contract per item.
+    fn upsert_message_vectors(&self, account_id: AccountId, items: &[(i64, &[f32])]) -> Result<()> {
+        for (message_id, embedding) in items {
+            self.upsert_message_vector(account_id, *message_id, embedding)?;
+        }
+        Ok(())
+    }
 
     /// Up to `limit` NON-SEALED messages with no vector yet, newest-first, for
     /// the startup backfill pass. Sealed rows are excluded in SQL.

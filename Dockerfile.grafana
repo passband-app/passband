@@ -6,6 +6,11 @@
 # write it.
 FROM grafana/grafana:12.2.0
 USER root
+# How long Grafana remembers that it already sent a notification. It has to
+# outlast `repeat_interval` in provisioning/alerting/policies.yml, or a
+# still-firing alert is announced again when the memory of the first message
+# expires (the default is 5d).
+ENV GF_UNIFIED_ALERTING_NOTIFICATION_LOG_RETENTION=54w
 COPY deploy/monitoring/grafana/provisioning /etc/grafana/provisioning
 COPY deploy/monitoring/grafana/dashboards /etc/grafana/dashboards
 EXPOSE 3000

@@ -7,6 +7,13 @@
 # types: no app, no simulator, no key.
 #
 #   ./test.sh          build and run every suite
+#
+# The suites are independent, so they build and run N at a time (N = cores).
+# Each run_suite call below only QUEUES its suite; the xargs at the bottom of
+# the file is what runs the queue. A suite's output is held back and printed
+# as one block when it finishes, so two suites never interleave on the
+# terminal, and a failure in one does not stop the others: every red suite
+# is reported, and the script exits non-zero if any was.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -20,14 +27,36 @@ mkdir -p "$BUILD"
 echo "==> analytics-lint"
 python3 ./analytics-lint.py
 
+QUEUE=$(mktemp)
+trap 'rm -f "$QUEUE"' EXIT
+
 run_suite() {
+  printf '%s\n' "$*" >> "$QUEUE"
+}
+
+# One suite start to finish: compile, run, print. Runs under xargs below, in
+# its own bash, which is why it is exported along with BUILD.
+run_one() {
   local name="$1"
   shift
-  echo "==> $name"
-  xcrun swiftc -swift-version 6 -parse-as-library -Onone \
-    -o "$BUILD/$name" Sources/Passband/Lib/RehearsalMode.swift "$@"
-  "$BUILD/$name"
+  local log="$BUILD/$name.log"
+  local status=0
+  {
+    echo "==> $name"
+    xcrun swiftc -swift-version 6 -parse-as-library -Onone \
+      -o "$BUILD/$name" Sources/Passband/Lib/RehearsalMode.swift "$@" \
+      && "$BUILD/$name" \
+      && case "$name" in
+        # Full connection rehearsal must work even when normal onboarding was
+        # completed.
+        tour-controller) "$BUILD/$name" --onboarding-rehearsal --rehearse-connection ;;
+      esac
+  } > "$log" 2>&1 || status=$?
+  cat "$log"
+  return $status
 }
+export -f run_one
+export BUILD
 
 # The hero, peek and fire-and-forget preload must share one request.
 run_suite thread-prefetch \
@@ -38,6 +67,130 @@ run_suite thread-prefetch \
 run_suite calendar-visibility \
   Sources/Passband/Lib/CalendarVisibility.swift \
   Tests/CalendarVisibilityTests.swift
+
+# The calendar page's arithmetic against the wire it reads: which rows are
+# drawn, which day they land on in the user's zone, their order, how solid
+# each is, what folds away, every time string, and the gate. Each is only ever
+# wrong on somebody's screen at the wrong hour, so it is pinned to a fixture
+# week rather than reasoned about.
+run_suite agenda \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Tests/AgendaTests.swift
+
+# The month view's arithmetic: the grid's days in the user's calendar, what
+# each cell lists and what folds into "+N more", spans and their lanes, the
+# unlikely counts, the day column's hours (the night cap, 7am, past midnight,
+# the DST Sundays), the keys' moves, the range the page asks for, the
+# month-first default, and the calendar colours brought into the palette.
+run_suite month-grid \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/MonthGrid.swift \
+  Sources/Passband/Lib/CalendarColor.swift \
+  Tests/MonthGridTests.swift
+
+# The week view (wave 6): which seven days (the user's first weekday, the DST
+# weeks), that the week is a row of the month the page asks for, overlapping
+# events side by side per day, the strip of all-day items and trips in the
+# month's own lanes, the draft among the blocks, widths, words and j / k.
+run_suite week-grid \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/MonthGrid.swift \
+  Sources/Passband/Lib/WeekGrid.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/WeekGridTests.swift
+
+# The event editor: typed dates and times, what blocks a save, the exact
+# body sent (timed with offsets, all-day with the INCLUSIVE last day), an
+# edit's patch carrying only what moved, the route's path, the daemon's
+# answer laid into the feed, and the wave-3 wire decoding.
+run_suite event-draft \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/EventDraftTests.swift
+
+# The title that understands "dinner with steven on friday 4pm" (wave 6): a
+# table of phrases and what each fills, the negatives that must fill nothing,
+# the saved title, the names, the fields a title may and may not write, the
+# way back (deleted words, Esc), and who is offered as a guest.
+run_suite title-parse \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/TitleParseTests.swift
+
+# The assistant's one calendar tool (wave 6): offered only with the Calendar
+# page (off, the inventory is main's), a proposal read and turned into the
+# pane's own draft by the pane's own rules, guests only where the calendar may
+# invite, every bad proposal an answer and never a draft, a pane in use never
+# replaced, and what the model is told did NOT happen.
+run_suite event-proposal \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Assistant/JSONValue.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Sources/Passband/Lib/EventProposal.swift \
+  Tests/EventProposalTests.swift
+
+# Guests on an event (wave 5), the first write that makes Google email other
+# people: how the guests line is read (bare addresses, one per person, the
+# cap), which calendars may invite and when the line is closed, which save
+# controls a draft shows and in what words, that Enter never saves a draft
+# whose save would tell anyone, that `notify` is true only from a control
+# that says so, the bodies on the wire (the whole list on a patch, nothing
+# from a closed line), the delete question by count, a guest's local time,
+# and the wave-5 wire decoding.
+run_suite event-guests \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/TitleParse.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/EventGuestsTests.swift
+
+# Drag to create on the day column: a press and a drag become a span of time.
+# The snap to the quarter hour, the quarter-hour minimum, dragging upward, the
+# clamp at the day's ends, the folded night's own scale, and what counts as a
+# click rather than a sweep.
+run_suite day-sweep \
+  Sources/Passband/Lib/DaySweep.swift \
+  Tests/DaySweepTests.swift
+
+# The location field's lookup, with a fake where MapKit goes: what is asked
+# and when (debounce, two characters), stale answers dropped, arrows and
+# Enter, Escape closing the list and not the pane, and the rule that typed
+# text is replaced only by a pick.
+run_suite place-lookup \
+  Sources/Passband/Lib/PlaceLookup.swift \
+  Tests/PlaceLookupTests.swift
 
 # The real poller against a cancellation-oblivious transport: mailbox switches
 # must detach old requests before the next mailbox starts warming.
@@ -71,6 +224,7 @@ run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Model/APIClient.swift \
   Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \
@@ -188,6 +342,12 @@ run_suite retriage-run \
 run_suite email-images \
   Sources/Passband/Lib/ImageProxy.swift \
   Tests/EmailImagesTests.swift
+
+# What the fetcher falls back on when a host's Content-Type will not say image:
+# the opening bytes. Pinned in both directions, since nil here IS the refusal.
+run_suite image-sniff \
+  Sources/Passband/Lib/ImageSniff.swift \
+  Tests/ImageSniffTests.swift
 
 # The OTHER image rewrite: `cid:` references to this message's own parts. Pure
 # string and url work, so it builds with the wire type and the buckets it gates
@@ -389,8 +549,10 @@ run_suite sender-identity \
 # exact binding in another set. That failure abandons a draft, so it is asserted
 # rather than remembered. KeyDispatch.swift is the whole suite: the registry and
 # the algorithm are pure, and only the NSEvent bridge below them is AppKit.
+# PageKeys.swift rides along: the digits and ⇧C exactly as RootView binds them.
 run_suite key-dispatch \
   Sources/Passband/Keys/KeyDispatch.swift \
+  Sources/Passband/Keys/PageKeys.swift \
   Tests/KeyDispatchTests.swift
 
 # The ledger between the live event feed, the 10s poll and the person reading
@@ -489,8 +651,6 @@ run_suite tour-controller \
   Sources/Passband/Model/TourController.swift \
   Tests/TourControllerTests.swift
 
-# Full connection rehearsal must work even when normal onboarding was completed.
-"$BUILD/tour-controller" --onboarding-rehearsal --rehearse-connection
 # The ring behind the search panel's empty state: what a submitted query does to
 # the remembered ones. Pure Foundation, one file — the fold is kept out of the
 # store precisely so the order, the dedupe and the cap can be asserted with no
@@ -574,6 +734,14 @@ echo "ok: the purge preview stamps, times and opens nothing"
 run_suite smart-done \
   Sources/Passband/Lib/SmartDone.swift \
   Tests/SmartDoneTests.swift
+
+# An agent's draft asked onto the screen: the passband://draft link (untrusted,
+# from whatever opened the URL) and the event-stream frame that carries
+# open_draft. Neither may read as the other, or as a pair link.
+run_suite agent-draft-link \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Tests/AgentDraftLinkTests.swift
+
 # Which hidden features this mailbox has been let into. Off for every doubt:
 # no stats, an old daemon, an empty list.
 run_suite hidden-features \
@@ -620,3 +788,7 @@ run_suite image-trim \
   Sources/Passband/Lib/ImageFill.swift \
   Sources/Passband/Lib/ImageTrim.swift \
   Tests/ImageTrimTests.swift
+
+# Run the queue. xargs keeps going past a failed suite and exits 123 if any
+# failed, which set -e turns into this script's exit status.
+xargs -P "$(sysctl -n hw.ncpu)" -L 1 bash -c 'run_one "$@"' _ < "$QUEUE"

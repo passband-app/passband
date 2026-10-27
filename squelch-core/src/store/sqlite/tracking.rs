@@ -128,13 +128,7 @@ impl SqliteStore {
         message_id: i64,
     ) -> Result<Vec<MessageOpen>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT o.opened_at, o.user_agent, o.classification
-             FROM message_opens o
-             JOIN send_trackers t ON t.token = o.token
-             WHERE t.account_id = ?1 AND t.message_id = ?2
-             ORDER BY o.opened_at ASC, o.id ASC",
-        )?;
+        let mut stmt = conn.prepare(MESSAGE_OPENS_SQL)?;
         let out = stmt
             .query_map(params![account_id, message_id], map_open)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -167,3 +161,13 @@ impl SqliteStore {
         Ok(row)
     }
 }
+
+/// The opens recorded against one sent message, oldest first. A `const` so
+/// the plan test pins it to `idx_send_trackers_message`: the read starts from
+/// a message, and `send_trackers` was keyed by token alone, so without the
+/// index it scanned every tracker the account ever minted.
+pub(super) const MESSAGE_OPENS_SQL: &str = "SELECT o.opened_at, o.user_agent, o.classification
+     FROM message_opens o
+     JOIN send_trackers t ON t.token = o.token
+     WHERE t.account_id = ?1 AND t.message_id = ?2
+     ORDER BY o.opened_at ASC, o.id ASC";

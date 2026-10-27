@@ -4,6 +4,22 @@
 # did exactly that: the runner's newer clippy flagged `question_mark` sites the
 # local 1.94 does not). Bump this deliberately, fixing whatever the new clippy
 # flags in the same commit.
+#
+# THE IMAGES BUILD WITH THIS TOOLCHAIN TOO. Every Rust Dockerfile (the root one,
+# Dockerfile.broker, Dockerfile.control, Dockerfile.warden, squelchd/Dockerfile)
+# copies this file into its builder and runs the same no-arg `rustup toolchain
+# install` ci.yml does, so cargo in the image runs the compiler CI tested rather
+# than whatever stable the `rust:1-slim-*` tag carried that day. (Pinning the
+# FROM tag instead would freeze the builder's Debian layer at the last rebuild
+# of that tag, and name the version in six places.) So a bump here also changes
+# the compiler the relay, broker and control services rebuild with on the next
+# merge to main, and the next daemon tag's images, none of which CI builds: the
+# first image build on the new compiler is a production one. The channel is
+# minor-level, so the images pick up a 1.94.x patch release when their cached
+# install layer is rebuilt, and CI on its next run; pin the patch here if that
+# ever matters. The builder keeps the image's own toolchain alongside, unused,
+# and installs the components listed below, which it never runs: a few hundred
+# MB per cold build, in a stage that does not ship.
 [toolchain]
 channel = "1.94"
 components = ["clippy", "rustfmt"]

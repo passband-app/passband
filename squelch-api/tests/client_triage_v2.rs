@@ -672,3 +672,41 @@ async fn a_failed_headline_call_is_not_remembered_as_nothing_to_say() {
     assert_eq!(second["settled"], true);
     assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 2);
 }
+
+/// The reader opens archive mail like any other, and opening it is free: no
+/// access assessment is queued for a row nobody at the agent door asked about.
+#[tokio::test]
+async fn a_human_opens_an_archive_message_and_no_model_work_is_queued() {
+    use squelch_core::sync::ingest::{RawFetched, ingest};
+    let h = harness(|_, _| {});
+    let when = Utc::now() - chrono::Duration::days(200);
+    let fetched = RawFetched {
+        account_id: h.acct,
+        gmail_msg_id: "old".into(),
+        gmail_thread_id: Some("old-thread".into()),
+        raw: b"From: pat@example.com\r\nTo: me@example.com\r\nSubject: Long ago\r\n\r\nAn old note\r\n"
+            .to_vec(),
+        internal_date: Some(when),
+        is_sent: false,
+        is_spam: false,
+        account_addr: "me@example.com".into(),
+    };
+    let triaged = ingest(&fetched, &Default::default(), Utc::now(), |_| false);
+    let id = h.store.ingest_archive_message(&triaged).unwrap().unwrap();
+
+    let response = h
+        .app
+        .clone()
+        .oneshot(authed("GET", &format!("/client/v2/messages/{id}")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["thread"]["messages"][0]["id"], id);
+    assert_eq!(body["thread"]["cache_allowed"], false);
+    assert_eq!(
+        h.store.agent_diagnostics(h.acct, id).unwrap()["jobs"],
+        serde_json::json!([]),
+        "opening old mail must not buy an assessment of it"
+    );
+}

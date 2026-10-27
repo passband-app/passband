@@ -169,6 +169,9 @@ struct InlineReply: View {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: Space.scaled(9)) {
                     headerLine(compose, parent: parent)
+                    // ABOVE the words it is about, beside who they go to:
+                    // under the editor it was the last thing read, if at all.
+                    if compose.fromAgent { AgentDraftNotice() }
                     if editingRecipients {
                         recipientEditor(compose)
                     }
@@ -443,6 +446,15 @@ struct InlineReply: View {
         private func card(_ compose: ComposeState, parent: ClientMessage) -> some View {
             VStack(alignment: .leading, spacing: 0) {
                 addressLine(compose, parent: parent)
+                // Its own row, always drawn for an agent's draft. It used to
+                // sit with the files and verdicts below, a block that is only
+                // there when one of THOSE is, so most agent drafts opened on
+                // the phone carried no mark at all.
+                if compose.fromAgent {
+                    AgentDraftNotice()
+                        .padding(.horizontal, Self.gutter)
+                        .padding(.bottom, Space.s10)
+                }
                 if editingRecipients {
                     VStack(alignment: .leading, spacing: Space.s8) {
                         recipientEditor(compose)
@@ -468,7 +480,7 @@ struct InlineReply: View {
                         // The files, under the editor. Nothing when empty.
                         AttachmentTray(slot: .inlineReply)
                         // A held send came back blocked.
-                        if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
+                    if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
                         if let error = compose.error {
                             Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                         }
@@ -637,6 +649,12 @@ struct InlineReply: View {
                 store.closeInlineReply()
             },
             KeyBinding("Enter", "send", meta: true, allowInInput: true) {
+                // A draft an agent put on screen is sent with the button,
+                // never this chord: see `ComposeState.keyboardSendLocked`.
+                guard store.inlineReply?.keyboardSendLocked != true else {
+                    store.noteKeyboardSendLocked()
+                    return
+                }
                 send(override: false)
             },
             // Explicit override: a blocked verdict, nothing else. Declines

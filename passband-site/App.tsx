@@ -1,4 +1,5 @@
 import {
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
@@ -14,23 +15,24 @@ import { CARRIERS, createScope, markerPoint, type ScopeLayout } from "./scope";
 // width of the panel.
 const FAKE_EMAILS: Array<[sender: string, subject: string, snippet: string]> = [
   ["LinkedIn", "You appeared in 9 searches this week", "See who's looking for someone like you. Recruiters from companies you've never heard of are searching for profiles matching yours..."],
-  ["Medium Daily Digest", "Stories for you", "10 Habits of Highly Effective Engineers | 12 min read. Why I Quit My Job to Farm Mushrooms | 8 min read. The Death of the..."],
+  ["Cats Weekly", "Why your cat stares at the wall", "Nine boxes, ranked by sit quality. Plus: a reader writes in about a cat who has learned to open the fridge and what it..."],
   ["no-reply@accounts", "Security alert for your account", "A new sign-in was detected on a device you may or may not recognize. If this was you, no action is needed. If this wasn't..."],
   ["DoorDash", "Your Friday deserves 40% off", "Hungry? Use code FRIYAY at checkout before midnight and get 40% off orders over $35, up to a maximum discount of $8..."],
   ["Confluence", "Weekly digest: 47 updates in spaces you follow", "Q3 Planning Doc was edited by 6 people. Retro Notes (DRAFT) (COPY) was moved. A page you commented on in 2024 was..."],
   ["Marriott Bonvoy", "Points update: you have 312 points", "Your points balance summary for the month. You are 87,688 points away from your next free night at participating..."],
-  ["Product Hunt Daily", "The 10 best new products today", "An AI notetaker for your AI notetaker, a smart water bottle that syncs to your calendar, and 8 more launches you'll..."],
+  ["Haightssion", "This month's programme", "Three talks, a walk and a pottery class. Doors at seven, and the walk leaves from the corner whether or not you have..."],
   ["billing@saas.io", "Your receipt from Acme SaaS #48211", "Amount paid: $12.00. Thank you for your continued subscription to a service you forgot you signed up for. Manage your..."],
-  ["United Airlines", "MileagePlus: miles expiring soon", "Don't lose your 1,204 miles. Book by the end of the month or transfer them to a partner at an exchange rate that will..."],
+  ["Skyward Miles", "Your miles are expiring soon", "Don't lose your 1,204 miles. Book by the end of the month or transfer them to a partner at an exchange rate that will..."],
   ["HR Announcements", "REMINDER: Open enrollment closes Friday", "This is your final reminder to complete your benefits elections. If you do not act, your current elections will roll..."],
-  ["Substack", "3 new posts from writers you follow", "The Case Against Breakfast, and other essays. Plus: a 4,000-word post about someone's move to Lisbon and what it..."],
+  ["The Federal Overstatement", "Markets react calmly to everything", "The Case Against Breakfast, and other essays. Plus: a 4,000-word post about someone's move to Lisbon and what it..."],
   ["Twitter", "You have 4 new notifications", "@someguy and 3 others liked a post you were mentioned in. See what you're missing. Your network has been busy while..."],
   ["Zoom", "Your cloud recording is now available", "Meeting recording: Weekly Sync. Duration: 58 minutes. This recording will be automatically deleted in 30 days and..."],
   ["Chase", "Your statement is ready", "Your February statement for account ending in 4482 is now available. Your minimum payment is due in 21 days. Log in..."],
   ["GitHub", "[repo] 23 new notifications", "dependabot opened 14 pull requests in repositories you have not touched since 2023. Bump lodash from 4.17.20 to..."],
   ["Eventbrite", "Events near you this weekend", "Networking mixers, fun runs, and a pottery class. Based on your interests: 12 events happening within 25 miles of..."],
   ["Google Calendar", "Daily agenda for Tuesday", "You have 7 events scheduled today starting with Standup at 9:00 AM, followed by a meeting that could have been an..."],
-  ["Sephora", "We miss you! Here's 15% off", "It's been a while. Your Beauty Insider points are waiting, and so is 15% off your next purchase of $50 or more..."],
+  ["Brightly", "48 hours only: 40% off everything", "Everything you looked at once is on sale. So is everything you did not. Ends Thursday at midnight, or when we send the..."],
+  ["Rainforest", "Deals picked for you", "Based on one search in 2023, we think you will love these 14 extension cords. Customers who bought nothing also bought..."],
   ["The Team", "We've updated our Privacy Policy", "We're writing to let you know about some updates to our Privacy Policy and Terms of Service, effective in 30 days..."],
   ["Slack", "You have unread messages in #general", "While you were away, 312 messages were posted in channels you follow, including a heated thread about the office..."],
 ];
@@ -40,7 +42,7 @@ const FAKE_EMAILS: Array<[sender: string, subject: string, snippet: string]> = [
 const BURIED: Array<[sender: string, subject: string, snippet: string]> = [
   ["Jamie Chen", "A quick decision before Friday", "Hey! Two options for the offsite venue, I need your pick by Friday so we can hold the date..."],
   ["Parkline Properties", "Lease renewal: signature needed", "Your renewal packet is ready. Please review and sign by September 23 to lock in your current rate..."],
-  ["UPS", "Your package is out for delivery", "Keychron Q1 Max. Scheduled delivery: today by 8:00 PM. Track your package for live updates..."],
+  ["ExFed", "Your package is out for delivery", "Keychron Q1 Max. Scheduled delivery: today by 8:00 PM. Track your package for live updates..."],
   ["Dr. Ortiz's Office", "Please confirm Thursday's appointment", "Reply C to confirm your appointment on Thursday at 2:30 PM, or call us to reschedule..."],
 ];
 
@@ -65,6 +67,7 @@ const PAGE_CSS = `
   --positive: #4FC08A;
   --danger: #FF7A68;
   --serif: "Newsreader", ui-serif, Georgia, serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --gutter: clamp(1rem, 4vw, 2.75rem);
 }
@@ -74,9 +77,18 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb a { color: inherit; }
 
 /* THE STORY. A tall section with a sticky stage inside it: the scroll through
-   the section is the squelch closing, and the stage holds still while it
-   happens. The height is the length of the scrub. */
-.pb-story { position: relative; height: 210vh; }
+   the section is the squelch closing. The stage is only the BACKGROUND: the
+   words are ordinary page laid over it (.pb-track) and leave at the speed of
+   the wheel, so nothing ever holds the scroll. The first leaf of copy goes up
+   and away, the second comes up from under the fold, and the scope closes in
+   the time between them. */
+.pb-story { position: relative; height: 182vh; height: 182svh; }
+.pb-track { position: absolute; inset: 0; z-index: 2; }
+.pb-leaf { position: relative; height: 100vh; height: 100svh; }
+/* Pulled well up under the first, so the second headline is already on its
+   way in as the first one leaves: the gap between them is a short scroll, not
+   a screen of empty scope. As far as it can go without showing at rest. */
+.pb-leaf-1 { margin-top: -38vh; margin-top: -38svh; }
 .pb-stage { position: sticky; top: 0; height: 100vh; height: 100svh; overflow: hidden; }
 .pb-scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 /* The analyzer's graticule: ten divisions across, eight down, faded out at the
@@ -133,20 +145,14 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-copy { position: absolute; z-index: 2; left: var(--gutter); top: 50%;
   transform: translateY(-50%); width: min(30rem, calc(100% - 2 * var(--gutter)));
   display: flex; flex-direction: column; gap: 1.6rem; }
-/* Both beats share one grid cell, so the cell is the taller beat's height and
-   the rig under it never moves as they trade places. */
-.pb-beats { display: grid; }
-.pb-beat { grid-area: 1 / 1; display: flex; flex-direction: column; gap: 1rem;
-  transition: opacity 0.7s ease, transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pb-beats[data-beat="0"] .pb-beat-1,
-.pb-beats[data-beat="1"] .pb-beat-0 { opacity: 0; transform: translateY(10px); pointer-events: none; }
+.pb-beat { display: flex; flex-direction: column; gap: 1rem; }
 .pb-lede { margin: 0; font-family: var(--serif); font-size: clamp(1.55rem, 2.6vw, 2.1rem);
   line-height: 1.15; color: var(--dim); }
 .pb-hero { margin: 0; font-family: var(--serif); font-weight: 500;
   font-size: clamp(2.4rem, 4.6vw, 3.4rem); line-height: 1.02; letter-spacing: -0.012em; }
 .pb-sub { margin: 0; font-size: 1rem; line-height: 1.6; color: var(--dim); max-width: 27rem; }
 /* Reserves the open rig's height, so the vertically centred copy above never
-   moves when the button opens. The fine print rides under whichever control
+   jumps when the button opens. The fine print rides under whichever control
    is showing and the unused room sits below it, where it reads as margin. */
 .pb-slot { min-height: 8.2rem; display: flex; flex-direction: column; align-items: flex-start; gap: 0.65rem; }
 .pb-slot .pb-cta { margin-top: 0; }
@@ -179,6 +185,12 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   .pb-copy { top: 5.2rem; bottom: 3rem; transform: none; gap: 1.25rem; justify-content: space-between; }
   .pb-nav a:not(.pb-keep) { display: none; }
   .pb-cue, .pb-mkrs, .pb-read-l { display: none; }
+  /* The words cross the trace on their way out here, so they carry their own
+     ground with them. */
+  .pb-beat { text-shadow: 0 0 6px var(--bg), 0 0 18px var(--bg), 0 0 30px var(--bg); }
+  /* The second leaf's words sit at its top here, so it can come up less. */
+  .pb-story { height: 200vh; height: 200svh; }
+  .pb-leaf-1 { margin-top: -8vh; margin-top: -8svh; }
 }
 
 /* BEFORE / AFTER. */
@@ -188,9 +200,35 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-h2 em { font-style: normal; color: var(--accent-ink); }
 .pb-intro { margin: 0 0 clamp(2rem, 5vw, 3.25rem); color: var(--dim); font-size: 1.05rem;
   line-height: 1.6; max-width: 34rem; }
-.pb-pair { display: grid; grid-template-columns: minmax(0, 0.58fr) auto minmax(0, 1.42fr);
-  gap: clamp(0.75rem, 1.6vw, 1.25rem); align-items: stretch; }
-@media (max-width: 900px) { .pb-pair { grid-template-columns: minmax(0, 1fr); } }
+/* THE PAIR, AND THE TOUR THAT GROWS OUT OF IT. The left column is ordinary
+   page: the "before" inbox, then one caption per feature, all scrolling at
+   the speed of the wheel. The window on the right holds its place beside them
+   and changes as each caption comes level with it. Nothing is captured: the
+   page never stops moving, only the window keeps you company.
+
+   The window's size is worked out here, once, from the pair's own width and
+   the viewport's height, so it always fits on screen whole and the "before"
+   panel can be cut to the same height. */
+.pb-pair { --g: clamp(0.75rem, 1.6vw, 1.25rem);
+  --shot-w: min((100cqw - 3.25rem - 2 * var(--g)) * 0.71, (100svh - 7rem) * 1.4444);
+  --shot-h: calc(var(--shot-w) * 0.6923);
+  container-type: inline-size; display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--g); align-items: start; }
+.pb-before { grid-column: 1; grid-row: 1; }
+.pb-hold { grid-column: 2; grid-row: 1 / span 2; position: sticky;
+  top: calc((100svh - var(--shot-h) - 2rem) / 2); display: flex; gap: var(--g); align-items: stretch; }
+/* The room under the last caption is what lets it reach the middle of the
+   screen before the window lets go. */
+.pb-steps { grid-column: 1; grid-row: 2; list-style: none; margin: 0; padding: 0 0 16svh; }
+.pb-step { min-height: 56svh; display: flex; flex-direction: column; justify-content: center; gap: 0.6rem;
+  padding-right: 1rem; opacity: 0.26; transition: opacity 0.4s ease; }
+.pb-step[data-on] { opacity: 1; }
+.pb-step i { font: 600 11px/1 var(--mono); font-style: normal; letter-spacing: 0.1em; color: var(--accent-ink); }
+.pb-step h3 { margin: 0; font-family: var(--serif); font-weight: 500; font-size: clamp(1.5rem, 2.3vw, 2rem);
+  line-height: 1.1; letter-spacing: -0.008em; }
+.pb-step p { margin: 0; color: var(--dim); font-size: 1rem; line-height: 1.6; max-width: 22rem; }
+.pb-step kbd { font: 600 0.78em/1 var(--mono); color: var(--accent-ink); padding: 0.18em 0.5em; border-radius: 99px;
+  box-shadow: inset 0 0 0 1px rgba(78, 155, 234, 0.4); white-space: nowrap; }
 /* THE GATE between the two panels: a lit filament with the squelch sitting on
    it, the same passband blue the scope's filter curve draws in. The before is
    everything upstream of it and the after is what comes out, so the divider is
@@ -204,7 +242,15 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   place-items: center; color: var(--accent-ink); background: #0d1624;
   box-shadow: inset 0 0 0 1px rgba(78, 155, 234, 0.55), 0 0 26px -2px rgba(78, 155, 234, 0.55); }
 .pb-gate svg { width: 1.05rem; height: 1.05rem; }
+/* PHONES: one column. The window sticks to the top of the screen and the
+   captions pass under it, on a ground that fades them out before they reach it. */
 @media (max-width: 900px) {
+  .pb-pair { display: block; --shot-w: 100cqw; }
+  .pb-hold { display: contents; }
+  .pb-after { position: sticky; top: 0; z-index: 2; padding: 0.7rem 0 1.6rem;
+    background: linear-gradient(var(--bg) 86%, rgba(9, 13, 22, 0)); }
+  .pb-step { min-height: 40svh; justify-content: flex-start; padding-top: 1rem; }
+  .pb-steps { padding-bottom: 0; }
   .pb-gate { width: auto; height: 3.25rem; margin: 0.25rem 0; }
   .pb-gate::before { top: 50%; bottom: auto; left: 0; right: 0; width: auto; height: 1px;
     background: linear-gradient(90deg, transparent, rgba(78, 155, 234, 0.75) 25%, rgba(78, 155, 234, 0.75) 75%, transparent); }
@@ -224,10 +270,11 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-after .pb-window { border-color: rgba(78, 155, 234, 0.45);
   box-shadow: 0 0 0 1px rgba(78, 155, 234, 0.12), 0 0 60px -12px rgba(78, 155, 234, 0.35),
     0 30px 80px -20px rgba(0, 0, 0, 0.7); }
-.pb-window { position: relative; flex: 1; border-radius: 14px; overflow: hidden; min-height: 30rem;
+.pb-window { position: relative; border-radius: 14px; overflow: hidden;
   border: 1px solid var(--hair-strong); background: var(--canvas);
   box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.04); }
-@media (max-width: 900px) { .pb-before .pb-window { min-height: 18rem; } }
+.pb-before .pb-window { height: var(--shot-h); }
+@media (max-width: 900px) { .pb-before .pb-window { height: 18rem; } }
 
 /* The doomscroll. Dimmed and faded at both ends: it is the "before", so it
    should read as a texture you are drowning in, not as something to read. */
@@ -254,90 +301,221 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
    So the mock is the app at one fixed layout, scaled as a picture would be,
    rather than a web page that reflows into something the app never draws.
    Colours are sampled from the same shot. */
-.pb-after .pb-window { container-type: inline-size; min-height: 0; background: #262c35; }
-.pb-app { --pt: calc(100cqw / 1040); display: grid; grid-template-columns: 58pt minmax(0, 1fr);
-  grid-template-rows: 40pt auto; font-size: 12pt; color: var(--ink); line-height: 1.25; }
+.pb-after .pb-window { background: #262c35; }
+/* THE SHOT: the window plus the two things that float over it. It is the
+   container the points are measured against, so the login code panel can hang
+   off the window's bottom edge and still be drawn in the same points. */
+.pb-shot { position: relative; container-type: inline-size; width: var(--shot-w); }
+.pb-app, .pb-code { --pt: calc(100cqw / 1040); }
+.pb-app { position: relative; display: grid; grid-template-columns: 60pt minmax(0, 1fr);
+  grid-template-rows: 40pt minmax(0, 1fr); height: 720pt; font-size: 12pt; color: var(--ink); line-height: 1.25; }
 .pb-app-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 14pt; padding: 0 18pt 0 16pt; }
 .pb-lights { display: flex; gap: 8pt; }
 .pb-lights i { width: 12pt; height: 12pt; border-radius: 50%; background: #ec6a5e; }
 .pb-lights i:nth-child(2) { background: #f4bf4f; } .pb-lights i:nth-child(3) { background: #61c554; }
-.pb-app-title { display: flex; align-items: baseline; gap: 8pt; margin-left: 12pt; }
+.pb-app-title { display: flex; align-items: baseline; gap: 7pt; margin-left: 12pt; }
 .pb-app-title b { font-family: var(--serif); font-weight: 500; font-size: 19pt; }
 .pb-app-title small { font-size: 10pt; font-weight: 500; letter-spacing: 0.06em; color: var(--faintest); }
-.pb-app-tools { margin-left: auto; display: flex; align-items: center; gap: 12pt; font-size: 10pt;
-  font-weight: 500; color: var(--faint); }
-.pb-app-tools svg { width: 10pt; height: 10pt; vertical-align: -1pt; margin-right: 3pt; }
-.pb-need { display: inline-flex; align-items: center; gap: 5pt; color: var(--danger); font-size: 11pt;
-  font-weight: 500; padding: 3pt 9pt; border-radius: 99pt; background: rgba(255, 122, 104, 0.14);
-  box-shadow: inset 0 0 0 0.75pt rgba(255, 122, 104, 0.45); }
-.pb-need::before { content: ""; width: 5pt; height: 5pt; border-radius: 50%; background: var(--danger); }
-.pb-side { background: #2c323f; border-right: 1px solid #363b48; border-top-right-radius: 10pt;
-  display: flex; flex-direction: column; align-items: center; gap: 13pt; padding: 12pt 0 16pt; }
-.pb-side span { width: 36pt; height: 30pt; display: grid; place-items: center; border-radius: 8pt; color: #9aa6b6; }
-.pb-side span.on { background: rgba(78, 155, 234, 0.2); color: var(--accent); }
-.pb-side svg { width: 18pt; height: 18pt; }
+/* Compose and search, at the bar's right end. */
+.pb-app-tools { margin-left: auto; display: flex; align-items: center; gap: 2pt; color: var(--faint); }
+.pb-app-tools span { width: 30pt; height: 30pt; display: grid; place-items: center; }
+.pb-app-tools svg { width: 17pt; height: 17pt; }
+/* The rail: three destinations on the digit keys, then the discovery ring,
+   a hairline, and the account's own group. Rules and Groups live in Settings. */
+.pb-side { background: #2c323f; border-right: 1px solid #363b48; border-top-right-radius: 12pt;
+  display: flex; flex-direction: column; align-items: center; gap: 6pt; padding: 10pt 0; }
+.pb-side span { width: 44pt; height: 36pt; display: grid; place-items: center; border-radius: 11pt; color: #9aa6b6; }
+.pb-side span.on { background: rgba(78, 155, 234, 0.26); color: var(--accent); }
+.pb-side span.up { color: var(--accent); }
+.pb-side svg { width: 17pt; height: 17pt; }
 .pb-side .pb-side-gap { flex: 1; }
-.pb-side .pb-me { width: 20pt; height: 20pt; border-radius: 50%; background: #24384F; color: #A9CBF0;
-  font-size: 10pt; font-weight: 600; }
-.pb-page { padding: 6pt 22pt 22pt 30pt; display: grid; grid-template-columns: minmax(0, 1fr) 252pt;
-  column-gap: 14pt; align-items: start; }
-.pb-dash-hero { grid-column: 1 / -1; margin-bottom: 16pt; }
+.pb-side hr { width: 22pt; height: 0; margin: 4pt 0; border: 0; border-top: 1px solid var(--hair-strong); }
+.pb-side .pb-me { width: 26pt; height: 26pt; margin-top: 5pt; border-radius: 50%; background: #24384F;
+  color: #A9CBF0; font-size: 13pt; font-weight: 600; }
+.pb-page { padding: 0 24pt 0; display: grid; grid-template-columns: minmax(0, 1fr) 306pt;
+  column-gap: 18pt; align-items: start; }
+.pb-dash-hero { grid-column: 1 / -1; padding: 4pt 4pt 34pt; }
 .pb-dash-hero small { display: block; font-size: 10pt; font-weight: 500; letter-spacing: 0.12em;
   text-transform: uppercase; color: var(--accent); margin-bottom: 2pt; }
-.pb-dash-hero b { font-family: var(--serif); font-weight: 500; font-size: 36pt; letter-spacing: -0.01em; line-height: 1.08; }
-.pb-col { display: flex; flex-direction: column; gap: 14pt; min-width: 0; }
-.pb-zone { border-radius: 16pt; padding: 12pt 12pt 10pt; background: #1f2c3a;
+.pb-dash-hero b { position: relative; display: inline-block; font-family: var(--serif); font-weight: 500;
+  font-size: 38pt; letter-spacing: -0.01em; line-height: 1.08; }
+.pb-col { display: flex; flex-direction: column; gap: 16pt; min-width: 0; }
+.pb-zone { position: relative; border-radius: 18pt; padding: 12pt 12pt 10pt; background: #1f2c3a;
   box-shadow: inset 0 0 0 0.75pt #2f4459; }
-.pb-zone-h { display: flex; align-items: center; gap: 7pt; padding: 0 4pt 7pt; font-size: 13pt; font-weight: 600; }
+.pb-zone-h { display: flex; align-items: center; gap: 8pt; padding: 0 4pt 10pt; font-size: 13pt; font-weight: 600; }
 .pb-zone-h svg { width: 14pt; height: 14pt; color: var(--zone, var(--accent)); flex: none; }
-.pb-zone-h em { font-style: normal; font-size: 10pt; font-weight: 500; color: var(--faint);
+.pb-zone-h em { font-style: normal; font-size: 11pt; font-weight: 600; color: var(--faint);
   background: rgba(233, 238, 245, 0.08); border-radius: 99pt; padding: 1pt 6pt; }
-.pb-zone-h small { font-size: 10pt; font-weight: 500; color: var(--faintest); margin-left: 2pt; }
-.pb-eye { position: relative; display: flex; align-items: center; gap: 9pt; padding: 7pt 10pt; border-radius: 8pt;
-  white-space: nowrap; }
+.pb-zone-h small { font-size: 10pt; font-weight: 500; color: var(--faintest); }
+/* FLOW MODE, in For your eyes' corner. At rest a pill says what it is; the key slides in when the tour reaches it, the way
+   it does under the pointer in the app. */
+.pb-flow { margin-left: auto; display: flex; align-items: center; gap: 5pt;
+  padding: 3pt 9pt 3pt 8pt; border-radius: 99pt; background: rgba(78, 155, 234, 0.1);
+  font-size: 10pt; font-weight: 500; color: var(--dim); transition: padding 0.3s ease, background 0.3s ease; }
+.pb-flow kbd { font: 600 9.5pt/1.25 var(--mono); color: var(--accent); border-radius: 99pt;
+  background: rgba(78, 155, 234, 0.2); box-shadow: inset 0 0 0 0.75pt rgba(78, 155, 234, 0.5);
+  max-width: 0; padding: 2pt 0; margin-right: -5pt; opacity: 0; overflow: hidden;
+  transition: max-width 0.3s ease, padding 0.3s ease, margin 0.3s ease, opacity 0.3s ease; }
+.pb-shot[data-focus="flow"] .pb-flow { padding-left: 3pt; background: rgba(78, 155, 234, 0.2); color: var(--ink); }
+.pb-shot[data-focus="flow"] .pb-flow kbd { max-width: 60pt; padding: 2pt 9pt; margin-right: 0; opacity: 1; }
+.pb-flow svg { width: 10pt; height: 10pt; color: var(--accent); }
+.pb-eye { position: relative; display: flex; align-items: center; gap: 9pt; padding: 7pt 10pt; border-radius: 9pt;
+  margin-top: 1pt; white-space: nowrap; }
 .pb-eye.cursor { background: rgba(78, 155, 234, 0.1); }
+.pb-eye.overdue.cursor { background: rgba(255, 122, 104, 0.09); }
 .pb-eye.overdue::before { content: ""; position: absolute; left: 0; top: 5pt; bottom: 5pt; width: 2pt;
   border-radius: 1pt; background: var(--danger); }
 .pb-avatar { width: 22pt; height: 22pt; border-radius: 50%; flex: none; display: grid; place-items: center;
   font-size: 9pt; font-weight: 600; }
 .pb-eye b { font-weight: 500; flex: none; }
+.pb-eye svg { width: 10pt; height: 10pt; flex: none; color: var(--faintest); margin-left: -3pt; }
 .pb-eye span.line { color: var(--dim); overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 .pb-chip { flex: none; font-size: 10pt; font-weight: 500; padding: 2.5pt 7pt; border-radius: 99pt; color: var(--c);
   box-shadow: inset 0 0 0 0.75pt color-mix(in srgb, var(--c) 30%, transparent); }
 .pb-chip.filled { background: color-mix(in srgb, var(--c) 16%, transparent); }
-.pb-reading { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8pt; }
-.pb-read { display: flex; gap: 10pt; padding: 8pt; border-radius: 12pt; background: #283647; min-width: 0; }
-.pb-logo { width: 46pt; height: 46pt; border-radius: 8pt; flex: none; display: grid; place-items: center;
-  font-weight: 700; font-size: 17pt; }
-.pb-read-text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3pt; }
-.pb-read-top { display: flex; justify-content: space-between; gap: 6pt; }
+/* Reading: articles first on warm paper, promotions after them on plain
+   ground. One card per sender, however many times they wrote. */
+.pb-reading { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10pt; }
+.pb-read { display: flex; gap: 9pt; padding: 9pt; border-radius: 12pt; background: rgba(233, 238, 245, 0.05); min-width: 0; }
+.pb-read.content { background: rgba(232, 207, 158, 0.16); }
+.pb-logo { width: 46pt; height: 46pt; border-radius: 15%; flex: none; display: block; }
+.pb-read-text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6pt; }
+.pb-read-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6pt; }
 .pb-read-top b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pb-read-top span { font-size: 10pt; color: var(--faintest); white-space: nowrap; }
-.pb-read p { margin: 0; font-size: 10.5pt; line-height: 1.3; color: var(--faint);
+.pb-read-top span { font-size: 10pt; font-weight: 500; color: var(--faintest); white-space: nowrap; }
+.pb-read p { margin: 0; font-size: 10pt; font-weight: 500; line-height: 1.3; color: var(--faint);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 /* The records rail: one TINTED card per zone, the zone's own hue washed into
    its ground and its border, which is the single biggest thing that makes the
    sitrep read as the sitrep. */
-.pb-rail { display: flex; flex-direction: column; gap: 12pt; min-width: 0; }
-.pb-rec { border-radius: 16pt; padding: 11pt 11pt 9pt; background: var(--bg-c); box-shadow: inset 0 0 0 0.75pt var(--edge); }
-.pb-rec .pb-zone-h { padding: 0 3pt 5pt; }
+.pb-rail { display: flex; flex-direction: column; gap: 14pt; min-width: 0; }
+.pb-rec { position: relative; border-radius: 18pt; padding: 12pt 11pt 9pt; background: var(--bg-c);
+  box-shadow: inset 0 0 0 0.75pt var(--edge); }
+.pb-rec .pb-zone-h { padding: 0 3pt 8pt; }
 .pb-rec-cal { --bg-c: #253341; --edge: #3b5673; --zone: var(--accent); }
 .pb-rec-ship { --bg-c: #35332d; --edge: #6a5a3e; --zone: var(--warn); }
-.pb-rec-bill { --bg-c: #2a3540; --edge: #3f566d; --zone: var(--accent); }
+.pb-rec-bill { --bg-c: #2a3540; --edge: #3f566d; --zone: var(--accent-ink); }
 .pb-rec-rcpt { --bg-c: #233635; --edge: #2f5a49; --zone: var(--positive); }
-.pb-rec-row { display: flex; justify-content: space-between; align-items: center; gap: 8pt; padding: 4.5pt 3pt;
-  font-size: 11.5pt; white-space: nowrap; }
-.pb-rec-row b { font-weight: 400; color: #cdd5df; overflow: hidden; text-overflow: ellipsis; }
+.pb-rec-row { display: flex; align-items: center; gap: 7pt; padding: 5pt 7pt; white-space: nowrap; }
+.pb-rec-row b { flex: 1; min-width: 0; font-weight: 400; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
 .pb-rec-row span { font-size: 10pt; color: var(--faintest); font-variant-numeric: tabular-nums; }
 .pb-rec-row .pb-chip { --c: var(--faint); }
-.pb-rec-rcpt .pb-rec-row span { font-size: 11.5pt; font-weight: 600; color: var(--positive); }
-.pb-ship { background: #3f3d38; border-radius: 10pt; padding: 7pt 8pt; margin-bottom: 6pt;
-  display: flex; flex-direction: column; gap: 6pt; }
-.pb-ship-top { display: flex; align-items: center; gap: 7pt; white-space: nowrap; }
-.pb-ship-top i { width: 14pt; height: 14pt; border-radius: 3pt; flex: none; background: #5a4631;
-  display: grid; place-items: center; font-style: normal; font-size: 8pt; font-weight: 700; color: #f4c47a; }
-.pb-ship-top b { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.pb-ship .pb-chip.eta { --c: var(--faint); align-self: flex-start; }
+.pb-rec-row span.amt { font-size: 11pt; font-weight: 500; color: var(--accent-ink); }
+.pb-rec-rcpt .pb-rec-row span { font-size: 11pt; font-weight: 500; color: var(--positive); }
+/* A package: what is in the box and who sold it, with the status on the
+   title's line and the arrival under it only when there is one. */
+.pb-ship { background: rgba(233, 238, 245, 0.07); border-radius: 11pt; padding: 9pt; margin-bottom: 6pt;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 7pt; }
+.pb-ship:last-child { margin-bottom: 2pt; }
+.pb-ship-top { align-self: stretch; display: flex; align-items: center; gap: 7pt; white-space: nowrap; }
+.pb-ship-top .pb-logo { width: 18pt; height: 18pt; }
+.pb-ship-top div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2pt; }
+.pb-ship-top b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.pb-ship-top small { font-size: 10pt; font-weight: 500; color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
+.pb-ship .pb-chip.eta { --c: var(--faint); }
+
+/* AUTOMATIC UNSUBSCRIBES, bottom right of the sitrep, where the app stacks
+   them: one finished, one still working through the sender's page. */
+.pb-tray { position: absolute; right: 24pt; bottom: 22pt; display: flex; flex-direction: column;
+  align-items: flex-end; gap: 7pt; opacity: 0; transform: translateY(12pt);
+  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pb-shot[data-focus="unsub"] .pb-tray { opacity: 1; transform: none; }
+.pb-unsub { position: relative; display: flex; align-items: center; gap: 10pt; padding: 9pt 12pt 9pt 10pt;
+  border-radius: 14pt; font-size: 12pt; color: var(--dim); white-space: nowrap;
+  background: #212d3b; box-shadow: inset 0 0 0 0.75pt #33485e, 0 10pt 26pt -8pt rgba(0, 0, 0, 0.6); }
+.pb-unsub.done { background: #1f3733; box-shadow: inset 0 0 0 0.75pt #2f5a49, 0 10pt 26pt -8pt rgba(0, 0, 0, 0.6); }
+.pb-unsub b { color: var(--ink); font-weight: 600; }
+.pb-unsub svg { width: 15pt; height: 15pt; color: var(--positive); }
+.pb-unsub i { width: 13pt; height: 13pt; margin: 1pt; border-radius: 50%; border: 1.5pt solid rgba(233, 238, 245, 0.18);
+  border-top-color: var(--dim); animation: pb-spin 0.9s linear infinite; }
+@keyframes pb-spin { to { transform: rotate(360deg); } }
+
+/* THE LOGIN CODE PANEL. In the app it floats at the top of the screen over
+   whatever you are working in, so here it hangs off the window's top edge:
+   half in the picture, half out, which is the feature. */
+.pb-code { position: absolute; left: 50%; top: -30pt; margin-left: -150pt; z-index: 4; width: 300pt; padding: 14pt;
+  border-radius: 22pt; opacity: 0; transform: translateY(-16pt) scale(0.97); pointer-events: none;
+  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+  font-size: 12pt; line-height: 1.25; color: var(--ink);
+  background: rgba(38, 34, 68, 0.9); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  box-shadow: inset 0 0 0 0.75pt rgba(155, 140, 245, 0.4), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
+    0 0 50pt -14pt rgba(155, 140, 245, 0.45); }
+.pb-shot[data-focus="code"] .pb-code { opacity: 1; transform: none; }
+.pb-code-top { display: flex; align-items: center; gap: 10pt; }
+.pb-code-top .pb-avatar { width: 26pt; height: 26pt; font-size: 11pt; }
+.pb-code-top div { flex: 1; display: flex; flex-direction: column; gap: 1pt; }
+.pb-code-top b { font-size: 13pt; font-weight: 600; }
+.pb-code-top small { display: flex; align-items: center; gap: 4pt; font-size: 10pt; font-weight: 500; color: #9B8CF5; }
+.pb-code-top small svg { width: 10pt; height: 10pt; }
+.pb-code-top > span:last-child { font-size: 10pt; color: var(--faintest); font-variant-numeric: tabular-nums; }
+.pb-code-num { padding: 14pt 0; text-align: center; font: 600 38pt/1.1 var(--mono); letter-spacing: 0.04em; }
+.pb-code-acts { display: flex; align-items: center; gap: 8pt; font-size: 13pt; }
+.pb-code-acts span { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6pt;
+  padding: 8pt 0; border-radius: 11pt; background: var(--accent); color: #fff; font-weight: 600; }
+.pb-code-acts span svg { width: 13pt; height: 13pt; }
+.pb-code-acts em { font-style: normal; font-weight: 500; color: var(--dim); padding: 8pt 14pt; }
+
+/* WHAT THE TOUR DOES TO THE PICTURE. One thing at a time: the rest of the
+   board steps back and the zone the caption is about keeps its light, with
+   an even ring so it reads as picked out rather than selected. */
+.pb-dash-hero, .pb-zone, .pb-rec { transition: opacity 0.45s ease, box-shadow 0.45s ease; }
+.pb-shot[data-focus] :is(.pb-dash-hero, .pb-zone, .pb-rec) { opacity: 0.28; }
+.pb-shot[data-focus="headline"] .pb-dash-hero,
+.pb-shot:is([data-focus="eyes"], [data-focus="flow"]) .pb-zone-eyes,
+.pb-shot[data-focus="smart"] .pb-zone-reading,
+.pb-shot[data-focus="group"] .pb-rec { opacity: 1; }
+.pb-shot:is([data-focus="eyes"], [data-focus="flow"]) .pb-zone-eyes,
+.pb-shot[data-focus="smart"] .pb-zone-reading {
+  box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.75), 0 0 44pt -8pt rgba(78, 155, 234, 0.65); }
+/* The grouping step lights the whole rail, each card in its own hue. */
+.pb-shot[data-focus="group"] .pb-rec {
+  box-shadow: inset 0 0 0 1pt var(--zone), 0 0 36pt -10pt var(--zone); }
+
+/* FLOW MODE, MOVING. The cursor drops down the band and each row leaves as it
+   is dealt with, one after the other and quickly, then the band refills and
+   it goes again. Each row runs the same loop a beat behind the one above. */
+.pb-shot[data-focus="flow"] .pb-eye { animation: pb-walk 4.4s calc(var(--i) * 0.5s) infinite both; }
+.pb-shot[data-focus="flow"] .pb-eye.cursor { background: none; }
+@keyframes pb-walk {
+  0%, 2% { background: rgba(78, 155, 234, 0); opacity: 1; transform: none; }
+  4%, 11% { background: rgba(78, 155, 234, 0.2); opacity: 1; transform: none; }
+  17%, 80% { background: rgba(78, 155, 234, 0); opacity: 0; transform: translateX(22pt); }
+  81% { opacity: 0; transform: translateY(6pt); }
+  90%, 100% { background: rgba(78, 155, 234, 0); opacity: 1; transform: none; }
+}
+
+/* SMART UNSUBSCRIBE, as a stand-in: the real page is still being designed, so
+   this only says what it is for. The senders you stopped reading get struck. */
+.pb-read { position: relative; }
+.pb-read > * { transition: opacity 0.4s ease; }
+.pb-x { position: absolute; inset: 0; margin: auto; width: 40pt; height: 40pt; color: var(--danger);
+  opacity: 0; transform: scale(0.4) rotate(-12deg);
+  filter: drop-shadow(0 0 8pt rgba(255, 122, 104, 0.55));
+  transition: opacity 0.3s ease, transform 0.45s cubic-bezier(0.3, 1.5, 0.5, 1); }
+.pb-shot[data-focus="smart"] .pb-read:not(.content) > :not(.pb-x) { opacity: 0.3; }
+.pb-shot[data-focus="smart"] .pb-x { opacity: 1; transform: none; transition-delay: calc(0.25s + var(--i) * 0.22s); }
+
+/* YOUR AGENT, off the window's lower corner: it is a different program, so
+   it is drawn as one. What it gets is the sitrep's own answer, not the pile. */
+.pb-agent { --pt: calc(100cqw / 1040); position: absolute; left: 96pt; bottom: -34pt; z-index: 4; width: 430pt;
+  border-radius: 14pt; overflow: hidden; font: 500 11pt/1.5 var(--mono); color: var(--dim);
+  background: rgba(11, 16, 24, 0.94); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.35), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.8),
+    0 0 50pt -14pt rgba(78, 155, 234, 0.5);
+  opacity: 0; transform: translateY(16pt) scale(0.97); pointer-events: none;
+  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pb-shot[data-focus="mcp"] .pb-agent { opacity: 1; transform: none; }
+.pb-agent-top { display: flex; align-items: center; gap: 8pt; padding: 9pt 14pt; color: var(--faint);
+  border-bottom: 1px solid var(--hair); font-size: 10pt; }
+.pb-agent-top b { color: var(--ink); font-weight: 600; }
+.pb-agent-top i { width: 7pt; height: 7pt; border-radius: 50%; background: var(--positive); }
+.pb-agent-top span { margin-left: auto; }
+.pb-agent-body { padding: 12pt 14pt 14pt; display: grid; grid-template-columns: auto 1fr; gap: 3pt 12pt; }
+.pb-agent-body > p { grid-column: 1 / -1; margin: 0; }
+.pb-agent-body > p:first-child { color: var(--accent-ink); }
+.pb-agent-body b { color: var(--ink); font-weight: 600; }
+.pb-agent-body .late { color: var(--danger); } .pb-agent-body .soon { color: var(--warn); }
+.pb-agent-body > p:last-child { margin-top: 6pt; color: var(--faint); }
 
 /* No phone layout, on purpose: a phone gets the same window at the same
    aspect ratio, just smaller. An accurate picture of the app beats a legible
@@ -375,6 +553,21 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   .pb-fact:first-child { border-top: 0; }
 }
 
+/* THE FORM AGAIN, straight after the tour, for whoever is convinced by now. */
+.pb-join { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 1.1rem;
+  padding-top: clamp(2rem, 6vw, 4rem); }
+.pb-join .pb-h2, .pb-join .pb-intro { margin: 0; }
+.pb-join .pb-rig { text-align: left; margin-top: 0.4rem; }
+.pb-join .pb-confirm, .pb-join .pb-status { text-align: center; }
+/* THE ARGUMENT: a claim on the left, the reasoning on the right. */
+.pb-layer { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: clamp(1.5rem, 5vw, 4.5rem); align-items: start; }
+.pb-layer .pb-h2 { margin: 0; }
+.pb-layer-body { display: flex; flex-direction: column; gap: 1.1rem; }
+.pb-layer-body p { margin: 0; color: var(--dim); font-size: 1.05rem; line-height: 1.65; }
+.pb-layer-body p:first-child { color: var(--ink); }
+@media (max-width: 820px) { .pb-layer { grid-template-columns: minmax(0, 1fr); } }
+
 .pb-close { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 1.4rem; }
 .pb-close .pb-h2 { margin: 0; }
 /* No meter behind this one, so no clearance for it under the label. */
@@ -384,16 +577,21 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-foot nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
 
 @media (prefers-reduced-motion: reduce) {
-  .pb-beat, .pb-cue { transition-duration: 0.01ms; }
+  .pb-cue { transition-duration: 0.01ms; }
+  .pb-step, .pb-agent, .pb-x, .pb-code, .pb-tray, .pb-dash-hero, .pb-zone, .pb-rec, .pb-flow, .pb-flow kbd { transition: none; }
   .pb-slot .pb-rig { animation: none; }
   .pb-cue::after { animation: none; }
+  .pb-unsub i { animation: none; }
+  .pb-shot[data-focus="flow"] .pb-eye { animation: none; }
 }
 `;
 
 // The mock's "Npt" lengths are the app's points: rewritten to multiples of
 // --pt, which scales the whole mock with its window (see THE AFTER above).
+// The sign rides inside the calc: "-7pt" has to become calc(-7 * ...), since a
+// minus in front of a calc() is not a length.
 const PAGE_CSS_RESOLVED = PAGE_CSS.replace(
-  /(\d*\.?\d+)pt\b/g,
+  /(-?\d*\.?\d+)pt\b/g,
   "calc($1 * var(--pt))",
 );
 
@@ -1054,17 +1252,19 @@ function JoinButton({
   );
 }
 
-// The waitlist rig, in the slot the button held. The beats crossfade above it
-// and it never moves, so a half-typed address stays exactly where it was while
-// the scope resolves behind it.
-function Waitlist() {
+// The waitlist rig, in the slot the button held, under the first headline.
+function Waitlist({ focus = true }: { focus?: boolean }) {
   const { chrome, handlers } = useMeter();
   const nameRef = useRef<HTMLInputElement>(null);
   // The button that opened this is gone from under the cursor, so the first
   // field takes the focus it left behind: press join, start typing. Not
   // autoFocus: that scrolls the field into view, which from the closing
   // button would cut the smooth scroll back up short.
-  useEffect(() => nameRef.current?.focus({ preventScroll: true }), []);
+  // The copy of the form further down the page was never opened by a press,
+  // so it leaves the focus where it is.
+  useEffect(() => {
+    if (focus) nameRef.current?.focus({ preventScroll: true });
+  }, [focus]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
@@ -1173,8 +1373,8 @@ function Waitlist() {
 
 // MARK: - the "after": a fake sitrep
 
-// Stand-ins for the SF Symbols the app draws: gauge, envelope, key, sliders,
-// people and waveform in the side rail; eye, envelope.open, calendar,
+// Stand-ins for the SF Symbols the app draws: gauge, envelope, key, the
+// discovery ring, the update arrow, waveform and gear in the side rail; eye, envelope.open, calendar,
 // shippingbox, building.columns and receipt on the zones.
 const GLYPHS = {
   sitrep: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4Zm0-3.6 2.8-5M3.8 8h1M8 3.8v1m4.2 3.2h-1",
@@ -1190,7 +1390,14 @@ const GLYPHS = {
   box: "M8 1.8 14 4.6v6.8L8 14.2 2 11.4V4.6L8 1.8ZM2 4.6 8 7.4l6-2.8M8 7.4v6.8",
   bank: "M2 6 8 2.5 14 6H2Zm1.2 0v6m3.2-6v6m3.2-6v6M12.8 6v6M2 13.5h12",
   receipt: "M3.5 1.8h9v12.4l-1.5-1-1.5 1-1.5-1-1.5 1-1.5-1-1.5 1V1.8Zm2.5 4h4m-4 3h4",
-  retriage: "M13.5 8a5.5 5.5 0 1 1-1.6-3.9M12.5 1.8v2.6H9.9",
+  compose: "M13.6 8.6v4.2a1.2 1.2 0 0 1-1.2 1.2H3.2A1.2 1.2 0 0 1 2 12.8V3.6a1.2 1.2 0 0 1 1.2-1.2h4.2M11.9 1.9l2.2 2.2-5.6 5.6-2.7.5.5-2.7 5.6-5.6Z",
+  search: "M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10Zm3.6-1.4L14 14",
+  wind: "M1.8 6.2h7.4a2 2 0 1 0-2-2M1.8 9.2h10.4a2 2 0 1 1-2 2M1.8 12.2h4.2",
+  clip: "M13 7.4 7.9 12.5a3 3 0 0 1-4.3-4.3l5.3-5.3a2 2 0 0 1 2.9 2.9L6.6 11a1 1 0 0 1-1.5-1.5l4.6-4.6",
+  ring: "M8 2.2a5.8 5.8 0 1 1-5 2.9M5.2 2.9l.1 0M3.4 4.3l.1 0",
+  update: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4ZM8 4.8v6m0 0L5.6 8.4M8 10.8l2.4-2.4",
+  done: "M8 14.2A6.2 6.2 0 1 0 8 1.8a6.2 6.2 0 0 0 0 12.4ZM5.3 8.2l1.9 1.9 3.6-3.9",
+  copy: "M5.5 5.5v-2a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2m-7-5h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z",
 };
 
 function Glyph({ name }: { name: keyof typeof GLYPHS }) {
@@ -1226,21 +1433,128 @@ const AVATAR = {
 // edge, exactly as SitrepView draws it; upcoming is an amber outline.
 const EYES: Array<{
   who: string; initials: string; tone: keyof typeof AVATAR; line: string;
-  chip?: string; overdue?: boolean;
+  chip?: string; overdue?: boolean; clip?: boolean;
 }> = [
-  { who: "Parkline Properties", initials: "PP", tone: "ochre", line: "Your lease renewal still needs a signature before the new rate lapses.", chip: "3d PAST DUE", overdue: true },
+  { who: "Parkline Properties", initials: "PP", tone: "ochre", line: "Your lease renewal still needs a signature before the new rate lapses.", chip: "3d PAST DUE", overdue: true, clip: true },
   { who: "Dr. Ortiz's Office", initials: "DO", tone: "green", line: "Confirm Thursday's 2:30 appointment or call to reschedule.", chip: "due today" },
   { who: "Jamie Chen", initials: "JC", tone: "blue", line: "Needs your pick between two offsite venues so they can hold the date.", chip: "due Fri" },
   { who: "Alex Rivera", initials: "AR", tone: "violet", line: "Replied to your offsite dates: the 14th works for everyone." },
   { who: "Mom", initials: "M", tone: "rose", line: "Sent photos from the weekend." },
 ];
 
-// Newsletters from the scroll, one card per sender. Lettered tiles rather
-// than anybody's real logo.
-const READING: Array<[sender: string, count: number, blurb: string, tile: [bg: string, fg: string, mark: string]]> = [
-  ["Medium Daily Digest", 7, "10 Habits of Highly Effective Engineers, and six more stories picked for you.", ["#f2f2ee", "#111", "M"]],
-  ["Product Hunt Daily", 5, "An AI notetaker for your AI notetaker, and eight more launches.", ["#3a2a22", "#f08a5d", "P"]],
-  ["Substack", 3, "Three new posts from writers you follow.", ["#f3eee6", "#c2531f", "S"]],
+// Recurring senders from the scroll, one card per sender: the ones worth
+// sitting down with first (the app tints those like paper), the offers after.
+const READING: Array<[brand: Brand, sender: string, count: number, blurb: string, content?: boolean]> = [
+  ["cats", "Cats Weekly", 4, "Why your cat stares at the wall, and nine boxes ranked by sit quality.", true],
+  ["federal", "The Federal Overstatement", 3, "Markets react calmly to everything. Plus the case against breakfast.", true],
+  ["haight", "Haightssion", 2, "This month's programme: three talks, a walk and a pottery class.", true],
+  ["brightly", "Brightly", 9, "48 hours only: 40% off everything you looked at once."],
+  ["rainforest", "Rainforest", 5, "Deals picked for you, based on one search in 2023."],
+  ["skyward", "Skyward Miles", 2, "1,204 miles expire at the end of the month."],
+];
+
+// MARK: - fake brands
+
+// The practice inbox's own invented senders (RehearsalNewsletterLogo.swift),
+// drawn from the same geometry, plus one airline that exists only here.
+// Nobody's real logo is on this page.
+type Brand = "cats" | "federal" | "haight" | "brightly" | "rainforest" | "exfed" | "skyward";
+
+const poly = (points: Array<[number, number]>) =>
+  points.map(([x, y]) => `${12 + x * 0.76},${12 + y * 0.76}`).join(" ");
+
+const BRIGHTLY_STAR = poly([
+  [50, 0], [58, 20], [75, 7], [73, 29], [93, 25], [80, 43], [100, 50], [80, 58], [93, 75], [71, 73], [75, 93], [57, 80],
+  [50, 100], [42, 80], [25, 93], [27, 71], [7, 75], [20, 57], [0, 50], [20, 42], [7, 25], [29, 27], [25, 7], [43, 20],
+]);
+const HAIGHT_PIECES = [
+  [[8, 8], [62, 8], [42, 28], [30, 28], [30, 70], [8, 92]],
+  [[92, 8], [92, 92], [38, 92], [58, 72], [70, 72], [70, 30]],
+  [[30, 49], [49, 30], [70, 30], [70, 51], [51, 70], [30, 70]],
+].map((piece) => poly(piece as Array<[number, number]>));
+
+function Logo({ brand }: { brand: Brand }) {
+  const marks: Record<Brand, ReactNode> = {
+    cats: (
+      <>
+        <rect width="100" height="100" fill="#F5EFDF" />
+        <path fill="#293B30" d="M32 20l9 13q9-4 18 0l9-13 2 25q0 17-20 17T30 45Z" />
+        <text x="51.5" y="87" textAnchor="middle" fill="#293B30" fontFamily="Newsreader, Georgia, serif"
+          fontWeight="700" fontSize="21" letterSpacing="3">CW</text>
+      </>
+    ),
+    federal: (
+      <>
+        <rect width="100" height="100" fill="#FFFDF6" />
+        <path fill="#181818" d="M13 16h74v2.5H13zM13 78h74v2.5H13zM13 83h74v1.5H13z" />
+        <text x="50" y="65" textAnchor="middle" fill="#181818" fontFamily="Newsreader, Georgia, serif"
+          fontWeight="700" fontSize="46" letterSpacing="-2">FO</text>
+      </>
+    ),
+    haight: (
+      <>
+        <rect width="100" height="100" fill="#171717" />
+        {HAIGHT_PIECES.map((points) => <polygon key={points} points={points} fill="#D9FF43" />)}
+      </>
+    ),
+    brightly: (
+      <>
+        <rect width="100" height="100" fill="#171717" />
+        <polygon points={BRIGHTLY_STAR} fill="#FFE500" />
+      </>
+    ),
+    rainforest: (
+      <>
+        <rect width="100" height="100" fill="#232F3E" />
+        <text x="50" y="64" textAnchor="middle" fill="#fff" fontFamily="ui-rounded, system-ui, sans-serif"
+          fontWeight="700" fontSize="78">r</text>
+        <path d="M20 73Q50 95 80 69M65 69l16-2-4 15" fill="none" stroke="#FF9900" strokeWidth="6.5"
+          strokeLinecap="round" strokeLinejoin="round" />
+      </>
+    ),
+    exfed: (
+      <>
+        <rect width="100" height="100" fill="#fff" />
+        <text x="50" y="47" textAnchor="middle" fill="#51258A" fontFamily="system-ui, sans-serif"
+          fontWeight="900" fontSize="42" letterSpacing="-3.5">Ex</text>
+        <text x="50" y="84" textAnchor="middle" fill="#F46A20" fontFamily="system-ui, sans-serif"
+          fontWeight="900" fontSize="42" letterSpacing="-3.5">Fed</text>
+      </>
+    ),
+    skyward: (
+      <>
+        <rect width="100" height="100" fill="#0F2747" />
+        <path fill="#8FC1FF" d="M14 66Q40 30 88 24Q62 40 52 70Q36 58 14 66Z" />
+        <path fill="#4E9BEA" d="M30 80Q52 62 80 60Q64 70 58 84Q46 76 30 80Z" />
+      </>
+    ),
+  };
+  return (
+    <svg className="pb-logo" viewBox="0 0 100 100" aria-hidden="true">{marks[brand]}</svg>
+  );
+}
+
+// MARK: - the tour
+
+// What the window shows off as the page scrolls past it, in the order the
+// captions arrive. `key` is what the stylesheet switches the picture on.
+const TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
+  { key: "headline", title: "Deep understanding of what matters to you",
+    line: "The sitrep opens on one sentence about your day, written from what Passband has learned you care about." },
+  { key: "eyes", title: "Only what you need to see",
+    line: "A handful of things need you today. Passband finds them, says what each one wants, and files the rest." },
+  { key: "flow", title: "Flow mode",
+    line: <>Press <kbd>space</kbd> and move through what needs you, one email after the next, until the board is clear.</> },
+  { key: "smart", title: "Smart unsubscribe",
+    line: "Passband notices the senders you have stopped reading and offers to cut them loose." },
+  { key: "group", title: "Visual smart grouping",
+    line: "Passband detects the mail that belongs together, like packages, bills, receipts and invitations, and gathers each kind into its own card." },
+  { key: "code", title: "Login codes come to you",
+    line: "A sign-in code floats over the app you are in. Copy it without opening your inbox." },
+  { key: "unsub", title: "Unsubscribe that actually works",
+    line: <>Press <kbd>u</kbd> and agents handle the rest.</> },
+  { key: "mcp", title: "An MCP to superpower your agent",
+    line: "Pre-triaged email passed on to your agent, so you only get the notifications that matter." },
 ];
 
 function AppMock() {
@@ -1248,7 +1562,7 @@ function AppMock() {
     <div
       className="pb-app"
       role="img"
-      aria-label="The Passband sitrep. Two items for your eyes: a lease renewal three days past due and an appointment to confirm today, then three more conversations. Newsletters wait on a reading shelf, and a rail beside it holds the calendar, shipments, billing and receipts."
+      aria-label="The Passband sitrep. A headline reads: the offsite has a date and your keyboard lands today. Five items are for your eyes, led by a lease renewal three days past due and an appointment to confirm today. Newsletters wait on a reading shelf, articles ahead of promotions. A rail beside it holds the calendar, packages by name, billing and receipts."
     >
       <div className="pb-app-bar">
         <div className="pb-lights" aria-hidden="true"><i /><i /><i /></div>
@@ -1257,8 +1571,8 @@ function AppMock() {
           <small>SITREP</small>
         </div>
         <div className="pb-app-tools">
-          <span className="pb-retriage"><Glyph name="retriage" />re-triage 7d</span>
-          <span className="pb-need">2 need you now</span>
+          <span><Glyph name="compose" /></span>
+          <span><Glyph name="search" /></span>
         </div>
       </div>
 
@@ -1266,29 +1580,40 @@ function AppMock() {
         <span className="on"><Glyph name="sitrep" /></span>
         <span><Glyph name="mail" /></span>
         <span><Glyph name="key" /></span>
-        <span><Glyph name="sliders" /></span>
-        <span><Glyph name="people" /></span>
         <i className="pb-side-gap" />
+        <span><Glyph name="ring" /></span>
+        <hr />
+        <span className="up"><Glyph name="update" /></span>
         <span><Glyph name="pulse" /></span>
         <span><Glyph name="gear" /></span>
-        <span className="pb-me">Y</span>
+        <span className="pb-me">S</span>
       </nav>
 
       <div className="pb-page">
         <div className="pb-dash-hero">
-          <small>Good morning</small>
-          <b>Two items for your eyes.</b>
+          <small>Good morning, Sam</small>
+          <b>The offsite has a date and your keyboard lands today.</b>
         </div>
 
         <div className="pb-col">
-          <section className="pb-zone">
-            <ZoneHead glyph="eye" title="For your eyes" count={EYES.length} />
-            {EYES.map(({ who, initials, tone, line, chip, overdue }, i) => {
+          <section className="pb-zone pb-zone-eyes">
+            <div className="pb-zone-h">
+              <Glyph name="eye" />
+              For your eyes <em>{EYES.length}</em>
+              <span className="pb-flow">
+                <kbd>space</kbd>
+                <Glyph name="wind" />
+                flow mode
+              </span>
+            </div>
+            {EYES.map(({ who, initials, tone, line, chip, overdue, clip }, i) => {
               const [bg, fg] = AVATAR[tone];
               return (
-                <div key={who} className={`pb-eye${overdue ? " overdue" : ""}${i === 0 ? " cursor" : ""}`}>
+                <div key={who} className={`pb-eye${overdue ? " overdue" : ""}${i === 0 ? " cursor" : ""}`}
+                  style={{ ["--i" as string]: i }}>
                   <span className="pb-avatar" style={{ background: bg, color: fg }}>{initials}</span>
                   <b>{who}</b>
+                  {clip && <Glyph name="clip" />}
                   <span className="line">{line}</span>
                   {chip && (
                     <span
@@ -1303,13 +1628,22 @@ function AppMock() {
             })}
           </section>
 
-          <section className="pb-zone">
-            <ZoneHead glyph="reading" title="Reading" count={READING.length}
-              sub="newsletters, announcements, and offers" />
+          <section className="pb-zone pb-zone-reading">
+            <div className="pb-zone-h">
+              <Glyph name="reading" />
+              Reading <em>{READING.length}</em>
+              <small>newsletters, announcements, and offers</small>
+            </div>
             <div className="pb-reading">
-              {READING.map(([sender, count, blurb, [bg, fg, mark]]) => (
-                <div key={sender} className="pb-read">
-                  <span className="pb-logo" style={{ background: bg, color: fg }}>{mark}</span>
+              {READING.map(([brand, sender, count, blurb, content], i) => (
+                <div key={sender} className={`pb-read${content ? " content" : ""}`}>
+                  {!content && (
+                    <svg className="pb-x" viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="5"
+                      strokeLinecap="round" style={{ ["--i" as string]: i - 3 }}>
+                      <path d="M8 8l24 24M32 8 8 32" />
+                    </svg>
+                  )}
+                  <Logo brand={brand} />
                   <div className="pb-read-text">
                     <div className="pb-read-top">
                       <b>{sender}</b>
@@ -1326,31 +1660,31 @@ function AppMock() {
         <aside className="pb-rail">
           <section className="pb-rec pb-rec-cal">
             <ZoneHead glyph="calendar" title="Calendar" count={2} />
-            <div className="pb-rec-row"><b>Dr. Ortiz · checkup</b><span>Sep 26</span></div>
-            <div className="pb-rec-row"><b>Team offsite</b><span>Oct 14</span></div>
+            <div className="pb-rec-row"><b>Dr. Ortiz · checkup</b><span>Thu 2:30 PM</span></div>
+            <div className="pb-rec-row"><b>Team offsite</b><span className="pb-chip">updated</span><span>Oct 14</span></div>
           </section>
           <section className="pb-rec pb-rec-ship">
             <ZoneHead glyph="box" title="Shipments" count={2} />
             <div className="pb-ship">
               <div className="pb-ship-top">
-                <i>UPS</i>
-                <b>Keychron Q1</b>
+                <Logo brand="exfed" />
+                <div><b>Keychron Q1 Max</b><small>Keychron · order KC-48211</small></div>
                 <span className="pb-chip filled" style={{ ["--c" as string]: "var(--warn)" }}>out for delivery</span>
               </div>
             </div>
             <div className="pb-ship">
               <div className="pb-ship-top">
-                <i>a</i>
-                <b>Linen notebooks</b>
-                <span className="pb-chip filled" style={{ ["--c" as string]: "var(--accent)" }}>shipped</span>
+                <Logo brand="rainforest" />
+                <div><b>Linen notebooks, set of 3</b><small>Rainforest · 2 items</small></div>
+                <span className="pb-chip" style={{ ["--c" as string]: "var(--accent)" }}>shipped</span>
               </div>
               <span className="pb-chip eta">arrives Sat</span>
             </div>
           </section>
           <section className="pb-rec pb-rec-bill">
             <ZoneHead glyph="bank" title="Billing" count={2} />
+            <div className="pb-rec-row"><b>Con Edison</b><span className="pb-chip">autopay</span><span className="amt">$142.08</span></div>
             <div className="pb-rec-row"><b>Chase ··4417</b><span className="pb-chip">statement</span></div>
-            <div className="pb-rec-row"><b>Con Edison</b><span className="pb-chip">update</span></div>
           </section>
           <section className="pb-rec pb-rec-rcpt">
             <ZoneHead glyph="receipt" title="Receipts" count={3} />
@@ -1360,6 +1694,138 @@ function AppMock() {
           </section>
         </aside>
       </div>
+
+      <div className="pb-tray">
+        <div className="pb-unsub done">
+          <span className="pb-avatar" style={{ background: AVATAR.rust[0], color: AVATAR.rust[1] }}>M</span>
+          <span>Unsubscribed from <b>Marriott Bonvoy</b></span>
+          <Glyph name="done" />
+        </div>
+        <div className="pb-unsub">
+          <span className="pb-avatar" style={{ background: AVATAR.violet[0], color: AVATAR.violet[1] }}>E</span>
+          <span>Unsubscribing from <b>Eventbrite</b></span>
+          <i />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The floating login code, which in the app sits at the top of the screen
+// over whatever you are working in. A sibling of the window so it can hang
+// off its edge.
+function CodePanel() {
+  return (
+    <div className="pb-code" aria-hidden="true">
+      <div className="pb-code-top">
+        <span className="pb-avatar" style={{ background: AVATAR.blue[0], color: AVATAR.blue[1] }}>N</span>
+        <div>
+          <b>Northwind Bank</b>
+          <small><Glyph name="key" />Login code</small>
+        </div>
+        <span>24s</span>
+      </div>
+      <div className="pb-code-num">482 913</div>
+      <div className="pb-code-acts">
+        <span><Glyph name="copy" />Copy</span>
+        <em>Dismiss</em>
+      </div>
+    </div>
+  );
+}
+
+// What an agent on the Agent MCP door is handed: the same answer the sitrep
+// gives, already triaged. A sibling of the window, like the code panel.
+function AgentPanel() {
+  return (
+    <div className="pb-agent" aria-hidden="true">
+      <div className="pb-agent-top"><i /><b>Claude</b>Agent MCP<span>passband</span></div>
+      <div className="pb-agent-body">
+        <p>get_inbox_updates</p>
+        <p><b>2 need you now</b></p>
+        <span>Parkline Properties</span><span className="late">lease to sign, 3 days past due</span>
+        <span>Dr. Ortiz's Office</span><span className="soon">confirm Thursday 2:30, today</span>
+        <p>4,307 others triaged. Nothing else is worth interrupting you.</p>
+      </div>
+    </div>
+  );
+}
+
+// THE BEFORE, THE AFTER, AND THE TOUR. The step whose caption is level with
+// the reading line (mid-screen, or lower on a phone where the window holds
+// the top) is the one the window shows. Before the first and after the last
+// the window is just the sitrep.
+function Showcase() {
+  const stepsRef = useRef<HTMLOListElement>(null);
+  const [focus, setFocus] = useState(-1);
+
+  useEffect(() => {
+    const list = stepsRef.current;
+    if (!list) return;
+    let raf = 0;
+    const measure = () => {
+      raf = 0;
+      const line = innerHeight * (innerWidth > 900 ? 0.5 : 0.54);
+      let at = -1;
+      Array.from(list.children).forEach((step, i) => {
+        const rect = step.getBoundingClientRect();
+        if (rect.top <= line && rect.bottom > line) at = i;
+      });
+      setFocus(at);
+    };
+    const queue = () => {
+      if (!raf) raf = requestAnimationFrame(measure);
+    };
+    measure();
+    addEventListener("scroll", queue, { passive: true });
+    addEventListener("resize", queue);
+    return () => {
+      cancelAnimationFrame(raf);
+      removeEventListener("scroll", queue);
+      removeEventListener("resize", queue);
+    };
+  }, []);
+
+  return (
+    <div className="pb-pair">
+      <figure className="pb-panel pb-before">
+        <figcaption>
+          <b>Before</b> everything, in the order it arrived
+          <span className="pb-unread" aria-label="4,312 unread">4,312</span>
+        </figcaption>
+        <div className="pb-window">
+          <FakeInbox />
+        </div>
+      </figure>
+      <div className="pb-hold">
+        <div className="pb-gate" aria-hidden="true">
+          <span>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6"
+              strokeLinecap="round" strokeLinejoin="round">
+              <path d="M2.5 8h11m0 0L9.5 4m4 4-4 4" />
+            </svg>
+          </span>
+        </div>
+        <figure className="pb-panel pb-after">
+          <figcaption><b>After</b> what Passband shows you</figcaption>
+          <div className="pb-shot" data-focus={focus < 0 ? undefined : TOUR[focus].key}>
+            <div className="pb-window">
+              <AppMock />
+            </div>
+            <CodePanel />
+            <AgentPanel />
+          </div>
+        </figure>
+      </div>
+      <ol className="pb-steps" ref={stepsRef}>
+        {TOUR.map(({ key, title, line }, i) => (
+          <li key={key} className="pb-step" data-on={i === focus || undefined}>
+            <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
+            <h3>{title}</h3>
+            <p>{line}</p>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
@@ -1375,7 +1841,9 @@ function AppMock() {
 // for fixed fractions to clear both on every one.
 function scopeLayout(): ScopeLayout {
   if (innerWidth > 820) return { center: 0.7, base: 0.82, scale: 0.5, spread: 1 };
-  const stage = document.querySelector(".pb-stage")?.getBoundingClientRect();
+  // The first leaf, not the stage: the leaf is where the copy sits before any
+  // scrolling, and measuring against it gives the same answer at any scroll.
+  const stage = document.querySelector(".pb-leaf")?.getBoundingClientRect();
   const beats = document.querySelector(".pb-beats")?.getBoundingClientRect();
   const slot = document.querySelector(".pb-slot")?.getBoundingClientRect();
   if (!stage || !beats || !slot || stage.height < 1) {
@@ -1402,7 +1870,6 @@ export function App() {
   const storyRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [beat, setBeat] = useState(0);
   const [scrolled, setScrolled] = useState(false);
   const [locked, setLocked] = useState(false);
   const readoutRef = useRef<HTMLElement>(null);
@@ -1423,17 +1890,27 @@ export function App() {
       },
     });
 
-    // Progress through the story, 0 at the top to 1 where the stage releases.
-    // The copy turns as the filter starts to close; the markers come up once
-    // it has closed, when there is something left to point at.
+    // THE SQUELCH IS KEYED TO THE SECOND HEADLINE, not to the section's length:
+    // it closes as that headline comes up the screen and is fully shut at the
+    // moment the headline is level with the middle, never before. `SHUT` is
+    // the progress at which the scope has finished closing (scope.ts's
+    // squelchAt), and the markers come up just short of it.
+    const second = story.querySelector<HTMLElement>(".pb-leaf-1 .pb-beat");
+    const SHUT = 0.52;
     const onScroll = () => {
       const rect = story.getBoundingClientRect();
-      const travel = Math.max(1, rect.height - innerHeight);
-      const p = Math.min(1, Math.max(0, -rect.top / travel));
+      const scrolled = -rect.top;
+      let arrival = Math.max(1, rect.height - innerHeight);
+      if (second) {
+        const at = second.getBoundingClientRect();
+        // How far the page has to scroll for the headline to sit mid-screen.
+        arrival = Math.max(1, scrolled + at.top + at.height / 2 - innerHeight / 2);
+      }
+      const t = Math.max(0, scrolled / arrival);
+      const p = Math.min(1, t <= 1 ? t * SHUT : SHUT + (t - 1) * 0.3);
       scene?.setProgress(p);
-      setBeat(p > 0.23 ? 1 : 0);
       setLocked(p > 0.46);
-      setScrolled(p > 0.03);
+      setScrolled(scrolled > innerHeight * 0.03);
     };
     const onResize = () => {
       setLayout(scopeLayout());
@@ -1522,28 +1999,39 @@ export function App() {
           <span className="pb-read-l" aria-hidden="true">SPAN&nbsp;&nbsp;your inbox&nbsp;&nbsp;·&nbsp;&nbsp;4,312 msgs</span>
           <span className="pb-read-r" aria-hidden="true">SQUELCH&nbsp;<b ref={readoutRef}>0%</b></span>
 
-          <header className="pb-top">
-            <a className="pb-brand" href="/" onClick={go(false)}>
-              <img src="/mark.svg" alt="" width={42} height={23} />
-              <span>passband</span>
-            </a>
-            <nav className="pb-nav">
-              <a href="/self-host">Self-host</a>
-              <a href="/trust">Trust</a>
-              <a className="pb-keep" href="https://github.com/passband-app/passband">GitHub</a>
-            </nav>
-          </header>
+          <div className="pb-cue" aria-hidden="true">scroll</div>
+        </div>
 
-          <div className="pb-copy">
-            <div className="pb-beats" data-beat={beat}>
-              <div className="pb-beat pb-beat-0" aria-hidden={beat !== 0}>
+        <div className="pb-track">
+          <div className="pb-leaf">
+            <header className="pb-top">
+              <a className="pb-brand" href="/" onClick={go(false)}>
+                <img src="/mark.svg" alt="" width={42} height={23} />
+                <span>passband</span>
+              </a>
+              <nav className="pb-nav">
+                <a href="/self-host">Self-host</a>
+                <a href="/trust">Trust</a>
+                <a className="pb-keep" href="https://github.com/passband-app/passband">GitHub</a>
+              </nav>
+            </header>
+            <div className="pb-copy">
+              <div className="pb-beat pb-beats">
                 <p className="pb-lede">Inbox zero every day was never realistic.</p>
                 <h1 className="pb-hero">You’re only human.</h1>
                 <p className="pb-sub">
                   Your attention is valuable. You deserve an inbox that treats it that way.
                 </p>
               </div>
-              <div className="pb-beat pb-beat-1" aria-hidden={beat !== 1}>
+              <div className="pb-slot">
+                {joining ? <Waitlist /> : <JoinButton onClick={go(true)} />}
+                <p className="pb-fine">For Gmail, on Mac and iPhone.</p>
+              </div>
+            </div>
+          </div>
+          <div className="pb-leaf pb-leaf-1">
+            <div className="pb-copy">
+              <div className="pb-beat">
                 <h2 className="pb-hero">Know what needs you.</h2>
                 <p className="pb-sub">
                   Passband brings the important things forward, so you can give them your
@@ -1551,13 +2039,7 @@ export function App() {
                 </p>
               </div>
             </div>
-            <div className="pb-slot">
-              {joining ? <Waitlist /> : <JoinButton onClick={go(true)} />}
-              <p className="pb-fine">For Gmail, on Mac and iPhone.</p>
-            </div>
           </div>
-
-          <div className="pb-cue" aria-hidden="true">scroll</div>
         </div>
       </section>
 
@@ -1569,30 +2051,33 @@ export function App() {
           Every email still arrives. Passband reads each one, pulls forward the few that
           need you, and files the rest where you can find them when you want to.
         </p>
-        <div className="pb-pair">
-          <figure className="pb-panel pb-before">
-            <figcaption>
-              <b>Before</b> everything, in the order it arrived
-              <span className="pb-unread" aria-label="4,312 unread">4,312</span>
-            </figcaption>
-            <div className="pb-window">
-              <FakeInbox />
-            </div>
-          </figure>
-          <div className="pb-gate" aria-hidden="true">
-            <span>
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6"
-                strokeLinecap="round" strokeLinejoin="round">
-                <path d="M2.5 8h11m0 0L9.5 4m4 4-4 4" />
-              </svg>
-            </span>
-          </div>
-          <figure className="pb-panel pb-after">
-            <figcaption><b>After</b> what Passband shows you</figcaption>
-            <div className="pb-window">
-              <AppMock />
-            </div>
-          </figure>
+        <Showcase />
+      </section>
+
+      <section className="pb-section pb-join">
+        <h2 className="pb-h2">That’s an inbox built in the <em>modern era.</em></h2>
+        <p className="pb-intro">Join the waitlist and we will email you when a spot opens.</p>
+        <Waitlist focus={false} />
+        <p className="pb-fine">For Gmail, on Mac and iPhone.</p>
+      </section>
+
+      <section className="pb-section pb-layer">
+        <h2 className="pb-h2">An intelligence layer, <em>not a wrapper.</em></h2>
+        <div className="pb-layer-body">
+          <p>
+            Most AI email is a chat box bolted onto the same inbox. You still do the reading.
+            It just answers questions about the pile.
+          </p>
+          <p>
+            Passband puts a capable agentic layer underneath instead. Every message is read
+            as it arrives, revisited as things change, and turned into what it means for you:
+            a deadline, a package, a receipt, a person waiting on a reply.
+          </p>
+          <p>
+            Everything else draws on that one understanding. The sitrep, the notifications
+            on your phone and the agent you already use all start from mail that has been
+            read, not mail that is waiting to be.
+          </p>
         </div>
       </section>
 

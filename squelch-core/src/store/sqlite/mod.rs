@@ -125,15 +125,147 @@ macro_rules! sealed_mail_sql {
 }
 
 pub(crate) mod agent_budget;
+/// An archive row nobody has assessed, over aliases `m` (messages) and `a`
+/// (its `agent_message_state`, LEFT JOINed): stored to be found, never
+/// checked. To an external reader such a row DOES NOT EXIST YET. It is left
+/// out of every thread read, subject and count, and it does not close its
+/// thread, because closing on it would shut every live conversation with a
+/// year-old ancestor until somebody paid for a model call per ancestor.
+///
+/// Exactly this and nothing wider: a restricted archive row, a row the owner
+/// sealed by hand, and any NON-archive pending row all still close the thread.
+macro_rules! archive_unassessed_sql {
+    () => {
+        archive_unassessed_sql_as!("m", "a")
+    };
+}
+/// [`archive_unassessed_sql!`] over any pair of aliases, so a subquery about a
+/// SIBLING row can ask the same question in the same words. One definition:
+/// the omission must not mean two things.
+macro_rules! archive_unassessed_sql_as {
+    ($m:literal, $a:literal) => {
+        concat!(
+            "(",
+            $m,
+            ".is_archive=1 AND (",
+            $a,
+            ".access IS NULL OR ",
+            $a,
+            ".access='pending')
+           AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections c
+               WHERE c.account_id=",
+            $m,
+            ".account_id AND c.message_id=",
+            $m,
+            ".id
+                 AND c.field='external_access' AND c.value_json='true'))"
+        )
+    };
+}
+/// An unassessed archive row an external caller may still BUY a check for:
+/// not spam, and nothing queued, running or finished at its revision. That
+/// leaves the rows never asked about and the ones whose check FAILED (which
+/// `revive_failed_archive_access` puts back once the failure is a day old).
+/// Same aliases as [`archive_unassessed_sql!`]. The search that picks ten
+/// matches to ask about and the thread open that picks eight siblings both
+/// use it, so a row already parked never takes a place a fresh one could.
+macro_rules! archive_askable_sql {
+    () => {
+        concat!(
+            "(m.is_spam=0 AND ",
+            archive_unassessed_sql!(),
+            " AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs j
+                 WHERE j.account_id=m.account_id AND j.message_id=m.id
+                   AND j.kind IN ('triage','access') AND j.state!='failed'
+                   AND j.input_revision=COALESCE(a.revision,1)))"
+        )
+    };
+}
+/// THE EXTERNAL SEARCH PREFILTER, over alias `m`: a cheap NECESSARY condition
+/// for an external reader to be shown a row, written so a recall leg can carry
+/// it in its own WHERE. IT AUTHORIZES NOTHING. The authority is
+/// `messages::external_message_allowed_conn` plus
+/// `messages::thread_guard_and_subject`, and every candidate that passes this
+/// still goes through both before a field of it leaves the store.
+///
+/// What it is for: a row an external reader cannot be shown must not take a
+/// place in a recall window, or which readable rows come back (and in what
+/// order, and how fast) becomes a function of mail the caller may not read.
+/// Three terms, each implied by the authority and none of them the whole of it:
+/// 1. the row's own assessment is `allowed`;
+/// 2. the owner has not sealed it;
+/// 3. no sibling closes its thread on its face: a sibling the thread guard
+///    counts (so not an unassessed archive row) that is itself not `allowed`
+///    or is owner-sealed.
+///
+/// What it leaves to the authority: the recursive dependency check (a decision
+/// that consumed a source since restricted, changed or deleted), on the row
+/// and on every sibling. `the_external_prefilter_is_implied_by_the_authority`
+/// in tests/archive.rs holds "necessary" over a fixture of every case; if the
+/// authority ever loosens, that test is what says this must follow.
+macro_rules! external_candidate_sql {
+    () => {
+        concat!(
+            "(EXISTS(SELECT 1 FROM agent_message_state xa WHERE xa.account_id=m.account_id
+                 AND xa.message_id=m.id AND xa.access='allowed')
+              AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections xc
+                 WHERE xc.account_id=m.account_id AND xc.message_id=m.id
+                   AND xc.field='external_access' AND xc.value_json='true')
+              AND NOT EXISTS(SELECT 1 FROM messages s
+                 LEFT JOIN agent_message_state sa
+                   ON sa.account_id=s.account_id AND sa.message_id=s.id
+                 WHERE s.account_id=m.account_id AND s.thread_id=m.thread_id AND s.id!=m.id
+                   AND NOT ",
+            archive_unassessed_sql_as!("s", "sa"),
+            " AND (sa.access IS NULL OR sa.access!='allowed'
+                     OR EXISTS(SELECT 1 FROM agent_triage_corrections sc
+                         WHERE sc.account_id=s.account_id AND sc.message_id=s.id
+                           AND sc.field='external_access' AND sc.value_json='true'))))"
+        )
+    };
+}
+/// [`external_candidate_sql!`] for a query that walks EVERY row of one account
+/// (the external vector leg), where the correlated sibling scan of term 3 is
+/// run once per row and is quadratic in thread length. The same three terms,
+/// with the third turned inside out: the set of threads a sibling closes is
+/// built once, for the account bound at `$account`, and a row passes when its
+/// thread is not in it. Equal to the correlated form for any row that passes
+/// terms 1 and 2, since such a row is never itself in the closing set;
+/// `the_external_prefilter_is_implied_by_the_authority` holds the two equal
+/// over its fixture.
+macro_rules! external_candidate_flat_sql {
+    ($account:literal) => {
+        concat!(
+            "(EXISTS(SELECT 1 FROM agent_message_state xa WHERE xa.account_id=m.account_id
+                 AND xa.message_id=m.id AND xa.access='allowed')
+              AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections xc
+                 WHERE xc.account_id=m.account_id AND xc.message_id=m.id
+                   AND xc.field='external_access' AND xc.value_json='true')
+              AND m.thread_id NOT IN (SELECT s.thread_id FROM messages s
+                 LEFT JOIN agent_message_state sa
+                   ON sa.account_id=s.account_id AND sa.message_id=s.id
+                 WHERE s.account_id=",
+            $account,
+            " AND NOT ",
+            archive_unassessed_sql_as!("s", "sa"),
+            " AND (sa.access IS NULL OR sa.access!='allowed'
+                     OR EXISTS(SELECT 1 FROM agent_triage_corrections sc
+                         WHERE sc.account_id=s.account_id AND sc.message_id=s.id
+                           AND sc.field='external_access' AND sc.value_json='true'))))"
+        )
+    };
+}
 mod agent_deliveries;
 mod agent_triage;
 mod attention;
 mod audit;
+mod calendar;
 mod contacts;
 pub mod device_tokens;
 mod drafts;
 mod events;
 mod feedback;
+mod ghosts;
 pub mod groups;
 mod messages;
 mod migrate;
@@ -151,8 +283,14 @@ mod specialists;
 mod tests;
 mod tracking;
 mod triage_stages;
+mod zones;
 
+pub use self::agent_triage::{
+    ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX,
+    ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
+};
 use self::migrate::migrate;
+pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
 
 use std::path::Path;
 use std::sync::{Mutex, Once, RwLock};
@@ -165,16 +303,17 @@ use crate::error::{CoreError, Result};
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::SmartBlockMemo;
 use crate::store::{
-    AccountIdentity, AccountPhoto, AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform,
-    ClientSeen, ClientTag, ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey,
-    ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay,
-    MarketingApplied, MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub,
-    MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
-    NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage,
-    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderDomainEntry,
-    SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued,
-    Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState,
-    TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    AccountIdentity, AccountPhoto, AgentDraftOutcome, AttachmentBytes, BankingApplied,
+    BlankBodyScan, ClientActed, ClientPlatform, ClientSeen, ClientTag, ContactEntry, Device,
+    DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread,
+    IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer,
+    MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode, MissingVector,
+    NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed, RevisitQueued,
+    SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
+    SeedVerdict, SenderDigestRow, SenderDomainEntry, SenderEntry, SenderHistory, SentMessage,
+    SitrepBand, SpamScope, Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides,
+    Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling,
+    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
@@ -210,6 +349,37 @@ pub const VEC_DIMS: usize = 384;
 /// runs, and short enough that a genuinely wedged writer still surfaces as an
 /// error instead of a hang.
 const BUSY_TIMEOUT_MS: u64 = 5_000;
+
+/// Page cache per connection, in SQLite's negative-is-KiB spelling: 32 MB. See
+/// [`SqliteStore::set_pragmas`].
+const CACHE_SIZE_KIB_NEGATED: i64 = -32_000;
+
+/// The WAL is truncated to this after a checkpoint: 64 MB. See
+/// [`SqliteStore::set_pragmas`].
+const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
+/// Rows `ANALYZE` samples per index (`PRAGMA analysis_limit`). LARGE, so a
+/// table under it is scanned in full and the statistics say what the data
+/// says: at the 400 SQLite's docs suggest for a cheap pass, the sampler
+/// visits ~400 rows and scales, and on a single-account store that records
+/// `account_id = ?` as matching ~400 rows of 50,000, which is "selective",
+/// the exact belief this pass exists to correct. A table past the limit is
+/// still bounded.
+///
+/// NEVER ZERO. Zero is also the switch that makes STAT4 (compiled in) persist
+/// real index-key samples, sender addresses and subjects among them, into the
+/// file, where they would outlive the rows the shredder removes. See
+/// [`SqliteStore::refresh_statistics`].
+const ANALYSIS_LIMIT_ROWS: i64 = 1_000_000;
+
+/// The `PRAGMA optimize` mask the statistics pass runs with: SQLite's default
+/// (`0xfffe`) minus bit `0x10`, which would cap every ANALYZE the pragma
+/// issues at the lesser of the connection's `analysis_limit` and 2,000 rows.
+/// Under that cap a table that grew 10x would be re-analyzed as a 2,000-row
+/// sample, which is the very "`account_id = ?` matches 2,000 of N" belief
+/// [`ANALYSIS_LIMIT_ROWS`] exists to keep out of the file. Without the bit
+/// the pragma's ANALYZE runs under the connection's limit, like step 1.
+const OPTIMIZE_MASK: u32 = 0xfffe & !0x10;
 
 static VEC_EXT_INIT: Once = Once::new();
 
@@ -254,6 +424,18 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// Overwrite the account's creation stamp with `raw`, for a test that
+    /// wants the store to stop answering [`Store::account_created_at`].
+    #[cfg(test)]
+    pub(crate) fn test_set_account_created_at(&self, account_id: AccountId, raw: &str) {
+        let conn = self.lock().unwrap();
+        conn.execute(
+            "UPDATE accounts SET created_at = ?2 WHERE id = ?1",
+            params![account_id, raw],
+        )
+        .unwrap();
+    }
+
     /// Open (or create) a store at `path`, applying the schema.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         register_vec_extension();
@@ -289,9 +471,45 @@ impl SqliteStore {
     /// file to itself, so it can lose to a process still holding the old mode
     /// open, and a store that quietly stayed on the rollback journal would
     /// reproduce the locking it is here to prevent with nothing to point at.
+    ///
+    /// Two more are per-connection tuning, so they too run on every open:
+    ///
+    /// - `cache_size=-32000` is 32 MB of page cache instead of the 2 MB default,
+    ///   against a file that runs 200 MB to 1 GB on a real mailbox. It is a
+    ///   ceiling, not a reservation: pages are cached as they are read, and an
+    ///   idle connection holds only what it has touched.
+    /// - `journal_size_limit` truncates the WAL back to 64 MB after a
+    ///   checkpoint. Without it the file keeps the high-water mark of the
+    ///   largest transaction ever run (the whole-mailbox FTS rebuild) for the
+    ///   life of the database.
+    ///
+    /// Two that look like they belong here are left at SQLite's defaults ON
+    /// PURPOSE:
+    ///
+    /// - `synchronous` stays FULL. NORMAL is the usual WAL pairing and would
+    ///   save an fsync per commit, but this daemon makes irreversible moves on
+    ///   the strength of its own commits: the scheduled-send claim must be on
+    ///   disk before the Gmail POST (`scheduled_send.rs` re-fires a row that
+    ///   reads `scheduled` after a crash, and only searches for the sent copy
+    ///   when `maybe_sent` says it may exist), and the notify ledger is the
+    ///   dedupe for a push already delivered and a model call already billed.
+    ///   Under NORMAL a power loss inside the OS writeback window could roll
+    ///   either back after the side effect: a mail sent twice. The right shape
+    ///   is NORMAL with those claims synced explicitly, which is a design
+    ///   change, not a pragma.
+    /// - `temp_store` stays FILE. MEMORY would keep the planner's temp b-trees
+    ///   off disk, but in this SQLite it also disables the sorter's spill, so a
+    ///   `CREATE INDEX` over a large table inside `migrate` (the one place a
+    ///   big sort is certain) would hold every key in heap: on a memory-capped
+    ///   tenant pod that is an OOM kill during open, on every restart.
+    ///
+    /// `foreign_keys=ON`, the one other per-connection setting, is applied by
+    /// `schema.sql`'s first line through `execute_batch(SCHEMA)` in `init`.
     fn set_pragmas(conn: &Connection) -> Result<()> {
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+        conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB_NEGATED)?;
+        conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
         Ok(())
     }
 
@@ -308,6 +526,87 @@ impl SqliteStore {
             embedder: RwLock::new(None),
             event_tx: RwLock::new(None),
         })
+    }
+
+    /// Give the query planner statistics to plan with.
+    ///
+    /// Until this existed NOTHING in the daemon ever ran `ANALYZE`, so the
+    /// planner had never seen a row count for the file. Its default guess is
+    /// that an equality on any indexed column is selective, which on a store
+    /// where every row carries the same `account_id` sends it down the
+    /// `account_id` prefix of whatever index it finds and walks the whole
+    /// account: the recursive external-access check measured 457 ms at 50k
+    /// messages with no statistics and 0.2 ms with them, `agent_sender_history`
+    /// 64 ms to 0.0, and several statements carry `INDEXED BY` pins only
+    /// because the planner could not be trusted to find the index on its own.
+    ///
+    /// Two steps, every call:
+    ///
+    /// 1. `ANALYZE` each REAL table that has no statistics yet. "Real" leaves
+    ///    out the FTS5 and vec0 shadow tables (`messages_fts_data`,
+    ///    `message_vecs_chunks`, ...): they hold the bodies and the vectors,
+    ///    the largest b-trees in the file, nothing plans against them, and an
+    ///    unqualified `ANALYZE` would walk every one of them end to end,
+    ///    because the per-index row count is exact whatever the sampling
+    ///    limit says.
+    /// 2. `PRAGMA optimize` under [`OPTIMIZE_MASK`], which in this SQLite
+    ///    (3.46) re-analyzes a table the connection has planned against
+    ///    whose size has moved 10x since its statistics were taken, or that
+    ///    has an index with none, and is a no-op otherwise. That second rule
+    ///    does reach the small keyed shadow tables FTS5 and vec0 look rows
+    ///    up in (`messages_fts_idx`, `messages_fts_config`,
+    ///    `message_vecs_info`): a few rows each, taken once, SQLite's own
+    ///    call. The blob tables have no index for it to want statistics on,
+    ///    and their growth is only checked against the connection's own
+    ///    queries, which never touch them, so it never walks them.
+    ///
+    /// NOT on the open path, on purpose. Step 1 on a cold multi-hundred-MB
+    /// file is seconds of b-tree walking, which belongs after the daemon's
+    /// door is bound rather than before, and never on the short CLI opens
+    /// (`squelchd token`, `squelchd pair`) that share the file with a serving
+    /// daemon: both steps take the write lock, and an open that waited out
+    /// `busy_timeout` behind the sync engine would have logged a failure for
+    /// nothing. The daemon calls this on a schedule instead
+    /// (`spawn_statistics_refresh` in squelchd).
+    ///
+    /// Under [`ANALYSIS_LIMIT_ROWS`] throughout; see that constant for why
+    /// the limit is large and why it must never be zero.
+    pub fn refresh_statistics(&self) -> Result<()> {
+        let conn = self.lock()?;
+        conn.pragma_update(None, "analysis_limit", ANALYSIS_LIMIT_ROWS)?;
+        let real_tables: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+                   AND name NOT LIKE 'messages\\_fts%' ESCAPE '\\'
+                   AND name NOT LIKE 'message\\_vecs%' ESCAPE '\\'",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        // `sqlite_stat1` does not exist until the first ANALYZE, and a SELECT
+        // naming it does not compile on such a file, so ask `sqlite_master`
+        // before asking it.
+        let stat_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat1')",
+            [],
+            |r| r.get(0),
+        )?;
+        let analyzed: std::collections::HashSet<String> = if stat_table {
+            let mut stmt = conn.prepare("SELECT DISTINCT tbl FROM sqlite_stat1")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        } else {
+            std::collections::HashSet::new()
+        };
+        for table in real_tables.iter().filter(|t| !analyzed.contains(*t)) {
+            // Quoted: these are our own names from schema.sql, but a name is
+            // a name.
+            conn.execute_batch(&format!("ANALYZE \"{}\"", table.replace('"', "\"\"")))?;
+        }
+        conn.execute_batch(&format!("PRAGMA optimize({OPTIMIZE_MASK:#x})"))?;
+        Ok(())
     }
 
     /// Attach an [`Embedder`](crate::embed::Embedder) so the semantic-recall
@@ -367,6 +666,14 @@ impl SqliteStore {
     /// The attached event notifier, if any. Cheap clone of the sender.
     pub fn event_notifier(&self) -> Option<tokio::sync::broadcast::Sender<i64>> {
         self.event_tx.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Run raw SQL on the store's connection. For a test outside this module
+    /// that has to break the store on purpose (a trigger that refuses one
+    /// row); nothing in the daemon has a use for it.
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &str) {
+        self.lock().unwrap().execute_batch(sql).unwrap();
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -723,6 +1030,26 @@ impl Store for SqliteStore {
         self.clear_shipment(account_id, shipment_id, at, policy)
     }
 
+    fn list_ghost_events(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>> {
+        self.list_ghost_events(account_id, from, to)
+    }
+
+    fn patch_ghost_user(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        end: Option<Option<crate::triage::ghost::EventTime>>,
+        state: Option<Option<crate::types::GhostUserState>>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.patch_ghost_user(account_id, ghost_id, end, state, at)
+    }
+
     fn shipments_redetect_cleanup(&self, account_id: AccountId) -> Result<u64> {
         self.shipments_redetect_cleanup(account_id)
     }
@@ -938,6 +1265,46 @@ impl Store for SqliteStore {
         self.ingest_message_fresh(triaged, scope)
     }
 
+    fn ingest_archive_message(&self, triaged: &TriagedMessage) -> Result<Option<i64>> {
+        self.ingest_archive_message(triaged)
+    }
+
+    fn archive_walked_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        self.archive_walked_to(account_id)
+    }
+
+    fn message_is_archive(&self, account_id: AccountId, message_id: i64) -> Result<bool> {
+        self.message_is_archive(account_id, message_id)
+    }
+
+    fn set_archive_walked_to(&self, account_id: AccountId, walked_to: DateTime<Utc>) -> Result<()> {
+        self.set_archive_walked_to(account_id, walked_to)
+    }
+
+    fn archive_disk(&self) -> Result<crate::store::ArchiveDisk> {
+        self.archive_disk()
+    }
+
+    fn archive_covered_to(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        self.archive_covered_to(account_id)
+    }
+
+    fn set_archive_covered_to(
+        &self,
+        account_id: AccountId,
+        covered_to: DateTime<Utc>,
+    ) -> Result<()> {
+        self.set_archive_covered_to(account_id, covered_to)
+    }
+
+    fn stored_gmail_msg_ids(
+        &self,
+        account_id: AccountId,
+        gmail_msg_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        self.stored_gmail_msg_ids(account_id, gmail_msg_ids)
+    }
+
     fn is_known_contact(&self, account_id: AccountId, addr: &str) -> Result<bool> {
         self.is_known_contact(account_id, addr)
     }
@@ -949,6 +1316,15 @@ impl Store for SqliteStore {
         limit: u32,
     ) -> Result<Vec<ContactEntry>> {
         self.search_contacts(account_id, q, limit)
+    }
+
+    fn people_named(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<PersonNamed>> {
+        self.people_named(account_id, name, limit)
     }
 
     fn merge_harvested_contacts(
@@ -992,6 +1368,20 @@ impl Store for SqliteStore {
 
     fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>> {
         self.inbox_unread(account_id)
+    }
+
+    fn account_created_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT created_at FROM accounts WHERE id = ?1",
+                params![account_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(stamp
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc)))
     }
 
     fn set_inbox_unread(&self, account_id: AccountId, messages: i64, threads: i64) -> Result<()> {
@@ -1648,6 +2038,10 @@ impl Store for SqliteStore {
         embedding: &[f32],
     ) -> Result<()> {
         self.upsert_message_vector(account_id, message_id, embedding)
+    }
+
+    fn upsert_message_vectors(&self, account_id: AccountId, items: &[(i64, &[f32])]) -> Result<()> {
+        self.upsert_message_vectors(account_id, items)
     }
 
     fn messages_missing_vectors(

@@ -91,6 +91,108 @@ fn migrate_adds_to_addrs_null_so_old_sent_mail_enters_the_backfill_queue() {
 }
 
 #[test]
+fn migrate_adds_is_archive_zero_to_a_preexisting_messages_table() {
+    // An install predating the archive tier. Nothing it holds came from the
+    // walk, so every old row reads 0, and the column is NOT NULL so no query
+    // has to think about a third state.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE messages(
+             id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             gmail_msg_id TEXT NOT NULL, body TEXT, is_sent INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO messages(id, account_id, gmail_msg_id, body) VALUES (1, 1, 'g1', 'old');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let existing: i64 = conn
+        .query_row("SELECT is_archive FROM messages WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(existing, 0, "pre-existing mail is live mail");
+    assert!(
+        conn.execute(
+            "INSERT INTO messages(id, account_id, gmail_msg_id, is_archive) VALUES (2, 1, 'g2', NULL)",
+            [],
+        )
+        .is_err(),
+        "the flag has no unknown state"
+    );
+}
+
+#[test]
+fn migrate_adds_the_forward_edge_null_to_a_preexisting_walk_cursor() {
+    // A database that walked before the forward pass existed: the cursor row
+    // keeps its backward edge and gains a NULL forward one.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE archive_walk(
+             account_id INTEGER PRIMARY KEY, walked_to TEXT NOT NULL, updated_at TEXT NOT NULL);
+         INSERT INTO archive_walk VALUES (1, '2026-01-01T00:00:00+00:00', '2026-01-02T00:00:00+00:00');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let (walked_to, covered_to): (String, Option<String>) = conn
+        .query_row(
+            "SELECT walked_to, covered_to FROM archive_walk WHERE account_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(walked_to, "2026-01-01T00:00:00+00:00");
+    assert_eq!(covered_to, None);
+}
+
+#[test]
+fn migrate_adds_date_offset_null_and_its_partial_index_to_a_preexisting_messages_table() {
+    // An install predating the timezone capture. The column arrives NULL on
+    // every old row (the raw mail is gone, so nothing can fill it locally),
+    // and the observation index arrives with it, on the second open as on
+    // the first. A development database may hold the index's earlier,
+    // non-covering shape under its old name; that one goes.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE messages(
+             id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             gmail_msg_id TEXT NOT NULL, from_addr TEXT NOT NULL,
+             received_at TEXT NOT NULL, body TEXT,
+             is_sent INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO messages(id, account_id, gmail_msg_id, from_addr, received_at, body)
+             VALUES (1, 1, 'g1', 'dan@example.com', '2026-01-01T00:00:00+00:00', 'old');
+         CREATE INDEX idx_messages_zone_obs ON messages(account_id, from_addr, received_at);",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT date_offset_minutes FROM messages WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(existing, None, "pre-existing mail is never backfilled");
+    let index: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_messages_zone_offsets'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(index.contains("WHERE date_offset_minutes != 0"), "{index}");
+    let old: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_messages_zone_obs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old, 0, "the superseded index is dropped");
+}
+
+#[test]
 fn migrate_adds_field_reasons_to_a_preexisting_triage_table() {
     // An install whose `triage` has no field_reasons. `model_used`/`status`
     // are present because the two-stage backfill in migrate() reads them.
@@ -880,18 +982,16 @@ fn migrate_adds_reminder_columns_and_the_due_index_to_preexisting_triage() {
     assert!(cols.iter().any(|c| c == "remind_at"), "remind_at added");
     assert!(cols.iter().any(|c| c == "reminded_at"), "reminded_at added");
 
-    let indexed: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type='index' AND name='idx_triage_remind_at'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        indexed, 1,
-        "the sweep's index is created here, not in schema.sql"
-    );
+    for index in ["idx_triage_remind_at", "idx_triage_reminded_at"] {
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                [index],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "{index} is created here, not in schema.sql");
+    }
 
     // NOT backfilled: `reminded_at` is a standing-band arm, so a stamped
     // historical row would drag the whole mailbox into the band.
@@ -2069,5 +2169,749 @@ fn migrate_retires_queued_rule_change_retriage() {
             (2, "leased".into()),
             (3, "queued".into())
         ]
+    );
+}
+
+/// The calendar ghost tables are new and need no backfill, so `schema.sql`
+/// alone brings them: on a fresh store, and on an existing mailbox from
+/// before they existed (simulated by dropping them), whose mail survives.
+/// A second open of a DB that already has them is a no-op.
+#[test]
+fn init_creates_the_ghost_tables_on_fresh_and_existing_dbs() {
+    const TABLES: [&str; 4] = [
+        "ghost_events",
+        "ghost_event_keys",
+        "ghost_event_sources",
+        "event_duration_priors",
+    ];
+    const TRIGGERS: [&str; 2] = [
+        "ghost_event_rows_follow_ghost",
+        "ghost_event_sources_follow_message",
+    ];
+    fn present(conn: &Connection) -> (usize, usize, Vec<String>) {
+        let named = |kind: &str, names: &[&str]| -> usize {
+            names
+                .iter()
+                .filter(|name| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type=?1 AND name=?2",
+                        params![kind, name],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap()
+                        == 1
+                })
+                .count()
+        };
+        let mut stmt = conn.prepare("PRAGMA table_info(ghost_events)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        (named("table", &TABLES), named("trigger", &TRIGGERS), cols)
+    }
+    let (fresh, _) = store();
+    let (tables, triggers, cols) = present(&fresh.lock().unwrap());
+    assert_eq!((tables, triggers), (4, 2));
+    for expected in [
+        "id",
+        "account_id",
+        "kind",
+        "title",
+        "starts_at",
+        "start_sort",
+        "start_timezone",
+        "ends_at",
+        "est_minutes",
+        "est_basis",
+        "location",
+        "venue_key",
+        "commitment",
+        "owner_scope",
+        "owner_addr",
+        "mail_state",
+        "likelihood_band",
+        "likelihood_reason",
+        "supplier_message_id",
+        "last_message_id",
+        "created_at",
+        "updated_at",
+        "user_state",
+        "user_state_at",
+        "user_end_minutes",
+        "user_end_days",
+    ] {
+        assert!(cols.iter().any(|c| c == expected), "missing {expected}");
+    }
+
+    let dir = std::env::temp_dir().join(format!("squelch-ghost-tables-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mail.db");
+    let _ = std::fs::remove_file(&path);
+    let acct;
+    {
+        let old = SqliteStore::open(&path).unwrap();
+        acct = old.ensure_account("me@example.com").unwrap();
+        triaged_row(acct, "g-1", "t-1", None, false, Sensitivity::Normal).ingest(&old);
+        old.lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TRIGGER ghost_event_rows_follow_ghost;
+                 DROP TRIGGER ghost_event_sources_follow_message;
+                 DROP TABLE ghost_events; DROP TABLE ghost_event_keys;
+                 DROP TABLE ghost_event_sources; DROP TABLE event_duration_priors;",
+            )
+            .unwrap();
+        assert_eq!(present(&old.lock().unwrap()).0, 0);
+    }
+    {
+        let upgraded = SqliteStore::open(&path).unwrap();
+        let conn = upgraded.lock().unwrap();
+        assert_eq!(present(&conn).0, 4);
+        assert_eq!(present(&conn).1, 2);
+        let mail: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mail, 1, "the mailbox survives the upgrade");
+        conn.execute(
+            "INSERT INTO ghost_events(account_id,kind,title,commitment,created_at,updated_at)
+             VALUES(?1,'ticket','Show','committed','2026-09-30T00:00:00Z','2026-09-30T00:00:00Z')",
+            [acct],
+        )
+        .unwrap();
+    }
+    let reopened = SqliteStore::open(&path).unwrap();
+    let ghosts: i64 = reopened
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM ghost_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ghosts, 1, "a later open keeps what is there");
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Google Calendar tables are new and need no backfill either: present on
+/// a fresh store with the columns the sync and the timeline use, created on an
+/// existing mailbox from before them (dropped here), whose mail survives, and
+/// left alone by a later open.
+#[test]
+fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+    fn index_exists(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_calendar_events_start'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    }
+    let (fresh, _) = store();
+    {
+        let conn = fresh.lock().unwrap();
+        assert_eq!(
+            columns(&conn, "calendar_calendars"),
+            [
+                "account_id",
+                "calendar_id",
+                "summary",
+                "is_primary",
+                "selected",
+                "time_zone",
+                "sync_token",
+                "synced_at",
+                "full_synced_at",
+                "last_error_kind",
+                "failures",
+                "retry_at",
+                "truncated",
+                "color",
+                "access_role",
+            ]
+        );
+        assert_eq!(
+            columns(&conn, "calendar_events"),
+            [
+                "account_id",
+                "calendar_id",
+                "event_id",
+                "ical_uid",
+                "status",
+                "summary",
+                "location",
+                "starts_at",
+                "start_sort",
+                "ends_at",
+                "all_day",
+                "start_timezone",
+                "organizer_email",
+                "self_response",
+                "transparent",
+                "html_link",
+                "updated_at",
+                "color_id",
+                "organizer_self",
+                "description",
+                "guests_truncated",
+                "organizer_unreadable",
+            ]
+        );
+        assert_eq!(
+            columns(&conn, "calendar_event_guests"),
+            [
+                "account_id",
+                "calendar_id",
+                "event_id",
+                "position",
+                "email",
+                "name",
+                "response",
+                "is_organizer",
+                "is_self",
+            ]
+        );
+        assert!(index_exists(&conn));
+    }
+
+    let dir = std::env::temp_dir().join(format!("squelch-calendar-tables-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mail.db");
+    let _ = std::fs::remove_file(&path);
+    let acct;
+    {
+        let old = SqliteStore::open(&path).unwrap();
+        acct = old.ensure_account("me@example.com").unwrap();
+        triaged_row(acct, "g-1", "t-1", None, false, Sensitivity::Normal).ingest(&old);
+        old.lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE calendar_event_guests; DROP TABLE calendar_events;
+                 DROP TABLE calendar_calendars;",
+            )
+            .unwrap();
+    }
+    {
+        let upgraded = SqliteStore::open(&path).unwrap();
+        let conn = upgraded.lock().unwrap();
+        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_event_guests").len(), 9);
+        assert!(index_exists(&conn));
+        let mail: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mail, 1, "the mailbox survives the upgrade");
+        conn.execute(
+            "INSERT INTO calendar_calendars(account_id,calendar_id,is_primary) VALUES(?1,'primary',1)",
+            [acct],
+        )
+        .unwrap();
+    }
+    let reopened = SqliteStore::open(&path).unwrap();
+    let kept: i64 = reopened
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM calendar_calendars", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 1, "a later open keeps what is there");
+    // A calendar table from before the per-calendar failure state, the
+    // colour and the role (and an events table from before the colour, the
+    // organizer flag and the description) gains them, keeping its rows, with
+    // the defaults that mean "never failed, not cut".
+    reopened
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE calendar_calendars DROP COLUMN failures;
+             ALTER TABLE calendar_calendars DROP COLUMN retry_at;
+             ALTER TABLE calendar_calendars DROP COLUMN truncated;
+             ALTER TABLE calendar_calendars DROP COLUMN color;
+             ALTER TABLE calendar_calendars DROP COLUMN access_role;
+             ALTER TABLE calendar_events DROP COLUMN color_id;
+             ALTER TABLE calendar_events DROP COLUMN organizer_self;
+             ALTER TABLE calendar_events DROP COLUMN description;
+             ALTER TABLE calendar_events DROP COLUMN guests_truncated;
+             ALTER TABLE calendar_events DROP COLUMN organizer_unreadable;
+             UPDATE calendar_calendars SET sync_token='minted-with-one-attendee',
+                    full_synced_at='2026-10-01T00:00:00+00:00', synced_at='2026-10-01T00:00:00+00:00';",
+        )
+        .unwrap();
+    drop(reopened);
+    let reopened = SqliteStore::open(&path).unwrap();
+    {
+        let conn = reopened.lock().unwrap();
+        assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
+        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        // A store from before guests was synced one attendee at a time: its
+        // tokens are forgotten, so the next pass reads every calendar in full
+        // with the new parameters.
+        let sync: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT sync_token, full_synced_at, synced_at FROM calendar_calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((sync.0, sync.1), (None, None));
+        assert!(sync.2.is_some(), "when it was last read is kept");
+        conn.execute("UPDATE calendar_calendars SET sync_token='fresh'", [])
+            .unwrap();
+        let row: (i64, Option<String>, i64) = conn
+            .query_row(
+                "SELECT failures, retry_at, truncated FROM calendar_calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, None, 0));
+    }
+    drop(reopened);
+    // A later open, with the column there, leaves the token alone.
+    let reopened = SqliteStore::open(&path).unwrap();
+    let token: Option<String> = reopened
+        .lock()
+        .unwrap()
+        .query_row("SELECT sync_token FROM calendar_calendars", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(token.as_deref(), Some("fresh"));
+    // A store from AFTER guests but before the unreadable-organizer mark
+    // (verify2 V9): only that column is new, and it alone must make every
+    // calendar forget its token and last full read, so the next pass rereads
+    // in full and sets the mark.
+    reopened
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE calendar_events DROP COLUMN organizer_unreadable;
+             UPDATE calendar_calendars SET sync_token='minted-before-the-mark',
+                    full_synced_at='2026-10-02T00:00:00+00:00';",
+        )
+        .unwrap();
+    drop(reopened);
+    let reopened = SqliteStore::open(&path).unwrap();
+    {
+        let conn = reopened.lock().unwrap();
+        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        let sync: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT sync_token, full_synced_at FROM calendar_calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            sync,
+            (None, None),
+            "the organizer mark alone forgets the tokens"
+        );
+    }
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A guest list is stored with its event, replaced whole when the event is
+/// written again, read back in Google's order, scoped by account, and GONE
+/// with the event whichever path deletes it (the trigger).
+#[test]
+fn an_events_guests_are_stored_with_it_and_go_with_it() {
+    use crate::gcal::{
+        CalendarMeta, EventItem, EventRow, Guest, GuestResponse, MAX_GUESTS, PRIMARY,
+    };
+    use crate::triage::ghost::EventTime;
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    let now: DateTime<Utc> = "2026-10-05T12:00:00Z".parse().unwrap();
+    let guest = |email: &str, response: GuestResponse, is_self: bool| Guest {
+        email: email.into(),
+        name: (!is_self).then(|| "A Guest".to_string()),
+        response,
+        organizer: is_self,
+        is_self,
+    };
+    let event = |id: &str, guests: Vec<Guest>, truncated| EventRow {
+        event_id: id.into(),
+        ical_uid: None,
+        tentative: false,
+        summary: Some("Party".into()),
+        location: None,
+        start: EventTime::parse("2026-10-06T19:00:00-04:00").unwrap(),
+        end: None,
+        start_timezone: None,
+        organizer_email: None,
+        organizer_unreadable: false,
+        organizer_self: true,
+        self_response: None,
+        transparent: false,
+        html_link: None,
+        updated_at: None,
+        color_id: None,
+        description: None,
+        guests,
+        guests_truncated: truncated,
+    };
+    let count = |id: &str| -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM calendar_event_guests WHERE event_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    for account in [acct, other] {
+        store
+            .calendar_set_selection(account, &[CalendarMeta::primary_only()])
+            .unwrap();
+    }
+    let three = vec![
+        guest("me@example.com", GuestResponse::Accepted, true),
+        guest("zed@example.com", GuestResponse::Declined, false),
+        guest("amy@example.com", GuestResponse::Pending, false),
+    ];
+    assert!(
+        store
+            .calendar_put_event(acct, PRIMARY, &event("a", three.clone(), false))
+            .unwrap()
+    );
+    store
+        .calendar_put_event(acct, PRIMARY, &event("b", three[..2].to_vec(), true))
+        .unwrap();
+    // Read back whole, in the order given (not by address), one event or a
+    // listing.
+    let one = store.calendar_event(acct, PRIMARY, "a").unwrap().unwrap();
+    assert_eq!(one.row.guests, three);
+    assert!(!one.row.guests_truncated);
+    assert_eq!(one.row.other_guests(), 2);
+    let from = (now - chrono::Duration::days(1)).fixed_offset();
+    let to = (now + chrono::Duration::days(30)).fixed_offset();
+    let (listed, _) = store.list_calendar_events(acct, from, to, now).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].row.guests, three);
+    assert_eq!(listed[1].row.guests, three[..2]);
+    assert!(listed[1].row.guests_truncated);
+    // Another account holds none of it.
+    assert!(store.calendar_event(other, PRIMARY, "a").unwrap().is_none());
+    assert!(
+        store
+            .list_calendar_events(other, from, to, now)
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    // The same event id under another account keeps its own list.
+    store
+        .calendar_put_event(other, PRIMARY, &event("a", three[..1].to_vec(), false))
+        .unwrap();
+    assert_eq!(
+        store
+            .calendar_event(acct, PRIMARY, "a")
+            .unwrap()
+            .unwrap()
+            .row
+            .guests
+            .len(),
+        3
+    );
+    // Written again with fewer: replaced, not added to.
+    store
+        .calendar_put_event(acct, PRIMARY, &event("a", three[..2].to_vec(), false))
+        .unwrap();
+    assert_eq!(
+        store
+            .calendar_event(acct, PRIMARY, "a")
+            .unwrap()
+            .unwrap()
+            .row
+            .guests,
+        three[..2]
+    );
+    // Never more than the cap, whatever it is handed.
+    let crowd: Vec<Guest> = (0..MAX_GUESTS + 20)
+        .map(|i| {
+            guest(
+                &format!("g{i}@example.com"),
+                GuestResponse::Tentative,
+                false,
+            )
+        })
+        .collect();
+    store
+        .calendar_put_event(acct, PRIMARY, &event("c", crowd, true))
+        .unwrap();
+    assert_eq!(count("c"), MAX_GUESTS as i64);
+
+    // GONE WITH THE EVENT, by each path that deletes one.
+    assert_eq!(count("a"), 3, "two here, one under the other account");
+    assert!(store.calendar_remove_event(acct, PRIMARY, "a").unwrap());
+    assert_eq!(
+        count("a"),
+        1,
+        "the user's delete; the other account's stays"
+    );
+    store
+        .calendar_apply_page(acct, PRIMARY, &[EventItem::Remove("b".into())], now)
+        .unwrap();
+    assert_eq!(count("b"), 0, "a cancelled event in a synced page");
+    store
+        .calendar_finish_sync(
+            acct,
+            PRIMARY,
+            Some("t"),
+            now,
+            Some((&Default::default(), false)),
+        )
+        .unwrap();
+    assert_eq!(count("c"), 0, "a full read's sweep");
+    store.calendar_set_selection(other, &[]).unwrap();
+    assert_eq!(count("a"), 0, "a calendar that stops being read");
+    let left: i64 = store
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM calendar_event_guests", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+/// The per-connection tuning `set_pragmas` applies on every open, asserted on a
+/// FILE-backed store because the journal limit means nothing to `:memory:`.
+/// Each value is read back through the same pragma, so a typo in a name (which
+/// SQLite ignores silently) fails here instead of in production; and the two
+/// settings deliberately left at their defaults are pinned at those defaults,
+/// so adding one back has to argue with the doc on `set_pragmas` first.
+#[test]
+fn open_tunes_the_connection_pragmas() {
+    let dir = std::env::temp_dir().join(format!("squelch-pragmas-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pragmas.db");
+
+    {
+        let store = SqliteStore::open(&path).unwrap();
+        let conn = store.lock().unwrap();
+        let read = |name: &str| -> i64 {
+            conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(read("cache_size"), CACHE_SIZE_KIB_NEGATED);
+        assert_eq!(read("journal_size_limit"), JOURNAL_SIZE_LIMIT_BYTES);
+        // Left alone on purpose: FULL (2) and FILE (0 or 1); see `set_pragmas`.
+        assert_eq!(read("synchronous"), 2, "synchronous must stay FULL");
+        assert_ne!(read("temp_store"), 2, "temp_store must not be MEMORY");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- the three indexes the 50k-row bench asked for -----------------------
+
+/// Three listings that walked the whole account on the planner bench, pinned
+/// by PLAN rather than by timing (a timing test is flaky on CI and a plan is
+/// exact), and pinned on the SHIPPED statements (the `const`s the store runs)
+/// so an edit to a query that loses its seek fails here. The second half drops
+/// each index and asserts the plan really degrades, so a rename that silently
+/// detaches one cannot pass either:
+///
+/// - `append_due_reminders` runs on EVERY Standing-band read (the client's
+///   10 s poll) and asked for `reminded_at IS NOT NULL` with no index over it:
+///   a walk of every triage row in the account, 233 ms at 50k messages;
+/// - `message_opens` (and the sent and group listings' per-row open counts)
+///   reached `send_trackers` through `token`, its only key, so each was a SCAN
+///   of the whole tracker table;
+/// - `agent_diagnostics` reads `agent_triage_runs ORDER BY id DESC LIMIT 25`,
+///   and the table had no index at all over a column that grows forever.
+#[test]
+fn reminder_tracker_and_run_lookups_seek_their_indexes() {
+    use super::super::agent_triage::{DUE_REMINDERS_SQL, MESSAGE_RUNS_SQL};
+    use super::super::tracking::MESSAGE_OPENS_SQL;
+
+    let (store, _acct) = store();
+    let conn = store.lock().unwrap();
+
+    /// Whether `table` (the alias, when there is one) is reached through
+    /// `index`.
+    fn seeks(plan: &[String], table: &str, index: &str) -> bool {
+        plan.iter()
+            .any(|line| line.starts_with(&format!("SEARCH {table} USING")) && line.contains(index))
+    }
+    /// Whether `table` is walked whole.
+    fn scans(plan: &[String], table: &str) -> bool {
+        plan.iter()
+            .any(|line| line.starts_with(&format!("SCAN {table}")))
+    }
+
+    let p = plan(&conn, DUE_REMINDERS_SQL);
+    assert!(
+        seeks(&p, "t", "idx_triage_reminded_at"),
+        "due reminders walk the account's triage rows:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_OPENS_SQL);
+    assert!(
+        seeks(&p, "t", "idx_send_trackers_message"),
+        "message opens scan send_trackers:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_RUNS_SQL);
+    assert!(
+        seeks(&p, "agent_triage_runs", "idx_agent_triage_runs_message"),
+        "run diagnostics scan agent_triage_runs:\n{p:#?}"
+    );
+
+    // THE CANARY: with the indexes gone the same statements must degrade to
+    // what they did before, or the assertions above were never testing the
+    // index. Each is asserted on the shape the planner actually falls back
+    // to, not on the absence of a name that cannot appear once dropped: the
+    // reminders are driven from `messages` with `t` reached by primary key
+    // instead of through an index, the opens walk `message_opens` whole and
+    // reach each tracker by token, and the runs become a table scan.
+    conn.execute_batch(
+        "DROP INDEX idx_triage_reminded_at;
+         DROP INDEX idx_send_trackers_message;
+         DROP INDEX idx_agent_triage_runs_message;",
+    )
+    .unwrap();
+    let p = plan(&conn, DUE_REMINDERS_SQL);
+    assert!(
+        !p.iter()
+            .any(|line| line.starts_with("SEARCH t USING INDEX")),
+        "canary: reminders still reach triage through an index:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_OPENS_SQL);
+    assert!(
+        scans(&p, "o") && !seeks(&p, "t", "idx_send_trackers_message"),
+        "canary: opens do not fall back to walking message_opens:\n{p:#?}"
+    );
+    let p = plan(&conn, MESSAGE_RUNS_SQL);
+    assert!(
+        scans(&p, "agent_triage_runs"),
+        "canary: runs do not fall back to a table scan:\n{p:#?}"
+    );
+}
+
+/// The planner has statistics to plan with, from the pass the daemon runs on a
+/// schedule: the real tables are analyzed, the bulky FTS and vector shadow
+/// tables (the largest b-trees in the file, which nothing plans against) are
+/// not, and a later pass notices a table that grew.
+#[test]
+fn refresh_statistics_analyzes_the_real_tables_and_optimize_keeps_up() {
+    let (store, acct) = store();
+    for i in 0..5 {
+        let _ = triaged(acct, &format!("g{i}"), &format!("t{i}")).upsert(&store);
+    }
+    // Opening analyzed nothing: that work is the scheduled pass's, not the
+    // open path's (a CLI open must not take the write lock for it).
+    let stat_table_exists = |store: &SqliteStore| -> bool {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert!(!stat_table_exists(&store), "open must not analyze");
+
+    store.refresh_statistics().unwrap();
+    let stat_for = |store: &SqliteStore, tbl: &str| -> Vec<(String, String)> {
+        store
+            .lock()
+            .unwrap()
+            .prepare("SELECT idx, stat FROM sqlite_stat1 WHERE tbl = ?1 ORDER BY idx")
+            .unwrap()
+            .query_map([tbl], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    let first = stat_for(&store, "messages");
+    assert!(!first.is_empty(), "messages has statistics after the pass");
+    // The pass's own ANALYZE loop never names a shadow table. `PRAGMA
+    // optimize` then takes statistics for the few small keyed ones whose
+    // index the connection consulted (the FTS term index and the two config
+    // tables), which is SQLite's call and a few rows each; the bulky ones,
+    // the body blobs, docsizes and vector chunks, have no index to plan with
+    // and are never walked.
+    let shadow_rows: Vec<String> = store
+        .lock()
+        .unwrap()
+        .prepare(
+            "SELECT DISTINCT tbl FROM sqlite_stat1
+             WHERE tbl LIKE 'messages\\_fts%' ESCAPE '\\'
+                OR tbl LIKE 'message\\_vecs%' ESCAPE '\\'
+             ORDER BY tbl",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    let keyed_and_small = [
+        "message_vecs_info",
+        "messages_fts_config",
+        "messages_fts_idx",
+    ];
+    assert!(
+        shadow_rows
+            .iter()
+            .all(|t| keyed_and_small.contains(&t.as_str())),
+        "only the small keyed shadow tables may carry statistics: {shadow_rows:?}"
+    );
+    for bulky in [
+        "messages_fts_data",
+        "messages_fts_docsize",
+        "messages_fts_content",
+        "message_vecs_chunks",
+        "message_vecs_rowids",
+        "message_vecs_vector_chunks00",
+    ] {
+        assert!(
+            !shadow_rows.iter().any(|t| t == bulky),
+            "{bulky} holds the bodies or the vectors and is never walked"
+        );
+    }
+
+    // Fifty times the rows (optimize's growth gate is a b-tree page estimate,
+    // too coarse to trust at ten), read through an index so the connection
+    // has planned against the table, and the incremental pass re-analyzes
+    // it, at the full limit: the second line of statistics is the honest
+    // one, not SQLite's 2000-row sample.
+    for i in 5..255 {
+        let _ = triaged(acct, &format!("g{i}"), &format!("t{i}")).upsert(&store);
+    }
+    let _: i64 = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND received_at > ''",
+            [acct],
+            |r| r.get(0),
+        )
+        .unwrap();
+    store.refresh_statistics().unwrap();
+    let second = stat_for(&store, "messages");
+    assert_ne!(first, second, "a table that grew 50x is re-analyzed");
+    let received = second
+        .iter()
+        .find(|(idx, _)| idx == "idx_messages_received")
+        .map(|(_, stat)| stat.as_str())
+        .expect("the (account_id, received_at) index has statistics");
+    assert_eq!(
+        received, "255 255 1",
+        "every row was counted, so `account_id = ?` is known to match them all"
     );
 }

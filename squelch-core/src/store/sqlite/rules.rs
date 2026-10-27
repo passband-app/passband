@@ -4,13 +4,15 @@ use super::*;
 
 /// A sender's recent non-sealed inbound mail with what became of it.
 ///
-/// `INDEXED BY` ON PURPOSE. Without `sqlite_stat1` (which a daemon never
-/// writes) the planner reads `ORDER BY received_at DESC LIMIT` as a reason to
-/// walk `idx_messages_received` newest-first across the WHOLE account, under the
-/// store mutex, until it happens on enough of this sender's rows. The seek on
-/// the NOCASE sender index plus a sort of one sender's mail is the cheap plan,
-/// and pinning it means a missing index is a loud prepare error, not a silent
-/// walk. `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
+/// `INDEXED BY` ON PURPOSE. Without `sqlite_stat1` (which the daemon writes
+/// only since `SqliteStore::refresh_statistics`, on a schedule, so a store can
+/// still be minutes or an upgrade away from having one) the planner reads
+/// `ORDER BY received_at DESC LIMIT` as a reason to walk `idx_messages_received`
+/// newest-first across the WHOLE account, under the store mutex, until it
+/// happens on enough of this sender's rows. The seek on the NOCASE sender index
+/// plus a sort of one sender's mail is the cheap plan, and pinning it means a
+/// missing index is a loud prepare error, not a silent walk, statistics or no.
+/// `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
 ///
 /// `status` IS THE OWNER'S, NOT A SWEEP'S. The rule suggester reads `done` and
 /// unopened as "cleared without opening" and tells its model so in trusted
@@ -31,7 +33,7 @@ pub(crate) const SENDER_RULE_DIGEST_SQL: &str = concat!(
      JOIN triage t ON t.message_id = m.id
      WHERE m.account_id = ?1
        AND m.from_addr = ?2 COLLATE NOCASE
-       AND m.is_sent = 0 AND m.is_spam = 0
+       AND m.is_sent = 0 AND m.is_spam = 0 AND m.is_archive = 0
        AND NOT ",
     sealed_mail_sql!(),
     " ORDER BY m.received_at DESC
@@ -264,7 +266,7 @@ impl SqliteStore {
         let row = conn
             .query_row(
                 "SELECT m.from_addr, m.list_unsubscribe, m.list_unsub_one_click, m.body_html,
-                        m.auth_pass, m.is_spam
+                        m.auth_pass, m.is_spam, m.to_addrs
                  FROM messages m
                  WHERE m.account_id = ?1 AND m.id = ?2",
                 params![account_id, message_id],
@@ -276,12 +278,13 @@ impl SqliteStore {
                         r.get::<_, Option<String>>(3)?,
                         r.get::<_, Option<i64>>(4)?,
                         r.get::<_, i64>(5)?,
+                        r.get::<_, Option<String>>(6)?,
                     ))
                 },
             )
             .optional()?;
         Ok(row.map(
-            |(from_addr, list_unsubscribe, one_click, body_html, auth_pass, is_spam)| {
+            |(from_addr, list_unsubscribe, one_click, body_html, auth_pass, is_spam, to_addrs)| {
                 MessageUnsub {
                     from_addr,
                     list_unsubscribe,
@@ -289,6 +292,7 @@ impl SqliteStore {
                     body_html,
                     auth_pass: auth_pass.map(|v| v != 0),
                     is_spam: is_spam != 0,
+                    to_addrs,
                 }
             },
         ))

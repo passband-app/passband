@@ -612,6 +612,75 @@ impl SqliteStore {
         Ok(seen)
     }
 
+    /// Record that the app holding `presented` just DID something: stamps
+    /// `client_action_at` on the token's row. The caller decides what counts
+    /// (the API's bearer middleware: a successful write on the client door).
+    ///
+    /// Only for a row that already says it is `platform`, which is what lets
+    /// [`SqliteStore::client_actions_seen`] read the stamp by the row's own
+    /// platform. A token's first tag is written at once by
+    /// [`SqliteStore::verify_device_token_from`], which every request passes
+    /// before it can get here, so a real app's first write is not lost to this.
+    ///
+    /// UNTHROTTLED, unlike the stamps verification writes: those ride on
+    /// reads, and this only ever follows a request that was a write already.
+    /// Anything that is not a live device token (the master token, a token
+    /// revoked mid-request) matches no row and is not an error.
+    pub fn note_client_action(&self, presented: &str, platform: ClientPlatform) -> Result<()> {
+        let presented = presented.trim();
+        if !presented.starts_with(TOKEN_PREFIX) {
+            return Ok(());
+        }
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE device_tokens SET client_action_at = ?3
+             WHERE token_hash = ?1 AND revoked_at IS NULL AND client_platform = ?2",
+            params![
+                hex_sha256(presented),
+                platform.as_str(),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// When an app of each platform last acted on this mailbox: at most one
+    /// entry per platform, newest first.
+    ///
+    /// For the operator's dashboard
+    /// (`squelchd_client_last_action_timestamp_seconds`). Revoked rows count
+    /// and timestamps are compared parsed, both as in
+    /// [`SqliteStore::client_versions_seen`]; so is skipping a platform this
+    /// build does not know.
+    pub fn client_actions_seen(&self, account_id: AccountId) -> Result<Vec<ClientActed>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT client_platform, client_action_at FROM device_tokens
+             WHERE account_id = ?1 AND client_platform IS NOT NULL
+               AND client_action_at IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id], |r| {
+                Ok((r.get::<_, String>(0)?, dt(r, 1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut newest = std::collections::BTreeMap::<ClientPlatform, DateTime<Utc>>::new();
+        for (platform, acted_at) in rows {
+            let Some(platform) = ClientPlatform::parse(&platform) else {
+                continue;
+            };
+            let at = newest.entry(platform).or_insert(acted_at);
+            *at = (*at).max(acted_at);
+        }
+        let mut acted = newest
+            .into_iter()
+            .map(|(platform, acted_at)| ClientActed { platform, acted_at })
+            .collect::<Vec<_>>();
+        acted.sort_by_key(|c| std::cmp::Reverse(c.acted_at));
+        Ok(acted)
+    }
+
     // ---- pairing ---------------------------------------------------------
 
     /// Mint a pairing code for `account_id`, SUPERSEDING every code the account

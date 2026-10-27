@@ -5,7 +5,8 @@
 //! bearer credential for the whole app id: never logged, never returned.
 
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::clock::now_unix;
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
@@ -105,14 +106,6 @@ impl JwtSigner {
         });
         Ok(token)
     }
-}
-
-/// Seconds since the epoch. A pre-1970 clock is not a case worth modelling.
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -34,7 +34,8 @@
 // highlighting. The first three are keyboard concepts with no thumb equivalent
 // (a tap opens the mail, and that is the whole interaction), and
 // `store.search.index` / `.expanded` are simply fields this surface never
-// writes.
+// writes. The sender rows above the hits ARE here: typing a name or an address
+// offers who it could be, and a tap lists that sender's mail newest first.
 
 import SwiftUI
 
@@ -58,6 +59,16 @@ struct MobileSearchView: View {
     /// rather than the string itself, so asking the same words twice in one
     /// session pushes twice instead of silently doing nothing the second time.
     @State private var ask: AgentAsk?
+
+    /// The sender directory's answer to the words in the field, as last
+    /// fetched. Drawn through `senders`, which drops the rows a newer keystroke
+    /// has ruled out.
+    @State private var fetchedSenders: [SenderHit] = []
+
+    /// The senders offered above the hits: who the words could be naming.
+    private var senders: [SenderHit] {
+        SearchFetch.senders(fetchedSenders, stillMatching: store.search.query)
+    }
 
     /// Spaces that turn typing into a question. Four means five words, which is
     /// past where a keyword lookup normally stops ("stripe payout receipt") and
@@ -128,6 +139,10 @@ struct MobileSearchView: View {
                        String(store.search.revision)]) {
                 await runSearch()
             }
+            .task(id: store.search.query) {
+                guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
+                fetchedSenders = found
+            }
             // Return is the send, and only in agent mode: under four spaces it
             // is the search that has already run behind the debounce. The
             // submit path CLEARS the field where the ask row does not: there
@@ -163,6 +178,13 @@ struct MobileSearchView: View {
                     askRow.padding(.horizontal, 16)
                     Divider().overlay(Palette.hairline)
                 }
+                // Above "No matches" too: the name may be in nobody's subject
+                // or body and still be somebody who writes.
+                ForEach(senders) { sender in
+                    SenderRow(sender: sender) { show(sender) }
+                        .padding(.horizontal, 16)
+                    Divider().overlay(Palette.hairline)
+                }
                 emptyState
             }
         } else {
@@ -178,6 +200,9 @@ struct MobileSearchView: View {
             // row quoting nothing at all is a row in that gap.
             if !term.isEmpty {
                 askRow.plainRow()
+            }
+            ForEach(senders) { sender in
+                SenderRow(sender: sender) { show(sender) }.plainRow()
             }
             // A failed refresh does NOT drop the hits already read, so the
             // error has to ride above them rather than replace them — see
@@ -198,7 +223,12 @@ struct MobileSearchView: View {
                 // The Done / Not done split the Mac draws, from the same
                 // unfinished-first order: without the header the order reads
                 // as the sort preference being ignored halfway down.
-                if i == 0 || hit.is_done != hits[i - 1].is_done {
+                //
+                // A LISTING (one sender's mail, operators and no words) is
+                // not split: it is one run in date order under one header.
+                if store.search.showsListing {
+                    if i == 0 { StatusHeader(title: "Newest first").plainRow() }
+                } else if i == 0 || hit.is_done != hits[i - 1].is_done {
                     StatusHeader(isDone: hit.is_done).plainRow()
                 }
                 HitRow(hit: hit) {
@@ -382,6 +412,15 @@ struct MobileSearchView: View {
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - one sender's mail
+
+    /// List everything from one sender: the completed operator goes into the
+    /// FIELD, the way a remembered search does, and the debounced task fetches
+    /// it. The reader can see what was asked and narrow it.
+    private func show(_ sender: SenderHit) {
+        store.search.query = FromOperator.listing(of: sender.addr)
     }
 
     // MARK: - the agent
@@ -589,10 +628,18 @@ private struct HitRow: View {
 /// an older daemon that does not say, which gets a plain "Results": unknown is
 /// not unfinished.
 private struct StatusHeader: View {
-    let isDone: Bool?
+    let title: String
+
+    init(isDone: Bool?) {
+        title = isDone.map { $0 ? "Done" : "Not done" } ?? "Results"
+    }
+
+    init(title: String) {
+        self.title = title
+    }
 
     var body: some View {
-        Text(isDone.map { $0 ? "Done" : "Not done" } ?? "Results")
+        Text(title)
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaint)
             .textCase(.uppercase)
@@ -601,6 +648,56 @@ private struct StatusHeader: View {
             .padding(.top, 14)
             .padding(.bottom, 2)
             .accessibilityAddTraits(.isHeader)
+    }
+}
+
+// MARK: - one sender
+
+/// One sender offered above the hits, shaped like the ask row it sits under:
+/// an icon, two lines, a chevron. The strings are email-derived and rendered
+/// as Text, never as markup.
+private struct SenderRow: View {
+    let sender: SenderHit
+    let onShow: () -> Void
+
+    private var name: String? {
+        sender.display_name.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private var count: String {
+        sender.msg_count == 1 ? "1 email" : "\(sender.msg_count) emails"
+    }
+
+    var body: some View {
+        Button(action: onShow) {
+            HStack(spacing: 11) {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.inkFaint)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name ?? sender.addr)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(name == nil ? count : "\(sender.addr) · \(count)")
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkFaint)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 6)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.inkFaintest)
+            }
+            .padding(.vertical, 11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Shows all mail from this sender, newest first")
     }
 }
 

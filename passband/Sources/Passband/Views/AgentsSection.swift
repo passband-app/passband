@@ -1,9 +1,10 @@
 // Settings' Agents pane: connecting an agent the human already runs (Claude,
 // OpenClaw, Hermes Agent, Codex…) to this mailbox over MCP.
 //
-// Three cards, in the order somebody needs them: WHERE the door is and whether
-// it is open, HOW to point a given agent at it, and WHAT the agent gets once it
-// is through. The last one is not decoration. Handing an agent your mail is
+// Four cards, in the order somebody needs them: WHERE the door is and whether
+// it is open, HOW to point a given agent at it, what the agent may WRITE (the
+// owner's setting, held by the daemon: read only, drafts, or sending), and
+// WHAT the agent gets once it is through. The last one is not decoration. Handing an agent your mail is
 // the kind of decision people make once and remember, and the honest version
 // of it includes the parts the agent cannot do and how the door is locked: a
 // self-hosted door has no lock of its own, a hosted one asks each agent to sign
@@ -21,6 +22,18 @@ struct AgentsSection: View {
     @State private var connect = AgentConnect.shared
     /// The chip somebody picked, nil until they pick one.
     @State private var agent: AgentKind?
+    /// What the daemon says an agent may write. nil until it answers, and for
+    /// good on a daemon older than the setting, where the card is not drawn:
+    /// such a daemon has no tool that writes mail, so there is nothing to set.
+    @State private var access: AgentAccessConfig?
+    /// The setting could not be read, for a reason other than the daemon
+    /// predating it (which is a 404 and simply draws no card). Kept apart
+    /// from "not offered" because the two must not look alike: with this
+    /// set, the pane does not know whether the agent can send, and says so
+    /// instead of claiming it cannot.
+    @State private var accessUnknown = false
+    @State private var accessBusy = false
+    @State private var accessError: String?
 
     private var endpoint: String? { AgentConnect.endpoint(serverURL: store.settings?.serverURL) }
     private var status: AgentDoorStatus { connect.status(for: endpoint) }
@@ -44,11 +57,22 @@ struct AgentsSection: View {
             // command for a 404 is a trap. See `showsSetup` for hosted.
             if let endpoint, AgentConnect.showsSetup(status, hosted: hosted) {
                 setupCard(endpoint)
+                if let access {
+                    writeCard(access)
+                } else if accessUnknown {
+                    writeUnknownCard
+                }
                 reachCard
             }
         }
         .task(id: endpoint) {
+            // Another account's answer is never shown while this one loads.
+            access = nil
+            accessUnknown = false
+            accessError = nil
+            accessBusy = false
             await connect.check(serverURL: store.settings?.serverURL)
+            await loadAccess()
         }
         // Somebody who has been here knows the door exists, so the one-time
         // ad for it never goes up after this (`AgentNudge`).
@@ -225,26 +249,182 @@ struct AgentsSection: View {
         .accessibilityAddTraits(active ? .isSelected : [])
     }
 
+    // MARK: - what it may write
+
+    /// Read the setting for the mailbox on screen. A 404 is a daemon older
+    /// than the setting; anything else is "could not find out".
+    private func loadAccess() async {
+        let asked = endpoint
+        do {
+            let loaded = try await APIClient.shared.getAgentAccess()
+            guard asked == endpoint, !Task.isCancelled else { return }
+            access = loaded
+            accessUnknown = false
+        } catch {
+            guard asked == endpoint, !Task.isCancelled else { return }
+            access = nil
+            accessUnknown = (error as? APIError)?.kind != .notFound
+        }
+    }
+
+    private var writeUnknownCard: some View {
+        SectionCard(label: "What your agent may write") {
+            SettingsHint("Could not read this setting from the server, so it is not shown here.")
+            Button("try again") {
+                Task { await loadAccess() }
+            }
+            .buttonStyle(.plain)
+            .font(Typo.micro)
+            .foregroundStyle(Palette.accent)
+        }
+    }
+
+    /// The owner's one decision about writing, as three whole rows rather than
+    /// a segmented control: each level is a different promise, and a promise
+    /// needs its sentence beside it, not in a tooltip.
+    private func writeCard(_ access: AgentAccessConfig) -> some View {
+        SectionCard(label: "What your agent may write") {
+            VStack(spacing: Space.s8) {
+                ForEach(AgentWriteAccess.allCases) { level in
+                    accessOption(level, chosen: access.level == level)
+                }
+            }
+            .disabled(accessBusy)
+            switch access.level {
+            case .send:
+                SettingsHint(
+                    "The approval happens in your agent's chat, not in Passband. Passband tells the agent to ask before every send and cannot check that it did. It still blocks anything that looks like a password or key, and every send is in the audit log as your agent's."
+                )
+                if auth != .signIn {
+                    Text(
+                        "Agent MCP has no password here. Anything that can reach the address above could send mail as you, so keep it on this computer or your tailnet."
+                    )
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            case .drafts:
+                SettingsHint("A draft your agent leaves is marked \"from your agent\" in your drafts.")
+            case .some(.none), nil:
+                EmptyView()
+            }
+            if let accessError {
+                Text(accessError).font(Typo.micro).foregroundStyle(Palette.danger)
+            }
+        }
+    }
+
+    private func accessOption(_ level: AgentWriteAccess, chosen: Bool) -> some View {
+        Button {
+            setAccess(level)
+        } label: {
+            HStack(alignment: .center, spacing: Space.s12) {
+                Image(systemName: level.symbol)
+                    .font(Typo.ui(12, weight: .medium))
+                    .foregroundStyle(chosen ? Palette.accent : Palette.inkFaint)
+                    .frame(width: Space.scaled(18))
+                VStack(alignment: .leading, spacing: Space.scaled(2)) {
+                    Text(level.title)
+                        .font(Typo.ui(12, weight: .medium))
+                        .foregroundStyle(chosen ? Palette.ink : Palette.inkDim)
+                    Text(level.detail)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: Space.s8)
+                Image(systemName: chosen ? "checkmark.circle.fill" : "circle")
+                    .font(Typo.ui(13, weight: .medium))
+                    .foregroundStyle(chosen ? Palette.accent : Palette.inkFaintest)
+            }
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.s8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(chosen ? Palette.accentSoft : Palette.canvas.opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(chosen ? Palette.accent.opacity(0.4) : Palette.hairline, lineWidth: 0.75)
+        )
+        .accessibilityLabel("\(level.title). \(level.detail)")
+        .accessibilityAddTraits(chosen ? .isSelected : [])
+    }
+
+    /// Fire-and-wait rather than optimistic: the rows render the STORED
+    /// answer, so a failed write leaves the choice where the daemon has it.
+    /// This is the one setting where showing a level the daemon did not take
+    /// would be a lie about who can send as you.
+    private func setAccess(_ level: AgentWriteAccess) {
+        guard !accessBusy, access?.level != level else { return }
+        accessBusy = true
+        accessError = nil
+        // The mailbox this click was about. An answer that comes back after
+        // a switch belongs to the other mailbox and is dropped: painting it
+        // here would show one mailbox's level on another's card.
+        let asked = endpoint
+        Task {
+            do {
+                let saved = try await APIClient.shared.setAgentAccess(level)
+                guard asked == endpoint else { return }
+                withAnimation(Motion.disclose) { access = saved }
+            } catch {
+                guard asked == endpoint else { return }
+                accessError = errText(error, "could not save")
+            }
+            accessBusy = false
+        }
+    }
+
     // MARK: - what it gets
+
+    /// What the two columns say, which moves with the owner's write setting:
+    /// a "can't send" beside a level that sends would be the pane lying.
+    private var reach: (can: [String], cannot: [String]) {
+        var can = [
+            "Read ranked updates and whole threads",
+            "Search your mail",
+            "List bills, deadlines and packages",
+            "Set sender rules, inside Passband only",
+        ]
+        var cannot = ["See sign-in codes or password resets"]
+        // What the daemon says, or, when it has no such setting at all, the
+        // read-only door that daemon is. Nil is "do not know": the setting
+        // would not load, or holds a level this build cannot read. Then the
+        // columns say nothing about writing mail, rather than a "can't send"
+        // that may be false.
+        let level: AgentWriteAccess? = access.map(\.level) ?? (accessUnknown ? nil : AgentWriteAccess.none)
+        guard let level else {
+            cannot.append("Archive, label or delete")
+            return (can, cannot)
+        }
+        switch level {
+        case .none:
+            cannot.insert("Send, archive, label or delete", at: 0)
+            cannot.append("Change anything in Gmail")
+        case .drafts:
+            can.append("Leave drafts for you to send")
+            cannot.insert("Send, archive, label or delete", at: 0)
+            cannot.append("Change anything in Gmail")
+        case .send:
+            can.append("Leave drafts for you to send")
+            can.append("Send mail, after asking you")
+            cannot.insert("Archive, label or delete", at: 0)
+            cannot.append("Send a password or key")
+        }
+        return (can, cannot)
+    }
 
     private var reachCard: some View {
         SectionCard(label: "What your agent can do") {
             HStack(alignment: .top, spacing: Space.scaled(18)) {
-                reachColumn(
-                    "can", symbol: "checkmark", tint: Palette.positive,
-                    items: [
-                        "Read ranked updates and whole threads",
-                        "Search your mail",
-                        "List bills, deadlines and packages",
-                        "Set sender rules, inside Passband only",
-                    ])
-                reachColumn(
-                    "can't", symbol: "xmark", tint: Palette.danger,
-                    items: [
-                        "Send, archive, label or delete",
-                        "See sign-in codes or password resets",
-                        "Change anything in Gmail",
-                    ])
+                reachColumn("can", symbol: "checkmark", tint: Palette.positive, items: reach.can)
+                reachColumn("can't", symbol: "xmark", tint: Palette.danger, items: reach.cannot)
             }
             if auth == .signIn {
                 SettingsHint(
@@ -411,6 +591,10 @@ extension AgentKind {
                     ink: Color(light: Color.white, dark: Color(hex: 0x14142A)), mark: nil))
         case .chatGPT, .codex:
             return AgentBrand(logo: nil, symbolTile: Color(hex: 0x000000), button: openAI)
+        case .muse:
+            // No mark or colour of Meta's for Muse has been fetched from the
+            // source, so the stand-in symbol and the house button.
+            return AgentBrand(logo: nil, symbolTile: nil, button: nil)
         case .cursor:
             // Cursor's own "Add to Cursor" badge (cursor.com/deeplink/
             // mcp-install-dark.svg): black at 90%, white type, the light cube.

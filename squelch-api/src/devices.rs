@@ -162,7 +162,7 @@ pub async fn register_device(
 
     let store = state.store.clone();
     let account_id = state.account_id;
-    let device = blocking(move || {
+    let device = blocking(&state, move || {
         store.upsert_device(
             account_id,
             &token,
@@ -198,7 +198,10 @@ pub async fn unregister_device(
 
     let store = state.store.clone();
     let account_id = state.account_id;
-    let removed = blocking(move || store.delete_device_by_token(account_id, &token)).await?;
+    let removed = blocking(&state, move || {
+        store.delete_device_by_token(account_id, &token)
+    })
+    .await?;
 
     if removed {
         crate::handlers::audit_action(&state, "device.unregister", None, "removed").await;

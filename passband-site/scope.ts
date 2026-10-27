@@ -55,6 +55,11 @@ const ease = (t: number) => {
 };
 
 /// Where a carrier's marker goes, in canvas fractions, for the DOM overlay.
+// How closed the squelch is at a point in the scroll. It starts closing as
+// soon as the page moves and is shut just past halfway, where the markers
+// come up (App.tsx locks at 0.46).
+const squelchAt = (progress: number) => ease((progress - 0.02) / 0.5);
+
 export function markerPoint(i: number, layout: ScopeLayout) {
   const c = CARRIERS[i];
   return { x: layout.center + c.dx * layout.spread, y: layout.base - c.h * layout.scale };
@@ -222,8 +227,10 @@ export function createScope(
 
   const step = (dt: number) => {
     time += dt;
-    const target = ease((progress - 0.08) / 0.45);
-    engage += (target - engage) * (1 - Math.exp(-dt * 4));
+    // The squelch is on the scroll's hand, not chasing it: a 50ms follow,
+    // just enough to round off a mouse wheel's steps. (At the old 250ms the
+    // filter was still closing a second after the page had stopped.)
+    engage += (squelchAt(progress) - engage) * (1 - Math.exp(-dt * 20));
     for (const s of spikes) {
       s.life -= dt * s.decay;
       if (s.life <= 0) spawn(s);
@@ -243,7 +250,7 @@ export function createScope(
   // Reduced motion: one settled frame at the current progress, redrawn when
   // the scroll moves rather than animated.
   const still = () => {
-    engage = ease((progress - 0.08) / 0.45);
+    engage = squelchAt(progress);
     opts.onReadout(engage);
     resize();
     draw(1 / 60, true);

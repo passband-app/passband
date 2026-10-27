@@ -95,6 +95,23 @@ struct ComposeState: Sendable, Equatable {
     /// Rides along to `send` so a successful send deletes the draft in the same
     /// transaction — otherwise the next `c` would restore mail already gone.
     var draftId: Int?
+    /// The draft this composer was filled from was written by an agent over
+    /// Agent MCP, not by the owner. Set by the restore paths and nothing else,
+    /// and shown in the composer until it is sent or closed: these are words
+    /// and recipients somebody else chose, about to go out under the owner's
+    /// name.
+    var fromAgent = false
+    /// ⌘Enter does not send this composer; the send button does.
+    ///
+    /// Set when the composer was put on screen BY A REQUEST the owner did not
+    /// make with their hands in Passband: an agent's `open_draft`, or a
+    /// `passband://draft` link. Such a request brings Passband to the front,
+    /// possibly in the middle of the owner typing somewhere else, and in an
+    /// agent's chat ⌘Enter is "submit". Without this, the keystroke they were
+    /// already making would land here and send, from their address, a message
+    /// they have not read, to recipients an agent chose. A click cannot be
+    /// typed ahead. Never set for a draft the owner opened themselves.
+    var keyboardSendLocked = false
     /// Redacted guard kinds from a 422, set when a held send comes back
     /// blocked and the composer reopens on it. Empty means the guard passed (or
     /// hasn't been asked yet). Non-empty is the ONLY state that offers an

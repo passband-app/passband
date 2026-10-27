@@ -241,7 +241,7 @@
         <dl class="spec">
           <div><dt>Training on your mail</dt><dd>Never<small>not by us, not by our model provider</small></dd></div>
           <div><dt>Isolation</dt><dd>One per account<small>own daemon, own database, own key</small></dd></div>
-          <div><dt>Subprocessors</dt><dd>7<small>all listed below</small></dd></div>
+          <div><dt>Subprocessors</dt><dd>8<small>all listed below</small></dd></div>
           <div><dt>Login codes to agents</dt><dd>Never<small>sealed away from the assistant and AI tools</small></dd></div>
         </dl>
       </section>
@@ -330,6 +330,11 @@
             </div>
             <div class="ch meta" data-hosted>
               <span class="wire"></span>
+              <div class="what"><b>Unsubscribing in a browser</b>When you ask to unsubscribe and the sender's page cannot be finished without a real browser, the daemon opens that sender's unsubscribe link in a remote one and works the page for you. The browser gets the link, the page, and your address if the form asks for it. Nothing else from your mailbox goes with it.</div>
+              <div class="who"><b>Browserbase</b>one browser per unsubscribe, closed when it ends, nothing recorded<br /><span class="pill">one link, no message text</span><span class="off">off</span></div>
+            </div>
+            <div class="ch meta" data-hosted>
+              <span class="wire"></span>
               <div class="what"><b>Health metrics</b>Counts and timings, like messages synced and triage latency, labelled with your account's label and nothing finer.</div>
               <div class="who"><b>Our monitoring on Railway</b>aggregate by design, never per message<br /><span class="pill">no mail content</span><span class="off">off</span></div>
             </div>
@@ -392,6 +397,12 @@
               <td>Backup storage (R2) and DNS</td>
               <td>Mailbox backups, encrypted before they arrive<br /><span class="dot sealed">encrypted only</span></td>
               <td>Global</td>
+            </tr>
+            <tr>
+              <td>Browserbase<small>browserbase.com</small></td>
+              <td>A remote browser that finishes an unsubscribe on the sender's own page</td>
+              <td>Only when you ask to unsubscribe and the sender's page needs a real browser: that sender's unsubscribe link, the page it opens, and your email address if the page's form asks for it. One browser per unsubscribe, closed when it ends, with recording and logging off<br /><span class="dot meta">one link, no message text</span></td>
+              <td>United States</td>
             </tr>
             <tr>
               <td>Apple<small>apple.com</small></td>

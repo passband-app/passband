@@ -10,6 +10,10 @@ use super::*;
 // that is neither: it gets an access review and never a decision, so without
 // its own arm it would count as pending for good. It reads as noise, the tier
 // ingest writes on the sent copies it resembles.
+//
+// The archive is not in it at all. Those rows have no decision and never will
+// unprompted, so counted here they would be a year of mail reading as pending
+// on every stats card and activity chart this feeds.
 const CANONICAL_MAIL_CTE: &str = concat!(
     "WITH classified AS (
     SELECT m.*, CASE
@@ -27,6 +31,7 @@ const CANONICAL_MAIL_CTE: &str = concat!(
     LEFT JOIN agent_message_decisions d ON d.account_id=a.account_id AND d.message_id=a.message_id AND d.revision=a.revision
     LEFT JOIN agent_thread_attention att ON att.account_id=m.account_id AND att.thread_id=m.thread_id
     LEFT JOIN agent_thread_preferences pref ON pref.account_id=m.account_id AND pref.thread_id=m.thread_id
+    WHERE m.is_archive=0
 )"
 );
 
@@ -81,6 +86,14 @@ fn non_blank(s: Option<String>) -> Option<String> {
 /// Like [`STANDING_BAND`] it lives in ONE place because the list query and the
 /// header's count must agree row for row.
 const WITHIN_WINDOW: &str = "(m.received_at >= ?2
+            OR t.remind_at IS NOT NULL
+            OR t.reminded_at IS NOT NULL)";
+
+/// The archive tier's exclusion from the human inventory, with the same
+/// exemption [`WITHIN_WINDOW`] gives: a reminder the user set on an archive
+/// message they found by search is their own instruction to see it again, so
+/// that row lists (and counts) exactly as a live row with a reminder does.
+pub(super) const LIVE_OR_REMINDER: &str = "(m.is_archive = 0
             OR t.remind_at IS NOT NULL
             OR t.reminded_at IS NOT NULL)";
 
@@ -177,6 +190,7 @@ impl SqliteStore {
 
                AND m.is_sent = 0
                AND m.is_spam = 0
+               AND m.is_archive = 0
                AND m.received_at >= ?2
                AND t.importance >= ?3
              ORDER BY t.importance DESC, m.received_at DESC",
@@ -241,6 +255,7 @@ impl SqliteStore {
 
                AND m.is_sent = 0
                AND {spam_sql}
+               AND {LIVE_OR_REMINDER}
                AND {WITHIN_WINDOW}
                AND t.importance >= ?3"
         );
@@ -534,6 +549,7 @@ impl SqliteStore {
             "SELECT COUNT(*), COUNT(t.opened_at)
                FROM messages m JOIN triage t ON t.message_id = m.id
               WHERE m.account_id = ?1 AND m.is_sent = 0 AND m.is_spam = 0
+                AND m.is_archive = 0
                 AND m.received_at >= ?2",
             params![account_id, floor_text],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -544,6 +560,7 @@ impl SqliteStore {
         let oldest: Option<String> = conn.query_row(
             "SELECT MIN(received_at) FROM messages
               WHERE account_id = ?1 AND is_sent = 0 AND is_spam = 0
+                AND is_archive = 0
                 AND received_at >= ?2",
             params![account_id, floor_text],
             |r| r.get(0),
@@ -867,6 +884,7 @@ impl SqliteStore {
                        WHERE t.account_id = ?1
                          AND m.is_sent = 0
                          AND m.is_spam = 0
+                         AND {LIVE_OR_REMINDER}
                          AND {WITHIN_WINDOW}) t"
             ),
             params![account_id, bands_since.to_rfc3339()],

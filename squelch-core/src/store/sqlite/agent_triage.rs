@@ -11,7 +11,14 @@ use sha2::{Digest, Sha256};
 
 // New arrivals retain first priority. Explicit manual work comes before old
 // import/migration work, without changing which budget pays for each job.
-const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arrival_eligible,j.kind,COALESCE(lane.foreground,0)
+// `archive_access` shares that tier and nothing else of `manual:`: an agent
+// is waiting on the answer, so it must not queue behind a cutover. ONLY WHILE
+// IT HAS NEVER BEEN PUSHED BACK: `last_error` is written by every deferral and
+// retry and cleared by neither a claim nor the passing of time, so a check
+// parked on a spent budget comes back at midnight (or on a grant within its
+// sub-cap's room) as ordinary work on the access lane instead of at the head
+// of the queue, ahead of the owner's own sent mail.
+const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arrival_eligible,j.kind,COALESCE(lane.foreground,0),j.last_error
              FROM agent_triage_jobs j INDEXED BY idx_agent_jobs_pending_claim JOIN messages candidate ON candidate.account_id=j.account_id AND candidate.id=j.message_id
              LEFT JOIN agent_job_lanes lane ON lane.job_id=j.id
              WHERE j.account_id=?1 AND j.state IN ('queued','leased') AND (j.kind=?2 OR (?2 IN ('investigation','initial_investigation') AND j.kind IN ('triage','access')))
@@ -24,7 +31,7 @@ const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arr
                      AND other.thread_id=candidate.thread_id))
              ORDER BY CASE
                  WHEN COALESCE(lane.foreground,0)=1 AND j.arrival_eligible=1 THEN 0
-                 WHEN j.trigger LIKE 'manual:%' THEN 1
+                 WHEN j.trigger LIKE 'manual:%' OR (j.trigger='archive_access' AND j.last_error IS NULL) THEN 1
                  ELSE 2 END,
                  COALESCE(lane.foreground,0) DESC,j.available_at,j.id LIMIT 1";
 
@@ -45,7 +52,8 @@ const MESSAGE_COLUMNS: &str = concat!(
     t.notify_eligible_at, COALESCE((SELECT
              revision FROM agent_thread_attention a WHERE a.account_id=m.account_id AND
              a.thread_id=m.thread_id),0),COALESCE((SELECT group_concat(field || value_json || revision)
-             FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),'')"
+             FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),''),
+    m.is_sent"
 );
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     let mut message = AgentMessage {
@@ -63,6 +71,7 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
         received_at: row.get(5)?,
         is_sent: row.get(6)?,
         is_spam: row.get(7)?,
+        labelled_sent: row.get(14)?,
         status: row.get(8)?,
         opened_at: row.get(9)?,
         remind_at: row.get(10)?,
@@ -79,6 +88,48 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     ))
     .expect("serializable user state");
     Ok(message)
+}
+/// ARCHIVE MAIL IS NOT EVIDENCE UNTIL SOMEBODY ASKED FOR IT. True of every live
+/// row, and of an archive row only once an explicit surfacing has had it
+/// assessed as allowed, or while work that somebody explicitly queued for it is
+/// genuinely in flight: leased, or queued, due and never pushed back
+/// (`last_error` NULL, see `CLAIM_JOB_SQL`). A PARKED JOB GRANTS NOTHING, or a
+/// check waiting on tomorrow's budget would make the row evidence all day and
+/// hide every live decision that then cited it. Every read the triage
+/// agent's tools make carries this, and it is what keeps the tier free: a row
+/// the agent is never shown is a row [`ensure_source_assessments`] is never
+/// asked to assess. Written against the alias `m`.
+///
+/// A macro beside the `const` for the same reason `own_mail_sql!` is one:
+/// static SQL can `concat!` it.
+macro_rules! archive_evidence_sql {
+    () => {
+        "(m.is_archive=0 \
+         OR EXISTS(SELECT 1 FROM agent_message_state s WHERE s.account_id=m.account_id \
+             AND s.message_id=m.id AND s.access='allowed') \
+         OR EXISTS(SELECT 1 FROM agent_triage_jobs j WHERE j.account_id=m.account_id \
+             AND j.message_id=m.id AND j.kind IN ('triage','access') \
+             AND (j.state='leased' OR (j.state='queued' AND j.last_error IS NULL \
+                 AND julianday(j.available_at)<=julianday('now')))))"
+    };
+}
+const ARCHIVE_EVIDENCE_SQL: &str = archive_evidence_sql!();
+
+/// [`read_message`] for the triage agent's evidence tools: an archive row
+/// nobody has asked about does not exist (see [`ARCHIVE_EVIDENCE_SQL`]).
+fn read_evidence_message(conn: &Connection, account: AccountId, id: i64) -> Result<AgentMessage> {
+    let readable: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM messages m
+             WHERE m.account_id=?1 AND m.id=?2 AND {ARCHIVE_EVIDENCE_SQL})"
+        ),
+        params![account, id],
+        |row| row.get(0),
+    )?;
+    if !readable {
+        return Err(CoreError::NotFound);
+    }
+    read_message(conn, account, id)
 }
 fn read_message(conn: &Connection, account: AccountId, id: i64) -> Result<AgentMessage> {
     conn.query_row(
@@ -110,9 +161,12 @@ fn read_thread(
     thread: &str,
     limit: usize,
 ) -> Result<Vec<AgentMessage>> {
+    // The thread as the triage agent sees it: old archive siblings nobody has
+    // asked about are absent, so a reply to a 2025 conversation does not buy
+    // an assessment of the whole of it.
     let mut stmt = conn.prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM messages m LEFT JOIN triage t ON t.message_id=m.id AND
-             t.account_id=m.account_id WHERE m.account_id=?1 AND m.thread_id=?2 ORDER BY m.received_at
-             DESC,m.id DESC LIMIT ?3"))?;
+             t.account_id=m.account_id WHERE m.account_id=?1 AND m.thread_id=?2 AND {ARCHIVE_EVIDENCE_SQL}
+             ORDER BY m.received_at DESC,m.id DESC LIMIT ?3"))?;
     let rows = stmt
         .query_map(
             params![account, thread, limit.min(1000) as i64],
@@ -348,6 +402,88 @@ fn apply_corrections(
     }
     Ok(())
 }
+fn is_archive_conn(conn: &Connection, account: AccountId, message: i64) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT is_archive FROM messages WHERE account_id=?1 AND id=?2",
+            params![account, message],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// PROMOTION: the one way `messages.is_archive` ever changes, and only from 1
+/// to 0. The OWNER, through the human door, asked for this one archive message
+/// to be triaged or corrected how it is filed, so from here on it is an
+/// ordinary live row: full triage, revisits, counts, and the STRICT thread
+/// guard (a promoted row whose access is still pending closes its thread at
+/// the agent door like any live pending row).
+///
+/// EXACTLY TWO CALLERS, both inside the caller's own transaction:
+/// `retriage_reset`'s single-message arm and [`correct_agent_triage_conn`] for
+/// any field but `external_access`. Nothing at the agent door, in the walk, in
+/// a live re-sighting or in a heal reaches either. It touches the flag and
+/// nothing else. What happens to the row's access verdict afterwards is what
+/// happens to any live row's: the triage the caller queues re-judges it, so a
+/// model's 'restricted' may become 'allowed'; only the owner's own seal
+/// (`external_access` corrected to true) outlives that.
+///
+/// NEVER THE OWNER'S OWN MAIL. Sent mail has no verdict to redo (see
+/// `OWN_MAIL`), so there is nothing a promotion would buy; and a promoted
+/// sent row is live and pending, which closes its thread at the agent door
+/// over archive siblings that door could read a moment before. Returns
+/// whether the row was promoted.
+///
+/// A caller that promotes then queues the row's triage and calls
+/// [`requeue_promoted_conn`], in that order.
+pub(super) fn promote_archive_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<bool> {
+    Ok(conn.execute(
+        concat!(
+            "UPDATE messages AS m SET is_archive=0
+             WHERE m.account_id=?1 AND m.id=?2 AND m.is_archive=1 AND NOT ",
+            own_mail_sql!()
+        ),
+        params![account, message],
+    )? == 1)
+}
+
+/// A PROMOTED ROW IS LEFT WITH WORK THAT CAN RUN. Call after the promotion's
+/// own enqueue. That enqueue merges into whatever job the row already has at
+/// its current revision, and deliberately keeps a FAILED job failed (a
+/// correction to a live row must not reset its retry state). For a row just
+/// promoted that job is the surfacing check an agent's search once bought:
+/// left failed, the row would be live, pending and closing its thread at the
+/// agent door with nothing ever due to judge it. The same for a job that
+/// completed and left the access pending. Requeued here from zero attempts;
+/// nothing is touched while a job for the row is queued or running.
+pub(super) fn requeue_promoted_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE agent_triage_jobs SET state='queued',attempts=0,available_at=?3,last_error=NULL,
+             lease_token=NULL,lease_until=NULL
+         WHERE id=(SELECT j.id FROM agent_triage_jobs j
+             JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
+             WHERE j.account_id=?1 AND j.message_id=?2 AND j.input_revision=a.revision
+               AND j.kind IN ('triage','access') AND j.trigger NOT LIKE 'revisit:%'
+               AND (j.state='failed' OR (j.state='completed' AND a.access='pending'))
+             ORDER BY j.id DESC LIMIT 1)
+           AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs live
+               WHERE live.account_id=?1 AND live.message_id=?2
+                 AND live.kind IN ('triage','access') AND live.state IN ('queued','leased'))",
+        params![account, message, now.to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 pub(super) fn correct_agent_triage_conn(
     conn: &Connection,
     account: AccountId,
@@ -369,8 +505,25 @@ pub(super) fn correct_agent_triage_conn(
     if field == "kinds" && candidate.kinds.is_empty() {
         return Err(CoreError::InvalidInput("kinds cannot be empty".into()));
     }
-    let trigger = format!("correction:{}", now.to_rfc3339());
-    enqueue_agent_triage_conn(conn, account, message, &trigger, false)?;
+    // A correction to how an ARCHIVE message is filed is the owner asking for
+    // it to be treated as live mail: promote it, then queue the same triage
+    // any corrected row gets. Sealing or unsealing one (`external_access`) is
+    // not that. It is a statement about who may read the row, it is applied
+    // below without a model, and the row stays in the archive with no job.
+    //
+    // An archive row that is NOT promoted (the owner's own sent mail) gets the
+    // correction recorded and no job either: nothing may queue work on a row
+    // still in the archive from here.
+    let archived = is_archive_conn(conn, account, message)?;
+    let promoted =
+        archived && field != "external_access" && promote_archive_conn(conn, account, message)?;
+    if !archived || promoted {
+        let trigger = format!("correction:{}", now.to_rfc3339());
+        enqueue_agent_triage_conn(conn, account, message, &trigger, false)?;
+    }
+    if promoted {
+        requeue_promoted_conn(conn, account, message, now)?;
+    }
     let revision: i64 = conn.query_row(
         "SELECT revision FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
         params![account, message],
@@ -432,6 +585,9 @@ pub(super) fn correct_agent_triage_conn(
                 }
             ],
         )?;
+        // The user's restriction (or lifting of it) applies to ghosts now,
+        // from the corrected decision written above.
+        super::ghosts::refresh_message_guarded(conn, account, message)?;
     }
     Ok(())
 }
@@ -476,7 +632,7 @@ fn queue_investigation(
             || (state == "failed" && trigger.starts_with("manual:") && existing_trigger != trigger))
             && !matches!(
                 trigger,
-                "ingest" | "arrival" | "backfill" | "heal" | "source_access"
+                "ingest" | "arrival" | "backfill" | "heal" | "source_access" | "archive_access"
             )
         {
             conn.execute("UPDATE agent_triage_jobs SET state='queued',kind=?2,trigger=?3,attempts=0,available_at=?4,last_error=NULL WHERE id=?1",
@@ -517,6 +673,50 @@ fn queue_investigation(
         SELECT id,?6 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2 AND kind=?3 AND trigger=?4 AND input_revision=?5
         ON CONFLICT(job_id) DO UPDATE SET foreground=MAX(foreground,excluded.foreground)",params![account,message,kind,trigger,revision,foreground])?;
     Ok(())
+}
+
+/// The `last_error` a job may carry: a bounded machine code, never provider
+/// errors or body text.
+fn job_error_code(error_code: &str) -> String {
+    error_code
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect()
+}
+
+/// The one way a leased job goes back to the queue (a retry, a deferral, a
+/// hand-back): the lease cleared, `last_error` written when the caller has
+/// a code and kept when it has none, this lease's attempt refunded when the
+/// job never ran (a deferral) and kept when it did. Once, by the lease's
+/// owner: a stale worker cannot change the attempt count or the schedule
+/// after another worker has claimed the job.
+fn requeue(
+    conn: &Connection,
+    job: &AgentJob,
+    available_at: DateTime<Utc>,
+    last_error: Option<&str>,
+    refund_attempt: bool,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE agent_triage_jobs SET state='queued',available_at=?1,
+             last_error=COALESCE(?2,last_error),
+             attempts=CASE WHEN ?6 THEN MAX(attempts-1,0) ELSE attempts END,
+             lease_token=NULL,lease_until=NULL
+         WHERE id=?3 AND account_id=?4 AND state='leased' AND lease_token=?5",
+        params![
+            available_at.to_rfc3339(),
+            last_error,
+            job.id,
+            job.account_id,
+            job.lease_token,
+            refund_attempt
+        ],
+    )? == 1;
+    if changed {
+        absorb_followup(conn, job)?;
+    }
+    Ok(changed)
 }
 
 fn absorb_followup(conn: &Connection, job: &AgentJob) -> Result<()> {
@@ -581,6 +781,26 @@ fn release_followup(conn: &Connection, job: &AgentJob) -> Result<()> {
             requested,
         )?;
     }
+    Ok(())
+}
+
+/// The archive walk's half of [`enqueue_agent_triage_lane`]: the state row and
+/// nothing behind it. Same snapshot function, revision 1, access pending, so
+/// the row reads as unchanged to any later touch and stays closed to the agent
+/// door until something explicit asks for its assessment. Insert-only: the
+/// caller has just inserted the message, and a row that somehow has state keeps
+/// it.
+pub(crate) fn seed_archive_state_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<()> {
+    let snapshot = content_snapshot(&read_message(conn, account, message)?)?;
+    conn.execute(
+        "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,revision,access)
+             VALUES(?1,?2,?3,1,'pending') ON CONFLICT(account_id,message_id) DO NOTHING",
+        params![account, message, snapshot],
+    )?;
     Ok(())
 }
 
@@ -680,7 +900,16 @@ pub(crate) fn enqueue_agent_triage_lane(
         params![account,message,revision])?;
         conn.execute("DELETE FROM agent_triage_followups WHERE job_id IN (SELECT id FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2 AND input_revision!=?3)",params![account,message,revision])?;
     }
-    let kind = if m.is_sent || m.is_spam || trigger == "source_access" {
+    // Both access triggers are a yes/no on one row somebody asked to read,
+    // never a placement: an archive row gets no FYE verdict and no push.
+    // WHATEVER THE TRIGGER, A ROW STILL IN THE ARCHIVE GETS AN ACCESS CHECK AND
+    // NEVER A TRIAGE. The two paths that mean "triage this" promote the row
+    // first (see `promote_archive_conn`), so by here it is no longer archive;
+    // anything else that finds its way to one (`not_spam`, a refresh) must not
+    // write destinations, records or revisits onto mail nobody asked about.
+    let access_only = matches!(trigger, "source_access" | "archive_access")
+        || is_archive_conn(conn, account, message)?;
+    let kind = if m.is_sent || m.is_spam || access_only {
         "access"
     } else {
         "triage"
@@ -718,13 +947,15 @@ pub(crate) fn enqueue_agent_triage_lane(
     }
     // A sent reply is evidence that can resolve an existing obligation. It gets
     // no placement or arrival push of its own; re-evaluate the inbound target.
-    if changed && m.is_sent && !m.is_spam && trigger != "source_access" && !m.thread_id.is_empty() {
+    if changed && m.is_sent && !m.is_spam && !access_only && !m.thread_id.is_empty() {
         let target: Option<i64> = conn
             .query_row(
                 concat!(
                     "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2 AND NOT ",
                     own_mail_sql!(),
-                    " AND m.is_spam=0
+                    // Never an archive row: a reply into an old conversation
+                    // re-evaluates live mail or nothing.
+                    " AND m.is_spam=0 AND m.is_archive=0
              ORDER BY m.received_at DESC,m.id DESC LIMIT 1"
                 ),
                 params![account, m.thread_id],
@@ -805,6 +1036,8 @@ fn retire_inbound_verdict(conn: &Connection, account: AccountId, message: i64) -
 
 /// A source revision invalidates its consumers' model results, never their
 /// human corrections. The existing per-message queue absorbs overlapping waves.
+/// Never an archive dependent: a changed source must not buy a model call on
+/// old mail that happens to cite it.
 fn queue_dependent_refreshes(
     conn: &Connection,
     account: AccountId,
@@ -824,7 +1057,8 @@ fn queue_dependent_refreshes(
             own_mail_sql!(),
             " OR m.is_spam=1 THEN 'access' ELSE 'triage' END
                FROM affected d JOIN messages m ON m.account_id=?1 AND m.id=d.message_id
-               JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id WHERE m.id!=?2 ORDER BY m.id",
+               JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+               WHERE m.id!=?2 AND m.is_archive=0 ORDER BY m.id",
         ))?;
         statement
             .query_map(params![account, source], |row| {
@@ -963,39 +1197,103 @@ pub(super) fn ensure_agent_source_ids_conn(
     ensure_source_assessments(conn, account, &messages)
 }
 
+/// NEVER ASSESSES AN ARCHIVE ROW, whoever is asking. The triage agent's own
+/// evidence reads and a human opening a message are unprompted, and unprompted
+/// work on the archive is a model call per message over a year of mail. An
+/// agent-door caller who names an archive row is prompted, but that request
+/// has ceilings this function knows nothing about: it goes through
+/// [`request_archive_access_conn`] and nowhere else.
 fn ensure_source_assessments(
     conn: &Connection,
     account: AccountId,
     messages: &[AgentMessage],
 ) -> Result<()> {
+    // Reads first, then every enqueue under ONE commit. An enqueue is three
+    // or four writes, and a thread read that queued ten sources paid each one
+    // as its own autocommit transaction: thirty fsyncs at `synchronous=FULL`,
+    // under the store mutex, on a READ (measured at 97 ms for ten on a
+    // file-backed store; 31 ms and one fsync with one commit). The common
+    // case, nothing to queue, never takes the write lock.
+    let mut wanted = Vec::new();
     for message in messages {
-        let access: Option<String> = conn
-            .query_row(
-                "SELECT access FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
-                params![account, message.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if access.as_deref().is_some_and(|state| state != "pending") {
-            continue;
+        if source_assessment_wanted(conn, account, message.id)? {
+            wanted.push(message.id);
         }
-        let active: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
-             AND kind IN ('triage','access') AND state IN ('queued','leased'))",
-            params![account, message.id],
-            |row| row.get(0),
-        )?;
-        let terminal: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs j JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
-             WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access') AND j.state IN ('failed','completed') AND j.input_revision=a.revision)",
-            params![account,message.id],|row|row.get(0),
-        )?;
-        if active || terminal {
-            continue;
-        }
-        enqueue_agent_triage_conn(conn, account, message.id, "source_access", false)?;
     }
-    Ok(())
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    in_write_transaction(conn, |tx| {
+        for id in &wanted {
+            // Asked again inside the transaction, because an enqueue can queue
+            // work for a LATER source in the same batch (a dependent's refresh
+            // through `queue_dependent_refreshes`), and that source is then
+            // active and must be skipped, exactly as the one-at-a-time loop
+            // skipped it. The answer can also have changed under a caller
+            // that took its time between the two phases.
+            if source_assessment_wanted(tx, account, *id)? {
+                enqueue_agent_triage_conn(tx, account, *id, "source_access", false)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Does reading this source as evidence call for an access job: not an
+/// archive row (see [`ensure_source_assessments`]), no assessment yet or one
+/// still pending, and no job already queued, leased, or finished against the
+/// current revision.
+fn source_assessment_wanted(conn: &Connection, account: AccountId, message: i64) -> Result<bool> {
+    if is_archive_conn(conn, account, message)? {
+        return Ok(false);
+    }
+    let access: Option<String> = conn
+        .query_row(
+            "SELECT access FROM agent_message_state WHERE account_id=?1 AND message_id=?2",
+            params![account, message],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if access.as_deref().is_some_and(|state| state != "pending") {
+        return Ok(false);
+    }
+    let active: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs WHERE account_id=?1 AND message_id=?2
+         AND kind IN ('triage','access') AND state IN ('queued','leased'))",
+        params![account, message],
+        |row| row.get(0),
+    )?;
+    let terminal: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_triage_jobs j JOIN agent_message_state a ON a.account_id=j.account_id AND a.message_id=j.message_id
+         WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access') AND j.state IN ('failed','completed') AND j.input_revision=a.revision)",
+        params![account,message],|row|row.get(0),
+    )?;
+    Ok(!active && !terminal)
+}
+
+/// Run `f` under ONE write transaction: the caller's when one is open (the
+/// `_conn` helpers compose, and SQLite refuses a nested BEGIN), otherwise an
+/// IMMEDIATE one of its own, committed when `f` returns Ok and rolled back
+/// when it does not.
+///
+/// IMMEDIATE rather than DEFERRED on purpose. A deferred transaction whose
+/// first statement is a SELECT pins a read snapshot, and if another process
+/// commits before this one's first write (`squelchd token`, `squelchd pair`,
+/// which share the file with a serving daemon) that write fails at once with
+/// `SQLITE_BUSY_SNAPSHOT`: the busy handler is never consulted for it. Taking
+/// the write lock up front waits out `busy_timeout` instead, which is what
+/// each autocommit statement did before the writes were batched.
+pub(super) fn in_write_transaction<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    if !conn.is_autocommit() {
+        return f(conn);
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let out = f(&tx)?;
+    tx.commit()?;
+    Ok(out)
 }
 
 fn leased(conn: &Connection, job: &AgentJob) -> Result<bool> {
@@ -1027,7 +1325,10 @@ fn finish(
     Ok(())
 }
 
-/// [`SqliteStore::triage_waiting_counts`]. Pinned to the account's ready index:
+/// [`SqliteStore::triage_waiting_counts`]. NOT `archive_access`: that is an
+/// agent's search asking whether it may read old mail, not the owner's mail
+/// waiting to be triaged, and counted here it would tell the human "triaging
+/// N" about work they never asked for. Pinned to the account's ready index:
 /// without ANALYZE the planner prefers the re-triage progress index on
 /// `account_id` alone and walks every job the account ever had, under the
 /// store mutex, on every `/client/stats`.
@@ -1037,12 +1338,40 @@ pub(crate) const TRIAGE_WAITING_SQL: &str = "SELECT
        COUNT(DISTINCT CASE WHEN state='leased' THEN message_id END)
      FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
      WHERE account_id=?1 AND state IN ('queued','leased') AND kind IN ('triage','access')
-       AND trigger NOT LIKE 'revisit:%'";
+       AND trigger NOT LIKE 'revisit:%' AND trigger!='archive_access'";
+
+/// [`SqliteStore::next_agent_jobs_due`], pinned to the same index: its
+/// `(account_id, state, kind, available_at)` seeks straight to the pending
+/// rows of the kinds asked for and serves `available_at` from the index, so
+/// only a leased row is fetched, for its `lease_until`. The partial index the
+/// claim itself seeks carries neither state nor kind and would walk every
+/// pending job of the tenant, a first backfill's whole triage backlog among
+/// them, to find the two notification kinds.
+///
+/// "Claimable" is [`CLAIM_JOB_SQL`]'s own notion, so that a job this read
+/// counts is one the claim will hand out: queued and available, or leased
+/// until its lease lapses (a leased row with no `lease_until`, which no claim
+/// writes, is never claimable, and `MAX` of a NULL is NULL, which `MIN`
+/// skips); and of a message that exists, the claim's own join. The per-thread
+/// exclusion the claim adds applies to triage and access jobs only. Both
+/// time columns are RFC 3339 text, which orders as text, as the claim's own
+/// comparison relies on. The kinds arrive as one JSON array, so the statement
+/// is one string whatever their number. A kind whose pending rows are all
+/// unclaimable comes back with a NULL time, which the caller drops.
+pub(crate) const NEXT_JOBS_DUE_SQL: &str = "SELECT j.kind,
+       MIN(CASE WHEN j.state='leased' THEN MAX(j.available_at, j.lease_until)
+                ELSE j.available_at END)
+     FROM agent_triage_jobs j INDEXED BY idx_agent_jobs_account_ready
+     JOIN messages m ON m.account_id=j.account_id AND m.id=j.message_id
+     WHERE j.account_id=?1 AND j.state IN ('queued','leased')
+       AND j.kind IN (SELECT value FROM json_each(?2))
+     GROUP BY j.kind";
 
 /// [`SqliteStore::triage_budget_parked`], pinned for the same reason.
 pub(crate) const TRIAGE_BUDGET_PARKED_SQL: &str = "SELECT COUNT(*), MIN(available_at)
      FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
      WHERE account_id=?1 AND state='queued' AND kind IN ('triage','access')
+       AND trigger!='archive_access'
        AND last_error='daily_budget_exhausted' AND available_at>?2";
 
 impl SqliteStore {
@@ -1054,6 +1383,7 @@ impl SqliteStore {
         let mut query = conn.prepare(
             "SELECT state, COUNT(*) FROM agent_triage_jobs
              WHERE account_id=?1 AND kind IN ('triage','access')
+               AND trigger!='archive_access'
                AND state IN ('queued','leased') GROUP BY state",
         )?;
         for row in query.query_map([account_id], |row| {
@@ -1143,10 +1473,7 @@ impl AgentTriageStore for SqliteStore {
         })))?.collect::<std::result::Result<Vec<_>,_>>()?
         };
         let runs = {
-            let mut stmt = conn.prepare(
-                "SELECT id,job_id,outcome,completed_at,metadata_json FROM agent_triage_runs
-             WHERE account_id=?1 AND message_id=?2 ORDER BY id DESC LIMIT 25",
-            )?;
+            let mut stmt = conn.prepare(MESSAGE_RUNS_SQL)?;
             let rows = stmt
                 .query_map(params![account, message], |row| {
                     Ok((
@@ -1211,19 +1538,13 @@ impl AgentTriageStore for SqliteStore {
     fn external_agent_decision(&self, account: AccountId, message: i64) -> Result<MessageDecision> {
         let conn = self.lock()?;
         let source = read_message(&conn, account, message)?;
-        let siblings = {
-            let mut stmt =
-                conn.prepare("SELECT id FROM messages WHERE account_id=?1 AND thread_id=?2")?;
-            stmt.query_map(params![account, source.thread_id], |row| {
-                row.get::<_, i64>(0)
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        for sibling in siblings {
-            if !super::messages::external_message_allowed_conn(&conn, account, sibling)? {
-                return Err(CoreError::NotFound);
-            }
+        // The message itself by name: the thread guard omits an unassessed
+        // archive row instead of failing on it, which is right for a sibling
+        // and would be a leak for the row being asked about.
+        if !super::messages::external_message_allowed_conn(&conn, account, message)? {
+            return Err(CoreError::NotFound);
         }
+        super::messages::thread_guard_and_subject(&conn, account, &source.thread_id)?;
         let encoded:Option<String>=conn.query_row("SELECT decision_json FROM agent_message_decisions WHERE account_id=?1 AND message_id=?2",params![account,message],|row|row.get(0)).optional()?;
         decode(&encoded.ok_or(CoreError::NotFound)?)
     }
@@ -1371,20 +1692,20 @@ impl AgentTriageStore for SqliteStore {
         tx.commit()?;
         Ok(())
     }
-    fn claim_agent_job(
+    fn claim_agent_job_sized(
         &self,
         account: AccountId,
         kind: &str,
         now: DateTime<Utc>,
         lease_seconds: i64,
+        access_lease_seconds: i64,
     ) -> Result<Option<AgentJob>> {
-        if lease_seconds <= 0 {
+        if lease_seconds <= 0 || access_lease_seconds <= 0 {
             return Err(CoreError::InvalidInput("lease must be positive".into()));
         }
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let token: String = tx.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
-        let until = (now + Duration::seconds(lease_seconds)).to_rfc3339();
         let row = tx
             .query_row(
                 CLAIM_JOB_SQL,
@@ -1398,15 +1719,30 @@ impl AgentTriageStore for SqliteStore {
                         r.get::<_, bool>(4)?,
                         r.get::<_, String>(5)?,
                         r.get::<_, bool>(6)?,
+                        r.get::<_, Option<String>>(7)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((id, message_id, trigger, attempts, arrival_eligible, claimed_kind, foreground)) =
-            row
+        let Some((
+            id,
+            message_id,
+            trigger,
+            attempts,
+            arrival_eligible,
+            claimed_kind,
+            foreground,
+            last_error,
+        )) = row
         else {
             return Ok(None);
         };
+        let lease = if claimed_kind == "access" {
+            access_lease_seconds
+        } else {
+            lease_seconds
+        };
+        let until = (now + Duration::seconds(lease)).to_rfc3339();
         tx.execute(
             "UPDATE agent_triage_jobs SET
              state='leased',lease_token=?1,lease_until=?2,attempts=attempts+1 WHERE id=?3",
@@ -1421,9 +1757,34 @@ impl AgentTriageStore for SqliteStore {
             trigger,
             lease_token: token,
             attempts: attempts + 1,
+            last_error,
             arrival_eligible,
             foreground,
         }))
+    }
+    fn next_agent_jobs_due(
+        &self,
+        account: AccountId,
+        kinds: &[&str],
+    ) -> Result<Vec<(String, DateTime<Utc>)>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock()?;
+        let mut statement = conn.prepare_cached(NEXT_JOBS_DUE_SQL)?;
+        let rows = statement.query_map(params![account, json(&kinds)?], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        rows.filter_map(|row| match row {
+            Ok((kind, Some(due))) => Some(
+                DateTime::parse_from_rfc3339(&due)
+                    .map(|due| (kind, due.with_timezone(&Utc)))
+                    .map_err(|e| CoreError::Other(e.into())),
+            ),
+            Ok((_, None)) => None,
+            Err(e) => Some(Err(e.into())),
+        })
+        .collect()
     }
     fn load_agent_context(&self, job: &AgentJob) -> Result<AgentContext> {
         context(&*self.lock()?, job.account_id, job.message_id)
@@ -1463,6 +1824,10 @@ impl AgentTriageStore for SqliteStore {
                 if restricted { "restricted" } else { "allowed" }
             ],
         )?;
+        // Access changed outside the triage commit: the message's stored
+        // decision is projected again now (matched afresh), not at its next
+        // re-triage.
+        super::ghosts::refresh_message_guarded(&tx, job.account_id, job.message_id)?;
         finish(&tx, job, "access_applied", metadata)?;
         tx.commit()?;
         Ok(AgentCommitOutcome::Applied)
@@ -1478,11 +1843,7 @@ impl AgentTriageStore for SqliteStore {
         Ok(true)
     }
     fn fail_agent_job(&self, job: &AgentJob, error_code: &str) -> Result<bool> {
-        let code: String = error_code
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(64)
-            .collect();
+        let code = job_error_code(error_code);
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let changed = tx.execute("UPDATE agent_triage_jobs SET state='failed',last_error=?1,lease_token=NULL,lease_until=NULL
@@ -1503,21 +1864,10 @@ impl AgentTriageStore for SqliteStore {
         retry_at: DateTime<Utc>,
         error_code: &str,
     ) -> Result<bool> {
-        // Persist only a bounded machine code, never provider errors/body text.
-        let code: String = error_code
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(64)
-            .collect();
+        let code = job_error_code(error_code);
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let changed = tx.execute("UPDATE agent_triage_jobs SET
-             state='queued',available_at=?1,last_error=?2,lease_token=NULL,lease_until=NULL WHERE id=?3
-             AND account_id=?4 AND state='leased' AND lease_token=?5",
-        params![retry_at.to_rfc3339(),code,job.id,job.account_id,job.lease_token])? == 1;
-        if changed {
-            absorb_followup(&tx, job)?;
-        }
+        let changed = requeue(&tx, job, retry_at, Some(&code), false)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -1527,30 +1877,17 @@ impl AgentTriageStore for SqliteStore {
         available_at: DateTime<Utc>,
         error_code: &str,
     ) -> Result<bool> {
-        let code: String = error_code
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(64)
-            .collect();
+        let code = job_error_code(error_code);
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        // A lease may be refunded only once. A stale worker cannot change the
-        // attempt count or schedule after another worker has claimed the job.
-        let changed = tx.execute(
-            "UPDATE agent_triage_jobs SET state='queued',available_at=?1,last_error=?2,
-                 attempts=MAX(attempts-1,0),lease_token=NULL,lease_until=NULL
-             WHERE id=?3 AND account_id=?4 AND state='leased' AND lease_token=?5",
-            params![
-                available_at.to_rfc3339(),
-                code,
-                job.id,
-                job.account_id,
-                job.lease_token
-            ],
-        )? == 1;
-        if changed {
-            absorb_followup(&tx, job)?;
-        }
+        let changed = requeue(&tx, job, available_at, Some(&code), true)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+    fn release_agent_job(&self, job: &AgentJob, available_at: DateTime<Utc>) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let changed = requeue(&tx, job, available_at, None, false)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -1726,6 +2063,21 @@ impl AgentTriageStore for SqliteStore {
             current.previous_decision.as_ref(),
             decision,
         )?;
+        // Ghosts never block triage: the projection runs under its own
+        // savepoint and a failure costs only the ghosts. It errs only when
+        // SQLite already rolled the whole transaction back, and then this
+        // commit must fail rather than finish the job in autocommit. The
+        // decision row written above is what its rebuild reads for this
+        // message.
+        super::ghosts::reconcile_guarded(
+            &tx,
+            job.account_id,
+            job.message_id,
+            !current.message.is_sent
+                && !current.message.is_spam
+                && super::ghosts::may_feed(decision),
+            decision,
+        )?;
         finish(&tx, job, "applied", &original.run_metadata)?;
         tx.commit()?;
         Ok(AgentCommitOutcome::Applied)
@@ -1805,7 +2157,7 @@ impl AgentTriageStore for SqliteStore {
         let conn = self.lock()?;
         let messages = ids
             .iter()
-            .map(|id| read_message(&conn, account, *id))
+            .map(|id| read_evidence_message(&conn, account, *id))
             .collect::<Result<Vec<_>>>()?;
         ensure_source_assessments(&conn, account, &messages)?;
         messages
@@ -1818,7 +2170,9 @@ impl AgentTriageStore for SqliteStore {
         let id: i64 = conn
             .query_row(
                 concat!(
-                    "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2 ORDER BY
+                    "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2 AND ",
+                    archive_evidence_sql!(),
+                    " ORDER BY
              ",
                     own_mail_sql!(),
                     ",m.is_spam,m.received_at DESC,m.id DESC LIMIT 1"
@@ -1831,6 +2185,12 @@ impl AgentTriageStore for SqliteStore {
         context(&conn, account, id)
     }
     fn agent_read_message(&self, account: AccountId, message: i64) -> Result<AgentMessage> {
+        let conn = self.lock()?;
+        let message = read_evidence_message(&conn, account, message)?;
+        ensure_source_assessments(&conn, account, std::slice::from_ref(&message))?;
+        read_message(&conn, account, message.id)
+    }
+    fn human_read_message(&self, account: AccountId, message: i64) -> Result<AgentMessage> {
         let conn = self.lock()?;
         let message = read_message(&conn, account, message)?;
         ensure_source_assessments(&conn, account, std::slice::from_ref(&message))?;
@@ -1862,6 +2222,7 @@ impl AgentTriageStore for SqliteStore {
             "SELECT {MESSAGE_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid
              LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              WHERE messages_fts MATCH ?2 AND m.account_id=?1 AND m.is_sent=0 AND m.is_spam=0
+               AND {ARCHIVE_EVIDENCE_SQL}
              ORDER BY bm25(messages_fts),m.received_at DESC,m.id DESC LIMIT ?3"
         ))?;
         let limit = limit.min(100);
@@ -1896,6 +2257,7 @@ impl AgentTriageStore for SqliteStore {
         let mut statement = conn.prepare(&format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages m LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              WHERE m.account_id=?1 AND m.from_addr=?2 COLLATE NOCASE AND m.is_sent=0 AND m.is_spam=0
+               AND {ARCHIVE_EVIDENCE_SQL}
              ORDER BY m.received_at DESC,m.id DESC LIMIT ?3"
         ))?;
         let rows = statement
@@ -2024,6 +2386,298 @@ fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|name| !name.trim().is_empty())
 }
 
+/// How many archive rows one agent search may send for an access check.
+pub const ARCHIVE_SURFACE_CAP: usize = 10;
+/// The most `archive_access` jobs one account may have queued or leased at
+/// once. Past it a search queues nothing, so no caller can build a backlog
+/// that outlives the day it was made in.
+pub const ARCHIVE_ACCESS_OUTSTANDING_MAX: u32 = 20;
+/// The daily sub-cap's key in `wake_budget`, charged by the worker for every
+/// `archive_access` job on top of the global and access-lane budgets.
+pub const ARCHIVE_ACCESS_BUDGET_KEY: &str = "__agent_archive_access__";
+pub use crate::triage::agent_config::{ACCESS_BUDGET_KEY, BACKGROUND_BUDGET_KEY};
+/// A failed access check on an archive row may be asked for again this long
+/// after it was last scheduled, so a row is not pending for good.
+const ARCHIVE_ACCESS_RETRY_HOURS: i64 = 24;
+
+/// What a door may spend on surfacing archive mail, from `triage.agent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveAccessCaps {
+    /// `triage.agent.archive_access_daily_cap`.
+    pub daily: u32,
+    /// The effective access-lane cap; once today's is spent nothing is
+    /// queued, since every check would park.
+    pub access_daily: u32,
+    /// `triage.agent.daily_run_cap`, the same way.
+    pub total_daily: u32,
+}
+
+impl From<&crate::triage::agent_config::AgentConfig> for ArchiveAccessCaps {
+    fn from(config: &crate::triage::agent_config::AgentConfig) -> Self {
+        Self {
+            daily: config.archive_access_daily_cap,
+            access_daily: config.effective_access_daily_run_cap(),
+            total_daily: config.daily_run_cap,
+        }
+    }
+}
+
+impl Default for ArchiveAccessCaps {
+    fn default() -> Self {
+        (&crate::triage::agent_config::AgentConfig::default()).into()
+    }
+}
+
+/// Where the checks one call queued have got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessProgress {
+    /// Still able to finish soon: leased, or queued and due.
+    pub waiting: usize,
+    /// Of those, never yet picked up by a worker.
+    pub untouched: usize,
+}
+
+/// Put a FAILED access job on an unassessed archive row back in the queue once
+/// it is [`ARCHIVE_ACCESS_RETRY_HOURS`] old. `available_at` is the last time
+/// the job was scheduled, which is never later than the failure, so this errs
+/// toward a slightly early retry and never toward none. The row's LATEST
+/// failure is the one that has to be that old: an older failed job beside a
+/// fresh one is no reason to try again today. Returns whether a job was
+/// revived.
+fn revive_failed_archive_access(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let cutoff = (now - Duration::hours(ARCHIVE_ACCESS_RETRY_HOURS)).to_rfc3339();
+    let job: Option<i64> = conn
+        .query_row(
+            concat!(
+                "SELECT j.id FROM messages m
+                 JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+                 JOIN agent_triage_jobs j ON j.account_id=m.account_id AND j.message_id=m.id
+                 WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0 AND ",
+                archive_unassessed_sql!(),
+                " AND j.kind='access' AND j.trigger IN ('archive_access','source_access')
+                   AND j.input_revision=a.revision AND j.state='failed'
+                   AND julianday(j.available_at)<=julianday(?3)
+                   AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs fresh
+                       WHERE fresh.account_id=m.account_id AND fresh.message_id=m.id
+                         AND fresh.kind='access' AND fresh.input_revision=a.revision
+                         AND fresh.state='failed'
+                         AND julianday(fresh.available_at)>julianday(?3))
+                   AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs live
+                       WHERE live.account_id=m.account_id AND live.message_id=m.id
+                         AND live.kind IN ('triage','access') AND live.state IN ('queued','leased'))
+                 ORDER BY j.trigger='archive_access' DESC,j.id DESC LIMIT 1"
+            ),
+            params![account, message, cutoff],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(job) = job else {
+        return Ok(false);
+    };
+    // Revived AS `archive_access`, whatever queued it first: the trigger is
+    // what the outstanding ceiling counts and what the worker charges the
+    // daily sub-cap on, so a revived check is inside both.
+    //
+    // THE RENAME MUST NOT MEET THE JOBS' UNIQUE KEY (account, message, kind,
+    // revision, trigger). The select above prefers a failed job that already
+    // carries the trigger, but the row may hold one in another state beside
+    // a failed `source_access` (completed, with the access still pending).
+    // Then that job is the one revived, and the other is left as it is.
+    let twin: Option<i64> = conn
+        .query_row(
+            "SELECT t.id FROM agent_triage_jobs j
+             JOIN agent_triage_jobs t ON t.account_id=j.account_id AND t.message_id=j.message_id
+               AND t.kind=j.kind AND t.input_revision=j.input_revision
+             WHERE j.id=?1 AND t.id!=j.id AND t.trigger='archive_access'",
+            params![job],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let job = twin.unwrap_or(job);
+    conn.execute(
+        "UPDATE agent_triage_jobs SET state='queued',attempts=0,available_at=?2,last_error=NULL,
+             trigger='archive_access'
+         WHERE id=?1",
+        params![job, now.to_rfc3339()],
+    )?;
+    Ok(true)
+}
+
+/// ASSESS ON SURFACING, in the caller's transaction: queue one `access` job
+/// (trigger `archive_access`) for each of `ids` that is an unassessed archive
+/// row of this account with NO job at its current revision, in any state. A
+/// row whose check already ran or is parked on the daily budget is left
+/// exactly as it is, so repeating a request never buys a second model call;
+/// one whose check FAILED is asked for again once that failure is a day old.
+/// Taken in the order given (the caller passes best-ranked first). Returns
+/// the ids queued.
+///
+/// THE ONE PLACE AN AGENT-DOOR CALLER CAN QUEUE WORK ON AN ARCHIVE ROW, a
+/// search that matched it and a thread open that named it alike, so both obey
+/// the same ceilings and neither can queue what the worker would only park:
+/// at most `limit` (never over [`ARCHIVE_SURFACE_CAP`]) per call; never more
+/// than [`ARCHIVE_ACCESS_OUTSTANDING_MAX`] outstanding for the account; never
+/// more than today's `caps.daily` can still pay for, counting what is already
+/// outstanding. And nothing at all once today's access budget, or the total, is spent,
+/// because every one of these would park.
+pub(super) fn request_archive_access_conn(
+    conn: &Connection,
+    account: AccountId,
+    ids: &[i64],
+    limit: usize,
+    caps: ArchiveAccessCaps,
+    now: DateTime<Utc>,
+) -> Result<Vec<i64>> {
+    let day = now.format("%Y-%m-%d").to_string();
+    // Nothing is queued once a cap every one of these checks would park on
+    // is spent, the lane's or the total's, as the worker will reserve
+    // against (the budget module's own rule, today's grant included): a
+    // `squelchd triage grant` on either reopens surfacing too.
+    let spent = |key: &str, configured: u32| -> Result<bool> {
+        Ok(super::agent_budget::runs(conn, account, key, &day)?
+            >= super::agent_budget::cap(conn, account, key, configured, &day)?)
+    };
+    if spent(ACCESS_BUDGET_KEY, caps.access_daily)?
+        || spent(
+            crate::triage::agent_config::TOTAL_BUDGET_KEY,
+            caps.total_daily,
+        )?
+    {
+        return Ok(Vec::new());
+    }
+    let outstanding: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM agent_triage_jobs WHERE account_id=?1 AND kind='access'
+           AND trigger='archive_access' AND state IN ('queued','leased')",
+        [account],
+        |row| row.get(0),
+    )?;
+    let room = limit
+        .min(ARCHIVE_SURFACE_CAP)
+        .min(ARCHIVE_ACCESS_OUTSTANDING_MAX.saturating_sub(outstanding) as usize)
+        .min(
+            caps.daily
+                .saturating_sub(super::agent_budget::runs(
+                    conn,
+                    account,
+                    ARCHIVE_ACCESS_BUDGET_KEY,
+                    &day,
+                )?)
+                .saturating_sub(outstanding) as usize,
+        );
+    let mut queued = Vec::new();
+    for id in ids {
+        if queued.len() >= room {
+            break;
+        }
+        let wanted: bool = conn.query_row(
+            concat!(
+                "SELECT EXISTS(SELECT 1 FROM messages m
+                 LEFT JOIN agent_message_state a
+                   ON a.account_id=m.account_id AND a.message_id=m.id
+                 WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0 AND ",
+                archive_unassessed_sql!(),
+                " AND NOT EXISTS(SELECT 1 FROM agent_triage_jobs j
+                     WHERE j.account_id=m.account_id AND j.message_id=m.id
+                       AND j.kind IN ('triage','access')
+                       AND j.input_revision=COALESCE(a.revision,1)))"
+            ),
+            params![account, id],
+            |row| row.get(0),
+        )?;
+        if wanted {
+            enqueue_agent_triage_conn(conn, account, *id, "archive_access", false)?;
+            queued.push(*id);
+        } else if revive_failed_archive_access(conn, account, *id, now)? {
+            queued.push(*id);
+        }
+    }
+    Ok(queued)
+}
+
+impl SqliteStore {
+    /// [`request_archive_access_conn`] for a search's matches, in its own
+    /// transaction: up to [`ARCHIVE_SURFACE_CAP`] of `ids`, inside every
+    /// ceiling that function keeps.
+    pub fn request_archive_access(
+        &self,
+        account: AccountId,
+        ids: &[i64],
+        caps: ArchiveAccessCaps,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<i64>> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let queued =
+            request_archive_access_conn(&tx, account, ids, ARCHIVE_SURFACE_CAP, caps, now)?;
+        tx.commit()?;
+        Ok(queued)
+    }
+
+    /// Where the access checks on `ids` stand. `waiting` counts a job leased,
+    /// or queued and due; a job parked for later (daily budget, provider
+    /// backoff) is not counted, so a caller polling this stops waiting for
+    /// work that will not run today. `untouched` is the part of `waiting` no
+    /// worker has picked up even once, which is how a caller tells a busy
+    /// lane from one that is not running.
+    pub fn archive_access_progress(
+        &self,
+        account: AccountId,
+        ids: &[i64],
+        now: DateTime<Utc>,
+    ) -> Result<AccessProgress> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(MAX(j.state='leased' OR j.available_at<=?3),0),
+                    COALESCE(MIN(j.state='queued' AND j.attempts=0 AND j.last_error IS NULL),0)
+             FROM agent_triage_jobs j
+             WHERE j.account_id=?1 AND j.message_id=?2 AND j.kind IN ('triage','access')
+               AND j.state IN ('queued','leased')",
+        )?;
+        let mut progress = AccessProgress::default();
+        for id in ids {
+            let (waiting, untouched): (bool, bool) = stmt
+                .query_row(params![account, id, now.to_rfc3339()], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
+            if waiting {
+                progress.waiting += 1;
+                progress.untouched += usize::from(untouched);
+            }
+        }
+        Ok(progress)
+    }
+
+    /// An explicit thread open at the agent door, as its own step: queue the
+    /// access checks its newest unassessed siblings need and return the ids
+    /// queued, so the door can wait on them BEFORE it applies the guard. Live
+    /// siblings as [`Self::thread_view`] would; ARCHIVE siblings only here,
+    /// and only inside `caps` (see [`request_archive_access_conn`]): the read
+    /// itself never queues work on an archive row. Idempotent.
+    pub fn request_thread_access(
+        &self,
+        account: AccountId,
+        thread: &str,
+        caps: ArchiveAccessCaps,
+    ) -> Result<Vec<i64>> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let queued = super::messages::request_external_thread_access_conn(
+            &tx,
+            account,
+            thread,
+            Some(caps),
+            Utc::now(),
+        )?;
+        tx.commit()?;
+        Ok(queued)
+    }
+}
+
 fn restrict_external_items(
     conn: &Connection,
     account: AccountId,
@@ -2134,7 +2788,9 @@ fn apply_attention(
                 "attention references another thread".into(),
             ));
         }
-        if !m.is_sent && !m.is_spam {
+        // Nor an archive row, named or not: the model may cite old mail as
+        // relevant, and it still never becomes the card.
+        if !m.is_sent && !m.is_spam && !is_archive_conn(conn, account, m.id)? {
             let activity = (effective_activity(conn, account, m.id)?, m.id);
             if latest.as_ref().is_none_or(|previous| activity > *previous) {
                 latest = Some(activity);
@@ -2168,7 +2824,7 @@ fn apply_attention(
             .query_row(
                 concat!("SELECT strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?3)),julianday(?3))) AS activity,m.id
              FROM messages m LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
-             WHERE m.account_id=?1 AND m.thread_id=?2
+             WHERE m.account_id=?1 AND m.thread_id=?2 AND m.is_archive=0
              ORDER BY (NOT ",own_mail_sql!()," AND m.is_spam=0) DESC,activity DESC,m.id DESC LIMIT 1"),
                 params![account, thread,Utc::now().to_rfc3339()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -2219,6 +2875,18 @@ pub(super) fn list_items(
     list_items_with_query(conn, account, destination, now, &AgentListQuery::default())
 }
 
+/// THE LISTS' BACKSTOP against the archive, over aliases `m` and `t`: FYE,
+/// Reading and Records list live mail. Every path that could put an archive
+/// row in one is closed where it starts (no decision, no attention, no
+/// placement without promotion); this is the line that holds if one of them
+/// is reopened. A reminder the owner set and that has fired is their own
+/// instruction to see the row again, as in the human inventory.
+macro_rules! archive_listable_sql {
+    () => {
+        "(m.is_archive=0 OR t.reminded_at IS NOT NULL)"
+    };
+}
+
 fn list_items_with_query(
     conn: &Connection,
     account: AccountId,
@@ -2247,7 +2915,7 @@ fn list_items_with_query(
              t.message_id=m.id LEFT JOIN agent_thread_preferences pref ON pref.account_id=a.account_id AND
              pref.thread_id=a.thread_id WHERE a.account_id=?1 AND ?3='fye' AND
              (COALESCE(pref.show_in_fye,CASE WHEN json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0
-             OR ",own_mail_sql!()," THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND COALESCE(t.status,'new')!='done' AND
+             OR ",own_mail_sql!()," THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND ",archive_listable_sql!()," AND COALESCE(t.status,'new')!='done' AND
              (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5")
     } else if destination == "records" {
         concat!("SELECT m.id,m.thread_id,m.from_addr,m.subject,
@@ -2255,7 +2923,7 @@ fn list_items_with_query(
              FROM agent_message_decisions d JOIN messages m ON m.account_id=d.account_id AND m.id=d.message_id
              LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
-             WHERE d.account_id=?1 AND ?3='records' AND NOT ",own_mail_sql!()," AND m.is_spam=0
+             WHERE d.account_id=?1 AND ?3='records' AND NOT ",own_mail_sql!()," AND m.is_spam=0 AND ",archive_listable_sql!(),"
              AND EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.records') r
                  WHERE json_extract(r.value,'$.kind') IN ('bill','receipt','delivery','event','financial_update'))
              AND (?4 OR COALESCE(t.status,'new')!='done')
@@ -2269,7 +2937,7 @@ fn list_items_with_query(
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND
              a.thread_id=m.thread_id WHERE p.account_id=?1 AND p.destination=?3 AND NOT ",own_mail_sql!()," AND
-             m.is_spam=0 AND (?4 OR COALESCE(t.status,'new')!='done') AND
+             m.is_spam=0 AND ",archive_listable_sql!()," AND (?4 OR COALESCE(t.status,'new')!='done') AND
              (?5 IS NULL OR min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))>=julianday(?5))")
     };
     let mut stmt = conn.prepare(sql)?;
@@ -2354,6 +3022,27 @@ fn list_items_with_query(
     Ok(items)
 }
 
+/// The fired reminders, newest first: what [`append_due_reminders`] adds to
+/// every FYE listing. A `const` so the plan test pins THIS statement to its
+/// index (`idx_triage_reminded_at`, created in `migrate.rs`): it runs on every
+/// Standing-band read, which is the client's 10 s poll, and without the index
+/// it walked every triage row in the account.
+pub(super) const DUE_REMINDERS_SQL: &str =
+    "SELECT m.id,m.thread_id,m.from_addr,m.subject,m.received_at,t.reminded_at,d.decision_json,
+            m.from_name
+     FROM messages m JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
+     LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
+     WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=0 AND t.status!='done'
+       AND t.reminded_at IS NOT NULL AND t.remind_at IS NULL
+     ORDER BY t.reminded_at DESC,m.id DESC";
+
+/// The newest runs for one message, for `agent_diagnostics`. A `const` so the
+/// plan test pins it to `idx_agent_triage_runs_message`: the table is never
+/// pruned, and without the index this was a scan of all of it.
+pub(super) const MESSAGE_RUNS_SQL: &str =
+    "SELECT id,job_id,outcome,completed_at,metadata_json FROM agent_triage_runs
+     WHERE account_id=?1 AND message_id=?2 ORDER BY id DESC LIMIT 25";
+
 /// A user's scheduled reminder is sufficient authority to surface mail even
 /// while model processing is unavailable. This is a view, never a stored verdict.
 fn append_due_reminders(
@@ -2361,15 +3050,7 @@ fn append_due_reminders(
     account: AccountId,
     items: &mut Vec<AgentListItem>,
 ) -> Result<()> {
-    let mut statement = conn.prepare(
-        "SELECT m.id,m.thread_id,m.from_addr,m.subject,m.received_at,t.reminded_at,d.decision_json,
-                m.from_name
-         FROM messages m JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
-         LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
-         WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=0 AND t.status!='done'
-           AND t.reminded_at IS NOT NULL AND t.remind_at IS NULL
-         ORDER BY t.reminded_at DESC,m.id DESC",
-    )?;
+    let mut statement = conn.prepare(DUE_REMINDERS_SQL)?;
     let rows = statement
         .query_map([account], |row| {
             Ok((
@@ -2448,6 +3129,122 @@ mod tests {
         }
         store
     }
+    /// THE LANE'S DUE READ: when the next claimable job of each notification
+    /// kind is due, over the rows the claim seeks, taking nothing. Queued and
+    /// available reads as its own time (in the past: due now); claimed, as
+    /// the end of its lease, which is when the claim would hand it out again;
+    /// completed, as nothing. A kind the lane does not claim, and another
+    /// tenant's job, are not counted. And it is a read: the job it reports
+    /// is still there for the claim.
+    #[test]
+    fn next_agent_jobs_due_read_the_queue_without_claiming() {
+        let store = fixture();
+        let kinds = ["notification", "deliberate_notification"];
+        let due = |kinds: &[&str]| {
+            let mut rows = store.next_agent_jobs_due(1, kinds).unwrap();
+            rows.sort();
+            rows
+        };
+        assert_eq!(due(&kinds), []);
+        let past = Utc::now() - Duration::minutes(5);
+        let ahead = Utc::now() + Duration::hours(1);
+        store.lock().unwrap().execute(
+            "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,available_at)
+             VALUES(1,1,'notification','arrival',1,?1),(1,2,'deliberate_notification','decision',1,?2),
+                   (1,2,'triage','arrival',1,?1),(2,3,'notification','arrival',1,?1)",
+            params![past.to_rfc3339(), ahead.to_rfc3339()],
+        ).unwrap();
+        assert_eq!(due(&[]), [], "no kinds, nothing");
+        assert_eq!(
+            due(&kinds),
+            [
+                ("deliberate_notification".to_string(), ahead),
+                ("notification".to_string(), past)
+            ],
+            "each kind's own next; the triage row at the same time is not the lane's"
+        );
+        assert!(past <= Utc::now(), "and the queued one is due now");
+        let job = store
+            .claim_agent_job(1, "notification", Utc::now(), 60)
+            .unwrap()
+            .expect("the read took nothing");
+        assert_eq!(job.message_id, 1);
+        let leased_until = due(&["notification"])[0].1;
+        assert!(
+            leased_until > Utc::now() + Duration::seconds(55)
+                && leased_until <= Utc::now() + Duration::seconds(60),
+            "leased, it is due when the lease lapses: {leased_until}"
+        );
+        assert!(store.complete_agent_job(&job).unwrap());
+        assert_eq!(
+            due(&kinds),
+            [("deliberate_notification".to_string(), ahead)],
+            "completed, its kind has nothing pending"
+        );
+        assert_eq!(
+            store.next_agent_jobs_due(2, &kinds).unwrap(),
+            [("notification".to_string(), past)],
+            "the other tenant's own queue"
+        );
+        // WHAT THE CLAIM WOULD REFUSE, THE READ DOES NOT COUNT: a job whose
+        // message is gone, and a leased row no claim wrote (no lease end).
+        store.lock().unwrap().execute(
+            "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,available_at,state)
+             VALUES(1,99,'notification','arrival',1,?1,'queued'),(1,1,'notification','orphan-lease',1,?1,'leased')",
+            params![past.to_rfc3339()],
+        ).unwrap();
+        assert_eq!(
+            due(&kinds),
+            [("deliberate_notification".to_string(), ahead)],
+            "neither the orphan nor the endless lease is a job to wake for"
+        );
+        assert!(
+            store
+                .claim_agent_job(1, "notification", Utc::now(), 60)
+                .unwrap()
+                .is_none(),
+            "and the claim agrees"
+        );
+    }
+
+    /// The due read SEARCHES the account's ready index on account, state and
+    /// kind, never scans the jobs table; and THE CANARY: with the index gone
+    /// the pinned statement no longer prepares, so the assertion above was
+    /// testing the index and not the planner's mood.
+    #[test]
+    fn next_jobs_due_seeks_the_account_ready_index() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {NEXT_JOBS_DUE_SQL}"))
+            .unwrap()
+            .query_map(
+                params![1, r#"["notification","deliberate_notification"]"#],
+                |r| r.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            plan.contains(
+                "INDEX idx_agent_jobs_account_ready (account_id=? AND state=? AND kind=?)"
+            ),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN agent_triage_jobs"), "{plan}");
+        assert!(
+            plan.contains("SEARCH m USING INTEGER PRIMARY KEY"),
+            "the message join is a rowid lookup per pending row:\n{plan}"
+        );
+        conn.execute_batch("DROP INDEX idx_agent_jobs_account_ready")
+            .unwrap();
+        assert!(
+            conn.prepare(NEXT_JOBS_DUE_SQL).is_err(),
+            "the statement is pinned to the index it was measured on"
+        );
+    }
+
     #[test]
     fn records_are_derived_from_facts_and_legacy_placements_are_retired() {
         let store = fixture();
@@ -3459,6 +4256,108 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_row_is_never_a_threads_fallback_representative() {
+        use crate::triage::decision::RelatedAttentionUpdate;
+        // Evidence in thread "two" updates attention on thread "one" without
+        // naming a message there, so the representative is the fallback's
+        // pick. With thread "one" live that is message 1; with it archived
+        // there is nothing to anchor a card to, and none is made.
+        for archived in [false, true] {
+            let store = fixture();
+            if archived {
+                // Assessed as allowed, so the agent may read it as evidence;
+                // it still may not become the card.
+                let conn = store.lock().unwrap();
+                conn.execute("UPDATE messages SET is_archive=1 WHERE id=1", [])
+                    .unwrap();
+                seed_archive_state_conn(&conn, 1, 1).unwrap();
+                conn.execute(
+                    "UPDATE agent_message_state SET access='allowed' WHERE message_id=1",
+                    [],
+                )
+                .unwrap();
+            }
+            let (job, context) = claim(&store, 2);
+            let sources = store.snapshot_agent_sources(1, &[1, 2]).unwrap();
+            let mut verdict = decision(2);
+            let mut attention = decision(1).attention;
+            attention.relevant_message_ids.clear();
+            verdict.related_updates.push(RelatedAttentionUpdate {
+                thread_id: "one".into(),
+                expected_revision: 0,
+                attention,
+                evidence: vec![],
+            });
+            assert_eq!(
+                store
+                    .commit_agent_decision(&job, &context, &verdict, &sources)
+                    .unwrap(),
+                AgentCommitOutcome::Applied
+            );
+            let anchored: Vec<i64> = store
+                .lock()
+                .unwrap()
+                .prepare("SELECT message_id FROM agent_thread_attention WHERE thread_id='one'")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert_eq!(anchored, if archived { vec![] } else { vec![1] });
+        }
+    }
+
+    /// The named half of the same rule. The model may cite an old message as
+    /// relevant to a thread's attention; cited or not, an archive row is never
+    /// the card. Message 1 is the only message in thread "one", so with it
+    /// archived there is nothing to anchor to and no card is made.
+    #[test]
+    fn an_archive_row_named_as_relevant_is_never_the_representative() {
+        use crate::triage::decision::RelatedAttentionUpdate;
+        for archived in [false, true] {
+            let store = fixture();
+            if archived {
+                let conn = store.lock().unwrap();
+                conn.execute("UPDATE messages SET is_archive=1 WHERE id=1", [])
+                    .unwrap();
+                seed_archive_state_conn(&conn, 1, 1).unwrap();
+                conn.execute(
+                    "UPDATE agent_message_state SET access='allowed' WHERE message_id=1",
+                    [],
+                )
+                .unwrap();
+            }
+            let (job, context) = claim(&store, 2);
+            let sources = store.snapshot_agent_sources(1, &[1, 2]).unwrap();
+            let mut verdict = decision(2);
+            let attention = decision(1).attention;
+            assert_eq!(attention.relevant_message_ids, vec![1]);
+            verdict.related_updates.push(RelatedAttentionUpdate {
+                thread_id: "one".into(),
+                expected_revision: 0,
+                attention,
+                evidence: vec![],
+            });
+            assert_eq!(
+                store
+                    .commit_agent_decision(&job, &context, &verdict, &sources)
+                    .unwrap(),
+                AgentCommitOutcome::Applied
+            );
+            let anchored: Vec<i64> = store
+                .lock()
+                .unwrap()
+                .prepare("SELECT message_id FROM agent_thread_attention WHERE thread_id='one'")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert_eq!(anchored, if archived { vec![] } else { vec![1] });
+        }
+    }
+
+    #[test]
     fn unclassified_representative_stays_visible_without_borrowing_source_classification() {
         use crate::triage::decision::RelatedAttentionUpdate;
         for same_thread in [false, true] {
@@ -3706,6 +4605,59 @@ mod tests {
                 .message_id,
             1
         );
+    }
+
+    #[test]
+    fn only_a_capped_surfacing_request_assesses_an_archive_source() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        conn.execute("UPDATE messages SET is_archive=1 WHERE id=1", [])
+            .unwrap();
+        seed_archive_state_conn(&conn, 1, 1).unwrap();
+        let queued = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT kind,trigger FROM agent_triage_jobs WHERE message_id=1")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let message = read_message(&conn, 1, 1).unwrap();
+
+        // The triage agent's own reads, a human's open, and the source repair
+        // behind a thread read: nothing. None of them carries a ceiling.
+        ensure_source_assessments(&conn, 1, std::slice::from_ref(&message)).unwrap();
+        ensure_agent_source_ids_conn(&conn, 1, &[1]).unwrap();
+        assert!(queued(&conn).is_empty());
+
+        // A surfacing request with nothing left to spend: still nothing.
+        let caps = ArchiveAccessCaps::default();
+        let spent = ArchiveAccessCaps { daily: 0, ..caps };
+        assert!(
+            request_archive_access_conn(&conn, 1, &[1], 8, spent, Utc::now())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(queued(&conn).is_empty());
+
+        // One inside its caps: one access job, on the revision the archive
+        // write recorded.
+        assert_eq!(
+            request_archive_access_conn(&conn, 1, &[1], 8, caps, Utc::now()).unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            queued(&conn),
+            vec![("access".to_string(), "archive_access".to_string())]
+        );
+        let revision: i64 = conn
+            .query_row(
+                "SELECT revision FROM agent_message_state WHERE message_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, 1, "being asked about is not a change of content");
     }
 
     #[test]
@@ -4403,6 +5355,90 @@ mod tests {
         assert!(!store.complete_agent_job(&job).unwrap());
         assert!(!store.retry_agent_job(&job, Utc::now(), "timeout").unwrap());
     }
+    /// A release puts the job back queued with `last_error` untouched (NULL
+    /// here, so the row still reads as never pushed back) and the attempt
+    /// it took kept; a second claim gets the same job, and the old lease
+    /// can no longer release it.
+    #[test]
+    fn a_release_hands_the_lease_back_untouched() {
+        let store = fixture();
+        let (job, _context) = claim(&store, 1);
+        assert_eq!(job.attempts, 1);
+        assert!(store.release_agent_job(&job, Utc::now()).unwrap());
+        let (state, attempts, last_error): (String, i64, Option<String>) = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT state,attempts,last_error FROM agent_triage_jobs WHERE id=?1",
+                [job.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((state.as_str(), attempts, last_error), ("queued", 1, None));
+        let again = store
+            .claim_agent_job(1, "triage", Utc::now(), 60)
+            .unwrap()
+            .expect("claimable again at once");
+        assert_eq!(again.id, job.id);
+        assert_eq!(again.attempts, 2, "the interrupted attempt counted");
+        assert_ne!(again.lease_token, job.lease_token);
+        assert!(
+            !store.release_agent_job(&job, Utc::now()).unwrap(),
+            "a stale lease"
+        );
+        assert!(store.release_agent_job(&again, Utc::now()).unwrap());
+    }
+    /// An `access` job is one call under the short access deadline, so it
+    /// gets the lease the claim was given for it, where an investigation's
+    /// covers a whole run; the plain claim leases every kind alike.
+    #[test]
+    fn an_access_job_is_leased_for_its_own_deadline() {
+        let store = fixture();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_triage_jobs
+                (account_id,message_id,kind,trigger,input_revision,state,available_at)
+                VALUES(1,1,'access','source_access',1,'queued','2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        store.enqueue_agent_triage(1, 2, "ingest", true).unwrap();
+        let lease_of = |id: i64| -> i64 {
+            let until: String = store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT lease_until FROM agent_triage_jobs WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let until: DateTime<Utc> = until.parse().unwrap();
+            (until - Utc::now()).num_seconds()
+        };
+        let now = Utc::now();
+        let mut leases = std::collections::BTreeMap::new();
+        for _ in 0..2 {
+            let job = store
+                .claim_agent_job_sized(1, "investigation", now, 480, 60)
+                .unwrap()
+                .expect("two due jobs on two threads");
+            leases.insert(job.kind.clone(), lease_of(job.id));
+        }
+        assert!((58..=60).contains(&leases["access"]), "{leases:?}");
+        assert!((478..=480).contains(&leases["triage"]), "{leases:?}");
+        for job in leases.keys() {
+            assert!(job == "access" || job == "triage", "{job}");
+        }
+        assert!(
+            store
+                .claim_agent_job_sized(1, "investigation", now, 480, 0)
+                .is_err(),
+            "both leases are validated"
+        );
+    }
     #[test]
     fn explicit_delivery_proposals_enter_carrier_polling_and_retract_atomically() {
         use crate::triage::decision::RecordProposal;
@@ -4927,6 +5963,7 @@ fn human_inventory(
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
          LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
+           AND (m.is_archive=0 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
            AND (?4 IS NULL OR m.received_at<?4 OR (m.received_at=?4 AND m.id<?5))
          ORDER BY m.received_at DESC,m.id DESC"

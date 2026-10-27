@@ -129,13 +129,20 @@ window still counts as sent.
 
 ## 4. Firing (the worker)
 
-`run_scheduled_send_pass(&ApiState)`, exported from squelch-api and spawned
-in squelchd beside the shredder, because it needs the WRITE credential and
-the sync engine is read-credential-bound by invariant. Ticks every 10s,
-honors the shutdown watch between ticks AND between rows inside a pass (the
-watch rides on `ApiState`): the send in hand settles, nothing new is claimed.
-squelchd stops on Ctrl-C or SIGTERM (it is PID 1 in the image). The tick is
-the clock: no timer per row, so a restart costs punctuality and never a mail.
+`scheduled_send_worker(ApiState, shutdown, timing)`, exported from
+squelch-api and spawned in squelchd beside the shredder, because it needs the
+WRITE credential and the sync engine is read-credential-bound by invariant.
+It runs `run_scheduled_send_pass` (recover, claim, sweep) once a minute of
+idleness and the claim half the moment a row comes due: after each round it
+reads when the next `scheduled` row is due (`next_scheduled_send_at`) and
+sleeps until then, or until the next maintenance pass, or until the schedule
+and send-now handlers poke its wake (`ApiState::scheduled_wake`) for a row
+just added or pulled forward. It used to tick every 10s whatever the outbox
+held. It honors the shutdown watch between rounds AND between rows inside a
+pass (the watch rides on `ApiState`): the send in hand settles, nothing new is
+claimed. squelchd stops on Ctrl-C or SIGTERM (it is PID 1 in the image). The
+store is the clock: no timer per row, so a restart costs punctuality and never
+a mail.
 
 Constants (squelch-api `scheduled_send.rs`, squelch-core `store/mod.rs`):
 
@@ -147,10 +154,12 @@ Constants (squelch-api `scheduled_send.rs`, squelch-core `store/mod.rs`):
 | `RECOVERY_RETRY` | 60 s | a recovery search that could not be made is not retried before this (`recover_at`) |
 | `RECOVERY_GIVE_UP` | 30 min | a `sending` row recovery never managed to ask about goes `failed:recovery` this long past its lease; a pre-fire search that stays unreachable goes `failed:recovery` this long after its first "could not ask" (`search_deferred_since`). Both keep `maybe_sent` |
 | `SCHEDULED_MAX_ATTEMPTS` | 3 | the claim counts; the claim also refuses a row already at it |
-| `MAX_PER_PASS` | 20 | claims per pass, and rows recovery asks about per pass: a backlog drains over ticks, interruptibly |
+| `MAX_PER_PASS` | 20 | claims per pass, and rows recovery asks about per pass: a backlog drains over rounds, interruptibly (a capped round is followed at once) |
 | not-now retry | 2 min | pacing and an unreachable pre-fire search come back this far out WITHOUT spending an attempt |
 
-Per tick:
+Per pass (recovery and the sweep run on the worker's maintenance clock, once
+a minute of idleness, measured from the end of the last pass; the claim step
+runs whenever a row comes due):
 
 1. **Recover** rows in `sending` whose `lease_until` passed at least
    `RECOVERY_GRACE` ago (a crash mid-send) and whose `recover_at` (if set) has
@@ -345,7 +354,7 @@ how long after a send `in:sent` lists it. `rfc822msgid:` takes the BARE id
 |---|---|
 | `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `cc`, `bcc` (each `""` when the request had none; a reply's `""` cc still derives at fire time), `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachments`, plus the parent context PR #289's `DRAFT_SELECT` LEFT JOIN computes for the picker (`thread_id`, `parent_subject`, `parent_from`, `parent_from_addr`). Lift that join into a shared helper rather than pasting it |
 | `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims back to unclaimed, returns the `request` so the client can reopen it in the composer, WITHOUT `override_guard` and `confirm` (the client sets `confirm` itself, and a reschedule is judged by the guard again). A `sending` row is 409 (it is in Gmail's hands). No server-side draft is created: the composer's next autosave does that through the normal keyed/by-id path, and re-claims the files (well inside the 24h unclaimed TTL) |
-| `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the next tick sends it. 202. A `maybe_sent` row still waits out `RECOVERY_GRACE` from its last attempt and is searched for first (§4 step 3): "now" moves the clock, never the double-send defense. A `sending` row is 409, the same answer a cancel gets; `sent`/`cancelled`/unknown is 404 |
+| `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the worker is woken for it. 202. A `maybe_sent` row still waits out `RECOVERY_GRACE` from its last attempt and is searched for first (§4 step 3): "now" moves the clock, never the double-send defense. A `sending` row is 409, the same answer a cancel gets; `sent`/`cancelled`/unknown is 404 |
 | `/client/stats` | gains `scheduled_send: true`. The client hides every schedule door without it (same trap as `compose_attachments`: an old daemon must not 404 a click) |
 
 Rows in `sent` and `cancelled` are swept after 7 days, `failed` rows after

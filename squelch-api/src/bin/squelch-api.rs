@@ -12,7 +12,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use squelch_api::{ApiState, attach_event_channel, router};
+use squelch_api::{ApiState, attach_event_channel, router, serve};
 use squelch_core::config::Config;
 use squelch_core::store::SqliteStore;
 
@@ -57,8 +57,6 @@ async fn main() -> anyhow::Result<()> {
         // Ends open SSE streams so the drain below can actually finish.
         let _ = shutdown_tx.send(true);
     };
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    serve(listener, app, shutdown).await?;
     Ok(())
 }

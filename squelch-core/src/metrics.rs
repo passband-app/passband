@@ -332,6 +332,25 @@ pub struct SyncMetrics {
     catchup_total: AtomicU64,
     catchup_done: AtomicU64,
 
+    /// The archive walk, as the engine last saw it: the oldest instant it has
+    /// fully covered (unix seconds), and 1 once that reaches `sync.archive_days`
+    /// back. BOTH ZERO until the walk has looked at its cursor in this process,
+    /// and for good when the archive is off. Its own pair rather than a reuse
+    /// of the catch-up one: a catch-up is a wait somebody is watching, and the
+    /// walk is hours of background work that must not read as one.
+    archive_walked_to_unix: AtomicI64,
+    archive_complete: AtomicU64,
+    /// The forward pass's edge (unix seconds): how far toward now the walk has
+    /// covered mail that carries neither INBOX nor SENT. 0 until read.
+    archive_covered_to_unix: AtomicI64,
+    /// WHY THE WALK IS NOT WALKING, as an [`ArchiveHold`] index; 0 is "it is
+    /// not held". Without it a walk waiting on a hung embedder, a short disk
+    /// or a wrong clock reads on a dashboard exactly like a walk switched off.
+    archive_hold: AtomicU64,
+    /// Messages the walk has stepped over, ever in this process: deleted
+    /// before their fetch, or failing on pass after pass.
+    archive_skipped: AtomicU64,
+
     gmail_auth: AtomicU64,
     /// Unix seconds of the FIRST credential failure in the current outage, or 0
     /// while the mailbox is connected. A STATE, not a count, for the same
@@ -616,6 +635,16 @@ impl SyncMetrics {
                 at: Utc::now().timestamp(),
             });
         }
+        self.count_gmail_error(kind);
+    }
+
+    /// COUNT a Gmail error WITHOUT showing it to anyone: the per-kind counter
+    /// moves, the client-visible last error does not. For background work
+    /// whose refusals are not the mailbox being out of sync (the archive
+    /// walk): a 429 on a year-old week must not put a sync warning in front of
+    /// somebody whose inbox is current. A credential failure is never quiet;
+    /// callers send `Auth` through [`Self::record_gmail_error_reason`].
+    pub fn count_gmail_error(&self, kind: GmailErrorKind) {
         let slot = match kind {
             GmailErrorKind::Auth => &self.gmail_auth,
             GmailErrorKind::Quota => &self.gmail_quota,
@@ -660,6 +689,59 @@ impl SyncMetrics {
     pub fn catchup_end(&self) {
         self.catchup_total.store(0, Ordering::Relaxed);
         self.catchup_done.store(0, Ordering::Relaxed);
+    }
+
+    /// Where the archive walk stands: its cursor, and whether it has reached
+    /// its target. Called each time the walk reads or moves the cursor.
+    pub fn note_archive_walk(&self, walked_to: chrono::DateTime<Utc>, complete: bool) {
+        self.archive_walked_to_unix
+            .store(walked_to.timestamp(), Ordering::Relaxed);
+        self.archive_complete
+            .store(u64::from(complete), Ordering::Relaxed);
+    }
+
+    /// Where the forward pass stands. See the field.
+    pub fn note_archive_covered_to(&self, covered_to: chrono::DateTime<Utc>) {
+        self.archive_covered_to_unix
+            .store(covered_to.timestamp(), Ordering::Relaxed);
+    }
+
+    /// What is holding the walk off, or `None` when nothing is.
+    pub fn note_archive_hold(&self, hold: Option<ArchiveHold>) {
+        self.archive_hold
+            .store(hold.map_or(0, |hold| hold as u64), Ordering::Relaxed);
+    }
+
+    /// The hold last reported. `None`: walking, finished, or off.
+    pub fn archive_hold(&self) -> Option<ArchiveHold> {
+        let index = self.archive_hold.load(Ordering::Relaxed);
+        ArchiveHold::ALL
+            .into_iter()
+            .find(|hold| *hold as u64 == index)
+    }
+
+    /// The forward edge last reported, unix seconds; 0 before the first.
+    pub fn archive_covered_to(&self) -> i64 {
+        self.archive_covered_to_unix.load(Ordering::Relaxed)
+    }
+
+    /// The walk stepped over one message.
+    pub fn count_archive_skipped(&self) {
+        self.archive_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Messages the walk has stepped over in this process.
+    pub fn archive_skipped(&self) -> u64 {
+        self.archive_skipped.load(Ordering::Relaxed)
+    }
+
+    /// `(walked_to unix seconds, complete)` of the archive walk, or `None`
+    /// before it has looked at its cursor in this process.
+    pub fn archive_walk(&self) -> Option<(i64, bool)> {
+        match self.archive_walked_to_unix.load(Ordering::Relaxed) {
+            0 => None,
+            at => Some((at, self.archive_complete.load(Ordering::Relaxed) == 1)),
+        }
     }
 
     /// `(done, total)` of a catch-up in flight, or `None` when none is.
@@ -821,6 +903,52 @@ impl SyncMetrics {
 
     fn get(&self, slot: &AtomicU64) -> f64 {
         slot.load(Ordering::Relaxed) as f64
+    }
+}
+
+/// Why the archive walk is holding off. The discriminants are what the
+/// metrics slot stores, so 0 stays "not held".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveHold {
+    /// No poll has succeeded yet in this lifecycle.
+    Poll = 1,
+    /// A first backfill or a catch-up is fetching a window of mail.
+    Window = 2,
+    /// The embedder's init has not resolved either way.
+    Embedder = 3,
+    /// Under the free-space floor (`sync.archive_min_free_mb` or a fifth of
+    /// the volume, at most 5 GiB), or free space could not be read.
+    Disk = 4,
+    /// The clock reads before 2024.
+    Clock = 5,
+    /// Gmail refused the walk for quota three times this UTC day.
+    QuotaDay = 6,
+    /// The database itself is at `sync.archive_max_db_mb`.
+    DbSize = 7,
+}
+
+impl ArchiveHold {
+    pub const ALL: [Self; 7] = [
+        Self::Poll,
+        Self::Window,
+        Self::Embedder,
+        Self::Disk,
+        Self::Clock,
+        Self::QuotaDay,
+        Self::DbSize,
+    ];
+
+    /// The `reason` label, and the word the log line uses.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::Window => "window",
+            Self::Embedder => "embedder",
+            Self::Disk => "disk",
+            Self::Clock => "clock",
+            Self::QuotaDay => "quota_day",
+            Self::DbSize => "db_size",
+        }
     }
 }
 
@@ -1311,8 +1439,14 @@ pub struct StoreSnapshot {
     /// one entry per (platform, version) and capped, so this is the series list
     /// as it will be exported.
     pub clients: Vec<crate::store::ClientSeen>,
+    /// When an app of each platform last did something
+    /// ([`crate::store::SqliteStore::client_actions_seen`]): one entry per
+    /// platform at most.
+    pub client_actions: Vec<crate::store::ClientActed>,
     /// Durable investigation jobs, including delayed retries; excludes notifications.
     pub triage_jobs: [u64; 2],
+    /// Today's investigation runs against the daily caps, and what they hold.
+    pub triage_budget: crate::triage::agent_config::DailyBudgetStatus,
     /// The same rolling 24-hour manual re-triage window as /client/retriage.
     pub retriage: crate::types::RetriageProgress,
 }
@@ -1370,6 +1504,7 @@ pub fn runs_notify_model(category: &str) -> bool {
         || category == FYE_HEADLINE_USAGE_CATEGORY
         || category == crate::triage::access::USAGE_CATEGORY
         || category == crate::triage::unsub_page::USAGE_CATEGORY
+        || category == crate::triage::unsub_agent::USAGE_CATEGORY
 }
 
 /// Estimated spend for a ledger rollup, costed exactly as `/client/usage` does.
@@ -1502,6 +1637,48 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         MetricKind::Gauge,
         "Messages listed for the current catch-up; grows when SENT is listed, 0 when idle.",
         total as f64,
+    );
+
+    // Both always emitted, 0 included, so a tenant whose walk never started
+    // reads as a 0 a dashboard can see rather than as a missing series.
+    e.scalar(
+        "squelchd_archive_walked_to_timestamp_seconds",
+        MetricKind::Gauge,
+        "Unix timestamp the archive walk has fully covered back to; 0 until the walk has run in this process, and while the archive is off.",
+        metrics.archive_walked_to_unix.load(Ordering::Relaxed) as f64,
+    );
+    e.scalar(
+        "squelchd_archive_complete",
+        MetricKind::Gauge,
+        "1 once the archive walk has reached sync.archive_days back, else 0.",
+        metrics.get(&metrics.archive_complete),
+    );
+    e.scalar(
+        "squelchd_archive_covered_to_timestamp_seconds",
+        MetricKind::Gauge,
+        "Unix timestamp the archive walk's forward pass has covered up to (mail carrying neither INBOX nor SENT); 0 until the walk has run in this process.",
+        metrics.archive_covered_to_unix.load(Ordering::Relaxed) as f64,
+    );
+    // Every reason always present, so "held on disk" is a series going to 1
+    // and not one appearing. All 0: walking, finished, or switched off.
+    e.family(
+        "squelchd_archive_held",
+        MetricKind::Gauge,
+        "1 for the reason the archive walk is currently holding off, else 0: poll (no successful poll yet), window (a backfill or catch-up is fetching), embedder (its init has not resolved), disk (free space under the larger of sync.archive_min_free_mb and a fifth of the volume capped at 5 GiB, or unreadable), clock (the clock reads before 2024), quota_day (Gmail refused the walk three times today), db_size (the database is at sync.archive_max_db_mb).",
+    );
+    let held = metrics.archive_hold();
+    for hold in ArchiveHold::ALL {
+        e.sample(
+            "squelchd_archive_held",
+            &[("reason", hold.label())],
+            f64::from(u8::from(held == Some(hold))),
+        );
+    }
+    e.scalar(
+        "squelchd_archive_skipped_messages_total",
+        MetricKind::Counter,
+        "Messages the archive walk stepped over: deleted before their fetch, or failing on three separate passes. Each is logged by Gmail id and error kind.",
+        metrics.get(&metrics.archive_skipped),
     );
 
     e.scalar(
@@ -1722,6 +1899,66 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         for (state, count) in ["queued", "leased"].into_iter().zip(db.triage_jobs) {
             e.sample("squelchd_triage_jobs", &[("state", state)], count as f64);
         }
+        let budget = &db.triage_budget;
+        e.family(
+            "squelchd_triage_daily_runs",
+            MetricKind::Gauge,
+            "Investigation runs spent this UTC day. Background and access runs also count toward the total.",
+        );
+        e.sample(
+            "squelchd_triage_daily_runs",
+            &[("scope", "total")],
+            budget.total_used as f64,
+        );
+        e.sample(
+            "squelchd_triage_daily_runs",
+            &[("scope", "background")],
+            budget.background_used as f64,
+        );
+        e.sample(
+            "squelchd_triage_daily_runs",
+            &[("scope", "access")],
+            budget.access_used as f64,
+        );
+        e.family("squelchd_triage_daily_run_cap", MetricKind::Gauge,
+            "The cap squelchd_triage_daily_runs is held to today: the configured cap plus any one-day grant from `squelchd triage grant`.");
+        e.sample(
+            "squelchd_triage_daily_run_cap",
+            &[("scope", "total")],
+            budget.total_cap as f64,
+        );
+        e.sample(
+            "squelchd_triage_daily_run_cap",
+            &[("scope", "background")],
+            budget.background_cap as f64,
+        );
+        e.sample(
+            "squelchd_triage_daily_run_cap",
+            &[("scope", "access")],
+            budget.access_cap as f64,
+        );
+        e.family("squelchd_triage_jobs_held", MetricKind::Gauge,
+            "Jobs parked until the next UTC day by a daily cap. scope=arrival is newly arrived mail going untriaged; scope=background is backlog draining at the background cap; scope=access is access checks (the owner's sent mail, spam, archive rows a caller asked to read) waiting on a daily cap, an archive check's own sub-cap included; scope=revisit is autonomous revisits, which also answer to [revisit].daily_cap.");
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "arrival")],
+            budget.held_arrival as f64,
+        );
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "background")],
+            budget.held_background as f64,
+        );
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "access")],
+            budget.held_access as f64,
+        );
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "revisit")],
+            budget.held_revisit as f64,
+        );
         e.scalar(
             "squelchd_retriage_messages_total",
             MetricKind::Gauge,
@@ -1828,6 +2065,23 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
                     ("version", &client.version),
                 ],
                 client.seen_at.timestamp() as f64,
+            );
+        }
+
+        // WHEN A PERSON LAST DID SOMETHING, by the app they did it in. The
+        // gauge above moves whenever an open app polls; this one moves only on
+        // a successful write on the client door. No samples until a named
+        // client has made one, for the reason given above.
+        e.family(
+            "squelchd_client_last_action_timestamp_seconds",
+            MetricKind::Gauge,
+            "Unix time an app of this platform last made a successful write on the client door (opening a message, done, a draft, a send, a rule), per the X-Passband-Client header. Push registration and pairing are not counted.",
+        );
+        for acted in &db.client_actions {
+            e.sample(
+                "squelchd_client_last_action_timestamp_seconds",
+                &[("platform", acted.platform.as_str())],
+                acted.acted_at.timestamp() as f64,
             );
         }
 
@@ -2210,6 +2464,16 @@ mod tests {
         assert!(!text.contains("squelchd_triage_jobs"));
         assert!(!text.contains("squelchd_retriage_messages"));
         assert!(text.contains("squelchd_catchup_messages_total 0\n"));
+        assert!(text.contains("squelchd_archive_walked_to_timestamp_seconds 0\n"));
+        assert!(text.contains("squelchd_archive_complete 0\n"));
+        assert!(text.contains("squelchd_archive_covered_to_timestamp_seconds 0\n"));
+        assert!(text.contains("squelchd_archive_skipped_messages_total 0\n"));
+        for hold in ArchiveHold::ALL {
+            assert!(text.contains(&format!(
+                "squelchd_archive_held{{reason=\"{}\"}} 0\n",
+                hold.label()
+            )));
+        }
         assert!(!text.contains("squelchd_devices_paired"));
         assert!(!text.contains("squelchd_client_last_seen_timestamp_seconds"));
         assert!(text.ends_with('\n'));
@@ -2269,7 +2533,23 @@ mod tests {
                     seen_at: chrono::DateTime::from_timestamp(1_789_000_000, 0).unwrap(),
                 },
             ],
+            client_actions: vec![crate::store::ClientActed {
+                platform: crate::store::ClientPlatform::Ios,
+                acted_at: chrono::DateTime::from_timestamp(1_788_000_000, 0).unwrap(),
+            }],
             triage_jobs: [9, 2],
+            triage_budget: crate::triage::agent_config::DailyBudgetStatus {
+                total_used: 1000,
+                total_cap: 1500,
+                background_used: 200,
+                background_cap: 200,
+                access_used: 30,
+                access_cap: 500,
+                held_arrival: 4,
+                held_background: 642,
+                held_access: 9,
+                held_revisit: 12,
+            },
             retriage: crate::types::RetriageProgress {
                 total: 7,
                 done: 3,
@@ -2284,6 +2564,16 @@ mod tests {
         assert!(text.contains("squelchd_store_messages_sealed 2\n"));
         assert!(text.contains("squelchd_triage_jobs{state=\"queued\"} 9\n"));
         assert!(text.contains("squelchd_triage_jobs{state=\"leased\"} 2\n"));
+        assert!(text.contains("squelchd_triage_daily_runs{scope=\"total\"} 1000\n"));
+        assert!(text.contains("squelchd_triage_daily_run_cap{scope=\"total\"} 1500\n"));
+        assert!(text.contains("squelchd_triage_daily_runs{scope=\"background\"} 200\n"));
+        assert!(text.contains("squelchd_triage_daily_run_cap{scope=\"background\"} 200\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"arrival\"} 4\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"background\"} 642\n"));
+        assert!(text.contains("squelchd_triage_daily_runs{scope=\"access\"} 30\n"));
+        assert!(text.contains("squelchd_triage_daily_run_cap{scope=\"access\"} 500\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"access\"} 9\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"revisit\"} 12\n"));
         assert!(text.contains("squelchd_retriage_messages_total 7\n"));
         assert!(text.contains("squelchd_retriage_messages_done 3\n"));
         assert!(text.contains("squelchd_llm_calls_total{category=\"extract_banking\"} 3\n"));
@@ -2317,6 +2607,11 @@ mod tests {
         assert!(text.contains(
             "squelchd_client_last_seen_timestamp_seconds{platform=\"ios\",version=\"0.0.6\"} 1789000000\n"
         ));
+        // By platform only: which build acted is not a question worth a series.
+        assert!(text.contains(
+            "squelchd_client_last_action_timestamp_seconds{platform=\"ios\"} 1788000000\n"
+        ));
+        assert!(!text.contains("squelchd_client_last_action_timestamp_seconds{platform=\"macos\""));
     }
 
     #[test]
@@ -2640,6 +2935,50 @@ mod sync_health_tests {
 #[cfg(test)]
 mod catchup_progress_tests {
     use super::*;
+
+    /// The archive pair renders what the walk last reported, and the catch-up
+    /// pair does not move for it.
+    #[test]
+    fn archive_exposition_tracks_the_cursor_and_completion() {
+        let m = SyncMetrics::new();
+        assert_eq!(m.archive_walk(), None);
+        let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        m.note_archive_walk(at, false);
+        assert_eq!(m.archive_walk(), Some((1_700_000_000, false)));
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_archive_walked_to_timestamp_seconds 1700000000\n"));
+        assert!(text.contains("squelchd_archive_complete 0\n"));
+        assert!(text.contains("squelchd_catchup_messages_total 0\n"));
+        m.note_archive_walk(at, true);
+        assert!(render(&m, None).contains("squelchd_archive_complete 1\n"));
+
+        // The forward edge, the skips and the one reason the walk is held.
+        m.note_archive_covered_to(at + chrono::Duration::days(1));
+        m.count_archive_skipped();
+        m.count_archive_skipped();
+        m.note_archive_hold(Some(ArchiveHold::Disk));
+        assert_eq!(m.archive_hold(), Some(ArchiveHold::Disk));
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_archive_covered_to_timestamp_seconds 1700086400\n"));
+        assert!(text.contains("squelchd_archive_skipped_messages_total 2\n"));
+        assert!(text.contains("squelchd_archive_held{reason=\"disk\"} 1\n"));
+        for hold in ArchiveHold::ALL {
+            if hold != ArchiveHold::Disk {
+                assert!(text.contains(&format!(
+                    "squelchd_archive_held{{reason=\"{}\"}} 0\n",
+                    hold.label()
+                )));
+            }
+        }
+        m.note_archive_hold(Some(ArchiveHold::DbSize));
+        assert_eq!(m.archive_hold(), Some(ArchiveHold::DbSize));
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_archive_held{reason=\"db_size\"} 1\n"));
+        assert!(text.contains("squelchd_archive_held{reason=\"disk\"} 0\n"));
+        m.note_archive_hold(None);
+        assert_eq!(m.archive_hold(), None);
+        assert!(render(&m, None).contains("squelchd_archive_held{reason=\"disk\"} 0\n"));
+    }
 
     #[test]
     fn catchup_exposition_tracks_sent_extension_and_clears_when_idle() {

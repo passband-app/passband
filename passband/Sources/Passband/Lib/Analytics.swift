@@ -118,6 +118,16 @@ enum Analytics {
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
+        // The calendar page (behind the `calendar` hidden feature): opened, the
+        // connect card's two answers, the user's word on a ghost, and the
+        // three writes to a real calendar. Bools and a closed state word;
+        // never a title, a place, a time, a calendar or an address. A write
+        // carries three bools: `all_day`, `guests` (the event has any) and
+        // `notified` (Google was asked to email them). Never how many
+        // guests, and never who.
+        "calendar_opened", "calendar_connect_clicked", "calendar_connect_dismissed",
+        "calendar_ghost_marked",
+        "calendar_event_created", "calendar_event_edited", "calendar_event_deleted",
         // Discovery: which feature sets get found and which get kept. `full`
         // only: this is the "which actions are used" layer, not whether the
         // product works. Whether anybody visits the page is its `$screen`
@@ -188,7 +198,14 @@ enum Analytics {
             // Listed by hand, so a new case must land here too or its undo
             // trips the debug assert.
             "archive", "done", "label", "ruleDelete", "groupDelete", "remind", "send",
-            "draftDelete", "schedule", "scheduledCancel", "skip",
+            "draftDelete", "schedule", "scheduledCancel", "ghostDismiss", "skip",
+            // calendar_ghost_marked states: the PATCH's own words, plus
+            // "cleared" for the null that takes the mark off. "calendar" (the
+            // page, and thread_opened's source from it) is a MainView.
+            "going", "dismissed", "cleared",
+            // calendar_opened's `view`: which way the page was drawn when it
+            // opened (CalendarViewMode's raw values).
+            "agenda", "month", "week",
             // group_* modes — how an audience is addressed. "individual" is the
             // only one that is not also a header name.
             "to", "bcc", "individual",
@@ -229,12 +246,12 @@ enum Analytics {
             // so a new set must land here too or its find trips the debug assert.
             "clear", "flow", "later", "teach", "find", "read", "glance", "write",
             // thread_opened sources (OpenSource): WHICH SURFACE the reader was
-            // entered from. "sitrep", "emails", "groups" are MainViews above,
-            // "reading" a triage kind, "reply" a compose kind; the rest are
-            // named here. "reader" is the walk from one queued thread to the
+            // entered from. "sitrep", "emails" are MainViews above, "reading" a
+            // triage kind, "reply" a compose kind; the rest are named here.
+            // "groups" was a MainView until the page moved into Settings. "reader" is the walk from one queued thread to the
             // next, which is an open the reader made, not the person.
             "sitrep_card", "search", "browse", "assistant", "deeper_search",
-            "notification", "reader", "tour",
+            "notification", "reader", "tour", "groups",
             // Verb origins (Via): how the verb was INPUT, and (Surface) which
             // page it was input on. "process", "sitrep", "emails" are
             // MainViews; "archive"/"done" already exist as undo kinds.

@@ -12,6 +12,10 @@
 //     system prompt of a question that never asked.
 //   * SAFE WRITES touch Passband's LOCAL store only (status, triage rules,
 //     drafts). Reversible in the app, invisible to Gmail, so no card.
+//     create_calendar_event is the calendar's draft: it fills in the event
+//     pane and writes NOTHING, to the daemon or to Google; the user adds the
+//     event themselves (Lib/EventProposal.swift). Offered only while the
+//     Calendar page is.
 //   * GATED WRITES touch the mailbox. They park on a confirmation card and only
 //     an approval reaches the API. The daemon demands `confirm: true` on those
 //     routes and APIClient sends it — which is honest ONLY because the tap has
@@ -54,6 +58,7 @@ enum AgentTools {
         case labelMessage = "label_message"
         case sendEmail = "send_email"
         case unsubscribeSender = "unsubscribe_sender"
+        case createCalendarEvent = "create_calendar_event"
         case productHelp = "product_help"
         case listShortcuts = "list_shortcuts"
         case findSetting = "find_setting"
@@ -76,6 +81,7 @@ enum AgentTools {
             case .labelMessage: "tag"
             case .sendEmail: "paperplane"
             case .unsubscribeSender: "hand.raised"
+            case .createCalendarEvent: "calendar.badge.plus"
             case .productHelp: "book"
             case .listShortcuts: "keyboard"
             case .findSetting: "gearshape"
@@ -89,7 +95,9 @@ enum AgentTools {
         /// has a guide of its own.
         var isAvailable: Bool {
             switch self {
-            case .productHelp, .listShortcuts, .findSetting:
+            // The calendar tool opens the Mac's event pane, and the phone
+            // has no Calendar page to open it on.
+            case .productHelp, .listShortcuts, .findSetting, .createCalendarEvent:
                 #if os(macOS)
                     true
                 #else
@@ -108,13 +116,23 @@ enum AgentTools {
 
     /// Execute one tool call. `cite` collects sources as they are seen; `show`
     /// hands the session email cards to put in the transcript; `gate` is the
-    /// confirm ceremony for the four tools that touch the mailbox.
+    /// confirm ceremony for the four tools that touch the mailbox. `live`
+    /// answers whether the run that made the call still owns its session
+    /// (`AssistantSession.alive`): the one tool that changes the screen after
+    /// a wait asks it before it does (`createCalendarEvent`).
     @MainActor
     static func run(
         name: String, input: [String: JSONValue], gate: ActionGate,
-        cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void
+        cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void,
+        live: @MainActor () -> Bool = { true }
     ) async -> ToolOutcome {
-        guard let tool = Tool(rawValue: name), tool.isAvailable else {
+        // Whether the guide may speak of the Calendar page, and whether the
+        // calendar tool exists: only while this mailbox has the page
+        // (ProductGuide.topics(calendar:), EventProposals.mayRun). Off, the
+        // tool's name is answered as any invented name is.
+        let calendar = AppStore.shared.calendarPageAvailable
+        guard let tool = Tool(rawValue: name), tool.isAvailable, EventProposals.mayRun(name, calendar: calendar)
+        else {
             return failure("unknown tool \(name)", summary: "unknown tool")
         }
         do {
@@ -133,8 +151,9 @@ enum AgentTools {
             case .labelMessage: return await labelMessage(input, gate)
             case .sendEmail: return await sendEmail(input, gate)
             case .unsubscribeSender: return await unsubscribeSender(input, gate)
-            case .productHelp: return productHelp(input)
-            case .listShortcuts: return listShortcuts()
+            case .createCalendarEvent: return await createCalendarEvent(input, live: live)
+            case .productHelp: return productHelp(input, calendar: calendar)
+            case .listShortcuts: return listShortcuts(calendar: calendar)
             case .findSetting: return findSetting(input)
             }
         } catch {
@@ -251,7 +270,18 @@ enum AgentTools {
                 "snippet": hit.snippet,
             ])
         }
-        return ok(["results": rows], summary: "searched \(quoted(query))")
+        // How far back the search could see, passed straight through so the
+        // model says "search covers mail since X" rather than "no such mail".
+        var output: [String: Any] = ["results": rows]
+        if let since = page.indexed_since { output["indexed_since"] = since }
+        if let archive = page.archive {
+            output["archive"] = row([
+                "target": archive.target,
+                "walk_complete": archive.walk_complete,
+                "older_mail": archive.older_mail,
+            ])
+        }
+        return ok(output, summary: "searched \(quoted(query))")
     }
 
     @MainActor
@@ -427,6 +457,59 @@ enum AgentTools {
         return ok(["contacts": rows], summary: "looked up \(quoted(query))")
     }
 
+    // MARK: - the calendar (a draft in the event pane, never a write)
+
+    /// THE ASSISTANT NEVER ADDS AN EVENT AND NEVER INVITES ANYONE. This
+    /// reads the proposal, checks it by the event pane's own rules, and opens
+    /// the pane on the Calendar page with it filled in. No daemon call, no
+    /// confirmation card: the pane is the confirmation, and its "add event"
+    /// (or "add and invite N") is the user's own press. A proposal that does
+    /// not check out, or a pane already holding something, is an error the
+    /// model can relay or correct, and nothing on screen changes.
+    ///
+    /// THE ONE THING IT MAY ASK THE DAEMON is the calendar feed itself, once,
+    /// when there is none (verify7 E12): the feed is otherwise loaded only by
+    /// the Calendar page, and "put this on my calendar" asked from an email
+    /// before that page was ever opened used to be answered "no calendar,
+    /// connect Google Calendar". It is the page's own read
+    /// (`refreshCalendar`), and it writes nothing.
+    @MainActor
+    private static func createCalendarEvent(
+        _ input: [String: JSONValue], live: @MainActor () -> Bool
+    ) async -> ToolOutcome {
+        let store = AppStore.shared
+        // Before the one wait below: which mailbox this was asked in.
+        let epoch = store.epoch
+        let proposal: EventProposal
+        switch EventProposals.read(input) {
+        case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
+        case .success(let read): proposal = read
+        }
+        if EventProposals.mustLoad(feed: store.calendarFeed) { await store.refreshCalendar() }
+        // THE WAIT IS OVER; IS THIS STILL THE RUN TO ANSWER? A New chat or an
+        // account switch during the load leaves this call running: the loop
+        // only looks once the tool returns. Everything after this line is
+        // synchronous, so one check here covers the draft and the pane.
+        guard EventProposals.runStillCurrent(live: live(), epochAsked: epoch, epochNow: store.epoch) else {
+            return failure(EventProposals.staleRunText, summary: "event not drafted")
+        }
+        let draft: EventDraft
+        switch EventProposals.draft(
+            proposal, feed: store.calendarFeed, owner: store.calendarAccountEmail, today: Date(),
+            calendar: .current)
+        {
+        case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
+        case .success(let made): draft = made
+        }
+        switch store.proposeEvent(draft) {
+        case .failure(let refusal): return failure(refusal.text, summary: "event not drafted")
+        case .success(let landing):
+            return ok(
+                ["status": "drafted_not_saved", "message": EventProposals.draftedText(landing)],
+                summary: "drafted \(quoted(proposal.title))")
+        }
+    }
+
     // MARK: - help (the app's own tables)
 
     // PLAIN TEXT, where every other result is JSON. A guide is prose the model
@@ -435,12 +518,17 @@ enum AgentTools {
     // is mail-derived either: the app wrote every word, so the Trust rules have
     // nothing to guard here.
 
-    private static func productHelp(_ input: [String: JSONValue]) -> ToolOutcome {
-        guard let raw = string(input, "topic"), let topic = ProductGuide.Topic(rawValue: raw) else {
+    private static func productHelp(_ input: [String: JSONValue], calendar: Bool) -> ToolOutcome {
+        // Only a topic on offer: the calendar's is not one while the page is
+        // off, whatever the model remembers from another turn.
+        let offered = ProductGuide.topics(calendar: calendar)
+        guard let raw = string(input, "topic"), let topic = ProductGuide.Topic(rawValue: raw),
+            offered.contains(topic)
+        else {
             // The model sometimes asks its question instead of naming a topic.
             // Answering with the list teaches it the vocabulary in one turn.
             return failure(
-                "topic must be one of: " + ProductGuide.Topic.allCases.map(\.rawValue).joined(separator: ", "),
+                "topic must be one of: " + offered.map(\.rawValue).joined(separator: ", "),
                 summary: "no such help topic")
         }
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
@@ -450,13 +538,14 @@ enum AgentTools {
             let onPhone = false
         #endif
         return ToolOutcome(
-            content: ProductGuide.text(topic, runningVersion: version, onPhone: onPhone), isError: false,
+            content: ProductGuide.text(topic, runningVersion: version, onPhone: onPhone, calendar: calendar),
+            isError: false,
             summary: "read the guide: \(topic.title)")
     }
 
-    private static func listShortcuts() -> ToolOutcome {
+    private static func listShortcuts(calendar: Bool) -> ToolOutcome {
         ToolOutcome(
-            content: ProductGuide.shortcuts(), isError: false, summary: "checked the shortcuts")
+            content: ProductGuide.shortcuts(calendar: calendar), isError: false, summary: "checked the shortcuts")
     }
 
     private static func findSetting(_ input: [String: JSONValue]) -> ToolOutcome {
@@ -520,7 +609,7 @@ enum AgentTools {
         }
         guard !existing.contains(where: { $0.match_pattern.lowercased() == normalized }) else {
             return failure(
-                "a rule for that pattern exists; the user can edit it in Settings",
+                "a rule for that pattern exists; the user can edit it in Settings > Rules",
                 summary: "rule already exists")
         }
         // Disposition is OMITTED so the daemon infers it from `want` — the
@@ -918,19 +1007,122 @@ enum AgentTools {
     // MARK: - definitions
 
     /// The tool list the model is given, in the order it should reach for them.
-    static let definitions: [Wire.ToolDef] = [
+    /// The inventory as the model is shown it for this mailbox. Only the
+    /// guide's topic list depends on the mailbox (the Calendar page, see
+    /// `productHelpDefinition`); with the page off this is the inventory
+    /// from before the calendar existed, byte for byte.
+    ///
+    /// With the page ON the list also gains `create_calendar_event`, after
+    /// the last of the acting tools (`EventProposals.inventory` is the
+    /// order, and the suite holds it: off, no such name).
+    static func definitions(calendar: Bool) -> [Wire.ToolDef] {
+        guard calendar else { return definitions }
+        var byName: [String: Wire.ToolDef] = [:]
+        for def in definitions { byName[def.name] = def }
+        byName[Tool.productHelp.rawValue] = productHelpDefinition(calendar: true)
+        byName[EventProposals.toolName] = calendarEventDefinition
+        return EventProposals.inventory(
+            definitions.map(\.name), calendar: true, after: Tool.unsubscribeSender.rawValue
+        ).compactMap { byName[$0] }
+    }
+
+    /// The one calendar tool. Its words carry the rule: a draft, never a
+    /// write, never an invitation.
+    private static let calendarEventDefinition = Wire.ToolDef(
+        name: EventProposals.toolName,
+        description: """
+            Draft a calendar event for the user to confirm. This opens Passband's event \
+            pane on the Calendar page, filled in with what you propose. It does NOT add \
+            the event to their calendar and does NOT invite or email anyone: the user \
+            reads the pane and presses its add control themselves. After calling it, say \
+            the event is drafted and waiting for them, never that it was created or that \
+            anyone was invited. You cannot read the calendar, and you cannot edit or \
+            delete events. If the result says an event is already open, relay that and \
+            stop. Only propose guests the user asked for. There is no notes or description \
+            field, on purpose: the title and the place are the only text you supply, one \
+            line each, and the user types any notes themselves. A field this tool does \
+            not list is refused, not ignored.
+            """,
+        input_schema: .init(
+            properties: [
+                "title": .init(type: "string", description: "The event's title: one line, 200 characters at most."),
+                "start": .init(
+                    type: "string",
+                    description:
+                        "When it starts, in the user's own local time: 2026-10-09T16:00:00 (an RFC3339 "
+                        + "offset is accepted too). For an all-day event, the date: 2026-10-09."),
+                "end": .init(
+                    type: "string",
+                    description:
+                        "When it ends, same form as start. Optional: a timed event defaults to one hour. "
+                        + "For an all-day event, its LAST day (inclusive); leave out for a single day."),
+                "all_day": .init(type: "boolean", description: "True for an all-day event (start and end are dates)."),
+                "calendar": .init(
+                    type: "string",
+                    description: "Which of the user's calendars, by name. Leave out for their primary calendar."),
+                "location": .init(
+                    type: "string",
+                    description: "Where: a place name or an address, one line, 200 characters at most."),
+                "guests": .init(
+                    type: "array",
+                    description:
+                        "Email addresses of people the user asked to invite. They are shown in the pane; "
+                        + "Google emails them only if the user then chooses the control that says so.",
+                    items: .init()),
+            ],
+            required: ["title", "start"]))
+
+    private static func productHelpDefinition(calendar: Bool) -> Wire.ToolDef {
+        Wire.ToolDef(
+            name: Tool.productHelp.rawValue,
+            description: """
+                How Passband itself works, one topic at a time: what a screen is for, \
+                how to do something in the app, which key or button does it. Call \
+                this before answering any question about using Passband ("how do I \
+                reply all?", "what is the noise page?", "can I schedule a send?"). \
+                Pick the closest topic, and ask for a second one if the first does \
+                not cover it. It reads the app's built-in guide, never the mailbox.
+                """,
+            input_schema: .init(
+                properties: [
+                    "topic": .init(
+                        type: "string", description: ProductGuide.topicIndex(calendar: calendar),
+                        values: ProductGuide.topics(calendar: calendar).map(\.rawValue))
+                ],
+                required: ["topic"]))
+    }
+
+    /// With the Calendar page off. `definitions(calendar:)` is what a lane
+    /// sends.
+    private static let definitions: [Wire.ToolDef] = [
         Wire.ToolDef(
             name: Tool.searchMail.rawValue,
             description: """
                 Search the user's mailbox by meaning AND keyword (hybrid recall). \
                 Returns summaries only (sender, subject, date, a snippet, and a \
                 thread_id), never full bodies. Auth/2FA messages are excluded. Reach \
-                for this first when the question is about a specific message.
+                for this first when the question is about a specific message, and \
+                reach for it again, reworded, when the first try comes back empty: \
+                the right mail usually lacks one of the words you used. Operators \
+                go in the query beside the words: from:<name or address fragment>, \
+                after:YYYY-MM-DD, before:YYYY-MM-DD. A query of only operators \
+                lists the matching mail newest first. \
+                Search only covers mail since `indexed_since`: when nothing \
+                matches, say that search covers mail since that date, not that \
+                the mail does not exist. `archive` says how far back older mail \
+                is being added (`target`) and whether that is finished \
+                (`walk_complete`). Older mail is checked the first time a \
+                keyword search matches it, so if old mail you expected is \
+                missing, run the same search once more. Never loop on it.
                 """,
             input_schema: .init(
                 properties: [
-                    "query": .init(type: "string", description: "What to look for, phrased naturally."),
-                    "limit": .init(type: "integer", description: "Max results (default 8, max 20)."),
+                    "query": .init(
+                        type: "string",
+                        description: "What to look for, phrased naturally, plus any from:, after:, before: operators."),
+                    "limit": .init(
+                        type: "integer",
+                        description: "Max results (default 8, max 20). Use 20 when hunting for something."),
                 ],
                 required: ["query"])),
 
@@ -986,7 +1178,11 @@ enum AgentTools {
                 to parse a receipt yourself: shipments (in flight, with carrier and \
                 status), receipts (amounts), calendar (invites and reservations), \
                 banking (statements, alerts, autopay), marketing (live offers and \
-                codes). Ask for one kind at a time.
+                codes). Ask for one kind at a time. It covers only mail RECEIVED \
+                inside the window (30 days unless widened, 90 at most) and only what \
+                the extractor recognized, so an empty result means nothing extracted \
+                lately, not nothing in the mailbox: widen the window, then search_mail \
+                for the same thing.
                 """,
             input_schema: .init(
                 properties: [
@@ -995,9 +1191,10 @@ enum AgentTools {
                         values: ["shipments", "receipts", "bills", "calendar", "banking", "marketing"]),
                     "days": .init(
                         type: "integer",
-                        description: "Look-back window for receipts and marketing."),
+                        description: "How far back the mail was received, in days (default 30, max 90)."),
                     "hours": .init(
-                        type: "integer", description: "Look-ahead window for calendar."),
+                        type: "integer",
+                        description: "The same window in hours (max 2160); overrides days. It is when the mail arrived, not when the event is."),
                     "include_delivered": .init(
                         type: "boolean",
                         description: "Shipments only: include already-delivered parcels."),
@@ -1061,9 +1258,9 @@ enum AgentTools {
                 and what they want to happen with them. Passband decides from `want` \
                 whether that means always surface, mute, or filter. LOCAL TRIAGE ONLY: \
                 it shapes what gets surfaced from now on, never the mailbox, and \
-                nothing already delivered moves. Reversible on the Rules screen. \
+                nothing already delivered moves. Reversible in Settings > Rules. \
                 Creates only: if a rule for that pattern exists, this reports so rather \
-                than changing it, and the user edits theirs in Settings.
+                than changing it, and the user edits theirs in Settings > Rules.
                 """,
             input_schema: .init(
                 properties: [
@@ -1214,23 +1411,7 @@ enum AgentTools {
                 ],
                 required: ["message_id", "thread_id"])),
 
-        Wire.ToolDef(
-            name: Tool.productHelp.rawValue,
-            description: """
-                How Passband itself works, one topic at a time: what a screen is for, \
-                how to do something in the app, which key or button does it. Call \
-                this before answering any question about using Passband ("how do I \
-                reply all?", "what is the noise page?", "can I schedule a send?"). \
-                Pick the closest topic, and ask for a second one if the first does \
-                not cover it. It reads the app's built-in guide, never the mailbox.
-                """,
-            input_schema: .init(
-                properties: [
-                    "topic": .init(
-                        type: "string", description: ProductGuide.topicIndex,
-                        values: ProductGuide.Topic.allCases.map(\.rawValue))
-                ],
-                required: ["topic"])),
+        productHelpDefinition(calendar: false),
 
         Wire.ToolDef(
             name: Tool.listShortcuts.rawValue,

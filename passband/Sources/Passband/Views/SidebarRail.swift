@@ -1,9 +1,12 @@
-// SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// 1..5 keys; Update + Usage + Settings sit below a divider, out of that sequence
-// so adding one never renumbers it. The discovery ring sits just ABOVE that
-// divider, alone after the spacer: a real destination with no number key, its
-// RailButton drawing the ring where the others draw a symbol. ONE long-lived
-// pane behind the icons is the selector, moved by GEOMETRY not identity: per-icon glass drags the glyph along and
+// SIDEBAR — the slim icon rail: Sitrep / Emails / Auth on the digit keys, with
+// Calendar second when it is offered (2, and every later page one higher; see
+// `MainView.railViews`). Rules and Groups left for Settings. Update + Usage +
+// Settings sit below a divider, out of that sequence so adding one never
+// renumbers it. The discovery
+// ring sits just ABOVE that divider, alone after the spacer: a real destination
+// with no number key, its RailButton drawing the ring where the others draw a
+// symbol. ONE long-lived pane behind the icons is the selector, moved by
+// GEOMETRY not identity: per-icon glass drags the glyph along and
 // swallows clicks, and a GlassEffectContainer would hoist the pane over it.
 
 import SwiftUI
@@ -109,9 +112,10 @@ struct SidebarRail: View {
                 // beside it rather than on its line — the rail is what the bar
                 // runs above, so an icon level with the title would be an icon
                 // sitting in the bar.
-                ForEach(Array(MainView.mainViews.enumerated()), id: \.element) { index, view in
+                ForEach(MainView.railViews(calendar: store.calendarPageAvailable), id: \.view) { row in
+                    let view = row.view
                     RailButton(
-                        view: view, keyNumber: index + 1, active: store.activeView == view,
+                        view: view, keyHint: row.key, active: store.activeView == view,
                         showRings: view == .auth, onSlot: { slots[view] = $0 })
                 }
 
@@ -125,7 +129,7 @@ struct SidebarRail: View {
                 // is up; the divider's own vertical padding is the gap under
                 // it, the same gap the bottom group gets above.
                 RailButton(
-                    view: .discovery, keyNumber: nil, active: store.activeView == .discovery,
+                    view: .discovery, keyHint: nil, active: store.activeView == .discovery,
                     showRings: false, onSlot: { slots[.discovery] = $0 }
                 ) { _ in DiscoveryRailGlyph() }
                 .accessibilityValue(DiscoveryRailGlyph.spokenValue)
@@ -139,7 +143,7 @@ struct SidebarRail: View {
 
                 ForEach(MainView.bottomViews, id: \.self) { view in
                     RailButton(
-                        view: view, keyNumber: nil, active: store.activeView == view,
+                        view: view, keyHint: nil, active: store.activeView == view,
                         showRings: false, onSlot: { slots[view] = $0 })
                 }
 
@@ -249,9 +253,14 @@ struct SidebarRail: View {
     /// 256pt square over the bottom of the rail. A bitmap that is already a
     /// 26pt circle has nothing left to get wrong. The initial stays a real
     /// view, as it always was: text in a menu label is laid out by SwiftUI.
+    ///
+    /// THE ACCOUNT BEING SWITCHED TO, while a switch is asking after it: the
+    /// press is answered here at once, whatever the daemon takes. A refused
+    /// switch puts the live account's mark back, beside the toast saying why.
     @ViewBuilder
     private var accountMark: some View {
-        let active = AccountManager.shared.active
+        let manager = AccountManager.shared
+        let active = manager.accounts.first { $0.id == store.switchingTo } ?? manager.active
         if let active, AccountPhotos.shared.image(for: active.id) != nil,
             let bitmap = markBitmap(active, size: 26, font: Typo.ui(13, weight: .semibold))
         {
@@ -384,7 +393,8 @@ private struct RailEdge: Shape {
 private struct RailButton<Icon: View>: View {
     @Environment(AppStore.self) private var store
     let view: MainView
-    let keyNumber: Int?
+    /// The key the tooltip teaches: a digit, or nothing.
+    let keyHint: String?
     let active: Bool
     let showRings: Bool
     /// Where this icon landed, in the rail's space, so the rail can park the
@@ -435,7 +445,7 @@ private struct RailButton<Icon: View>: View {
                 .frame(width: SidebarRail.iconWidth, height: SidebarRail.iconHeight)
         }
         .onHover { hovering = $0 }
-        .help(keyNumber.map { "\(view.label) · \($0)" } ?? view.label)
+        .help(keyHint.map { "\(view.label) · \($0)" } ?? view.label)
         .accessibilityLabel(view.label)
         .accessibilityHint(RehearsalMode.isEnabled ? "Available after onboarding." : "")
         .modifier(PracticeRailFeedback(attempts: deniedAttempts))
@@ -443,9 +453,9 @@ private struct RailButton<Icon: View>: View {
 }
 
 extension RailButton where Icon == RailSymbol {
-    init(view: MainView, keyNumber: Int?, active: Bool, showRings: Bool, onSlot: @escaping (CGRect) -> Void) {
+    init(view: MainView, keyHint: String?, active: Bool, showRings: Bool, onSlot: @escaping (CGRect) -> Void) {
         self.init(
-            view: view, keyNumber: keyNumber, active: active, showRings: showRings, onSlot: onSlot
+            view: view, keyHint: keyHint, active: active, showRings: showRings, onSlot: onSlot
         ) { RailSymbol(symbol: view.symbol, active: $0) }
     }
 }

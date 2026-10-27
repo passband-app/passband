@@ -42,6 +42,7 @@ enum ProductGuide {
     enum Topic: String, CaseIterable, Sendable {
         case gettingAround = "getting_around"
         case sitrep
+        case calendar
         case readingMail = "reading_mail"
         case writingMail = "writing_mail"
         case mailList = "mail_list"
@@ -70,6 +71,9 @@ enum ProductGuide {
             case .sitrep:
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
                     + "receipts cards, flow mode"
+            case .calendar:
+                "the Calendar page: month, week and agenda, events guessed from mail, connecting "
+                    + "Google Calendar, new, edited and deleted events, guests"
             case .readingMail:
                 "an open email: moving between messages and emails, done, skip, unsubscribe, "
                     + "attachments, images, chat or email style, the contact card"
@@ -81,7 +85,7 @@ enum ProductGuide {
             case .triage:
                 "how mail gets sorted, what done means, fixing a wrong call"
             case .senderRules:
-                "rules for a sender (allow, mute, filter) and the Rules page"
+                "rules for a sender (allow, mute, filter) and the Rules pane in Settings"
             case .reminders:
                 "remind me later: parking an email until a time"
             case .search:
@@ -98,12 +102,24 @@ enum ProductGuide {
         }
     }
 
-    /// The `topic` parameter's description: every topic and what it covers,
-    /// built from the enum so a topic added above is offered without a second
-    /// edit. This IS sent with every request, which is why each line is short.
-    static let topicIndex: String =
+    /// THE TOPICS ON OFFER for this mailbox. The calendar topic only while
+    /// the Calendar page is (`AppStore.calendarPageAvailable`, handed in):
+    /// a guide that described a page the rail does not have would have the
+    /// assistant send somebody looking for it. With the page off, this is
+    /// the list from before the calendar existed, byte for byte, and so is
+    /// everything else the guide says.
+    static func topics(calendar: Bool) -> [Topic] {
+        calendar ? Topic.allCases : Topic.allCases.filter { $0 != .calendar }
+    }
+
+    /// The `topic` parameter's description: every topic on offer and what it
+    /// covers, built from the enum so a topic added above is offered without
+    /// a second edit. This IS sent with every request, which is why each line
+    /// is short.
+    static func topicIndex(calendar: Bool) -> String {
         "Which page of the guide to read. "
-        + Topic.allCases.map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+            + topics(calendar: calendar).map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+    }
 
     // MARK: - the system prompt's share
 
@@ -130,10 +146,40 @@ enum ProductGuide {
     /// iPhone app is numbered on its own line and keeps its own release notes
     /// (Lib/PhoneReleaseNotes.swift), so "what's new" there is a different
     /// table read against a different version.
-    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false) -> String {
+    ///
+    /// `calendar` is whether the Calendar page is on for this mailbox: it
+    /// puts the page into the getting-around list. The calendar topic itself
+    /// is asked for only while it is on (`topics(calendar:)`).
+    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false, calendar: Bool = false) -> String {
+        keyed(page(topic, runningVersion: runningVersion, onPhone: onPhone, calendar: calendar), calendar: calendar)
+    }
+
+    /// THE DIGIT THAT OPENS A PAGE IS NEVER WRITTEN IN THE PROSE. A topic
+    /// says "the Emails page (key {key:emails})" and the number is put in
+    /// here, from the Navigate row of the table the `?` sheet draws for this
+    /// mailbox (`ShortcutCatalog.groups(calendar:)`): Emails is 2 with the
+    /// Calendar page off and 3 with it on, and the guide says whichever the
+    /// sheet does. With the page off the text is main's, byte for byte.
+    ///
+    /// A name the row does not have is left as written, braces and all, so
+    /// the suite's "no brace left in any topic" check catches a page renamed
+    /// in one place only.
+    static func keyed(_ text: String, calendar: Bool) -> String {
+        guard text.contains("{key:") else { return text }
+        guard let row = ShortcutCatalog.groups(calendar: calendar).first(where: { $0.title == "Navigate" })?.items.first
+        else { return text }
+        var out = text
+        for (name, key) in zip(row.desc.components(separatedBy: " · "), row.keys) {
+            out = out.replacingOccurrences(of: "{key:\(name)}", with: key)
+        }
+        return out
+    }
+
+    private static func page(_ topic: Topic, runningVersion: String?, onPhone: Bool, calendar: Bool) -> String {
         switch topic {
-        case .gettingAround: gettingAround
+        case .gettingAround: gettingAround(calendar: calendar)
         case .sitrep: sitrep
+        case .calendar: Self.calendar
         case .readingMail: readingMail
         case .writingMail: writingMail
         case .mailList: mailList
@@ -148,17 +194,40 @@ enum ProductGuide {
         }
     }
 
-    private static let gettingAround = """
+    /// The pages on the number keys, in rail order, Calendar second while
+    /// it is on (`CalendarGate.numbered`'s rule, restated: this file stands
+    /// alone under test). Numbered when the text is built, so a page added
+    /// renumbers the ones after it here exactly as it does on the rail.
+    private static func numberedPages(calendar: Bool) -> String {
+        var pages = [
+            "Sitrep: the home board. What needs the user, what there is to read, and today's records.",
+            "Emails: every message in one list, plus sent and spam.",
+            "Auth: login codes, password resets and security alerts.",
+            "Rules: sender rules. A pane in Settings, not on the rail; the key opens Settings > Rules.",
+            "Groups: named sets of recipients. A pane in Settings, not on the rail; the key opens Settings > Groups.",
+        ]
+        if calendar {
+            pages.insert(
+                "Calendar: events guessed from mail and, once connected, Google Calendar. ⇧C also "
+                    + "opens it. See the calendar topic.", at: 1)
+        }
+        return pages.enumerated().map { "- \($0.offset + 1) \($0.element)" }.joined(separator: "\n")
+    }
+
+    private static func gettingAround(calendar: Bool) -> String {
+        gettingAroundHead + numberedPages(calendar: calendar) + "\n" + gettingAroundTail
+    }
+
+    private static let gettingAroundHead = """
         Passband is one window. A narrow rail down the left edge switches pages, and \
         most actions have a single-letter key. Letter keys only fire when no text \
         field has focus, and a capital letter means Shift.
 
         Pages (number keys, no modifier):
-        - 1 Sitrep: the home board. What needs the user, what there is to read, and today's records.
-        - 2 Emails: every message in one list, plus sent and spam.
-        - 3 Auth: login codes, password resets and security alerts.
-        - 4 Rules: sender rules.
-        - 5 Groups: named sets of recipients.
+
+        """
+
+    private static let gettingAroundTail = """
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
         - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the at a glance cards, the reading stack, writing) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
@@ -230,6 +299,49 @@ enum ProductGuide {
         - If a sender keeps emailing after an unsubscribe, a notice appears at the bottom left with "Block sender" and "Keep". When that sender also sends mail worth having, the notice adds "Smart block": it shows a rule that keeps the important kinds and drops the promotion, and saves it as a filter rule on that address.
         """
 
+    private static let calendar = """
+        The Calendar page is on for this mailbox. Passband turns it on per mailbox from \
+        its side, and there is no setting for it in the app. It is second on the rail: \
+        key {key:calendar}, or ⇧C from anywhere. Emails is then key {key:emails}, Auth {key:auth}, Rules {key:rules} and Groups {key:groups}. \
+        It is on the Mac only; the iPhone has no Calendar page yet.
+
+        What is on it:
+        - Events guessed from mail (invitations, bookings, plans in a thread), drawn solid, striped or outlined by how likely they are. They need no permission.
+        - Real events from Google Calendar, once it is connected, in each calendar's own colour.
+        - Connecting: the "Connect calendar" card or button opens Google's consent screen. Unticking calendar there leaves the mailbox working and simply connects no calendar.
+
+        Views:
+        - m shows the month, w the week, a the agenda. The month is the default. Trips and stays are bars across the days they cover, and "+N more" is what does not fit in a day.
+        - In the month the arrow keys move the day, [ and ] go to the previous and next month, and t goes to today. Enter opens the selected day: its hours in a column beside the month.
+        - The week shows seven days side by side under one column of hours, with all-day events and trips in a strip across the top. The left and right arrows move the day, [ and ] go to the previous and next week, t goes to today, and j / k or the up and down arrows step through the selected day's events.
+        - j / k move the selection. Enter opens the mail behind an event guessed from mail. y marks it going (again: not going), x dismisses it.
+
+        Making and changing events (only on the user's own calendars):
+        - n, or "New event", opens the event pane. It takes half the window, like the composer, and the month stays usable beside it: clicking a day sets the event's date.
+        - Pressing and dragging down a day's hours (the month's day column, or any day of the week view) sweeps a time, in quarter hours; letting go opens the event pane with that day and those times.
+        - e edits the selected event. ⌫ deletes it, after asking once.
+        - The pane has the title, the calendar, all day, the day and times, a location that suggests places from Apple Maps as it is typed (arrows and Enter pick one), guests and notes.
+        - A timed event shows its end day beside its end time. Left alone it follows the start day, or the next day when the end time is at or before the start; typing a day into it sets it, for an event that runs overnight or over several days.
+        - A new event's title reads itself as it is typed, from its end. "dinner friday 4pm" and "Dinner with Steven Friday 4pm" both fill in Friday and 4pm, and the day and times they filled are tinted. Capitals make no difference. Only the last words are read: a closing "with steven" is skipped over ("dinner friday 4pm with steven"), and a day or a time anywhere earlier is part of the title ("Black Friday sale", "Friday dinner", "4pm standup").
+        - The title is saved exactly as typed unless the day or time is led by "on", "at" or "@". Then those words come out: "dinner with steven on friday 4pm" is saved as "Dinner with Steven", and a "saves as" line under the title shows the title that will be saved. That line appears only when the saved title differs from the typed one. Without the lead nothing comes out: "taco tuesday" goes on Tuesday and is still called "taco tuesday".
+        - It is all or nothing. When the last words cannot all be read, or name two different days or times, or a weekday and a date that do not match, or a year already over, nothing is filled in. A time needs its am or pm ("4pm"), or "at" and a colon ("at 4:30"); a bare number is not read, so "dinner friday at 7" fills in nothing and wants "7pm". A range has to end after it starts ("4-6pm", or an evening into the morning like "10pm-2am").
+        - "for", "before", "after", "until", "of" and "the" in front of a day or time make it part of the title: "out of office until friday" and "prep for friday" fill in nothing. "ship v2 by friday" fills in Friday and keeps its words. "sat", "sun", "wed", "mar", "may" and "jun" are read only after "on", "this" or "next", or beside another day or time ("gym on sat", "gym sat 9am").
+        - The line under the when fields says what will be saved, with the year when it is not this one and "in the past" when the start has gone by. A day or time set by hand is never overwritten, and words in the title that would have set it stay in the title. Deleting the words puts back what was there, and Esc in the title (or ⌘Z) keeps the title exactly as typed and puts the day and times back.
+        - "with steven" in a new event's title also suggests a guest: the Steven the user most recently exchanged mail with, in a dashed box on the guests line with a checkmark and an x. The checkmark adds them as a guest, the x dismisses the suggestion. Tab from the title moves to it; there Enter adds and ⌫ dismisses. A suggestion is not a guest, and nobody is invited, until the checkmark and then the save control.
+        - ⌘↵ saves from anywhere in the pane. Plain Enter saves from a one-line field, but only when the event has no guests. With guests, plain Enter does nothing: only ⌘↵ or a click on the save control does. An event the assistant drafted is the exception, described below.
+        - Google, not Passband, emails the guests, and only when the control says so: "add and invite 3", "save and tell guests" or "delete and tell guests". "save without telling" and "delete without telling" change the event and tell nobody.
+        - Esc closes the place list first, then the delete question, then the pane. The event pane and the composer share that half of the window, so only one is open at a time.
+
+        The assistant and the calendar:
+        - Asked to put something on the calendar, the assistant drafts it: the event pane opens on the Calendar page filled in with a title, the times, a place and any guests the user asked for. The title and the place are the only text it supplies, one line each. It writes no notes; those are the user's to type.
+        - It never adds the event and never sends anything. The user reads the draft and adds it with the pane's own control.
+        - The keys wait. A drafted pane does not take the keyboard, and Enter and ⌘↵ do nothing in it (a note says "Read it, then click add") until the user has clicked in the pane or typed in it. After that they work as in any event without guests.
+        - When the draft has guests, only the button invites them: a click on the control that names them, such as "add and invite 2". ⌘↵ never does, however much of the pane has been clicked or typed in, and plain Enter never saves an event with guests. The line above the button says so.
+        - If an email is open when the assistant drafts, the email stays open and the draft waits on the Calendar page; it appears when that email is closed or the user goes to the page. It never closes mail the user is writing: with something typed in a composer or a reply, the assistant is told to wait, and a draft already waiting stays out of sight until that mail is sent or closed.
+        - A draft is made only while the assistant's bar is open. Starting a new chat or switching mailbox while it is working drafts nothing.
+        - The assistant cannot read the calendar, and it cannot edit or delete events. If an event is already open with unsaved changes, it asks the user to finish or close that one first.
+        """
+
     private static let readingMail = """
         Opening an email (Enter on a row, or a click) opens the reader. A thread \
         reads oldest at the top and opens on the newest message.
@@ -295,7 +407,7 @@ enum ProductGuide {
 
         Groups:
         - "groups" on the To line addresses a saved group. New messages only, not replies or forwards.
-        - Groups are made on the Groups page (key 5): n new, e or Enter edit, x delete.
+        - Groups are made in Settings > Groups (key {key:groups}): n new, e or Enter edit, x delete.
         - On the iPhone, Groups is under the person icon at the top left of the Sitrep: + makes one, tap opens it, swipe a group to the left to edit or delete it.
         - Each group is set to go out one way: To (one email, everyone sees the list), Bcc (one email, nobody sees anyone else) or Individually (a separate email per person).
 
@@ -307,7 +419,7 @@ enum ProductGuide {
         Send later:
         - The clock beside send, or ⌘⇧L, opens "Send later". Pick a preset or type a time ("friday", "in 3 hours", "the 24th"), then ⌘Enter schedules it.
         - It goes out on time even with Passband closed.
-        - Scheduled mail waits on the Emails page (key 2) under "sent", in a "scheduled" group: s sends it now, x or Backspace cancels it, Enter previews it, and Enter again from the preview pulls it back into the composer to edit.
+        - Scheduled mail waits on the Emails page (key {key:emails}) under "sent", in a "scheduled" group: s sends it now, x or Backspace cancels it, Enter previews it, and Enter again from the preview pulls it back into the composer to edit.
 
         Drafts:
         - Everything autosaves about a second after typing stops. Esc closes a composer and keeps the draft.
@@ -325,7 +437,7 @@ enum ProductGuide {
         """
 
     private static let mailList = """
-        The Emails page (key 2) is every message in one list.
+        The Emails page (key {key:emails}) is every message in one list.
 
         The list:
         - Grouped by day (Today, Yesterday and so on). Within a day the most important mail is first.
@@ -343,7 +455,7 @@ enum ProductGuide {
         - e or d done, r reply, h remind, v fix triage, t write a rule for this sender.
         - f searches everything from this sender.
         - a opens "browse all": a side panel of mail ranked by importance, with a noise filter slider that + and - move.
-        - T goes to Rules, g to Auth, A to the audit log.
+        - T goes to Rules and A to the audit log, both in Settings. g goes to Auth.
 
         Sent:
         - The "sent" segment at the top. Rows show who the mail went to and, if read tracking fired, an eye with the open count.
@@ -393,12 +505,12 @@ enum ProductGuide {
 
         Making one:
         - From an email: press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The editor opens for that sender and may suggest a sentence; Tab takes the suggestion.
-        - From the Rules page (key 4, or T on the Emails page): n. Typing in the match field lists senders who have written to the user, by name or address; typing *@ lists whole domains instead. Arrows pick, Enter or Tab takes one, Esc hides the list.
+        - From Settings > Rules (key {key:rules}, or T on the Emails page): n. Typing in the match field lists senders who have written to the user, by name or address; typing *@ lists whole domains instead. Arrows pick, Enter or Tab takes one, Esc hides the list.
         - In the editor: Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition.
         - This assistant can write one when asked. It only adds rules; it never changes one the user wrote.
 
         Managing them:
-        - On the Rules page: j / k move, e or Enter or a click edits, x deletes (with undo).
+        - In Settings > Rules: j / k move, e or Enter or a click edits, x deletes (with undo).
         - On the iPhone, Rules is under the person icon at the top left of the Sitrep: + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
         - Rules are grouped by what they do (allow, filter, mute) and then by domain.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
@@ -419,7 +531,7 @@ enum ProductGuide {
         - The chip at the bottom left undoes it for 5 seconds.
 
         Finding and changing them:
-        - Emails page (key 2), then the Reminders pill: parked mail in the order it comes back.
+        - Emails page (key {key:emails}), then the Reminders pill: parked mail in the order it comes back.
         - Press h again on one to move its time.
         - Backspace on a row there cancels the reminder. The email stays done.
         """
@@ -433,7 +545,13 @@ enum ProductGuide {
         What it searches:
         - Subjects and bodies, by keyword and by meaning. Subject words count more, word forms match (password finds passwords), and a quoted phrase has to appear exactly.
         - Login codes and spam are not searchable.
+        - Search covers the mail Passband has indexed. Where the older-mail archive is on, that includes up to a year of mail from before Passband was connected, added gradually in the background and listed with finished mail, and the assistant can say how far back search currently reaches.
         - Unfinished mail is listed first, and the matching words are highlighted.
+
+        Finding a sender:
+        - Typing a name or an email address lists up to three matching senders above the results, each with how many emails they have sent. Down arrow and Enter, Tab, or a click picks one.
+        - Picking a sender shows every email from them, newest first, in one list that is not split into Not done and Done. The field then reads from: and their address, and more words typed after it search within their mail.
+        - It works the same way in the phone's Search tab: tap the sender.
 
         Operators:
         - from: narrows to a sender. Typing from: opens a menu of the people who write to the user; the arrows pick and Enter or Tab accepts.
@@ -455,7 +573,7 @@ enum ProductGuide {
 
     private static let loginCodes = """
         Login codes, password resets, sign-in links and security alerts are kept \
-        apart from the rest of the mail, on the Auth page (key 3, or g on the Emails \
+        apart from the rest of the mail, on the Auth page (key {key:auth}, or g on the Emails \
         page).
 
         Why:
@@ -471,6 +589,9 @@ enum ProductGuide {
 
         Arrival:
         - Auth mail shows up within seconds, without waiting for triage. The Auth icon on the rail shows live codes counting down.
+        - On the Mac, a fresh login code floats in a small panel at the top of the screen, over whatever app is in front, with Copy and Dismiss buttons. It does not bring Passband forward or take the keyboard. Copy puts the code on the clipboard and closes the panel. Left alone for 60 seconds, it closes and the code arrives as an ordinary banner instead.
+        - Settings > General > Notifications > "Float login codes" turns the panel off, and codes arrive as banners.
+        - By default the panel appears even during a Focus or Do Not Disturb. "Respect Do Not Disturb", just below that setting, holds it back while any Focus is on: the code then arrives as a banner, which the Focus handles like any other. Turning it on asks macOS for permission to see the Focus status.
         """
 
     private static let assistant = """
@@ -491,16 +612,17 @@ enum ProductGuide {
         Deeper search is the same agent working inside search. See the search topic.
 
         Connecting an outside agent (Settings > Agents):
-        - Passband has an MCP endpoint (Agent MCP) that Claude, OpenClaw, Hermes Agent, ChatGPT, Claude Code, Codex, Cursor, VS Code or Claude Desktop can connect to. The pane shows the address, a button that adds it where the agent has an install link (Claude, Cursor, VS Code) or copies the setup otherwise, and the setup snippet for each.
-        - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot send, archive, label or delete, cannot see login codes, and cannot change anything in Gmail.
+        - Passband has an MCP endpoint (Agent MCP) that Claude, OpenClaw, Hermes Agent, Muse, ChatGPT, Claude Code, Codex, Cursor, VS Code or Claude Desktop can connect to. The pane shows the address, a button that adds it where the agent has an install link (Claude, Cursor, VS Code) or copies the setup otherwise, and the setup snippet for each. Muse is set up by sending it a message, which the pane writes.
+        - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot archive, label or delete, and cannot see login codes. Unless the user changed the setting below, it can leave drafts and cannot send.
+        - "What your agent may write" sets whether it can write mail, per mailbox. "Read only": it cannot. "Drafts only" (the default): it can leave drafts, marked "from your agent" in the drafts list and in the composer when one is opened, for the user to read, edit and send. An agent can also ask Passband on the Mac to bring a draft it wrote up in the composer: Passband comes to the front with it, unless the user is in the middle of writing something in Passband, in which case nothing moves and a toast says the draft is waiting. A draft opened this way is sent with the send button, not ⌘Enter, so a keystroke meant for another app cannot send it. If the Mac app is not open, the agent gives a passband:// link that opens the draft. This never sends anything. "Send, with your approval": it can send from the user's address, and is told to show each message and wait for the user's go-ahead in its own chat first. Passband cannot check that it asked. It blocks anything that looks like a password or key, and every agent send is in the audit log.
         - Hosted Passband does not offer this yet. A self-hosted daemon does.
         """
 
     private static let appAndAccounts = """
         Accounts:
-        - Add one from the Accounts menu ("Add Account…") or Settings > Account: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
-        - Switch with ⌘1 to ⌘9, in the order listed in Settings > Account, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
-        - Rename an account by editing its name in Settings > Account. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
+        - Add one from the Accounts menu ("Add Account…") or Settings > Accounts: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
+        - Switch with ⌘1 to ⌘9, in the order listed in Settings > Accounts, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
+        - Rename an account by editing its name in Settings > Accounts. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
         - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
         - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
@@ -524,8 +646,8 @@ enum ProductGuide {
         - Audit log (Settings > Audit, or A on the Emails page): every action taken on the mail by the user or by an agent, with undo for the reversible ones.
 
         Sharing:
-        - Settings > Account > Invites sends a friend an invite from the user's own address. Shown only where the server supports it.
-        - Settings > Account also has the link to the iPhone app on TestFlight.
+        - Settings > Accounts > Invites sends a friend an invite from the user's own address. Shown only where the server supports it.
+        - Settings > Accounts also has the link to the iPhone app on TestFlight.
 
         Privacy:
         - Settings > Privacy sets telemetry to Full, Minimal or None.
@@ -603,13 +725,17 @@ enum ProductGuide {
 
     /// The `?` overlay's table, as text. Key caps separated by a space, the
     /// way the overlay sets them side by side.
-    static func shortcuts() -> String {
+    ///
+    /// `calendar`: the table as the overlay draws it for this mailbox
+    /// (`ShortcutCatalog.groups(calendar:)`), so the calendar's keys are
+    /// recited only where the page is on.
+    static func shortcuts(calendar: Bool = false) -> String {
         var lines = [
             "Passband keyboard shortcuts, grouped by where they work. A single letter only "
                 + "fires when no text field has focus, and a capital letter means Shift. "
                 + "Pressing ? shows this same list in the app."
         ]
-        for group in ShortcutCatalog.groups {
+        for group in ShortcutCatalog.groups(calendar: calendar) {
             lines.append("")
             lines.append(group.title)
             for item in group.items {

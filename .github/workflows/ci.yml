@@ -6,11 +6,16 @@
 # Path-filtered so a client-only or docs-only PR does not build the workspace.
 # The filter is the workspace's real input set: every member crate (all named
 # squelch-* or squelchd; the glob also catches a crate added later without
-# anyone editing this list), the two Cargo manifests, and the toolchain pin.
-# Nothing under deploy/, docs/, scripts/ or passband/ reaches a Rust build —
-# every include_str! points inside its own crate and there is no build.rs —
-# so a change there is correctly not a reason to run this. squelch-desktop is
-# retired and not a member; the glob would run on it, but nothing touches it.
+# anyone editing this list, and would catch any squelch-* directory, crate or
+# not), the two Cargo manifests, the toolchain pin, and the hosted deploy
+# directory (squelch-warden's quota test reads six of its manifests with
+# include_str!, and is the one gate on a quota line that would refuse a
+# signup, so a PR that edits only one of those files has to run it; the glob
+# is the whole directory, its docs included, so the list here cannot fall
+# behind the test's, at the price of one Rust job for a hosted-docs PR).
+# Nothing else under deploy/, docs/, scripts/ or passband/ reaches a Rust
+# build — every other include_str! points inside its own crate and there is
+# no build.rs — so a change there is correctly not a reason to run this.
 #
 # Consequence, same as ci-passband: do NOT mark this check required in branch
 # protection. A path-skipped workflow reports no status at all, and a
@@ -35,6 +40,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - ".github/workflows/ci.yml"
+      - "deploy/hosted/**"
   push:
     branches: [main]
     paths:
@@ -44,6 +50,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - ".github/workflows/ci.yml"
+      - "deploy/hosted/**"
 
 # A force-push or rapid follow-up commit obsoletes the previous run; cancel it
 # rather than queue behind it. On main, never cancel — every merge gets a run.
@@ -75,9 +82,16 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     # Two things keep the workspace inside the runner's disk. The hosted
-    # ubuntu image ships ~14 GB free on / and something like 25 GB of
-    # toolchains this job never touches (.NET, Android, Haskell, CodeQL);
-    # dropping those first is the cheap half. The other half is debuginfo:
+    # ubuntu image ships ~13 GB free on / and this job needs ~11 GB of it (a
+    # 4.5 GB restored target that grows to ~10 GB), so it first drops the
+    # toolchains it never touches. Measured 2026-10-08: .NET 17 s for 6 GB,
+    # ghcup 4 s for 4 GB, CodeQL 10 s for 1 GB, and the Android SDK 133 s for
+    # 11 GB. The SDK is left alone on purpose: the other three leave ~13 GB
+    # spare at the end of the job, and its deletion was two thirds of the
+    # step. (Not in the background either: that was tried, and an rm
+    # competing with the cache restore and clippy for the one disk freed 5 GB
+    # in five minutes. There is no second disk on this image to build on.)
+    # The other half is debuginfo:
     # `cargo test --workspace` links one binary per test target with the whole
     # dependency tree inside it, and at the default `debug = 2` those binaries
     # are several hundred MB each. Line tables keep panic backtraces readable
@@ -87,12 +101,18 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
+      # One directory at a time, with the clock and df after each, so the log
+      # keeps saying which of these are worth their seconds. If the build
+      # outgrows the headroom (see "disk after"), /usr/local/lib/android is
+      # the next 11 GB, at ~130 s.
       - name: free disk
         run: |
           df -h / | tail -1
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h / | tail -1
+          for d in /usr/share/dotnet /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
+            start=$(date +%s)
+            sudo rm -rf "$d"
+            echo "$d: $(( $(date +%s) - start ))s, $(df -h / | tail -1 | awk '{print $4}') free"
+          done
 
       - uses: actions/checkout@v4
 
@@ -108,6 +128,14 @@ jobs:
       # it from recompiling on every PR.
       - uses: Swatinem/rust-cache@v2
 
+      # `cargo test` links one binary per test target (fifty-odd here), each
+      # carrying the whole dependency tree, ONNX included. mold links them in a
+      # fraction of bfd's time; measured on the test build it was worth 0-40 s
+      # of a ~3.5 min step, inside run-to-run noise, and costs 2 s to install.
+      # make-default (the action's default) puts it on PATH as `ld`, so no
+      # RUSTFLAGS change and the rust-cache key stays what it was.
+      - uses: rui314/setup-mold@v1
+
       # BEFORE clippy on purpose: a formatting diff is the cheapest possible
       # failure and there is no reason to spend a compile discovering it. The
       # toolchain install above carries rustfmt from rust-toolchain.toml, so
@@ -118,7 +146,23 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # --no-fail-fast so a red PR reports every failing binary, not the first.
+      #
+      # Eight test threads on a four-core runner: the slow tests here mostly
+      # sit on a clock (a 30 s token expiry, eight 5 s relay retries, a 7 s
+      # backoff) rather than a core, and libtest runs a binary's tests on
+      # cores-many threads by default, so those waits queued behind each other.
+      # Not cargo-nextest: it was tried (process per test) and the spawn cost
+      # of 3,650 tests on binaries this large doubled the work instead.
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast -- --test-threads=8
         env:
           SQUELCH_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+      # Headroom check for the comment above: what the job left free, and
+      # what target/ came to.
+      - name: disk after
+        if: always()
+        run: |
+          df -h / | tail -1
+          du -sh target 2>/dev/null || true

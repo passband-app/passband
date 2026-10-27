@@ -15,6 +15,7 @@ pub mod decision;
 pub mod events;
 pub mod extract;
 pub mod fye_headline;
+pub mod ghost;
 pub mod llm;
 pub mod login_code;
 pub mod money;
@@ -34,6 +35,7 @@ pub mod smart_done;
 pub mod stage1_llm;
 pub mod stage2;
 pub(crate) mod text;
+pub mod unsub_agent;
 pub mod unsub_page;
 
 pub use calendar::{CalendarInfo, CalendarKind, detect_calendar};

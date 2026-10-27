@@ -3014,3 +3014,135 @@ fn migrate_adds_skipped_to_a_prerelease_event_revisit_ledger() {
         .unwrap();
     assert_eq!(skipped, 0);
 }
+
+/// A sent row stored straight into `messages`, with no index rows: what the
+/// recipients backfill exists to find.
+fn raw_sent(conn: &Connection, id: i64, account: i64, to: &str) {
+    conn.execute(
+        "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,
+             snippet,body,is_sent,to_addrs)
+         VALUES(?1,?2,?3,?3,'me@x.com','subject','2026-01-01T00:00:00+00:00','','',1,?4)",
+        params![id, account, id.to_string(), to],
+    )
+    .unwrap();
+}
+
+fn indexed(conn: &Connection, message: i64) -> Vec<String> {
+    conn.prepare("SELECT addr FROM message_recipients WHERE message_id=?1 ORDER BY addr")
+        .unwrap()
+        .query_map([message], |r| r.get(0))
+        .unwrap()
+        .map(|addr| addr.unwrap())
+        .collect()
+}
+
+/// EVERY OPEN HEALS EVERY ROW WITH NONE. A sent row with recipients stored and
+/// no index rows is indexed whenever it turns up: on the first open, and again
+/// after its rows are lost (a re-ingest whose raw does not parse clears them
+/// while the stored columns keep their text). Bcc alone is enough. Received
+/// mail is never indexed, nor is sent mail whose recipients were never stored
+/// (the recipients sweep's queue) or were stored empty. And the candidates come
+/// from the indexes, the table fetched by rowid only, with statistics and
+/// without.
+#[test]
+fn recipients_backfill_heals_on_every_open_from_the_indexes() {
+    use super::super::migrate::RECIPIENTS_CANDIDATES_SQL;
+    let store = SqliteStore::open_in_memory().unwrap();
+    let conn = store.lock().unwrap();
+    conn.execute(
+        "INSERT INTO accounts(id,email,created_at) VALUES(1,'me@x.com','2026-01-01')",
+        [],
+    )
+    .unwrap();
+    raw_sent(&conn, 1, 1, "Ann <ann@x.com>, Bo <bo@x.com>");
+    conn.execute(
+        "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,
+             snippet,body,is_sent,to_addrs)
+         VALUES(2,1,'2','2','ann@x.com','subject','2026-01-01T00:00:00+00:00','','',0,'me@x.com')",
+        [],
+    )
+    .unwrap();
+    // The sweep's queue (nothing stored), stored empty, and Bcc alone.
+    conn.execute_batch(
+        "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,
+             snippet,body,is_sent,to_addrs,cc_addrs,bcc_addrs)
+         VALUES(3,1,'3','3','me@x.com','s','2026-01-01T00:00:00+00:00','','',1,NULL,NULL,NULL),
+               (4,1,'4','4','me@x.com','s','2026-01-01T00:00:00+00:00','','',1,'','',''),
+               (5,1,'5','5','me@x.com','s','2026-01-01T00:00:00+00:00','','',1,'','','Cy <cy@x.com>');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    assert_eq!(indexed(&conn, 1), ["ann@x.com", "bo@x.com"]);
+    assert!(indexed(&conn, 2).is_empty());
+    assert!(indexed(&conn, 3).is_empty());
+    assert!(indexed(&conn, 4).is_empty());
+    assert_eq!(indexed(&conn, 5), ["cy@x.com"]);
+    let candidates: Vec<i64> = conn
+        .prepare(RECIPIENTS_CANDIDATES_SQL)
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|id| id.unwrap())
+        .collect();
+    assert!(candidates.is_empty(), "{candidates:?}");
+
+    conn.execute("DELETE FROM message_recipients WHERE message_id=1", [])
+        .unwrap();
+    migrate(&conn).unwrap();
+    assert_eq!(indexed(&conn, 1), ["ann@x.com", "bo@x.com"]);
+
+    let mut plans = vec![plan(&conn, RECIPIENTS_CANDIDATES_SQL)];
+    conn.execute_batch("ANALYZE").unwrap();
+    plans.push(plan(&conn, RECIPIENTS_CANDIDATES_SQL));
+    for plan in plans {
+        assert!(
+            plan.iter()
+                .any(|line| line.starts_with("SCAN s USING COVERING INDEX idx_messages_sent")),
+            "{plan:#?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|line| line.starts_with("SEARCH r USING COVERING INDEX")),
+            "{plan:#?}"
+        );
+        let table: Vec<&String> = plan.iter().filter(|line| line.contains(" m ")).collect();
+        assert!(
+            !table.is_empty()
+                && table
+                    .iter()
+                    .all(|line| line.starts_with("SEARCH m USING INTEGER PRIMARY KEY")),
+            "the table is only fetched by rowid:\n{plan:#?}"
+        );
+    }
+}
+
+/// The open-time attention repairs at the end of schema.sql probe a thread's
+/// messages from `idx_messages_thread` alone, never by reading the decision
+/// message's row.
+#[test]
+fn schema_attention_repairs_probe_the_thread_index() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let conn = store.lock().unwrap();
+    let start = SCHEMA
+        .find("-- Repair beta related-thread projections")
+        .unwrap();
+    let mut repairs = Vec::new();
+    for opening in [
+        "INSERT OR IGNORE INTO agent_attention_sources(account_id,thread_id,source_message_id,source_revision)\nSELECT a.account_id,a.thread_id,d.source_message_id",
+        "INSERT OR IGNORE INTO agent_attention_sources(account_id,thread_id,source_message_id,source_revision)\nSELECT a.account_id,a.thread_id,a.decision_message_id",
+        "UPDATE agent_thread_attention SET decision_message_id=message_id",
+    ] {
+        let at = start + SCHEMA[start..].find(opening).unwrap();
+        let end = at + SCHEMA[at..].find(';').unwrap();
+        repairs.push(&SCHEMA[at..end]);
+    }
+    for statement in repairs {
+        let plan = plan(&conn, statement);
+        assert!(
+            plan.iter().any(|line| line.starts_with(
+                "SEARCH m USING COVERING INDEX idx_messages_thread (account_id=? AND thread_id=? AND rowid=?)"
+            )),
+            "{statement}\n{plan:#?}"
+        );
+    }
+}

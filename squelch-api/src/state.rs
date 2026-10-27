@@ -3,9 +3,7 @@
 use std::sync::Arc;
 
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
-use squelch_core::credentials::{
-    CredentialKind, CredentialStore, FileCredentialStore, KeyringCredentialStore,
-};
+use squelch_core::credentials::{CredentialKind, CredentialStore};
 use squelch_core::features::Features;
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
@@ -110,6 +108,20 @@ pub struct ApiState {
     pub(crate) smart_done_model: Arc<str>,
     pub(crate) smart_done_price_in_per_mtok: f64,
     pub(crate) smart_done_price_out_per_mtok: f64,
+    /// The TRANSLATE model and its per-MTok prices (docs/TRANSLATION.md),
+    /// which `/client/usage` costs the `translate` category with. Its own arm
+    /// for the notify arm's reason: it is neither Stage-1's model nor the
+    /// notify model, so either one's prices would misreport it.
+    pub(crate) translate_model: Arc<str>,
+    pub(crate) translate_price_in_per_mtok: f64,
+    pub(crate) translate_price_out_per_mtok: f64,
+    /// Whether a translator will ever work a queued translation (translation
+    /// on and an LLM configured, [`squelch_core::config::Config::translation_active`]).
+    /// Without one, `GET /client/thread/{id}` serves no `pending` or
+    /// `deferred` translation (nothing would ever finish it, and the reader
+    /// would say "Translating..." for good), and the translate POST promotes
+    /// nothing. Default `true`, matching `[translate].enabled`.
+    pub(crate) translate_active: bool,
     /// Manual-refresh signal shared with the Gmail sync loop, fired by
     /// `POST /client/refresh`. `None` when no sync loop is wired in, which the
     /// endpoint reports as `triggered: false` rather than faking a poke.
@@ -529,7 +541,9 @@ pub fn attach_event_channel(
 /// without `SQUELCH_API_TOKEN`; it now serves and answers 401 until a credential
 /// exists, because pairing is how the first credential arrives and pairing needs
 /// a door to talk to. What is left is resolving the account, which is still a
-/// store operation and still fallible.
+/// store operation and still fallible, and, in [`ApiState::from_config`], a
+/// credential backend this build cannot use, refused where its stores are
+/// built.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error(transparent)]
@@ -594,6 +608,16 @@ impl ApiState {
                 .price_in_per_mtok,
             smart_done_price_out_per_mtok: squelch_core::config::SmartDoneConfig::default()
                 .price_out_per_mtok,
+            translate_model: Arc::from(
+                squelch_core::config::TranslateConfig::default()
+                    .model
+                    .as_str(),
+            ),
+            translate_price_in_per_mtok: squelch_core::config::TranslateConfig::default()
+                .price_in_per_mtok,
+            translate_price_out_per_mtok: squelch_core::config::TranslateConfig::default()
+                .price_out_per_mtok,
+            translate_active: true,
             refresh: None,
             event_listeners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             spam_refresh: None,
@@ -1201,6 +1225,27 @@ impl ApiState {
         self
     }
 
+    /// Set the TRANSLATE model + its per-MTok prices, which `/client/usage`
+    /// costs the `translate` category with.
+    pub fn with_translate_config(
+        mut self,
+        model: impl Into<String>,
+        price_in_per_mtok: f64,
+        price_out_per_mtok: f64,
+    ) -> Self {
+        self.translate_model = Arc::from(model.into().as_str());
+        self.translate_price_in_per_mtok = price_in_per_mtok;
+        self.translate_price_out_per_mtok = price_out_per_mtok;
+        self
+    }
+
+    /// Whether a translator exists to finish queued translations (see the
+    /// field). `from_config` sets it from the config.
+    pub fn with_translate_active(mut self, active: bool) -> Self {
+        self.translate_active = active;
+        self
+    }
+
     /// TEST HOOK: run the scheduled-send worker's clock `skew` ahead of the
     /// wall clock (see `worker_clock_skew`). Never used in production.
     #[doc(hidden)]
@@ -1231,31 +1276,25 @@ impl ApiState {
     }
 
     /// The ONLY place squelch-api constructs a write credential. Bound to
-    /// [`CredentialKind::Write`], so it can never yield the read token.
+    /// [`CredentialKind::Write`], so it can never yield the read token, and
+    /// built by the core's one constructor, so a backend this build cannot
+    /// serve is refused here rather than on the first action.
     pub fn with_write_credentials(
         self,
         backend: CredentialBackend,
         account_email: String,
         credentials_path: std::path::PathBuf,
         client: OAuthClientConfig,
-    ) -> Self {
-        let account_id = self.account_id;
-        let creds: Arc<dyn CredentialStore> = match backend {
-            CredentialBackend::Keyring => Arc::new(KeyringCredentialStore::new_with_kind(
-                account_id,
-                account_email,
-                CredentialKind::Write,
-                client,
-            )),
-            CredentialBackend::File => Arc::new(FileCredentialStore::new_with_kind(
-                account_id,
-                account_email,
-                CredentialKind::Write,
-                credentials_path,
-                client,
-            )),
-        };
-        self.with_write_store(creds)
+    ) -> Result<Self, StateError> {
+        let creds = squelch_core::credentials::store_for_backend(
+            backend,
+            self.account_id,
+            account_email,
+            CredentialKind::Write,
+            credentials_path,
+            client,
+        )?;
+        Ok(self.with_write_store(creds))
     }
 
     /// The WRITE-bound credential store, if action capability is enabled.
@@ -1367,6 +1406,12 @@ impl ApiState {
                 cfg.smart_done.price_in_per_mtok,
                 cfg.smart_done.price_out_per_mtok,
             )
+            .with_translate_config(
+                cfg.translate.model.clone(),
+                cfg.translate.price_in_per_mtok,
+                cfg.translate.price_out_per_mtok,
+            )
+            .with_translate_active(cfg.translation_active())
             .with_tracking_base_url(cfg.tracking.base_url.clone())
             .with_console_allow_insecure_cookie(cfg.console.allow_insecure_cookie)
             // The poller's retirement cap doubles as the listing's suppression
@@ -1438,13 +1483,13 @@ impl ApiState {
                         cfg.credential_backend,
                         cfg.resolve_credentials_path(),
                         client.clone(),
-                    ))
+                    )?)
                     .with_write_credentials(
                         cfg.credential_backend,
                         account_email.to_string(),
                         cfg.resolve_credentials_path(),
                         client,
-                    )
+                    )?
             }
             Err(_) => {
                 eprintln!(

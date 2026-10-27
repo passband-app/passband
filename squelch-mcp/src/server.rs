@@ -18,12 +18,15 @@ use serde::Deserialize;
 use squelch_core::agent_write::{AgentCompose, AgentMailer, AgentWriteAccess, AgentWriteError};
 use squelch_core::config::ShipmentListPolicy;
 use squelch_core::error::CoreError;
+use squelch_core::owner_clock::OwnerClock;
 use squelch_core::store::agent_triage::AgentTriageStore;
 use squelch_core::store::archive_surface::{
     ArchiveHorizon, ArchiveSurfacing, KeywordMatch, SurfaceWait, await_thread_access,
     search_with_surfacing,
 };
-use squelch_core::store::{NewAuditEntry, SearchSort, SqliteStore, Store};
+use squelch_core::store::{
+    ExternalSearchMode, NewAuditEntry, SearchSort, SqliteStore, Store, parse_search_query,
+};
 use squelch_core::triage::agent_config::RankingConfig;
 use squelch_core::triage::decision::{
     EmailKind, MessageDestination, ReadingKind, RecordProposal, SupportedTime,
@@ -85,6 +88,13 @@ pub struct GetInboxUpdatesParams {
     pub min_importance: Option<u8>,
 }
 
+/// Parameters for `get_reading`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetReadingParams {
+    /// Only return Reading mail received at or after this UTC timestamp (RFC 3339).
+    pub since: DateTime<Utc>,
+}
+
 /// Parameters for `get_thread`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetThreadParams {
@@ -95,8 +105,16 @@ pub struct GetThreadParams {
 /// Parameters for `search_mail`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchMailParams {
-    /// Free-text query. Matched with hybrid keyword + semantic recall.
+    /// Free-text query, matched with hybrid keyword + semantic recall. May
+    /// carry operators: from:<name or address>, in:sent (mail the owner
+    /// wrote; from:me means the same), after:YYYY-MM-DD, before:YYYY-MM-DD.
+    /// May be empty when `from_me` is set, which lists the owner's sent mail
+    /// newest first.
     pub query: String,
+    /// true: only mail the mailbox owner wrote themselves (their sent mail).
+    /// Same as putting in:sent in the query.
+    #[serde(default)]
+    pub from_me: Option<bool>,
     /// Max number of summaries to return (1-50). Defaults to 10.
     #[serde(default)]
     pub k: Option<u8>,
@@ -122,6 +140,9 @@ pub struct SearchMailHit {
     /// `sort` ran. NOT "most textually similar" under the default sort, which
     /// blends recency in.
     pub relevance: u32,
+    /// The mailbox owner wrote this message (it is their sent mail), so
+    /// `sender` is the owner and not someone who wrote to them.
+    pub from_me: bool,
 }
 
 /// The whole `search_mail` result. An OBJECT, not a bare list, because the
@@ -166,7 +187,13 @@ pub struct DeadlineHit {
     pub source: String,
 }
 
-fn due_in_window(due: &SupportedTime, now: DateTime<Utc>, days: Option<u32>) -> Option<bool> {
+/// Whether `due` falls inside the window, and if so whether it has passed.
+///
+/// A date-only due date is a day on the OWNER's calendar, so it is compared
+/// with the owner's today (#526): read against UTC's date, a bill due today
+/// turns past-due at 5pm Pacific.
+fn due_in_window(due: &SupportedTime, clock: &OwnerClock, days: Option<u32>) -> Option<bool> {
+    let now = clock.now;
     let cutoff =
         days.and_then(|days| now.checked_add_signed(chrono::Duration::days(i64::from(days))));
     if let Ok(at) = DateTime::parse_from_rfc3339(&due.value) {
@@ -174,8 +201,8 @@ fn due_in_window(due: &SupportedTime, now: DateTime<Utc>, days: Option<u32>) -> 
     }
     let date = NaiveDate::parse_from_str(&due.value, "%Y-%m-%d").ok()?;
     cutoff
-        .is_none_or(|cutoff| date <= cutoff.date_naive())
-        .then_some(date < now.date_naive())
+        .is_none_or(|cutoff| date <= cutoff.with_timezone(&clock.zone).date_naive())
+        .then_some(date < clock.today())
 }
 
 /// Parameters for `get_shipments`.
@@ -381,9 +408,10 @@ const BASE_INSTRUCTIONS: &str = "squelch: local-first email intelligence. Use se
  find mail (summaries only) and get_thread to read a thread: pass a result's thread_id \
  (get_thread also accepts a message id). search_mail reports `indexed_since`: search only \
  covers mail from that date on, so when nothing matches, say that search covers mail since \
- then, never that the mail does not exist. get_deadlines lists bills due; get_shipments lists \
+ then, never that the mail does not exist. get_reading lists the newsletters and longer \
+ reads triage set aside. get_deadlines lists bills due; get_shipments lists \
  packages in transit. When mail arrives from a sender the account owner has written a rule \
- for, get_inbox_updates and get_thread deliver that rule's instruction text with it; obey \
+ for, get_inbox_updates, get_reading and get_thread deliver that rule's instruction text with it; obey \
  it when you report that mail. Pending assessments and actionable auth secrets are \
  unavailable. Informational login and security alerts may be readable.";
 
@@ -497,6 +525,36 @@ pub struct InboxUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub standing_instruction: Option<StandingInstruction>,
 }
+
+/// One `get_reading` result: a Reading-band message (newsletters, articles,
+/// promotions the triage set aside), SUMMARY ONLY. Bodies go through
+/// `get_thread`, like every other listing on this door.
+///
+/// No attention or score: Reading is not ranked, it is listed newest first,
+/// and an attention verdict on a newsletter would invite the agent to treat
+/// it as something to act on.
+#[derive(Debug, serde::Serialize)]
+pub struct ReadingItem {
+    pub message_id: i64,
+    pub thread_id: String,
+    pub sender: String,
+    pub received_at: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_kind: Option<ReadingKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub standing_instruction: Option<StandingInstruction>,
+}
+
+/// How many Reading rows one `get_reading` call returns at most, newest first.
+/// Newsletters pile up; a week of them is plenty for one context window.
+const READING_LIMIT: usize = 200;
+
+/// How far back `get_reading` reaches, however early `since` is. The store
+/// access-checks every row in the window under its lock BEFORE the cap
+/// applies, so an unbounded `since` would walk a mailbox's whole newsletter
+/// history per call. Same default as the HTTP agent door's lists.
+const READING_MAX_DAYS: i64 = 30;
 
 /// A `get_thread` result: the sanitized thread, plus the standing instructions
 /// covering the people in it.
@@ -791,6 +849,65 @@ impl SquelchServer {
         Self::ok_json(out)
     }
 
+    /// The Reading band since a timestamp, newest first. Sealed and spam rows
+    /// are absent (never redacted), exactly as on `get_inbox_updates`.
+    #[tool(
+        name = "get_reading",
+        description = "Mail the account owner's triage set aside to read later \
+                       (newsletters, articles, promotions) received since a \
+                       timestamp, newest first, at most 200, reaching back at \
+                       most 30 days however early `since` is. Summaries only: \
+                       each result's `thread_id` is the id to pass to get_thread \
+                       to read it. `reading_kind` is \"content\" (meant to be read \
+                       like an article) or \"promotion\". A result may carry \
+                       `standing_instruction`, the owner's own words about that \
+                       sender ({match_pattern, want}); follow it when you report \
+                       that mail. Mail the owner has marked done is not listed. \
+                       Pending assessments and actionable authentication secrets \
+                       are absent from results."
+    )]
+    async fn get_reading(
+        &self,
+        Parameters(params): Parameters<GetReadingParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use squelch_core::store::agent_triage::AgentListQuery;
+        let floor = Utc::now() - chrono::Duration::days(READING_MAX_DAYS);
+        let query = AgentListQuery {
+            since: Some(params.since.max(floor)),
+            include_done: false,
+        };
+        let items = self
+            .store
+            .external_agent_reading_with_query(self.account_id, READING_LIMIT, &query)
+            .map_err(Self::map_err)?;
+        let rules = self.sender_rules()?;
+        let mut out = Vec::new();
+        for item in items {
+            // The store already restricts these (and is what the tests can
+            // see). The per-row checks are the same second layer
+            // `get_inbox_updates` wears, kept so a regression in the store's
+            // restriction still has to get past this door.
+            if !self
+                .store
+                .agent_access_allowed(self.account_id, item.message_id)
+                .map_err(Self::map_err)?
+                || self.thread_is_unavailable(&item.thread_id)?
+            {
+                continue;
+            }
+            out.push(ReadingItem {
+                standing_instruction: Self::instruction_for(&item.from_addr, &rules),
+                message_id: item.message_id,
+                thread_id: item.thread_id,
+                sender: item.from_addr,
+                received_at: item.received_at,
+                summary: item.decision.summary,
+                reading_kind: item.decision.reading_kind,
+            });
+        }
+        Self::ok_json(out)
+    }
+
     /// Full sanitized thread view. `id` may be a thread id or a single message
     /// id. A sealed id and a nonexistent one return the same `resource_not_found`
     /// through BOTH paths, so a sealed message's existence cannot be inferred.
@@ -866,7 +983,10 @@ impl SquelchServer {
         &self,
         Parameters(params): Parameters<GetDeadlinesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let now = Utc::now();
+        let now = OwnerClock::new(
+            Utc::now(),
+            self.store.owner_zone(self.account_id).unwrap_or_default(),
+        );
         let records = self
             .store
             .external_agent_records_with_query(
@@ -888,7 +1008,7 @@ impl SquelchServer {
                     due: Some(due),
                     ..
                 } = record
-                    && let Some(past_due) = due_in_window(&due, now, params.within_days)
+                    && let Some(past_due) = due_in_window(&due, &now, params.within_days)
                 {
                     out.push(DeadlineHit {
                         id: item.message_id,
@@ -908,7 +1028,7 @@ impl SquelchServer {
         }
         let attention = self
             .store
-            .external_agent_fye(self.account_id, usize::MAX, &self.ranking_config, now)
+            .external_agent_fye(self.account_id, usize::MAX, &self.ranking_config, now.now)
             .map_err(Self::map_err)?;
         for item in attention {
             let mut times: Vec<(&SupportedTime, &str)> = item
@@ -935,7 +1055,7 @@ impl SquelchServer {
                 {
                     continue;
                 }
-                if let Some(past_due) = due_in_window(due, now, params.within_days) {
+                if let Some(past_due) = due_in_window(due, &now, params.within_days) {
                     out.push(DeadlineHit {
                         id: item.message_id,
                         account_id: self.account_id,
@@ -1188,9 +1308,18 @@ impl SquelchServer {
         description = "Search the mailbox (hybrid keyword + semantic recall). \
                        Ranked with a tilt toward recent mail by default; pass \
                        sort=\"best_match\" to rank on relevance alone when \
-                       hunting an older thread. Returns SUMMARIES ONLY (sender, \
-                       one-line subject, received_at, thread_id, relevance), \
-                       never message bodies, in `results`. To read a result, pass its \
+                       hunting an older thread. The owner's own SENT mail is \
+                       searched too: pass from_me=true (or put in:sent in the \
+                       query) for only mail they wrote, plus words about it, \
+                       e.g. from_me=true, query=\"dan lease\" for what they told \
+                       Dan about the lease. The query also accepts from:, \
+                       after:YYYY-MM-DD and before:YYYY-MM-DD, and may be empty \
+                       when from_me is set (their sent mail, newest first). \
+                       Recipients are not searchable here. \
+                       Returns SUMMARIES ONLY (sender, one-line subject, \
+                       received_at, thread_id, relevance, from_me), never message \
+                       bodies, in `results`. from_me=true on a result means the \
+                       owner wrote it. To read a result, pass its \
                        `thread_id` to get_thread. Auth/verification emails are \
                        structurally absent. SEARCH ONLY COVERS MAIL SINCE \
                        `indexed_since`: when nothing matches, tell the user that \
@@ -1209,9 +1338,28 @@ impl SquelchServer {
         &self,
         Parameters(params): Parameters<SearchMailParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let query = params.query.trim();
-        if query.is_empty() {
-            return Err(ErrorData::invalid_params("query must not be empty", None));
+        // Operators are lifted out of the text exactly as the HTTP agent
+        // door and the human search box lift them; the two arguments are the
+        // same operators for a model that reaches for a parameter first.
+        let (text, mut filter) = parse_search_query(params.query.trim());
+        let text = text.trim().to_owned();
+        if params.from_me == Some(true) {
+            filter.from_me = true;
+        }
+        // RECIPIENTS ARE HUMAN-DOOR DATA (SECURITY.md section 4): a `to:`
+        // filter rebuilds To, Cc and the owner's Bcc one fragment at a time.
+        // Refused, so the agent does not read an unfiltered page as filtered.
+        if filter.to.is_some() {
+            return Err(ErrorData::invalid_params(
+                "to: is not available here; recipients are not searchable",
+                None,
+            ));
+        }
+        if text.is_empty() && filter.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "query must not be empty unless from_me is set",
+                None,
+            ));
         }
         // Default 10, clamp to 1..=50 (u8 default `10` when omitted).
         let k = params.k.unwrap_or(10).clamp(1, 50) as usize;
@@ -1236,23 +1384,33 @@ impl SquelchServer {
         // search then runs once. What is still unchecked is not reported in
         // any form: this door never learns it.
         let account_id = self.account_id;
-        let query = query.to_string();
+        // Operators with no words are a newest-first listing, which only the
+        // keyword leg serves: there is nothing to embed.
+        let mode = if text.is_empty() {
+            ExternalSearchMode::Keyword
+        } else {
+            ExternalSearchMode::Hybrid
+        };
         let surfacing = self
             .archive_surfacing
             .clone()
             .capped(SurfaceWait::MCP_DEADLINE);
-        let keyword = KeywordMatch {
-            text: query.clone(),
-            filter: Default::default(),
+        // A KEYWORD MATCH OR NOTHING: operators alone buy no archive checks,
+        // the same rule the HTTP agent door keeps.
+        let keyword = (!text.is_empty()).then(|| KeywordMatch {
+            text: text.clone(),
+            filter: filter.clone(),
             // The hybrid keyword leg recalls the owner's sent mail too.
             include_sent: true,
-        };
+        });
         let (hits, horizon) = search_with_surfacing(
             &self.store,
             account_id,
             &surfacing,
-            Some(keyword),
-            move |store: &SqliteStore| store.external_search(account_id, &query, sort, k),
+            keyword,
+            move |store: &SqliteStore| {
+                store.external_search_filtered(account_id, &text, &filter, sort, mode, k)
+            },
         )
         .await
         .map_err(Self::map_err)?;
@@ -1272,6 +1430,7 @@ impl SquelchServer {
                 received_at: hit.received_at,
                 thread_id: hit.thread_id,
                 relevance: (out.len() as u32) + 1,
+                from_me: hit.from_me,
             });
         }
         Self::ok_json(SearchMailResult {
@@ -1514,6 +1673,45 @@ mod tests {
     use squelch_core::store::Store;
     use squelch_core::store::archive_surface::RefinePoke;
 
+    /// A bill due "today" is not past-due at 5pm Pacific just because UTC has
+    /// moved on to tomorrow (#526).
+    #[test]
+    fn a_date_only_deadline_is_past_due_on_the_owners_calendar() {
+        use chrono::TimeZone;
+        use squelch_core::owner_clock::{OwnerZone, OwnerZoneSource};
+
+        let due = |value: &str| SupportedTime {
+            value: value.into(),
+            timezone: None,
+            source_message_id: 1,
+            interpreted_relative: false,
+        };
+        // 8pm Pacific on the 19th is 03:00 UTC on the 20th.
+        let evening = Utc.with_ymd_and_hms(2026, 10, 20, 3, 0, 0).unwrap();
+        let pacific = OwnerClock::new(
+            evening,
+            OwnerZone {
+                zone: squelch_core::owner_clock::device_zone("America/Los_Angeles").unwrap(),
+                source: OwnerZoneSource::Client,
+            },
+        );
+        let utc = OwnerClock::new(evening, OwnerZone::UTC);
+        assert_eq!(
+            due_in_window(&due("2026-10-19"), &pacific, None),
+            Some(false)
+        );
+        assert_eq!(due_in_window(&due("2026-10-19"), &utc, None), Some(true));
+        assert_eq!(
+            due_in_window(&due("2026-10-18"), &pacific, None),
+            Some(true)
+        );
+        // An instant is an instant in any zone.
+        assert_eq!(
+            due_in_window(&due("2026-10-20T02:00:00Z"), &pacific, None),
+            Some(true)
+        );
+    }
+
     /// A mailer that records what it was asked and answers from a script, so
     /// these tests pin THIS crate's half: which tools are offered, what the
     /// agent is told, and what reaches the mailer. The pipeline behind the
@@ -1609,7 +1807,7 @@ mod tests {
         };
         let (none, _) = writing_server(AgentWriteAccess::None, RecordingMailer::default());
         assert!(!has(&none, "create_draft") && !has(&none, "send_email"));
-        assert_eq!(none.offered_tool_names().len(), 7);
+        assert_eq!(none.offered_tool_names().len(), 8);
 
         let (drafts, _) = writing_server(AgentWriteAccess::Drafts, RecordingMailer::default());
         assert!(has(&drafts, "create_draft") && !has(&drafts, "send_email"));
@@ -1971,8 +2169,18 @@ mod tests {
     }
 
     fn seed(store: &SqliteStore, account: i64, thread: &str, text: &str) -> i64 {
+        seed_at(store, account, thread, text, Utc::now())
+    }
+
+    /// `seed`, received (and ingested) at `now` instead of the real clock.
+    fn seed_at(
+        store: &SqliteStore,
+        account: i64,
+        thread: &str,
+        text: &str,
+        now: DateTime<Utc>,
+    ) -> i64 {
         use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
-        let now = Utc::now();
         let raw = RawFetched {
             account_id: account,
             gmail_msg_id: format!("{thread}-{text}"),
@@ -1992,16 +2200,40 @@ mod tests {
         restricted: bool,
         extra_source: Option<i64>,
     ) {
+        decide_as(store, account, id, restricted, extra_source, |_| {});
+    }
+
+    /// Assess `id` into the Reading band instead of FYE.
+    fn decide_reading(store: &SqliteStore, account: i64, id: i64, restricted: bool) {
+        decide_as(store, account, id, restricted, None, |decision| {
+            decision.summary = "A weekly essay on birds".into();
+            decision.destinations = vec![MessageDestination::Reading];
+            decision.reading_kind = Some(ReadingKind::Content);
+            decision.attention.show_in_fye = false;
+        });
+    }
+
+    fn decide_as(
+        store: &SqliteStore,
+        account: i64,
+        id: i64,
+        restricted: bool,
+        extra_source: Option<i64>,
+        tweak: impl Fn(&mut squelch_core::triage::decision::MessageDecision),
+    ) {
         use squelch_core::store::agent_triage::AgentCommitOutcome;
         use squelch_core::triage::decision::MessageDecision;
         store
             .enqueue_agent_triage(account, id, "test", false)
             .unwrap();
-        // Ingest may have already queued an arrival; finish all jobs for this message.
-        while let Some(job) = store
-            .claim_agent_job(account, "triage", Utc::now(), 120)
-            .unwrap()
-        {
+        // Ingest may have already queued an arrival; finish all jobs for this
+        // message. The owner's own mail (and spam) is queued as an `access`
+        // job, which only decides external access.
+        while let Some(job) = ["triage", "access"].into_iter().find_map(|kind| {
+            store
+                .claim_agent_job(account, kind, Utc::now(), 120)
+                .unwrap()
+        }) {
             assert_eq!(
                 job.message_id, id,
                 "test fixtures assess one message at a time"
@@ -2015,6 +2247,7 @@ mod tests {
             decision.attention.show_in_fye = true;
             decision.attention.summary = "An update worth reading".into();
             decision.attention.relevant_message_ids = vec![id];
+            tweak(&mut decision);
             let mut sources = vec![context.message.source.clone()];
             if let Some(source) = extra_source {
                 sources.push(store.agent_read_message(account, source).unwrap().source);
@@ -2963,10 +3196,132 @@ mod tests {
                     query: query.into(),
                     k: Some(50),
                     sort: None,
+                    from_me: None,
                 }))
                 .await
                 .unwrap(),
         )
+    }
+
+    /// The owner's own send, through the real ingest, so `to_addrs` is what
+    /// the parser stores.
+    fn seed_sent(store: &SqliteStore, account: i64, thread: &str, to: &str, text: &str) -> i64 {
+        use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
+        let now = Utc::now();
+        let raw = RawFetched {
+            account_id: account,
+            gmail_msg_id: format!("{thread}-{text}"),
+            gmail_thread_id: Some(thread.into()),
+            raw: format!(
+                "From: me@localhost\r\nTo: {to}\r\nSubject: {text}\r\nDate: {}\r\n\r\n{text}",
+                now.to_rfc2822()
+            )
+            .into_bytes(),
+            internal_date: Some(now),
+            is_sent: true,
+            is_spam: false,
+            account_addr: "me@localhost".into(),
+        };
+        let message = ingest_with_rules(&raw, &Default::default(), now, &[], |_| false);
+        store.ingest_message(&message).unwrap()
+    }
+
+    async fn search_with(
+        server: &SquelchServer,
+        query: &str,
+        from_me: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorData> {
+        Ok(values(
+            &server
+                .search_mail(Parameters(SearchMailParams {
+                    query: query.into(),
+                    k: Some(50),
+                    sort: None,
+                    from_me,
+                }))
+                .await?,
+        )["results"]
+            .clone())
+    }
+
+    /// The bug this exists for: an agent asked for the owner's sent mail and
+    /// got mail containing the WORD "sent". `in:sent` and `from_me` now scope
+    /// the search, each hit says whether the owner wrote it, and `to:` is
+    /// refused because recipients are human-door data.
+    #[tokio::test]
+    async fn search_mail_scopes_to_mail_the_owner_wrote() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let to_dan = seed_sent(
+            &store,
+            account,
+            "t-dan",
+            "Dan Smith <dan@landlord.test>",
+            "lease renewal",
+        );
+        decide(&store, account, to_dan, false, None);
+        let to_amy = seed_sent(
+            &store,
+            account,
+            "t-amy",
+            "amy@friend.test",
+            "lease question",
+        );
+        decide(&store, account, to_amy, false, None);
+        let received = seed(&store, account, "t-in", "we sent you lease tips");
+        decide(&store, account, received, false, None);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        let threads = |v: &serde_json::Value| -> Vec<String> {
+            let mut t: Vec<String> = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["thread_id"].as_str().unwrap().to_string())
+                .collect();
+            t.sort();
+            t
+        };
+
+        // Unscoped: everything, and the owner's own mail is marked.
+        let all = search_with(&server, "lease", None).await.unwrap();
+        assert_eq!(threads(&all), ["t-amy", "t-dan", "t-in"]);
+        for hit in all.as_array().unwrap() {
+            assert_eq!(
+                hit["from_me"],
+                serde_json::json!(hit["thread_id"] != "t-in"),
+                "{hit}"
+            );
+        }
+
+        // The operator and the argument mean the same thing.
+        for (q, from_me) in [
+            ("lease in:sent", None),
+            ("lease", Some(true)),
+            ("in:sent sent", None),
+        ] {
+            let hits = search_with(&server, q, from_me).await.unwrap();
+            let expect: &[&str] = if q.ends_with("sent sent") {
+                &[]
+            } else {
+                &["t-amy", "t-dan"]
+            };
+            assert_eq!(threads(&hits), expect, "{q} {from_me:?}");
+        }
+
+        // A filter-only search with no words: the owner's sends, newest first.
+        let listing = search_with(&server, "", Some(true)).await.unwrap();
+        assert_eq!(threads(&listing), ["t-amy", "t-dan"]);
+
+        // Recipients are not a filter an agent may run, with or without words:
+        // "did this go to d", "da", "dan" would rebuild every To/Cc/Bcc.
+        for q in ["lease to:dan", "to:dan", "in:sent to:d"] {
+            let error = search_with(&server, q, None).await.unwrap_err();
+            assert_eq!(error.code, ErrorData::invalid_params("x", None).code, "{q}");
+        }
+
+        // Nothing to search for and nothing to scope by is still refused.
+        assert!(search_with(&server, "  ", None).await.is_err());
+        assert!(search_with(&server, "", Some(false)).await.is_err());
     }
 
     #[tokio::test]
@@ -3233,6 +3588,189 @@ mod tests {
         )
     }
 
+    async fn reading(server: &SquelchServer) -> serde_json::Value {
+        reading_since(server, Utc::now() - chrono::Duration::days(1)).await
+    }
+
+    async fn reading_since(server: &SquelchServer, since: DateTime<Utc>) -> serde_json::Value {
+        values(
+            &server
+                .get_reading(Parameters(GetReadingParams { since }))
+                .await
+                .unwrap(),
+        )
+    }
+
+    // ---- get_reading --------------------------------------------------------
+
+    #[tokio::test]
+    async fn reading_lists_the_reading_band_and_not_fye() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let urgent = seed(&store, account, "urgent", "please reply");
+        decide(&store, account, urgent, false, None);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+
+        let out = reading(&server).await;
+        let rows = out.as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{out}");
+        assert_eq!(rows[0]["message_id"], essay);
+        assert_eq!(rows[0]["thread_id"], "essay");
+        assert_eq!(rows[0]["sender"], "alerts@example.com");
+        assert_eq!(rows[0]["summary"], "A weekly essay on birds");
+        assert_eq!(rows[0]["reading_kind"], "content");
+        // Summaries only, and no ranking to misread as urgency.
+        for absent in ["body", "body_text", "body_html", "attention", "score"] {
+            assert!(rows[0].get(absent).is_none(), "{absent} leaked: {out}");
+        }
+        // FYE stays FYE: the essay is not an inbox update.
+        let updates = inbox(&server).await;
+        let ids: Vec<_> = updates
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["message_id"].clone())
+            .collect();
+        assert_eq!(ids, [serde_json::json!(urgent)]);
+        // An agent listing Reading is not the human opening it.
+        assert!(
+            store
+                .agent_read_message(account, essay)
+                .unwrap()
+                .opened_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_respects_since() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        assert_eq!(reading(&server).await.as_array().unwrap().len(), 1);
+        let later = reading_since(&server, Utc::now() + chrono::Duration::hours(1)).await;
+        assert!(later.as_array().unwrap().is_empty(), "{later}");
+    }
+
+    /// Each sealed shape on its own, next to an allowed control row, so a
+    /// guard that stops working shows up as one extra thread id.
+    #[tokio::test]
+    async fn sealed_reading_mail_is_absent() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let control = seed(&store, account, "control", "plain newsletter");
+        decide_reading(&store, account, control, false);
+        // A restricted Reading row.
+        let sealed = seed(&store, account, "sealed", "reset code digest");
+        decide_reading(&store, account, sealed, true);
+        // An allowed Reading row whose thread holds a restricted sibling. The
+        // sibling stays out of FYE and names no attention sources, so only
+        // the THREAD guard can close this, not the attention-source check.
+        let open = seed(&store, account, "mixed", "ordinary newsletter");
+        decide_reading(&store, account, open, false);
+        let secret = seed(&store, account, "mixed", "reset token");
+        decide_as(&store, account, secret, true, None, |d| {
+            d.attention.show_in_fye = false;
+            d.attention.relevant_message_ids = vec![];
+        });
+        // An allowed Reading row whose summary was DERIVED from a restricted
+        // message in another thread.
+        let source = seed(&store, account, "source", "your login code");
+        decide(&store, account, source, true, None);
+        let derived = seed(&store, account, "derived", "weekly digest");
+        decide_as(&store, account, derived, false, Some(source), |d| {
+            d.destinations = vec![MessageDestination::Reading];
+            d.reading_kind = Some(ReadingKind::Content);
+            d.attention.show_in_fye = false;
+        });
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+
+        let out = reading(&server).await;
+        let threads: Vec<_> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["thread_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(threads, ["control"], "{out}");
+    }
+
+    #[tokio::test]
+    async fn reading_leaves_out_done_mail_and_lists_newest_first() {
+        use squelch_core::types::AttentionStatus;
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let first = seed(&store, account, "first", "issue one");
+        decide_reading(&store, account, first, false);
+        let second = seed(&store, account, "second", "issue two");
+        decide_reading(&store, account, second, false);
+        let done = seed(&store, account, "done", "issue zero");
+        decide_reading(&store, account, done, false);
+        assert!(
+            store
+                .set_attention_status(account, done, AttentionStatus::Done)
+                .unwrap()
+        );
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        let ids: Vec<_> = reading(&server)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["message_id"].as_i64().unwrap())
+            .collect();
+        // Same received second, so the newer message id breaks the tie.
+        assert_eq!(ids, [second, first]);
+    }
+
+    #[tokio::test]
+    async fn reading_reaches_back_thirty_days_at_most() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let old = Utc::now() - chrono::Duration::days(35);
+        let stale = seed_at(&store, account, "stale", "last month's issue", old);
+        decide_reading(&store, account, stale, false);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        // An ancient `since` is clamped rather than refused: the fresh row
+        // answers, the 35-day-old one is past the window.
+        let out = reading_since(&server, Utc::now() - chrono::Duration::days(3650)).await;
+        let threads: Vec<_> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["thread_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(threads, ["essay"], "{out}");
+    }
+
+    #[tokio::test]
+    async fn reading_carries_the_senders_standing_instruction() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let account = store.ensure_account("me@localhost").unwrap();
+        let essay = seed(&store, account, "essay", "the heron issue");
+        decide_reading(&store, account, essay, false);
+        let server = SquelchServer::new(store.clone(), "me@localhost").unwrap();
+        server
+            .set_sender_rule(Parameters(SetSenderRuleParams {
+                match_pattern: "*@example.com".into(),
+                want: "just the headline".into(),
+                disposition: "surface".into(),
+            }))
+            .await
+            .unwrap();
+        let out = reading(&server).await;
+        assert_eq!(
+            out[0]["standing_instruction"],
+            serde_json::json!({"match_pattern": "*@example.com", "want": "just the headline"})
+        );
+    }
+
     /// Nothing of an unassessed archive row may be in a response: not its
     /// subject, body, sender, display name or thread-title.
     fn assert_no_trace(what: &str, wire: &str) {
@@ -3385,6 +3923,7 @@ mod tests {
                                     query: (*query).into(),
                                     k: Some(k),
                                     sort: sort.map(str::to_string),
+                                    from_me: None,
                                 }))
                                 .await
                                 .unwrap(),
@@ -3675,6 +4214,7 @@ mod tests {
                 "create_draft",
                 "get_deadlines",
                 "get_inbox_updates",
+                "get_reading",
                 "get_shipments",
                 "get_thread",
                 "list_sender_rules",
@@ -3689,6 +4229,7 @@ mod tests {
             let _ = thread(&server, "old").await;
             let _ = thread(&server, &old.to_string()).await;
             let _ = inbox(&server).await;
+            let _ = reading(&server).await;
             let _ = server
                 .get_deadlines(Parameters(GetDeadlinesParams { within_days: None }))
                 .await;

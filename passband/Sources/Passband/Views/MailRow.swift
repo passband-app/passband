@@ -57,6 +57,23 @@ struct MailRow: View {
         self.onOpen = onOpen
     }
 
+    /// The mail's own subject, when the daemon sent one that says something
+    /// the one-liner does not. A summary that IS the subject (an untriaged
+    /// row's fallback) would otherwise print twice.
+    private static func subject(_ update: AttentionUpdate) -> String? {
+        guard let s = update.subject?.displaySubject.flattenedLine(cap: 300), !s.isEmpty
+        else { return nil }
+        return s
+    }
+
+    /// What follows the subject: the one-liner, or for a row nothing triaged,
+    /// the opening of its body.
+    private static func gist(_ update: AttentionUpdate, subject: String?) -> String {
+        let line = update.one_line.flattenedLine(cap: 300)
+        if line.isEmpty { return (update.preview ?? "").flattenedLine(cap: 300) }
+        return line == subject ? "" : line
+    }
+
     /// Done and NOT parked. Parking resolves the thread too, but a parked row
     /// is coming back, and its reminder chip says when; drawing it finished
     /// (dimmed, checked) would say the opposite.
@@ -66,28 +83,14 @@ struct MailRow: View {
     /// should land on first. The same test as the Important lens.
     private var emphasized: Bool { MailFilter.important.matches(update) && !finished }
 
-    /// The mail's own subject, when the daemon sent one that says something
-    /// the one-liner does not. A summary that IS the subject (an untriaged
-    /// row's fallback) would otherwise print twice.
-    private var subject: String? {
-        guard let s = update.subject?.displaySubject.flattenedLine(cap: 300), !s.isEmpty
-        else { return nil }
-        return s
-    }
-
-    /// What follows the subject: the one-liner, or for a row nothing triaged,
-    /// the opening of its body.
-    private var gist: String {
-        let line = update.one_line.flattenedLine(cap: 300)
-        if !line.isEmpty, line != subject { return line }
-        if line.isEmpty { return (update.preview ?? "").flattenedLine(cap: 300) }
-        return ""
-    }
-
     /// The middle column as ONE `Text`, so it truncates in one place and in
     /// the right order: the gist is eaten first, the subject last.
     /// `verbatim` for both, since neither is ours to localize.
-    private var middle: Text {
+    ///
+    /// The subject and the gist are worked out ONCE a body and passed in:
+    /// they were computed properties, and this column alone asked for the
+    /// subject four times, each a trim, a cap and a flatten of the line.
+    private func middle(subject: String?, gist: String) -> Text {
         let weight: Font.Weight = emphasized ? .semibold : .regular
         let gistText = Text(verbatim: gist)
             .font(Typo.rowSub)
@@ -111,6 +114,8 @@ struct MailRow: View {
 
     var body: some View {
         let chip = Fmt.deadlineChip(update.displayDeadline)
+        let subject = Self.subject(update)
+        let gist = Self.gist(update, subject: subject)
         ListRow(
             selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 7,
             hoverFill: opens,
@@ -140,7 +145,7 @@ struct MailRow: View {
                 // THE COLUMN THAT CARRIES THE ROW, so it is the last to give
                 // way: a floor and a priority over the chips beside it, which
                 // otherwise ate it whole in a narrow window.
-                middle
+                middle(subject: subject, gist: gist)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(minWidth: Typo.measure(140), maxWidth: .infinity, alignment: .leading)

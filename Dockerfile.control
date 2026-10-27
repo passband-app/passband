@@ -12,7 +12,7 @@
 # -> ort, whose prebuilt static onnxruntime needs glibc >= 2.38. Bookworm's 2.36
 # cannot link it. The same constraint the squelchd image documents.
 
-FROM rust:1-slim-trixie AS builder
+FROM rust:1-slim-trixie AS chef
 WORKDIR /build
 
 # ort links -lstdc++ and rust:slim ships gcc without g++.
@@ -20,11 +20,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# cargo-chef, so the dependency compile (the ONNX tree, most of this build) is
+# its own layer keyed on the dependency graph alone. A plain `COPY Cargo.toml
+# Cargo.lock` + `cargo build` cannot cache it across releases: every daemon tag
+# bumps the workspace version, which rewrites both files. chef's recipe masks
+# the workspace crates' own versions, so a release that changes no dependency
+# reuses the cooked layer from the registry cache and compiles only our crates.
+# Installed before the toolchain COPY so a toolchain bump does not reinstall it.
+RUN cargo install cargo-chef --locked --version 0.1.78
+
 # The compiler is rust-toolchain.toml's, not the image's; see that file's
 # header for why, and for what a bump of it reaches.
 COPY rust-toolchain.toml ./
 RUN rustup toolchain install --no-self-update
 
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY squelch-core ./squelch-core
 COPY squelch-httpauth ./squelch-httpauth
@@ -37,8 +47,17 @@ COPY squelch-broker ./squelch-broker
 COPY squelch-control ./squelch-control
 COPY squelch-warden ./squelch-warden
 COPY squelchd ./squelchd
+RUN cargo chef prepare --recipe-path recipe.json
 
-RUN cargo build --release --locked -p squelch-control
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --locked -p squelch-control --recipe-path recipe.json
+COPY --from=planner /build ./
+# The target dir is deleted in the same layer, so the layer the registry cache
+# re-uploads every tag is the binary, not gigabytes of build tree.
+RUN cargo build --release --locked -p squelch-control \
+    && cp target/release/squelch-control /squelch-control \
+    && rm -rf target
 
 FROM debian:trixie-slim
 # rustls everywhere, so the only runtime need is the CA roots for Google's
@@ -49,7 +68,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --no-create-home control
 
-COPY --from=builder /build/target/release/squelch-control /usr/local/bin/squelch-control
+COPY --from=builder /squelch-control /usr/local/bin/squelch-control
 
 # TRANSITION: the control store is Postgres now, reached via
 # SQUELCH_CONTROL_DATABASE_URL set on the service (never baked here — the URL

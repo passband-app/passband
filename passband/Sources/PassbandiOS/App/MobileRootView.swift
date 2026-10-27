@@ -318,21 +318,9 @@ private struct MobileShell: View {
                 }
             if let view, store.activeView != view { store.activeView = view }
         }
-        // WHAT'S NEW, after an update: asked when the first sync of a
-        // session lands, and only over the Sitrep. The Mac asks from the same
-        // moment (RootView); the rule itself is the model's.
-        //
-        // AND ASKED AGAIN WHENEVER THE BOARD COMES BACK INTO VIEW, which the
-        // Mac does not need: a phone is often opened by a banner, straight
-        // into a reader, and a session here lasts days. Once at first sync
-        // would mean an update whose notes never came. The model still shows
-        // them once (its stamp, and its own once-a-session flag).
-        .onChange(of: store.lastRefresh) { old, new in
-            if old == nil, new != nil { askWhatsNew() }
-        }
-        .onChange(of: bareSitrep) { _, bare in
-            if bare, store.lastRefresh != nil { askWhatsNew() }
-        }
+        // WHAT'S NEW, asked from a view of its own: see WhatsNewAsker.
+        .background(
+            WhatsNewAsker(bareSitrep: bareSitrep, sitrepShowing: tab == .sitrep && door.pane == nil))
         // A request to be shown the search. The ASK, not the query: "search
         // this sender" twice for one sender seeds the term the field already
         // holds, and a watch on the term would hear nothing the second time.
@@ -491,11 +479,7 @@ private struct MobileShell: View {
     /// The Sitrep with nothing over it, which is the only place What's New is
     /// raised. The model checks the modals itself; this is the shell's half.
     private var bareSitrep: Bool {
-        tab == .sitrep && door.pane == nil && store.threadId == nil && store.compose == nil
-    }
-
-    private func askWhatsNew() {
-        store.whatsNew.maybeShowOnPhone(sitrepShowing: tab == .sitrep && door.pane == nil)
+        tab == .sitrep && door.pane == nil && store.threadId == nil && !store.composeOpen
     }
 
     /// Exactly one stack may take a thread the store opens. While the Account
@@ -579,7 +563,7 @@ private struct MobileShell: View {
     /// does — so the draft is flushed exactly once either way.
     private var composeOpen: Binding<Bool> {
         Binding(
-            get: { store.compose != nil },
+            get: { store.composeOpen },
             set: { if !$0 { store.closeCompose() } })
     }
 }
@@ -865,5 +849,40 @@ extension View {
     /// opens comes back to it, not to the tab's first page.
     func readerHost() -> some View {
         modifier(ThreadDestination(root: false))
+    }
+}
+
+/// WHAT'S NEW, after an update: asked when the first sync of a session lands,
+/// and only over the Sitrep. The Mac asks from the same moment (RootView); the
+/// rule itself is the model's.
+///
+/// AND ASKED AGAIN WHENEVER THE BOARD COMES BACK INTO VIEW, which the Mac does
+/// not need: a phone is often opened by a banner, straight into a reader, and
+/// a session here lasts days. Once at first sync would mean an update whose
+/// notes never came. The model still shows them once (its stamp, and its own
+/// once-a-session flag).
+///
+/// ITS OWN VIEW, zero-sized, like the Mac's ShellWatchers: `lastRefresh` moves
+/// on every poll, and the shell that watched it was redrawn with it, tabs,
+/// overlays and sheets alike.
+private struct WhatsNewAsker: View {
+    @Environment(AppStore.self) private var store
+    let bareSitrep: Bool
+    let sitrepShowing: Bool
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .onChange(of: store.lastRefresh) { old, new in
+                if old == nil, new != nil { ask() }
+            }
+            .onChange(of: bareSitrep) { _, bare in
+                if bare, store.lastRefresh != nil { ask() }
+            }
+    }
+
+    private func ask() {
+        store.whatsNew.maybeShowOnPhone(sitrepShowing: sitrepShowing)
     }
 }

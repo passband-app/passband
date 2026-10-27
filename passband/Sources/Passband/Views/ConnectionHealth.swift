@@ -24,7 +24,7 @@ struct DaemonDownPane: View {
                 Text(
                     auth
                         ? "The server refused the saved token. Update it in Settings."
-                        : "The server URL didn't answer. Is squelchd running? Retrying every 10 seconds."
+                        : "The server URL didn't answer. Is squelchd running? Retrying automatically."
                 )
                 .font(Typo.ui(13))
                 .foregroundStyle(Palette.inkFaint)

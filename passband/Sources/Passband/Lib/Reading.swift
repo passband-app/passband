@@ -134,7 +134,7 @@ enum Reading {
     ///
     /// A READ-SIDE FILTER, not a mutation of the store. `derive` skips
     /// `status == .done`, so the server's next poll produces this same answer —
-    /// this only covers the ten seconds in between, which is exactly the window
+    /// this only covers the tick in between, which is exactly the window
     /// in which marking mail done looked like it had not worked. `resolvedIds`
     /// is already the app's record of "resolved, poll has not caught up", and
     /// undo clears it, so a restored message brings its card straight back.

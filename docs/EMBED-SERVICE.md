@@ -80,7 +80,7 @@ loses:
    should have a one-sentence description. `squelch-embed` opens no store,
    mounts no credential, and has no Gmail or LLM client on any route. It
    therefore does **not** link `squelch-core`, which pulls `rusqlite`,
-   `sqlite-vec`, `keyring`, `age`, `oauth2`, `mail-parser`, `ammonia` and
+   `sqlite-vec`, `keyring-core`, `age`, `oauth2`, `mail-parser`, `ammonia` and
    `reqwest` (`squelch-core/Cargo.toml:13-49`) and makes that sentence
    unprovable to whoever audits it. Depend on `fastembed` directly, or put the
    `Embedder` trait in a leaf crate both sides use. Linking is not reachability,

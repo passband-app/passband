@@ -10,6 +10,7 @@ pub mod html;
 pub mod ingest;
 pub mod notify_lane;
 mod profile;
+mod translate_pass;
 pub(crate) mod triage_worker;
 
 use std::sync::Arc;
@@ -571,6 +572,10 @@ enum CapKind {
     /// notifications stopped. The [[fleet LLM outage]] was a config-level 400
     /// that read as normal for four days.
     NotifyFastConfig,
+    /// The translate pass's daily dollar budget
+    /// (`[translate].daily_budget_usd`). Its stamp for today is also how
+    /// ingest knows the translator has nothing left.
+    Translate,
 }
 
 /// Outcome of a check-then-increment budget gate.
@@ -588,6 +593,7 @@ enum BudgetGate {
 struct WarnDays {
     notify_fast: Option<String>,
     notify_fast_config: Option<String>,
+    translate: Option<String>,
 }
 
 /// The account's daily-budget ledger plus the warn-once state that goes with it:
@@ -622,6 +628,7 @@ impl<S: Store + ?Sized> BudgetLedger<'_, S> {
         let slot = match kind {
             CapKind::NotifyFast => &mut guard.notify_fast,
             CapKind::NotifyFastConfig => &mut guard.notify_fast_config,
+            CapKind::Translate => &mut guard.translate,
         };
         if slot.as_deref() == Some(day) {
             false
@@ -750,6 +757,11 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`SyncEngine::refine_lane`]; see [`SyncEngine::run_lanes`] for why the
     /// two are separate futures at all.
     refine_wake: tokio::sync::Notify,
+    /// REFINE LANE -> TRANSLATE LANE: poked at the top of every refine round,
+    /// so the translate lane (docs/TRANSLATION.md, Pipeline) starts whenever
+    /// the refine lane does (new mail, an archive thread the reader asked to
+    /// translate, the interval) without either lane waiting on the other.
+    translate_wake: tokio::sync::Notify,
     /// THE NOTIFICATION LANE'S WAKE: a job it claims may just have been
     /// queued. Poked by the two producers, this engine's own ingest of an
     /// incremental arrival (its `notification` job is queued inside the
@@ -933,6 +945,24 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// a fresh throttle hours after an old episode from the next probe of
     /// a continuing one. Zero until a cooldown has been opened.
     agent_last_cooldown_end: AtomicI64,
+    /// THE TRANSLATOR (docs/TRANSLATION.md): `None` when translation is
+    /// switched off or no LLM is configured. A trait object so the tests can
+    /// stand a scripted one in its place.
+    translator: Option<Arc<dyn crate::translate::TranslateBackend>>,
+    /// The translate pass's own cooldown after a configuration failure (unix
+    /// seconds). Separate from `agent_retry_after`: the translate model can be
+    /// missing from an allow-list that carries the triage model.
+    translate_retry_after: AtomicI64,
+    /// When the TRANSLATE MODEL last answered this account (unix ms, 0 = not
+    /// since start): a translation outcome that is not a configuration
+    /// failure or an outage. What the release cap needs before it charges a
+    /// row for a 400, which may be about the model rather than the message.
+    translate_answer_ms: AtomicI64,
+    /// When the GATEWAY last answered this account (unix ms): the above, or
+    /// a successful agent triage run or access assessment on the same
+    /// gateway and key. Enough for the cap to charge a row that times out.
+    /// Neither moves in a total outage, so an outage never spends attempts.
+    gateway_answer_ms: AtomicI64,
     /// Scrape-facing counters. Its own registry unless the daemon shares one
     /// via [`SyncEngine::with_metrics`], so an engine built anywhere (tests, the
     /// contacts harvest, `run`) still records rather than branching on absence.
@@ -1005,6 +1035,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             );
         }
         let gmail_budget = Arc::new(GmailBudget::new(config.sync.gmail_quota_profile));
+        let translator = crate::translate::TranslateClient::from_config(&config)
+            .map(|c| Arc::new(c) as Arc<dyn crate::translate::TranslateBackend>);
         Self {
             store,
             creds,
@@ -1021,6 +1053,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             refresh: Arc::new(tokio::sync::Notify::new()),
             event_listeners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             refine_wake: tokio::sync::Notify::new(),
+            translate_wake: tokio::sync::Notify::new(),
             notify_wake: tokio::sync::Notify::new(),
             spam_refresh: Arc::new(tokio::sync::Notify::new()),
             refine_poke: Default::default(),
@@ -1043,6 +1076,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             agent_access_strikes: AtomicU32::new(0),
             agent_answered_since_timeout: AtomicBool::new(false),
             agent_last_cooldown_end: AtomicI64::new(0),
+            translator,
+            translate_retry_after: AtomicI64::new(0),
+            translate_answer_ms: AtomicI64::new(0),
+            gateway_answer_ms: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
             profile_url: profile::PEOPLE_ME_URL.to_string(),
@@ -1586,6 +1623,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let mut refine_shutdown = shutdown.clone();
         let mut notify_shutdown = shutdown.clone();
         let mut archive_shutdown = shutdown.clone();
+        let mut translate_shutdown = shutdown.clone();
         tokio::select! {
             polled = async {
                 if backfill_first {
@@ -1596,6 +1634,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             () = self.agent_notification_lane(&mut notify_shutdown) => Ok(()),
             // Only ever completes on shutdown; it has no error to report.
             () = self.refine_lane(&mut refine_shutdown) => Ok(()),
+            // The same. Its own lane so a long translation never holds up
+            // triage of new mail (docs/TRANSLATION.md, Pipeline).
+            () = self.translate_lane(&mut translate_shutdown) => Ok(()),
             // The same: a Gmail error inside the walk is the walk's to wait
             // out, never a reason to bounce the lifecycle.
             () = self.archive_lane(&mut archive_shutdown) => Ok(()),
@@ -2352,6 +2393,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // is closed. An agent search waits on its access checks only
             // while this is true.
             self.refine_poke.set_runnable(self.refine_can_spend());
+            // TRANSLATION RUNS BESIDE THIS LANE, never in it
+            // (docs/TRANSLATION.md, Pipeline): one long message must not hold
+            // up triage of everything that arrives after it. Triage instead
+            // holds back the one message whose translation is pending, for a
+            // bounded wait (`TRIAGE_WAIT_SECS` in the store), so foreign mail
+            // is normally triaged once, on the English.
+            self.translate_wake.notify_one();
             if self.poll_healthy.load(Ordering::Relaxed) {
                 if self.agent_triage_pass().await {
                     idle_rounds = 0;
@@ -3665,6 +3713,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         triaged.foreground_triage = origin == IngestOrigin::Incremental
             && !triaged.message.is_sent
             && !triaged.message.is_spam;
+        // NO TRANSLATOR, NO QUEUE: a row queued here with nothing to work it
+        // would read as "Translating..." in the reader for good. Detection is
+        // free; the row is what promises a translation.
+        if self.translator.is_none() {
+            triaged.translate_lang = None;
+        }
+        // OVER TODAY'S TRANSLATE BUDGET, nothing holds triage, and a
+        // backfilled message waits `deferred` for its reader. Asked only of
+        // foreign mail: English mail has no row to queue.
+        if triaged.translate_lang.is_some() {
+            triaged.translate_over_budget = self.translate_over_budget(now);
+        }
         let id = if origin == IngestOrigin::Archive {
             // Insert-only: an id the store already holds is left as it is, and
             // there is nothing to embed for a row this call did not write.
@@ -3808,22 +3868,50 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             flag: &self.vectors_dirty,
             drained: false,
         };
+        let mut total = 0usize;
+        // The originals first, then the translations' own table: the same
+        // drain, the same batches, a different source and destination.
+        for translations in [false, true] {
+            match self.drain_vector_kind(&embedder, translations).await {
+                Some(n) => total += n,
+                // Stopped short: the guard leaves the debt on the books.
+                None => {
+                    Self::trim_after_drain(total).await;
+                    return;
+                }
+            }
+        }
+        pass.drained = true;
+        Self::trim_after_drain(total).await;
+    }
+
+    /// One table's half of [`Self::backfill_missing_vectors`]: `Some(embedded)`
+    /// when the queue came back empty or short, `None` when a query or a batch
+    /// failed and the rest is owed.
+    async fn drain_vector_kind(
+        &self,
+        embedder: &Arc<dyn crate::embed::Embedder>,
+        translations: bool,
+    ) -> Option<usize> {
         let batch = self.config.embed.backfill_batch.max(1);
         let max_chars = self.config.embed.max_chars;
         let account_id = self.account_id;
         let mut total = 0usize;
-
         loop {
-            let missing = match self.store.messages_missing_vectors(account_id, batch) {
+            let missing = if translations {
+                self.store.translations_missing_vectors(account_id, batch)
+            } else {
+                self.store.messages_missing_vectors(account_id, batch)
+            };
+            let missing = match missing {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("squelch: vector backfill query failed ({e}); stopping pass");
-                    return;
+                    return None;
                 }
             };
             if missing.is_empty() {
-                pass.drained = true;
-                break;
+                return Some(total);
             }
             let n = missing.len();
             // Flatten each message the SAME way ingest does. (Query text takes a
@@ -3836,6 +3924,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     .map(|m| crate::embed::message_embed_text(&m.subject, &m.body, max_chars))
                     .collect();
                 let vecs = embedder.embed_batch(&texts)?;
+                if translations {
+                    // One at a time: each re-checks, under the lock, that its
+                    // translation is still served.
+                    for (m, vec) in missing.iter().zip(vecs.iter()) {
+                        store.upsert_translation_vector(account_id, m.message_id, vec)?;
+                    }
+                    return Ok(());
+                }
                 // One commit for the batch, not two per vector.
                 let items: Vec<(i64, &[f32])> = missing
                     .iter()
@@ -3850,18 +3946,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 Ok(Ok(())) => total += n,
                 Ok(Err(e)) => {
                     eprintln!("squelch: vector backfill batch failed ({e}); stopping pass");
-                    break;
+                    return None;
                 }
                 Err(e) => {
                     eprintln!("squelch: vector backfill task join error ({e}); stopping pass");
-                    break;
+                    return None;
                 }
             }
 
             // A short batch means we drained the queue; stop before re-querying.
             if n < batch {
-                pass.drained = true;
-                break;
+                return Some(total);
             }
             // Throttle between batches so a large backfill doesn't peg the CPU
             // or starve the poll lane, which shares this task: the two lanes are
@@ -3869,7 +3964,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // here still delays the next `history.list`.
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
 
+    async fn trim_after_drain(total: usize) {
         if total > 0 {
             eprintln!("squelch: vector backfill embedded {total} message(s) for semantic recall");
             // A batch pass is the single largest transient this process makes:
@@ -4554,7 +4651,45 @@ mod tests {
     use crate::config::Stage1Config;
     use crate::store::SpamScope;
     use crate::store::SqliteStore;
-    use crate::types::{Disposition, NewMessage, Tier};
+    use crate::types::{AttentionUpdate, Disposition, NewMessage, Tier};
+
+    /// The mail list as the client reads it (`human_agent_updates`, every
+    /// band, nothing filtered but spam scope): what a sync test means by
+    /// "visible in the mailbox". Sent copies never appear in it.
+    fn inventory(
+        store: &SqliteStore,
+        acct: AccountId,
+        since: DateTime<Utc>,
+        spam: SpamScope,
+    ) -> Vec<AttentionUpdate> {
+        use crate::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+        store
+            .human_agent_updates(
+                acct,
+                &AgentInventoryQuery {
+                    since,
+                    min_importance: None,
+                    status: None,
+                    band: None,
+                    pending_reminders: false,
+                    spam,
+                    ranking: Default::default(),
+                    before: None,
+                    limit: None,
+                },
+            )
+            .unwrap()
+    }
+
+    /// The last day of non-spam mail in [`inventory`].
+    fn listed(store: &SqliteStore, acct: AccountId, now: DateTime<Utc>) -> Vec<AttentionUpdate> {
+        inventory(
+            store,
+            acct,
+            now - ChronoDuration::days(1),
+            SpamScope::Exclude,
+        )
+    }
 
     #[test]
     fn gmail_quota_limit_note_names_the_limit_and_nothing_else() {
@@ -4750,19 +4885,14 @@ mod tests {
     /// one the `DO UPDATE SET` quietly rewrote, would pass every in-memory check
     /// and still leave the emission sites reading the wrong clock.
     ///
-    /// `triage_seed_verdict` because it is the one read that carries the column
-    /// for ANY normal row, sent copies included — the queue SELECTs filter
-    /// `m.is_sent = 0`, so they cannot see half of what these tests assert on.
+    /// `notify_eligible_at` because it reads the column for ANY row, sent
+    /// copies and sealed mail included.
     fn stamp_of(
         store: &SqliteStore,
         account_id: AccountId,
         message_id: i64,
     ) -> Option<DateTime<Utc>> {
-        store
-            .triage_seed_verdict(account_id, message_id)
-            .unwrap()
-            .expect("a triage row for this message")
-            .notify_eligible_at
+        store.notify_eligible_at(account_id, message_id).unwrap()
     }
 
     /// An ops-alert EML dated `at`: automated sender + alert language, so it
@@ -5101,13 +5231,10 @@ mod tests {
         assert_eq!(me.len(), 1);
         assert_eq!(me[0].sent_count, 1, "From: self must not bump self");
 
-        // Sent mail must NOT pollute the ranked inbox.
-        let updates = store
-            .ranked_updates(acct, now - ChronoDuration::days(1), None)
-            .unwrap();
+        // Sent mail must NOT pollute the mail list.
         assert!(
-            updates.is_empty(),
-            "sent mail must never surface in ranked_updates"
+            listed(&store, acct, now).is_empty(),
+            "sent mail must never surface in the mail list"
         );
 
         // And it must not appear in search results either.
@@ -6752,30 +6879,15 @@ mod tests {
         assert_eq!(n, 1);
 
         // It is spam, and it is invisible to the ordinary mailbox.
-        let inbox = store
-            .attention_updates(
-                acct,
-                Utc::now() - ChronoDuration::days(1),
-                None,
-                None,
-                None,
-                false,
-                crate::store::SpamScope::Exclude,
-            )
-            .unwrap();
+        let inbox = listed(&store, acct, Utc::now());
         assert!(inbox.is_empty(), "spam must not reach the mailbox listing");
 
-        let spam = store
-            .attention_updates(
-                acct,
-                Utc::now() - ChronoDuration::days(1),
-                None,
-                None,
-                None,
-                false,
-                crate::store::SpamScope::Only,
-            )
-            .unwrap();
+        let spam = inventory(
+            &store,
+            acct,
+            Utc::now() - ChronoDuration::days(1),
+            SpamScope::Only,
+        );
         assert_eq!(spam.len(), 1, "and it must reach the spam page");
 
         // Never triaged: the same 'n/a' markers the sent branch gets.
@@ -6882,20 +6994,13 @@ mod tests {
         assert_eq!(row.importance, 0);
         assert_eq!(row.stage1_model_used.as_deref(), Some("n/a"));
         assert!(!row.needs_stage2);
-        assert!(store.stage1_queue(acct, 10).unwrap().is_empty());
-        assert!(store.stage2_queue(acct, 10).unwrap().is_empty());
 
         // THE SILENCE INVARIANT: never a push for mail the user sent themselves.
         assert!(store.events_after(acct, 0, 100).unwrap().is_empty());
         assert_eq!(store.latest_event_id(acct).unwrap(), 0);
 
         // And it stays out of the bands and out of search, as sent mail must.
-        assert!(
-            store
-                .ranked_updates(acct, now - ChronoDuration::days(1), None)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(listed(&store, acct, now).is_empty());
         assert!(store.search(acct, "lunch", 10, 0).unwrap().is_empty());
 
         // The recipients still seed contacts, which is half the point of having
@@ -7619,15 +7724,13 @@ mod tests {
         // ONE row, and it is the visible one.
         let view = store.thread_view_with_html(acct, "g-self").unwrap();
         assert_eq!(view.messages.len(), 1, "one row, not two");
-        let visible = store
-            .ranked_updates(acct, now - ChronoDuration::days(1), None)
-            .unwrap();
+        let visible = listed(&store, acct, now);
         assert_eq!(
             visible.len(),
             1,
             "the inbox copy must win the unique-key race"
         );
-        assert_eq!(visible[0].id, view.messages[0].id);
+        assert_eq!(visible[0].update.id, view.messages[0].id);
 
         // The INBOX walk ran FIRST and claimed the id, so the sent half never even
         // re-fetched it.
@@ -7668,10 +7771,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store
-                .ranked_updates(acct, now - ChronoDuration::days(1), None)
-                .unwrap()
-                .len(),
+            listed(&store, acct, now).len(),
             1,
             "the inbox batch is ingested even though the sent walk failed"
         );
@@ -7735,10 +7835,7 @@ mod tests {
         assert_eq!(cursor_of(&store, acct), Some(220), "max across both walks");
         // Both landed, each on its own side of the visibility line.
         assert_eq!(
-            store
-                .ranked_updates(acct, now - ChronoDuration::days(1), None)
-                .unwrap()
-                .len(),
+            listed(&store, acct, now).len(),
             1,
             "only the received message is in a band"
         );
@@ -7808,11 +7905,9 @@ mod tests {
         );
         assert!(store.is_known_contact(acct, "bob@friends.com").unwrap());
         // The dual-listed message keeps its visible copy, exactly as in the walk.
-        let visible: Vec<String> = store
-            .ranked_updates(acct, now - ChronoDuration::days(1), None)
-            .unwrap()
+        let visible: Vec<String> = listed(&store, acct, now)
             .into_iter()
-            .map(|u| u.thread_id)
+            .map(|u| u.update.thread_id)
             .collect();
         assert!(visible.contains(&"g-in".to_string()));
         assert!(visible.contains(&"g-self".to_string()));
@@ -8154,10 +8249,7 @@ mod tests {
         assert_eq!(view.messages[0].id, echoed, "the same local row");
         assert!(store.events_after(acct, 0, 100).unwrap().is_empty());
         assert!(
-            store
-                .ranked_updates(acct, now - ChronoDuration::days(1), None)
-                .unwrap()
-                .is_empty(),
+            listed(&store, acct, now).is_empty(),
             "re-delivery must not promote the echo into a band"
         );
         let row = store
@@ -8298,17 +8390,12 @@ mod tests {
         );
 
         // ...and the reminder fired anyway.
-        let rows = store
-            .attention_updates(
-                acct,
-                Utc::now() - ChronoDuration::days(30),
-                None,
-                None,
-                None,
-                false,
-                SpamScope::Exclude,
-            )
-            .unwrap();
+        let rows = inventory(
+            &store,
+            acct,
+            Utc::now() - ChronoDuration::days(30),
+            SpamScope::Exclude,
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, crate::types::AttentionStatus::Open);
         assert!(rows[0].remind_at.is_none(), "the pending stamp MOVED");

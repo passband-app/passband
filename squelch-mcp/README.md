@@ -4,9 +4,10 @@ The **agent door**: an MCP server exposing squelch's intelligence to any MCP cli
 
 ## Tools
 
-Seven tools that are always there, read-mostly by design:
+Eight tools that are always there, read-mostly by design:
 
 - `get_inbox_updates` — ranked updates since a timestamp
+- `get_reading` — the Reading band (newsletters, articles, promotions triage set aside) since a timestamp (reaching back at most 30 days), newest first, at most 200. Summaries, `reading_kind` and thread ids only; done mail is left out, and bodies come from `get_thread`
 - `get_thread` — a sanitized thread by thread id or message id
 - `get_deadlines` — bills and deadlines due within N days
 - `get_shipments` — tracked packages (en-route by default)

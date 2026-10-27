@@ -48,6 +48,18 @@ struct ThreadViewer: View {
     private var styles: ThreadStyleLedger { .shared }
 
     @State private var thread: ClientThreadView?
+    /// Bumped by every `adopt`, so a check of an aged copy can tell that a
+    /// newer answer (an arrival, the post-send reload) landed while it was out.
+    @State private var adoptions = 0
+    /// Bumped by "try again", so the retry runs as the opening load does: in
+    /// the reader's own task, cancelled with it.
+    @State private var attempt = 0
+
+    /// What the opening task is keyed on: the thread, and which try at it.
+    private struct LoadKey: Hashable {
+        var threadId: String
+        var attempt: Int
+    }
     @State private var error: String?
     @State private var loading = true
     /// HOW THIS THREAD IS DRAWN, resolved once per thread rather than per row:
@@ -74,6 +86,25 @@ struct ThreadViewer: View {
     @State private var debugInfo: JSONValue?
     /// True for `Clip.flashWindow` after the subject is clicked-to-copy.
     @State private var subjectCopied = false
+    /// THE MESSAGES THE READER ASKED TO SEE IN THEIR OWN LANGUAGE ("show
+    /// original" on a translated card). Per message, and held HERE rather than
+    /// on the card because the subject in the bar follows the message it came
+    /// from: a card flipped to the French under an English subject would be
+    /// half a flip. Keyed by message id, which is global, so a thread switch
+    /// leaves nothing in here that could flip the wrong mail.
+    @State private var originals: Set<Int> = []
+    /// The translation poll spent its budget with something still on its way:
+    /// the strip says the translation is not ready rather than "translating".
+    @State private var translationGaveUp = false
+    /// This reader's ask for the thread's archived translations failed twice:
+    /// the deferred ones are not on their way, so nothing waits for them.
+    @State private var translationUnasked = false
+    /// Orders this reader's in-place refetches, so an answer that set off
+    /// before a newer one cannot land after it (see RefreshSequence).
+    @State private var refreshes = RefreshSequence()
+    /// The images and quoted history the reader opened, per message, so a
+    /// "show original" flip rebuilds the body the way it was left.
+    @State private var disclosures = BodyDisclosures()
     /// messageId -> recorded opens of the user's own tracked sends. Only sent,
     /// tracked messages ever have an entry; see `refreshOpens`.
     @State private var opens: [Int: [MessageOpen]] = [:]
@@ -178,12 +209,43 @@ struct ThreadViewer: View {
         _index = State(initialValue: seed.index)
     }
 
-    /// What a measuring pass is FOR. Any of the three changing means the
-    /// heights on file answer a question nobody is asking any more: another
-    /// thread, another message in this one, another column width.
+    /// The translation poll's identity: it runs while anything in this thread
+    /// is on its way, and restarts (with a fresh schedule) when something new
+    /// starts being.
+    private struct TranslationPoll: Equatable {
+        let thread: String
+        let pending: Bool
+    }
+
+    /// Pending, or deferred (archive mail this reader asks for on open, see
+    /// `requestDeferredTranslations`): either way the English is on its way.
+    /// EXCEPT a deferred one whose ask failed: nobody requested it, so there
+    /// is nothing to wait for, and polling for it would be waiting on nothing.
+    private var translationPending: Bool {
+        messages.contains { translationAwaited($0) }
+    }
+
+    private func translationAwaited(_ m: ClientMessage) -> Bool {
+        guard let t = m.translation, t.awaiting else { return false }
+        return !(translationUnasked && t.status == .deferred)
+    }
+
+    /// Whether the strip on `m` has stopped claiming a translation is coming:
+    /// the poll gave up on it, or it is archive mail nobody managed to ask for.
+    private func translationStalled(_ m: ClientMessage) -> Bool {
+        guard m.translation?.awaiting == true else { return false }
+        return translationGaveUp || !translationAwaited(m)
+    }
+
+    /// What a measuring pass is FOR. Any of these changing means the heights
+    /// on file answer a question nobody is asking any more: another thread,
+    /// another message in this one, another column width.
     private struct MeasurePass: Equatable {
         let thread: String
         let count: Int
+        /// How many messages have a translation ready: one landing is a new
+        /// document under a new key, which nothing has measured yet.
+        let translations: Int
         let width: CGFloat
         /// A bubble measures its document at the bubble's measure, so a flip is
         /// a whole new set of heights to take — under a whole new set of keys.
@@ -315,6 +377,7 @@ struct ThreadViewer: View {
         // key meant for the email arriving over it.
         .keyBindings(.thread, turn?.incoming == false ? [] : bindings)
         .environment(find)
+        .environment(\.bodyDisclosures, disclosures)
         // The menu's ⌘F, which is the same verb as the key in the keymap.
         .onChange(of: store.findInEmailTick) { _, _ in openFind() }
         // This view outlives a thread (done+next swaps the content under it),
@@ -370,14 +433,43 @@ struct ThreadViewer: View {
                 .task { await rehearseBar() }
             #endif
         #endif
-        .task(id: threadId) {
-            await load()
+        .task(id: LoadKey(threadId: threadId, attempt: attempt)) {
+            let aged = await load()
             // Only once the thread is HERE: the hand-off names a message, and
             // whether it is in this thread is not knowable until it has loaded.
             consumePendingReply()
+            await requestDeferredTranslations()
             await refreshOpens()
+            if aged { await revalidate() }
         }
         .task(id: newestSender) { await refreshUnsub() }
+        // A TRANSLATION STILL BEING WRITTEN. The daemon translates on arrival
+        // (and, for archived mail, when this reader asks on open), so a thread
+        // can land with a message whose English is seconds away. Refetched on
+        // TranslationPollPlan's schedule, fast and then a slow tail while the
+        // reader is mounted, and merged in WITHOUT moving the reader (see
+        // `refreshTranslations`). A translation still not here after about ten
+        // minutes is one the next open will bring, and the strip stops saying
+        // it is translating. Keyed on whether anything is pending, so the loop
+        // ends the moment nothing is.
+        .task(id: TranslationPoll(thread: threadId, pending: translationPending)) {
+            guard translationPending else { return }
+            if translationGaveUp { translationGaveUp = false }
+            var attempt = 0
+            while let seconds = TranslationPollPlan.delay(attempt: attempt) {
+                try? await Task.sleep(for: .seconds(seconds))
+                guard !Task.isCancelled, translationPending else { return }
+                await refreshTranslations()
+                attempt += 1
+            }
+            guard !Task.isCancelled, translationPending else { return }
+            translationGaveUp = true
+        }
+        // A FLIP IS A DIFFERENT LENGTH OF MAIL. Both versions are measured (see
+        // FrameMeasurer), so the rail redraws to the version now shown at once.
+        .onChange(of: originals) { _, shown in
+            marks = Self.marks(for: messages, style: style, originals: shown)
+        }
         // SIZE THE THREAD UP BEFORE IT IS SCROLLED THROUGH. Nothing here waits
         // on it: the pass runs off screen, fills the height memory message by
         // message, and the reader simply finds the sizes already there when it
@@ -385,7 +477,8 @@ struct ThreadViewer: View {
         // different set of heights and has to be taken again.
         .task(
             id: MeasurePass(
-                thread: threadId, count: messages.count, width: bodyWidth, style: style,
+                thread: threadId, count: messages.count,
+                translations: thread?.readyTranslations ?? 0, width: bodyWidth, style: style,
                 ready: styleReady, density: prefs.density)
         ) {
             // A window resize walks the width a pixel at a time, and each step
@@ -403,7 +496,7 @@ struct ThreadViewer: View {
             ) {
                 // THE RAIL SWAPS ONCE, when every message is a measurement
                 // rather than a guess — see `marks(for:)`.
-                marks = Self.marks(for: sized, style: measuring)
+                marks = Self.marks(for: sized, style: measuring, originals: originals)
             }
         }
         // The pass outlives nothing: a reader that has left owns no thread to
@@ -663,11 +756,11 @@ struct ThreadViewer: View {
     private func subjectLine(lines: Int) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
             Button {
-                if let subject = thread?.subject, !subject.isEmpty {
+                if let subject = shownSubject, !subject.isEmpty {
                     Clip.copy(subject, flashing: $subjectCopied)
                 }
             } label: {
-                Text(thread?.subject ?? "…")
+                Text(shownSubject ?? "…")
                     .font(Typo.serif(19, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(lines)
@@ -675,7 +768,7 @@ struct ThreadViewer: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("copy subject")
+            .help(subjectHelp)
             if subjectCopied {
                 Text("copied!")
                     .font(Typo.micro)
@@ -684,6 +777,33 @@ struct ThreadViewer: View {
             }
         }
         .animation(.easeOut(duration: 0.18), value: subjectCopied)
+    }
+
+    /// The message the thread's subject belongs to: the oldest one whose own
+    /// subject header IS the thread's (or says nothing), else the oldest.
+    private var subjectSource: ClientMessage? {
+        guard let thread else { return nil }
+        return thread.messages.first { $0.subject == nil || $0.subject == thread.subject }
+            ?? thread.messages.first
+    }
+
+    /// The subject AS SHOWN: in English when the message it came from is being
+    /// shown translated, the thread's own otherwise. Only the bar uses this.
+    /// A reply still answers the original subject, since that is the one the
+    /// sender's mail client threads on.
+    private var shownSubject: String? {
+        guard let thread else { return nil }
+        guard let source = subjectSource, !originals.contains(source.id),
+            let t = source.readyTranslation, !t.subject.isEmpty
+        else { return thread.subject }
+        return t.subject
+    }
+
+    private var subjectHelp: String {
+        guard let thread, let shown = shownSubject, shown != thread.subject else {
+            return "copy subject"
+        }
+        return "copy subject. Original: \(thread.subject)"
     }
 
     private var participantsText: some View {
@@ -731,7 +851,11 @@ struct ThreadViewer: View {
                                 ? "arrow.down.to.line.compact" : "arrow.up.to.line.compact"
                         )
                         .font(Typo.ui(10, weight: .semibold))
-                        Text(attentionJumpLabel).font(Typo.micro)
+                        // Its own minute, for the reason the unsubscribe
+                        // hint has one: "12 min past due" moves by the clock.
+                        TimelineView(.everyMinute) { _ in
+                            Text(attentionJumpLabel).font(Typo.micro)
+                        }
                     }
                 }
                 .buttonStyle(.textAction)
@@ -779,8 +903,12 @@ struct ThreadViewer: View {
                 }
             } label: {
                 if let unsub {
-                    Text(Self.unsubHint(unsub))
-                        .font(Typo.micro)
+                    // Its own minute: the reader no longer redraws with every
+                    // poll, and "N ago" would stop where it was first drawn.
+                    TimelineView(.everyMinute) { _ in
+                        Text(Self.unsubHint(unsub))
+                            .font(Typo.micro)
+                    }
                 } else {
                     HStack(spacing: Space.s4) {
                         #if os(macOS)
@@ -839,14 +967,19 @@ struct ThreadViewer: View {
                                     message: m, style: style, position: i,
                                     selected: i == index, ruled: i > 0,
                                     opens: opens[m.id] ?? [],
-                                    me: store.stats?.account_email,
+                                    me: store.accountEmail,
                                     // The message before this one IN THE THREAD,
                                     // which is the order this stack is already in
                                     // (oldest first). The first message has none,
                                     // and gets no marks: "everyone here is new"
                                     // is a claim, and nothing precedes it.
                                     previousRecipients: i > 0
-                                        ? messages[i - 1].audience : nil
+                                        ? messages[i - 1].audience : nil,
+                                    showingOriginal: originals.contains(m.id),
+                                    translationStalled: translationStalled(m),
+                                    onToggleOriginal: {
+                                        if originals.remove(m.id) == nil { originals.insert(m.id) }
+                                    }
                                 ) {
                                     index = i
                                 }
@@ -1181,7 +1314,7 @@ struct ThreadViewer: View {
                     // has a whole set of heights to take under the new style's
                     // keys, and a rail that is wrong for a second reads as a
                     // rail that jumps.
-                    marks = Self.marks(for: messages, style: style)
+                    marks = Self.marks(for: messages, style: style, originals: originals)
                     guard landed else { return }
                     let target = anchorId.flatMap { id in messages.firstIndex { $0.id == id } } ?? index
                     settle(
@@ -1198,7 +1331,7 @@ struct ThreadViewer: View {
                 // which restarts on the density, hands it measurements again.
                 .onChange(of: prefs.density) { _, _ in
                     ReaderMetrics.sync()
-                    marks = Self.marks(for: messages, style: style)
+                    marks = Self.marks(for: messages, style: style, originals: originals)
                     guard landed else { return }
                     let target = anchorId.flatMap { id in messages.firstIndex { $0.id == id } } ?? index
                     settle(
@@ -1389,8 +1522,9 @@ struct ThreadViewer: View {
     /// often as the answer changes.
     ///
     /// MORE ABOVE THAN BELOW, and above first: the reader opens at the end of
-    /// the thread, so up is the way nearly every scroll goes. Five in all,
-    /// inside the six the pool keeps for mail that has been read.
+    /// the thread, so up is the way nearly every scroll goes. Five in all;
+    /// the prewarmer takes as many as the pool keeps room for
+    /// (`WebFramePool.aheadBudget`: all five on the Mac, two on the phone).
     ///
     /// Only mail the pool may hold at all (`cache_allowed`), and only what is
     /// not already drawn. "Drawn" is judged within a few windows of here: the
@@ -1444,8 +1578,11 @@ struct ThreadViewer: View {
     /// anything at all invalidated the reader — a row crossing the visibility
     /// threshold, which happens repeatedly while you scroll. The messages are
     /// the only input, and they only change when a fetch replaces them.
+    ///
+    /// Of each message AS SHOWN: `originals` names the ones flipped back to
+    /// the sender's language, which are a different length from the English.
     private static func marks(
-        for messages: [ClientMessage], style: ThreadStyle
+        for messages: [ClientMessage], style: ThreadStyle, originals: Set<Int>
     ) -> [ThreadMinimap.Mark] {
         // ALL MEASURED OR NONE, and that is not fussiness. A map drawn half
         // from measurements and half from guesses redraws itself as each
@@ -1453,13 +1590,16 @@ struct ThreadViewer: View {
         // measuring pass fills the whole set and says so once, so the rail
         // changes scale exactly once per thread — and on the next open there is
         // nothing left to change.
-        let sizes = messages.map { measuredCard($0, style: style) }
+        let sizes = messages.map {
+            measuredCard($0, style: style, original: originals.contains($0.id))
+        }
         let complete = sizes.allSatisfy { $0 != nil }
         return messages.enumerated().map { i, m in
             ThreadMinimap.Mark(
                 attention: m.needsAttention,
                 tint: Palette.avatarColors(for: m.senderString).fg,
-                estimate: (complete ? sizes[i] : nil) ?? mapEstimate(m, style: style))
+                estimate: (complete ? sizes[i] : nil)
+                    ?? mapEstimate(m, style: style, original: originals.contains(m.id)))
         }
     }
 
@@ -1472,20 +1612,23 @@ struct ThreadViewer: View {
     /// of text in a message that is nothing but lines of text. Holding the
     /// whole rail hostage to a body no engine will ever be asked to lay out
     /// would mean a thread with one plain reply never gets a true map at all.
-    private static func measuredCard(_ m: ClientMessage, style: ThreadStyle) -> CGFloat? {
-        guard let html = m.html, !html.isEmpty else {
+    private static func measuredCard(
+        _ m: ClientMessage, style: ThreadStyle, original: Bool
+    ) -> CGFloat? {
+        guard let html = m.presented(original: original).html, !html.isEmpty else {
             // Its own guess, not `mapEstimate`: this card draws with its quoted
             // history collapsed behind a chip, exactly as the html ones do, and
             // the rail must not draw it at the length of the chain it is
             // answering.
             return MinimapGeometry.card(
-                bodyHeight: MessageCard.guessedBody(m, style: style),
+                bodyHeight: MessageCard.guessedBody(m, style: style, original: original),
                 attachments: m.attachmentList.count, style: style, scale: .current)
         }
         // Under the STYLE's own key: the same message has one measurement per
         // measure it was laid out at, and a card's height on a bubble rail is
         // the wrong length of nub.
-        guard let body = FrameHeights.shared.get(style.frameKey(m.id)) else { return nil }
+        guard let body = FrameHeights.shared.get(style.frameKey(for: m, original: original))
+        else { return nil }
         return MinimapGeometry.card(
             bodyHeight: body, attachments: m.attachmentList.count, style: style, scale: .current)
     }
@@ -1497,8 +1640,11 @@ struct ThreadViewer: View {
     /// ones redraws itself as the measurements land, which is a rail that crawls
     /// while you read it. A map that is uniformly approximate holds still, and
     /// holding still is the whole job.
-    private static func mapEstimate(_ m: ClientMessage, style: ThreadStyle) -> CGFloat {
-        MinimapGeometry.estimate(
+    private static func mapEstimate(
+        _ m: ClientMessage, style: ThreadStyle, original: Bool
+    ) -> CGFloat {
+        let m = m.presented(original: original)
+        return MinimapGeometry.estimate(
             text: m.content, html: m.html, attachments: m.attachmentList.count, style: style,
             scale: .current)
     }
@@ -1631,7 +1777,7 @@ struct ThreadViewer: View {
 
             Text(
                 down
-                    ? "This email is already on your machine — the daemon that serves it isn't answering. Is squelchd running? Retrying every 10 seconds."
+                    ? "This email is already on your machine — the daemon that serves it isn't answering. Is squelchd running? Retrying automatically."
                     : (error ?? "The server didn't return this thread.")
             )
             .font(Typo.ui(13))
@@ -1641,7 +1787,7 @@ struct ThreadViewer: View {
 
             HStack(spacing: Space.s10) {
                 Button {
-                    Task { await load() }
+                    attempt &+= 1
                 } label: {
                     Label("try again", systemImage: "arrow.clockwise")
                         .font(Typo.ui(12, weight: .medium))
@@ -1903,7 +2049,7 @@ struct ThreadViewer: View {
 
     /// What the find reads for a message nothing has mounted: its text.
     private var findCorpus: [(id: Int, text: String)] {
-        messages.map { (id: $0.id, text: $0.content) }
+        messages.map { (id: $0.id, text: $0.presented(original: originals.contains($0.id)).content) }
     }
 
     /// ⌘F. Again with the bar already up puts the caret back in it.
@@ -1988,9 +2134,7 @@ struct ThreadViewer: View {
     /// chat), asked of the store rather than of a view's environment so the
     /// initializer and the pre-renderer can ask too.
     static func isReadingMail(_ threadId: String, _ store: AppStore) -> Bool {
-        store.readingMail || store.zones.reading.contains { sender in
-            sender.items.contains { $0.thread_id == threadId }
-        }
+        store.readingMail || store.readingThreadIds.contains(threadId)
     }
 
     /// A message reduced to what the guess asks about. The fresh length is the
@@ -2055,8 +2199,9 @@ struct ThreadViewer: View {
     /// reopening this thread would serve a version with the reply missing.
     private func reloadAfterSend() async {
         let epoch = store.epoch
+        let ticket = refreshes.issue()
         guard let view = try? await APIClient.shared.getThread(threadId) else { return }
-        guard store.isCurrent(epoch), !Task.isCancelled else { return }
+        guard store.isCurrent(epoch), !Task.isCancelled, refreshes.accept(ticket) else { return }
         ThreadPrefetch.shared.note(threadId, view)
         adopt(view)
         // The echo is a new message id, so the receipt map has nothing for it
@@ -2082,8 +2227,20 @@ struct ThreadViewer: View {
     private func refreshInPlace() async {
         guard thread != nil else { return }
         let epoch = store.epoch
+        // In line with every other in-place refetch: an older answer landing
+        // after a newer one would put the older thread back (see
+        // RefreshSequence).
+        let ticket = refreshes.issue()
         guard let view = try? await APIClient.shared.getThread(threadId) else { return }
-        guard store.isCurrent(epoch), !Task.isCancelled else { return }
+        guard store.isCurrent(epoch), !Task.isCancelled, refreshes.accept(ticket) else { return }
+        await takeInPlace(view, arrival: true)
+    }
+
+    /// Adopt a refetched copy of the thread on screen without moving the
+    /// person reading it: `refreshInPlace`'s arrival, or `revalidate`'s
+    /// change. Only an arrival is counted as one, and fetches the receipts
+    /// itself; a check runs before the opening's receipts fetch.
+    private func takeInPlace(_ view: ClientThreadView, arrival: Bool) async {
         // Anchor AFTER the await: a reader who moved while the fetch was in
         // flight is anchored where they are now, not where they were.
         let anchor = anchorId
@@ -2110,10 +2267,39 @@ struct ThreadViewer: View {
         // Only when something actually arrived: a token bump whose refetch
         // brought nothing (the daemon had not stored the message yet) is not a
         // reading experience anybody had.
-        if gained > 0 {
+        if arrival, gained > 0 {
             Analytics.capture("thread_live_arrival", ["followed": held == nil])
         }
-        await refreshOpens()
+        if arrival { await refreshOpens() }
+    }
+
+    /// THE TRANSLATION POLL'S REFETCH, which must not move anybody. Nothing has
+    /// arrived, the reader may be halfway down an older message, and going
+    /// through `adopt` would reset the selection and re-aim the scroll at a
+    /// card's top four times in a minute. So only the `translation` on each
+    /// message is laid over the thread already on screen: the index, the
+    /// anchor and the scroll are never touched, and a card whose English landed
+    /// redraws in place. The cache takes the whole answer, so a reopen reads
+    /// the newest.
+    ///
+    /// A refetch that DOES carry another message is an arrival the live poll
+    /// has not delivered yet, and goes the way an arrival goes.
+    private func refreshTranslations() async {
+        guard thread != nil else { return }
+        let epoch = store.epoch
+        let ticket = refreshes.issue()
+        guard let view = try? await APIClient.shared.getThread(threadId) else { return }
+        guard store.isCurrent(epoch), !Task.isCancelled, refreshes.accept(ticket),
+            let current = thread
+        else { return }
+        guard current.sameMessages(as: view) else {
+            await takeInPlace(view, arrival: true)
+            return
+        }
+        ThreadPrefetch.shared.note(threadId, view)
+        guard let merged = current.mergingTranslations(from: view) else { return }
+        thread = merged
+        marks = Self.marks(for: merged.messages, style: style, originals: originals)
     }
 
     /// The message the reader is actually ON, whether they got there with the
@@ -2765,7 +2951,10 @@ struct ThreadViewer: View {
 
     // MARK: - data
 
-    private func load() async {
+    /// True when what it painted was a prefetched copy past the default
+    /// minute, which the caller then checks with the daemon (`revalidate`).
+    @discardableResult
+    private func load() async -> Bool {
         let epoch = store.epoch
         // A fresh thread mounts fresh rows; where the LAST one's cards were
         // must not anchor this one, and its shape must not be what the minimap
@@ -2794,15 +2983,24 @@ struct ThreadViewer: View {
             adopt(direct, opening: true)
             error = nil
             loading = false
-            return
+            return false
         }
-        // Fresh prefetch hit → render it and skip the round-trip entirely (the
-        // cache is at most 60s old; e/d/refresh paths repopulate it).
-        if let cached = ThreadPrefetch.shared.cached(threadId) {
+        // Fresh prefetch hit → render it and skip the round-trip (a copy is
+        // served only inside its lifetime, a minute by default and five for a
+        // warmed thread, and is dropped once a row names a message it lacks;
+        // e/d/refresh paths repopulate it). One past the minute is checked
+        // with the daemon once it is on screen.
+        // A copy that lacks the message this open names (the reply it was
+        // opened to write, the notification's message) is behind on exactly
+        // the thing asked for, so the open goes to the daemon instead.
+        if let cached = ThreadPrefetch.shared.cached(
+            threadId,
+            holding: [store.pendingReplyMessageId, store.focusedMessageId].compactMap { $0 })
+        {
             adopt(cached, opening: true)
             error = nil
             loading = false
-            return
+            return ThreadPrefetch.shared.isAged(threadId)
         }
         loading = true
         error = nil
@@ -2810,14 +3008,117 @@ struct ThreadViewer: View {
             let view = try await APIClient.shared.getThread(threadId)
             // Account switches clear the shared cache. A request that started
             // before that clear must never repopulate it under the new account.
-            guard store.isCurrent(epoch), !Task.isCancelled else { return }
+            guard store.isCurrent(epoch), !Task.isCancelled else { return false }
             ThreadPrefetch.shared.note(threadId, view)  // instant reopen
             adopt(view, opening: true)
         } catch {
-            guard store.isCurrent(epoch), !Task.isCancelled else { return }
+            guard store.isCurrent(epoch), !Task.isCancelled else { return false }
             self.error = errText(error, "thread load failed")
         }
         loading = false
+        return false
+    }
+
+    /// The open painted a prefetched copy past the default minute, which can
+    /// be behind on anything no row named: a quiet reply, the account's own
+    /// mail sent elsewhere, a status changed by a reminder or an unsubscribe.
+    /// Ask for the current thread and take it in place, as an arrival is
+    /// taken, only if it differs, so an unchanged thread is not redrawn.
+    ///
+    /// An answer is dropped if anything was adopted while it was out: that
+    /// was an arrival or the post-send reload, newer than this. A thread the
+    /// daemon no longer serves says so, as a cold open would have.
+    private func revalidate() async {
+        let epoch = store.epoch
+        let shown = adoptions
+        let view: ClientThreadView
+        do {
+            view = try await APIClient.shared.getThread(threadId)
+        } catch let failure as APIError where failure.kind == .notFound {
+            guard store.isCurrent(epoch), !Task.isCancelled else { return }
+            // As a cold open's 404 leaves it: no thread, nothing for the
+            // verbs or the ask bar to act on.
+            ThreadPrefetch.shared.drop(threadId)
+            // A reply the hand-off opened against the copy goes too.
+            if let to = store.inlineReply?.replyToMessageId, messages.contains(where: { $0.id == to }) {
+                store.closeInlineReply()
+            }
+            thread = nil
+            if store.openThreadSummary?.threadId == threadId { store.openThreadSummary = nil }
+            self.error = errText(failure, "thread load failed")
+            return
+        } catch {
+            // Offline, or the daemon is struggling: the copy on screen stands.
+            return
+        }
+        guard store.isCurrent(epoch), !Task.isCancelled, thread != nil, adoptions == shown
+        else { return }
+        guard view != thread else {
+            ThreadPrefetch.shared.note(threadId, view)
+            return
+        }
+        let held = messages.map(\.id)
+        if landed {
+            await takeInPlace(view, arrival: false)
+        } else {
+            // Not landed yet: the selection is still the open's own (the
+            // newest, or the message it was opened on), and where the initial
+            // anchor dropped the scroll is nobody's position, so `takeInPlace`'s
+            // anchor would pin an older card and the landing would never come.
+            // Keep the selection by id; the newest stays the newest, the
+            // current copy's, and the landing proceeds as an open's does.
+            let selected = index == newestIndex ? nil : messages[safe: index]?.id
+            ThreadPrefetch.shared.note(threadId, view)
+            adopt(view)
+            if let selected, let at = messages.firstIndex(where: { $0.id == selected }) {
+                index = at
+            }
+        }
+        // Mail the check brought: its receipts too, which the opening's
+        // receipts fetch ran before it.
+        if messages.map(\.id) != held { await refreshOpens() }
+    }
+
+    /// ARCHIVE MAIL IN ANOTHER LANGUAGE is translated only when somebody is
+    /// looking at it: the daemon serves its translation as `deferred` and buys
+    /// nothing on a read, because `ThreadPrefetch` reads threads nobody opened
+    /// (search results, hovers, the sitrep's preload) through the same GET.
+    /// This reader is the one party that knows the thread is on screen, so it
+    /// asks, once per open, and only here. It runs off the loaded thread
+    /// whichever way it arrived, cache included: a warmed thread opens without
+    /// a request, and that is exactly the one the daemon would never hear of.
+    ///
+    /// The translation poll above then refetches until the English lands
+    /// (deferred and pending both count as on the way). A failed ask is tried
+    /// once more after a moment; failing again, it is left alone: nothing was
+    /// requested, so nothing is polled for, the strip stops saying it is
+    /// translating, and the next open asks again.
+    private func requestDeferredTranslations() async {
+        guard messages.contains(where: { $0.translation?.status == .deferred }) else { return }
+        let epoch = store.epoch
+        let id = threadId
+        var asked = false
+        for attempt in 0..<2 {
+            if attempt > 0 {
+                try? await Task.sleep(for: .seconds(2))
+                guard store.isCurrent(epoch), !Task.isCancelled else { return }
+            }
+            do {
+                try await APIClient.shared.translateThread(id)
+                asked = true
+                break
+            } catch {
+                continue
+            }
+        }
+        guard store.isCurrent(epoch), !Task.isCancelled else { return }
+        guard asked else {
+            translationUnasked = true
+            return
+        }
+        // The cached copy still says `deferred`; this refetch replaces it with
+        // `pending`, so a reopen in the next minute does not read stale.
+        await refreshTranslations()
     }
 
     /// Take a loaded thread and derive its reader state. `opening` is true only
@@ -2828,6 +3129,7 @@ struct ThreadViewer: View {
     /// that moved the paragraph somebody was on.
     private func adopt(_ view: ClientThreadView, opening: Bool = false) {
         thread = view
+        adoptions &+= 1
         // THE STYLE FIRST: the rail below is drawn to its measure, so a mark
         // taken before the thread has chosen one is drawn for the wrong one.
         if opening {
@@ -2836,7 +3138,7 @@ struct ThreadViewer: View {
         }
         // And the one place the messages change is the one place the rail is
         // drawn.
-        marks = Self.marks(for: view.messages, style: style)
+        marks = Self.marks(for: view.messages, style: style, originals: originals)
         // LAND ON THE NEWEST. It is last in the stack now, and `tailSpace` is
         // what lets the scroll put it at the top of the window rather than the
         // bottom.
@@ -3227,7 +3529,8 @@ extension View {
                             selected: false, ruled: false, opens: [],
                             // A glimpse of the NEXT thread: no "you" rewrite and
                             // no diff against a message it is not beside.
-                            me: nil, previousRecipients: nil, onSelect: {})
+                            me: nil, previousRecipients: nil, showingOriginal: false,
+                            translationStalled: false, onToggleOriginal: {}, onSelect: {})
                     } else {
                         MessageSenderHeading(sender: row.senderString)
                             .padding(.leading, MessageCard.bodyInset)
@@ -3330,6 +3633,16 @@ private struct MessageCard: View, Equatable {
     /// first message of a thread and on any predecessor whose headers were never
     /// read — see `MessageRecipients`.
     nonisolated let previousRecipients: MessageAudience?
+    /// The reader asked for this message in its own language rather than the
+    /// translation. Meaningless on a message with no ready translation.
+    nonisolated let showingOriginal: Bool
+    /// The reader stopped waiting for this one's translation: its strip says
+    /// so instead of "translating".
+    nonisolated let translationStalled: Bool
+    let onToggleOriginal: () -> Void
+    /// The reader's memory of what was opened up in each body. A reference
+    /// that never changes for a reader's life, so it is no part of `==`.
+    @Environment(\.bodyDisclosures) private var disclosures
     let onSelect: () -> Void
 
     /// The gutter the rules live in, which every body is inset by. Named
@@ -3345,6 +3658,7 @@ private struct MessageCard: View, Equatable {
         a.message == b.message && a.style == b.style && a.position == b.position
             && a.selected == b.selected && a.ruled == b.ruled && a.opens == b.opens
             && a.me == b.me && a.previousRecipients == b.previousRecipients
+            && a.showingOriginal == b.showingOriginal && a.translationStalled == b.translationStalled
     }
 
     /// Which side of the conversation this is. Only the chat style asks.
@@ -3365,6 +3679,15 @@ private struct MessageCard: View, Equatable {
         // keeping.
         VStack(alignment: chat ? side : .leading, spacing: chat ? Space.scaled(5) : Space.scaled(9)) {
             if chat { caption } else { cardHeader }
+            // Its own slot, ahead of the body and always in the tuple, so the
+            // body's position never moves when a translation lands or flips.
+            TranslationStrip(
+                translation: message.translation, showingOriginal: showingOriginal,
+                stalled: translationStalled, onToggle: onToggleOriginal)
+                // Above the body, so on the phone the flip's touch band (which
+                // reaches past the strip's own line) wins the few points it
+                // overlaps the document's top padding.
+                .zIndex(1)
             mail
             AttachmentStrip(attachments: message.attachmentList, inBody: inBodyImages)
         }
@@ -3431,10 +3754,16 @@ private struct MessageCard: View, Equatable {
     /// bubble fits fewer characters on a line than a card does, so the guess is
     /// a different number for the same words. Read from a view body, and the
     /// split is a regex walk of every line of the message.
-    static func guessedBody(_ message: ClientMessage, style: ThreadStyle) -> CGFloat {
-        FrameHeights.shared.guess(style.frameKey(message.id)) {
+    ///
+    /// Of the version being SHOWN, under that version's key: a translation is
+    /// a different length from the original.
+    static func guessedBody(
+        _ message: ClientMessage, style: ThreadStyle, original: Bool = false
+    ) -> CGFloat {
+        let shown = message.presented(original: original)
+        return FrameHeights.shared.guess(style.frameKey(for: message, original: original)) {
             MinimapGeometry.textHeight(
-                text: Quotes.splitText(message.content).visible, html: message.html, style: style,
+                text: Quotes.splitText(shown.content).visible, html: shown.html, style: style,
                 scale: .current)
         }
     }
@@ -3575,20 +3904,35 @@ private struct MessageCard: View, Equatable {
     /// conditional, and a flip would collapse the quoted history the reader
     /// opened. The bubble's chrome is values on that one view — zero padding
     /// and a clear fill ARE the card.
+    ///
+    /// IN TRANSLATION by default, when the daemon has one ready
+    /// (ClientMessage.presented). The two versions are two documents under two
+    /// keys, and `.id` on WHICH VERSION is what makes a language flip a fresh
+    /// frame: the web view prepares its body once, at init, so the same view
+    /// handed the other version's html would go on drawing the first. The id
+    /// is the version and NOT the whole key, which also carries the style: a
+    /// style flip must keep the frame's state (see `body`).
     @ViewBuilder
     private var mail: some View {
-        if let html = message.html, !html.isEmpty {
+        let shown = message.presented(original: showingOriginal)
+        let key = style.frameKey(for: message, original: showingOriginal)
+        let translated = !showingOriginal && message.readyTranslation != nil
+        if let html = shown.html, !html.isEmpty {
             EmailWebView(
-                html: html, cacheKey: style.frameKey(message.id),
+                html: html, cacheKey: key,
                 allowTrackers: message.allowsTrackers,
                 attachments: message.attachmentList,
-                textHeight: Self.guessedBody(message, style: style),
-                bubble: chat, mine: mine, findID: message.id,
+                textHeight: Self.guessedBody(message, style: style, original: showingOriginal),
+                bubble: chat, mine: mine, findID: message.id, disclosures: disclosures,
                 // Received mail only: a click in the user's own sent message
                 // says nothing about a sender.
                 attentionMessageId: mine ? nil : message.id)
+            .id(translated)
         } else {
-            PlainBody(content: message.content, fills: !chat, findID: message.id)
+            PlainBody(
+                content: shown.content, fills: !chat, findID: message.id,
+                disclosures: disclosures)
+                .id(translated)
                 .padding(.horizontal, chat ? Space.s12 : 0)
                 .padding(.vertical, chat ? Space.scaled(9) : 0)
                 // The same corner the web frame clips itself to, so a plain
@@ -3636,7 +3980,10 @@ private struct MessageCard: View, Equatable {
     /// and counting it here would take the tile away from a photo nothing draws.
     /// Only a body that actually names a cid pays for the extra pass.
     private var inBodyImages: Set<Int> {
-        guard let html = message.html, !html.isEmpty else { return [] }
+        // The body being SHOWN: a translation keeps the original's markup, cid
+        // references and all, but it is the one on screen.
+        guard let html = message.presented(original: showingOriginal).html, !html.isEmpty
+        else { return [] }
         return InBodyImages.shared.ids(
             messageId: message.id, html: html, allowTrackers: message.allowsTrackers,
             attachments: message.attachmentList)
@@ -3832,7 +4179,18 @@ struct PlainBody: View {
     var fills = true
     /// The message this body is, for the reader's find. nil outside the reader.
     var findID: Int?
-    @State private var open = false
+    /// Whether the reader unfolded this message's quoted history, kept across a
+    /// rebuild (the "show original" flip). Keyed by `findID`.
+    var disclosures: BodyDisclosures?
+    @State private var open: Bool
+
+    init(content: String, fills: Bool = true, findID: Int? = nil, disclosures: BodyDisclosures? = nil) {
+        self.content = content
+        self.fills = fills
+        self.findID = findID
+        self.disclosures = disclosures
+        _open = State(initialValue: disclosures?.quotesOpen(findID) ?? false)
+    }
     @Environment(ReaderFind.self) private var find: ReaderFind?
 
     /// What the reader's find has for this body: the term's matches in the
@@ -3873,6 +4231,25 @@ struct PlainBody: View {
         return Text(out)
     }
 
+    /// The text itself, selectable on both platforms. The Mac's `Text` selects
+    /// for real; a phone's only copies the whole block on a long press, so the
+    /// phone draws a read-only UITextView instead (SelectableTextiOS, #522).
+    @ViewBuilder
+    private func lines(
+        _ text: String, _ hits: [Range<String.Index>], active: Int?, size: CGFloat, color: Color
+    ) -> some View {
+        #if os(iOS)
+            SelectableText(
+                text: text, hits: hits, active: active, size: Typo.size(size), color: color,
+                fills: fills)
+        #else
+            painted(text, hits, active: active)
+                .font(Typo.ui(size))
+                .foregroundStyle(color)
+                .textSelection(.enabled)
+        #endif
+    }
+
     /// The scroll target for the active match. Plain text has no document to
     /// ask where a range is drawn, so the match is placed by how far through
     /// the text it starts: off by a line or two in mail with uneven
@@ -3896,10 +4273,10 @@ struct PlainBody: View {
         let shown = split.quoted == nil ? content : split.visible
         let found = search(shown: shown, quoted: split.quoted)
         VStack(alignment: .leading, spacing: Space.s8) {
-            painted(shown, found?.visible ?? [], active: found?.active)
-                .font(Typo.ui(ReaderMetrics.plainBase))
-                .foregroundStyle(Palette.ink)
-                .textSelection(.enabled)
+            lines(
+                shown, found?.visible ?? [], active: found?.active,
+                size: ReaderMetrics.plainBase, color: Palette.ink
+            )
                 .frame(maxWidth: fills ? .infinity : nil, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .overlay(alignment: .topLeading) {
@@ -3908,6 +4285,7 @@ struct PlainBody: View {
             if let quoted = split.quoted {
                 Button {
                     open.toggle()
+                    disclosures?.setQuotesOpen(open, findID)
                 } label: {
                     Text(open ? "hide quoted history" : "··· show quoted history")
                         .font(Typo.micro)
@@ -3922,10 +4300,7 @@ struct PlainBody: View {
                     // The cursor counts through the reply first, then the
                     // history under it, which is the order they are read in.
                     let active = found?.active.map { $0 - (found?.visible.count ?? 0) }
-                    painted(quoted, found?.quoted ?? [], active: active)
-                        .font(Typo.ui(13))
-                        .foregroundStyle(Palette.inkFaint)
-                        .textSelection(.enabled)
+                    lines(quoted, found?.quoted ?? [], active: active, size: 13, color: Palette.inkFaint)
                         .padding(.leading, Space.s10)
                         .overlay(alignment: .leading) {
                             Rectangle().fill(Palette.hairline).frame(width: 2)
@@ -4037,9 +4412,7 @@ private struct StackDoneHold: View {
         return onward ? what + ", then the next sender" : what
     }
 
-    private var seconds: Double {
-        Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
-    }
+    private var seconds: Double { duration.timeInterval }
 
     var body: some View {
         ZStack {
@@ -4047,7 +4420,12 @@ private struct StackDoneHold: View {
                 .fill(.black.opacity(0.14))
                 .ignoresSafeArea()
             VStack(spacing: Space.s14) {
-                TimelineView(.animation) { ctx in
+                // Sixty a second, not the display's hundred and twenty: a ring
+                // filling over a second or so loses nothing at sixty, and the
+                // hold is exactly when the walk is about to need the frames.
+                // Just under a sixtieth, so a frame that lands a hair early is
+                // not skipped for the one after it.
+                TimelineView(.animation(minimumInterval: 1.0 / 64, paused: pinned != nil)) { ctx in
                     let p = pinned ?? min(1, max(0, ctx.date.timeIntervalSince(startedAt) / seconds))
                     ZStack {
                         Circle()

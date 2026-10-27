@@ -125,7 +125,7 @@ fallbacks and log a one-line deprecation note to stderr — migrate off them.
 | `SQUELCH_API_HTTP` | no | `127.0.0.1:8849` | Standalone `squelch-api` dev bin bind address. |
 | `SQUELCH_METRICS_BIND` | no | — | Opens a SECOND listener carrying exactly `GET /metrics` (Prometheus text) and `GET /healthz` (`200` once sync is running and embedder init has settled, `503` before). Both are plaintext and unauthenticated by design, so bind it to loopback or a private interface — never a public one. Unset, no such port is opened. |
 | `SQUELCH_MCP_HTTP` | no | — | Standalone `squelch-mcp` bin: set to switch from stdio to HTTP (address or empty for the loopback default). |
-| `SQUELCH_CRED_BACKEND` | no | `keyring` (macOS) / `file` (Linux) | `keyring` or `file`. |
+| `SQUELCH_CRED_BACKEND` | no | `keyring` (macOS) / `file` (elsewhere) | `keyring` (the macOS keychain, built on macOS only; refused elsewhere) or `file`. |
 | `SQUELCH_CREDENTIALS_PATH` | no | `~/.config/squelch/credentials.json` | Used only by the `file` backend. |
 | `SQUELCH_CLIENT_ID` / `SQUELCH_CLIENT_SECRET` | yes (OAuth) | — | Your GCP "Desktop app" OAuth client. |
 | `SQUELCH_RELAY_URL` | no | — | Base URL of your `squelch-relay`. Setting it is what SPAWNS the APNs pusher; unset, the daemon never talks to any relay. The read-tracking opens poller needs `SQUELCH_TRACK_URL` as well: with a relay and no tracking URL, the daemon pushes but never drains the relay's opens buffer (see `docs/TRACKING.md`). |

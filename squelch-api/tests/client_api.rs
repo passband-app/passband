@@ -18,6 +18,37 @@ use common::{
     Harness, TOKEN, authed, authed_json, body_json, calendar_on, harness, msg, sent_msg, state_with,
 };
 
+/// The mail list exactly as `/client/updates` reads it (`human_agent_updates`),
+/// with the same filters the handler passes. What these tests mean by "what the
+/// client sees".
+#[allow(clippy::too_many_arguments)] // the handler's filters, one per axis
+fn mail_list(
+    store: &SqliteStore,
+    acct: squelch_core::types::AccountId,
+    since: chrono::DateTime<chrono::Utc>,
+    min_importance: Option<u8>,
+    status: Option<squelch_core::types::AttentionStatus>,
+    band: Option<squelch_core::store::SitrepBand>,
+    pending_reminders: bool,
+    spam: SpamScope,
+) -> squelch_core::error::Result<Vec<squelch_core::types::AttentionUpdate>> {
+    use squelch_core::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+    store.human_agent_updates(
+        acct,
+        &AgentInventoryQuery {
+            since,
+            min_importance,
+            status,
+            band,
+            pending_reminders,
+            spam,
+            ranking: Default::default(),
+            before: None,
+            limit: None,
+        },
+    )
+}
+
 #[tokio::test]
 async fn missing_token_is_401() {
     let Harness { app, .. } = harness(|_, _| {});
@@ -4117,17 +4148,17 @@ async fn updates_stamp_once_and_carry_prestamp_surfaced_at() {
     assert_eq!(items[0]["status"], "new", "pre-stamp status is new");
 
     // Stamped as a side effect of the fetch.
-    let after = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let after = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     let first_stamp = after[0].surfaced_at.expect("surfaced_at now set");
     assert_eq!(after[0].status, AttentionStatus::Open);
 
@@ -4135,17 +4166,17 @@ async fn updates_stamp_once_and_carry_prestamp_surfaced_at() {
     let resp2 = app.oneshot(authed("GET", "/client/updates")).await.unwrap();
     let json2 = body_json(resp2).await;
     assert!(!json2["items"][0]["surfaced_at"].is_null());
-    let after2 = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let after2 = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(
         after2[0].surfaced_at,
         Some(first_stamp),
@@ -4171,9 +4202,17 @@ async fn peek_returns_the_same_rows_without_stamping_the_ledger() {
     assert_eq!(json["items"].as_array().unwrap().len(), 2);
 
     // ...and the ledger is untouched: nothing was actually shown to anyone.
-    let after_peek = store
-        .attention_updates(acct, window(), None, None, None, false, SpamScope::Exclude)
-        .unwrap();
+    let after_peek = mail_list(
+        &store,
+        acct,
+        window(),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(after_peek.len(), 2);
     for u in &after_peek {
         assert!(u.surfaced_at.is_none(), "peek must not stamp surfaced_at");
@@ -4188,9 +4227,17 @@ async fn peek_returns_the_same_rows_without_stamping_the_ledger() {
     // and not a broken fixture.
     let resp2 = app.oneshot(authed("GET", "/client/updates")).await.unwrap();
     assert_eq!(resp2.status(), StatusCode::OK);
-    let after_normal = store
-        .attention_updates(acct, window(), None, None, None, false, SpamScope::Exclude)
-        .unwrap();
+    let after_normal = mail_list(
+        &store,
+        acct,
+        window(),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     for u in &after_normal {
         assert!(u.surfaced_at.is_some(), "normal fetch stamps surfaced_at");
         assert_eq!(u.status, AttentionStatus::Open);
@@ -4341,17 +4388,17 @@ async fn dismiss_and_reopen_endpoint() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(done.len(), 1);
     assert!(done[0].resolved_at.is_some());
 
@@ -4453,17 +4500,17 @@ async fn reminder_endpoint_defers_the_thread_and_schedules_its_return() {
 
     // DEFERRING IS RESOLVING: one round trip both hides the mail and schedules
     // it, and the listing carries the pending stamp back.
-    let rows = store
-        .attention_updates(
-            acct,
-            reminder_window(),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let rows = mail_list(
+        &store,
+        acct,
+        reminder_window(),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(rows[0].status, AttentionStatus::Done);
     assert!(rows[0].resolved_at.is_some());
     assert_eq!(rows[0].remind_at.unwrap().timestamp(), due.timestamp());
@@ -4500,18 +4547,18 @@ async fn reminder_rejects_a_past_or_unparseable_date() {
     }
     // And nothing was scheduled.
     assert!(
-        store
-            .attention_updates(
-                acct,
-                reminder_window(),
-                None,
-                None,
-                None,
-                true,
-                SpamScope::Exclude
-            )
-            .unwrap()
-            .is_empty()
+        mail_list(
+            &store,
+            acct,
+            reminder_window(),
+            None,
+            None,
+            None,
+            true,
+            SpamScope::Exclude
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 
@@ -4612,18 +4659,18 @@ async fn reminder_on_the_users_own_sent_mail_is_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert!(
-        store
-            .attention_updates(
-                acct,
-                reminder_window(),
-                None,
-                None,
-                None,
-                true,
-                SpamScope::Exclude
-            )
-            .unwrap()
-            .is_empty(),
+        mail_list(
+            &store,
+            acct,
+            reminder_window(),
+            None,
+            None,
+            None,
+            true,
+            SpamScope::Exclude
+        )
+        .unwrap()
+        .is_empty(),
         "nothing was scheduled"
     );
 }
@@ -4735,17 +4782,17 @@ async fn clear_reminder_endpoint_is_idempotent() {
         assert_eq!(body["cleared"], true);
     }
 
-    let rows = store
-        .attention_updates(
-            acct,
-            reminder_window(),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let rows = mail_list(
+        &store,
+        acct,
+        reminder_window(),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(rows[0].remind_at.is_none(), "un-scheduled");
     assert_eq!(
         rows[0].status,
@@ -4805,17 +4852,17 @@ async fn pending_reminder_listing_is_soonest_first_and_never_stamps() {
 
     // AND IT NEVER STAMPS: these are deferred rows the user is reviewing the
     // schedule of, not mail being shown to them.
-    let rows = store
-        .attention_updates(
-            acct,
-            reminder_window(),
-            None,
-            None,
-            None,
-            true,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let rows = mail_list(
+        &store,
+        acct,
+        reminder_window(),
+        None,
+        None,
+        None,
+        true,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         rows.iter().all(|u| u.surfaced_at.is_none()),
         "the schedule read leaves the seen-ledger alone"
@@ -4849,17 +4896,17 @@ async fn archive_success_resolves_target_to_done() {
     let _ = handle.await.unwrap();
 
     // RESOLUTION: the target row is now done + resolved_at set.
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].update.id, message_id);
     assert!(done[0].resolved_at.is_some());
@@ -5361,17 +5408,17 @@ async fn an_inferred_squelch_never_resolves_the_senders_open_mail() {
         squelch_core::types::Disposition::Squelch
     );
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         !done.iter().any(|u| u.update.id == spam_id),
         "an INFERRED squelch resolves nothing, sweep or no sweep"
@@ -5424,17 +5471,17 @@ async fn a_literal_auto_squelch_is_inferred_and_never_resolves_open_mail() {
         squelch_core::types::Disposition::Squelch
     );
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         !done.iter().any(|u| u.update.id == spam_id),
         "an \"auto\" squelch is an inferred squelch: it resolves nothing"
@@ -6139,17 +6186,17 @@ async fn unsubscribe_resolves_the_source_email_to_done() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         done.iter().any(|u| u.update.id == mid),
         "unsubscribed email is done"
@@ -6217,17 +6264,17 @@ async fn squelch_rule_with_source_message_resolves_it_surface_does_not() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         done.iter().any(|u| u.update.id == spam_id),
         "squelch-rule source is done"
@@ -6278,17 +6325,17 @@ async fn an_explicit_squelch_without_sweep_resolves_nothing() {
         "the rule is still a squelch"
     );
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         !done.iter().any(|u| u.update.id == spam_id),
         "no sweep was asked for, so the sender's open mail stays open"
@@ -6401,17 +6448,17 @@ async fn sweep_resolves_by_sender_and_a_wildcard_resolves_only_the_source() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     let is_done = |id: i64| done.iter().any(|u| u.update.id == id);
     assert!(
         is_done(spam_a) && is_done(spam_b),
@@ -8681,17 +8728,17 @@ async fn forward_success_sends_a_new_conversation_carrying_the_original() {
     );
     // FORWARDING IS NOT HANDLING: the attention row is left where it was, unlike
     // a reply, which resolves it.
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            Some(squelch_core::types::AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        Some(squelch_core::types::AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         done.is_empty(),
         "passing a message on can leave the user's own action outstanding"
@@ -9333,7 +9380,8 @@ fn calendar_resolver(
             client_id: "id".into(),
             client_secret: "secret".into(),
         },
-    );
+    )
+    .unwrap();
     (resolver, path)
 }
 
@@ -9852,17 +9900,17 @@ async fn not_spam_is_confirm_gated_and_needs_a_write_credential() {
     // AND THE LOCAL FLAG IS UNTOUCHED, which is the ordering guarantee: the
     // Gmail write runs first, so a refused one leaves the message exactly where
     // Gmail still has it rather than visible here and filtered everywhere else.
-    let rows = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(1),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Only,
-        )
-        .unwrap();
+    let rows = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(1),
+        None,
+        None,
+        None,
+        false,
+        SpamScope::Only,
+    )
+    .unwrap();
     assert_eq!(rows.len(), 1, "the row is still spam");
 }
 
@@ -14411,17 +14459,17 @@ async fn the_worker_fires_a_reply_threaded_under_its_minted_id() {
     assert_eq!(row.sent_thread_id.as_deref(), Some("thread-77"));
     // `resolve_done`: a fired reply handles the message it answers, as a
     // reply sent now does.
-    let done = store
-        .attention_updates(
-            acct,
-            chrono::Utc::now() - chrono::Duration::days(365),
-            None,
-            Some(AttentionStatus::Done),
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap();
+    let done = mail_list(
+        &store,
+        acct,
+        chrono::Utc::now() - chrono::Duration::days(365),
+        None,
+        Some(AttentionStatus::Done),
+        None,
+        false,
+        SpamScope::Exclude,
+    )
+    .unwrap();
     assert!(
         done.iter().any(|u| u.update.id == parent),
         "the parent is handled"
@@ -15591,4 +15639,195 @@ async fn json_gzips_when_asked_and_the_event_stream_never_does() {
         4096,
         "and arrives byte for byte"
     );
+}
+
+// --- GET /client/thread/{id} buys nothing; POST .../translate buys it -------
+
+#[tokio::test]
+async fn reading_a_thread_never_promotes_and_the_translate_post_does() {
+    let (state, store, acct) = common::state_with(|store, acct| {
+        let id = store
+            .upsert_message(&msg(acct, "g-fr", "t-fr", "Votre facture", "Bonjour"))
+            .unwrap();
+        store
+            .set_triage(
+                id,
+                acct,
+                40,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+        // An archive row: parked until somebody displays the thread.
+        store
+            .queue_translation(acct, id, "fr", true, chrono::Utc::now())
+            .unwrap();
+        // And an English neighbour, which carries no translation at all.
+        store
+            .upsert_message(&msg(acct, "g-en", "t-fr", "Re: Votre facture", "Thanks"))
+            .unwrap();
+    });
+    let poke = squelch_core::store::archive_surface::RefinePoke::new();
+    let app = router(state.with_refine_poke(poke.clone()));
+    let status_of = |store: &squelch_core::store::SqliteStore, id: i64| {
+        store.message_translations(acct, &[id]).unwrap()[0].status
+    };
+
+    // THE GET IS A READ, and the client prefetches through it: the row is
+    // served as `deferred` (a translation is available) and stays parked.
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/thread/t-fr"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["translation"]["status"], "deferred");
+    assert_eq!(msgs[0]["translation"]["source_lang"], "fr");
+    assert_eq!(msgs[0]["translation"]["source_language"], "French");
+    assert_eq!(msgs[0]["translation"]["content"], "");
+    assert_eq!(msgs[0]["translation"]["subject"], "");
+    assert!(
+        msgs[1].get("translation").is_none(),
+        "English mail has no key"
+    );
+    let id = msgs[0]["id"].as_i64().unwrap();
+    assert_eq!(
+        status_of(&store, id),
+        squelch_core::store::TranslationStatus::Deferred,
+        "reading spent nothing"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), poke.poked())
+            .await
+            .is_err(),
+        "a read does not wake the lane"
+    );
+
+    // THE POST is the reader displaying it: promoted, and the lane poked.
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 1);
+    tokio::time::timeout(std::time::Duration::from_millis(100), poke.poked())
+        .await
+        .expect("the refine lane was poked");
+    assert_eq!(
+        status_of(&store, id),
+        squelch_core::store::TranslationStatus::Pending
+    );
+
+    // Now the GET says translating.
+    let json = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/thread/t-fr"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["messages"][0]["translation"]["status"], "pending");
+
+    // IDEMPOTENT: a second POST moves nothing and pokes nothing.
+    let resp = app
+        .clone()
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), poke.poked())
+            .await
+            .is_err(),
+        "nothing moved, nothing poked"
+    );
+
+    // An unknown thread is a no-op, not an error.
+    let resp = app
+        .oneshot(authed("POST", "/client/thread/t-nope/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+}
+
+#[tokio::test]
+async fn without_a_translator_nothing_promises_a_translation() {
+    // Translation off or no LLM: a queued row would never finish, so the
+    // reader is not told "Translating...", and the POST promotes nothing. A
+    // translation that already landed is still served.
+    let (state, store, acct) = common::state_with(|store, acct| {
+        let parked = store
+            .upsert_message(&msg(acct, "g-fr", "t-fr", "Votre facture", "Bonjour"))
+            .unwrap();
+        store
+            .queue_translation(acct, parked, "fr", true, chrono::Utc::now())
+            .unwrap();
+        let queued = store
+            .upsert_message(&msg(acct, "g-fr2", "t-fr", "Re: Votre facture", "Merci"))
+            .unwrap();
+        store
+            .queue_translation(acct, queued, "fr", false, chrono::Utc::now())
+            .unwrap();
+    });
+    let poke = squelch_core::store::archive_surface::RefinePoke::new();
+    let app = router(
+        state
+            .with_refine_poke(poke.clone())
+            .with_translate_active(false),
+    );
+    let json = body_json(
+        app.clone()
+            .oneshot(authed("GET", "/client/thread/t-fr"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let ids: Vec<i64> = json["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            assert!(m.get("translation").is_none(), "{m}");
+            m["id"].as_i64().unwrap()
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let resp = app
+        .oneshot(authed("POST", "/client/thread/t-fr/translate"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["promoted"], 0);
+    let rows = store
+        .message_translations(acct, &ids)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.status)
+        .collect::<Vec<_>>();
+    assert!(rows.contains(&squelch_core::store::TranslationStatus::Deferred));
+}
+
+#[tokio::test]
+async fn the_translate_post_needs_the_human_door_token() {
+    let (state, _store, _acct) = common::state_with(|_, _| {});
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/client/thread/t-fr/translate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

@@ -106,12 +106,26 @@ pub async fn fye_headline(
     let Some(client) = state.fye_headline.clone() else {
         return Ok(none());
     };
-    let today = query
-        .today
-        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d (%A)").to_string())
-        .chars()
-        .take(40)
-        .collect::<String>();
+    // The app sends its own local day. Anything that does not gets the
+    // owner's day (#526), not UTC's, which is tomorrow by an American evening.
+    let today = match query.today {
+        Some(today) => today,
+        None => store_call(&state, |store, account| store.owner_zone(account))
+            .await
+            .map(|zone| squelch_core::owner_clock::OwnerClock::new(Utc::now(), zone))
+            .unwrap_or_else(|_| {
+                squelch_core::owner_clock::OwnerClock::new(
+                    Utc::now(),
+                    squelch_core::owner_clock::OwnerZone::UTC,
+                )
+            })
+            .local_now()
+            .format("%Y-%m-%d (%A)")
+            .to_string(),
+    }
+    .chars()
+    .take(40)
+    .collect::<String>();
     let ranking = state.triage_config.ranking.clone();
     let policy = state.shipment_policy;
     let now = Utc::now();

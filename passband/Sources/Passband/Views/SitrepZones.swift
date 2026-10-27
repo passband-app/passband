@@ -658,13 +658,8 @@ struct ReadingZone: View {
     /// How many cards stand unfolded. The feed decides what BELONGS; this only
     /// keeps a busy week from burying the records under a wall of cards. The
     /// rest sits behind the same quiet expander For-your-eyes uses.
-    #if os(iOS)
-        // The phone draws two-up, so 24 would be twelve rows of cards before
-        // the fold; 8 is four rows, in line with its For-your-eyes fold of 4.
-        private static let collapsed = 8
-    #else
-        private static let collapsed = 24
-    #endif
+    /// See `BoardFold.reading`, which the launch warms read too.
+    private static let collapsed = BoardFold.reading
 
     @State private var expanded = false
 
@@ -1160,7 +1155,7 @@ extension View {
     func warmsThreadOnHover(_ threadId: String?) -> some View {
         onHover { over in
             guard over, let threadId, !threadId.isEmpty else { return }
-            ThreadPrefetch.shared.prefetch(threadId, fresh: SitrepView.boardFresh)
+            ThreadPrefetch.shared.prefetch(threadId, fresh: ThreadPrefetch.warmFresh)
             FramePrewarmer.shared.nudge(threadId)
         }
     }

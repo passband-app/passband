@@ -149,9 +149,12 @@ pub const CALENDAR_SCOPES: &[&str] = &[CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOP
 /// echoes this one on the response, so one string serves both directions.
 pub const GOOGLE_PROFILE_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.profile";
 
-/// Which backend persists OAuth tokens: the OS secret service, or a mode-0600
-/// JSON file (the only option on a headless box with no desktop keyring).
-/// Defaults to keyring on macOS, file on Linux.
+/// Which backend persists OAuth tokens: the OS keyring, or a mode-0600 JSON
+/// file (the only option on a headless box with no desktop keyring). Defaults
+/// to keyring on macOS, file everywhere else; and the keyring is the macOS
+/// keychain alone, so elsewhere `keyring` is refused up front, at boot or
+/// before a consent (`credentials::ensure_backend`), rather than linked for a
+/// box that never selects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CredentialBackend {
@@ -161,7 +164,8 @@ pub enum CredentialBackend {
 
 impl Default for CredentialBackend {
     fn default() -> Self {
-        // Headless Linux typically has no Secret Service.
+        // The keyring is the macOS keychain; no other platform has a store in
+        // this build (`credentials::os_keyring`).
         if cfg!(target_os = "macos") {
             CredentialBackend::Keyring
         } else {
@@ -530,9 +534,69 @@ impl Default for SmartDoneConfig {
     }
 }
 
-/// Scheduled re-evaluation tunables. The serde-facing shape of
-/// [`crate::triage::revisit::RevisitConfig`], in plain numbers rather than
-/// `chrono::Duration`s, so it round-trips through TOML and env vars.
+/// Auto-translate (docs/TRANSLATION.md): mail in another language is
+/// translated to English in the refine lane. ON by default and file-only: the
+/// feature takes hold when the daemon version rolls, so there is deliberately
+/// no env var and no warden knob behind any of this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateConfig {
+    /// Whether the translate pass runs at all. Detection at ingest is local and
+    /// free, so this gates only the model spend. Default `true`.
+    pub enabled: bool,
+    /// The model that translates. Qualified with the gateway's provider prefix
+    /// at call time, never here (see
+    /// [`crate::triage::llm::qualify_gateway_model`]). Default
+    /// `claude-sonnet-5`, which every tenant's Bifrost allow-list already
+    /// carries.
+    pub model: String,
+    /// USD per million input tokens for `model`, for the usage estimators
+    /// (`metrics::estimate_cost_usd` and `/client/usage`), which price the
+    /// `translate` ledger category here rather than letting it fall through
+    /// to the Stage-1 arm. Default 2.0, Claude Sonnet 5's list price.
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, Claude
+    /// Sonnet 5's list price.
+    pub price_out_per_mtok: f64,
+    /// Per-account-per-day spend cap in US dollars, priced at
+    /// [`Self::price_in_per_mtok`] / [`Self::price_out_per_mtok`] from the
+    /// `translate` usage ledger: a runaway guard on the tenant's LLM key,
+    /// which translation shares with triage. Each message's cost is
+    /// ESTIMATED before its call to decide whether it fits what is left
+    /// today, and the day's spend is SETTLED from the usage the provider
+    /// actually reported. Over it, live rows stay `pending` until the next
+    /// UTC day (and triage does not wait for them), backfill rows are queued
+    /// `deferred`. No `app_settings` override. Default 0.50: at Sonnet 5's
+    /// prices, roughly a hundred short messages a day, or twenty of 5,000
+    /// characters.
+    pub daily_budget_usd: f64,
+}
+
+impl Default for TranslateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "claude-sonnet-5".to_string(),
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+            daily_budget_usd: 0.50,
+        }
+    }
+}
+
+impl Config {
+    /// Whether a translator will ever work a queued row: translation is on
+    /// and an LLM is configured. The same two facts
+    /// [`crate::translate::TranslateClient::from_config`] needs. The human
+    /// door asks it so it never tells the reader "Translating..." about a
+    /// row nothing will translate.
+    pub fn translation_active(&self) -> bool {
+        self.translate.enabled && self.stage2.resolve_llm().is_some()
+    }
+}
+
+/// Scheduled re-evaluation tunables for agent triage's revisit jobs, in plain
+/// numbers so they round-trip through TOML and env vars.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RevisitPassConfig {
@@ -557,18 +621,9 @@ pub struct RevisitPassConfig {
     /// Furthest out a revisit may be scheduled (days); beyond this it is dropped
     /// as a hallucinated date. Env: `SQUELCH_REVISIT_MAX_HORIZON_DAYS`.
     pub max_horizon_days: i64,
-    /// Legacy deterministic scheduler only; unused by agent triage.
-    /// How long after a deadline to re-evaluate automatically (hours). Env:
-    /// `SQUELCH_REVISIT_DEADLINE_GRACE_HOURS`.
-    pub deadline_grace_hours: i64,
     /// Revisits closer together than this are one revisit (hours). Env:
     /// `SQUELCH_REVISIT_DEDUPE_HOURS`.
     pub dedupe_window_hours: i64,
-    /// Legacy deterministic scheduler only; unused by agent triage.
-    /// Days a row may sit in the standing band, untouched and with nothing
-    /// scheduled, before the staleness sweep re-evaluates it anyway. 0 disables
-    /// the sweep. Env: `SQUELCH_REVISIT_FYE_STALE_DAYS`.
-    pub fye_stale_days: i64,
 }
 
 impl Default for RevisitPassConfig {
@@ -584,50 +639,31 @@ impl Default for RevisitPassConfig {
             max_per_message_lifetime: 6,
             min_lead_hours: 1,
             max_horizon_days: 400,
-            deadline_grace_hours: 24,
             dedupe_window_hours: 12,
-            // 14 days: long enough that a real obligation still in play is not
-            // churned, short enough that a row nobody has touched in a fortnight
-            // gets questioned.
-            fye_stale_days: 14,
         }
     }
 }
 
 impl RevisitPassConfig {
-    /// The planner's view of these settings.
-    ///
-    /// Every duration goes through the fallible constructor. `Duration::days`
-    /// PANICS out of range, and these numbers come from an operator's TOML or
-    /// env: `SQUELCH_REVISIT_MAX_HORIZON_DAYS` with one too many digits would
-    /// otherwise take down the sync task the first time a verdict scheduled
-    /// anything. Every other bound in this module is defensive against a hostile
-    /// model; a typo deserves the same treatment, and the default is a better
-    /// answer than a crash.
-    pub fn planner(&self) -> crate::triage::revisit::RevisitConfig {
-        let d = crate::triage::revisit::RevisitConfig::default();
-        crate::triage::revisit::RevisitConfig {
-            max_per_message: self.max_per_message,
-            min_lead: hours_or(self.min_lead_hours, d.min_lead),
-            max_horizon: days_or(self.max_horizon_days, d.max_horizon),
-            deadline_grace: hours_or(self.deadline_grace_hours, d.deadline_grace),
-            dedupe_window: hours_or(self.dedupe_window_hours, d.dedupe_window),
-            max_per_message_lifetime: self.max_per_message_lifetime,
-            max_why_chars: d.max_why_chars,
-        }
+    // Every duration goes through a clamp. `Duration::days` PANICS out of
+    // range, and these numbers come from an operator's TOML or env:
+    // `SQUELCH_REVISIT_MAX_HORIZON_DAYS` with one too many digits would
+    // otherwise take down the triage worker the first time a verdict
+    // scheduled anything. A typo deserves the default, not a crash.
+
+    /// Nearest a revisit may be scheduled.
+    pub fn min_lead(&self) -> chrono::Duration {
+        hours_or(self.min_lead_hours, chrono::Duration::hours(1))
     }
 
-    /// The staleness window as a duration, or `None` when the sweep is off.
-    /// Clamped like the planner's knobs and for the same reason: the sync task
-    /// subtracts this from `now`, and that subtraction panics out of range.
-    pub fn fye_stale_window(&self) -> Option<chrono::Duration> {
-        if self.fye_stale_days <= 0 {
-            return None;
-        }
-        Some(days_or(
-            self.fye_stale_days,
-            chrono::Duration::days(Self::default().fye_stale_days),
-        ))
+    /// Furthest out a revisit may be scheduled.
+    pub fn max_horizon(&self) -> chrono::Duration {
+        days_or(self.max_horizon_days, chrono::Duration::days(400))
+    }
+
+    /// Revisits closer together than this are one revisit.
+    pub fn dedupe_window(&self) -> chrono::Duration {
+        hours_or(self.dedupe_window_hours, chrono::Duration::hours(12))
     }
 }
 
@@ -645,9 +681,10 @@ fn hours_or(hours: i64, fallback: chrono::Duration) -> chrono::Duration {
 }
 
 /// `days` as a [`chrono::Duration`], clamped to [`REVISIT_MAX_DAYS`] and floored
-/// at one; `fallback` if it somehow still does not fit.
+/// at zero (a zero horizon schedules nothing, as it always has); `fallback` if
+/// it somehow still does not fit.
 fn days_or(days: i64, fallback: chrono::Duration) -> chrono::Duration {
-    let bounded = days.clamp(1, REVISIT_MAX_DAYS);
+    let bounded = days.clamp(0, REVISIT_MAX_DAYS);
     chrono::Duration::try_days(bounded).unwrap_or(fallback)
 }
 
@@ -1272,8 +1309,7 @@ pub struct Stage1Config {
 
     // ---- Stage-1 LLM pass (the model run on every non-sealed email) --------
     // The heuristic fields above are its WITNESS and its offline fallback, never
-    // an alternative verdict: see [`crate::triage::router`]. Key, provider, and
-    // endpoint come from [`Stage2Config::resolve_llm`]; only the fields below
+    // an alternative verdict. Key, provider, and endpoint come from [`Stage2Config::resolve_llm`]; only the fields below
     // are Stage-1's own.
     /// The Stage-1 model id string. Default `claude-opus-5-5`: triage is the
     /// product, so the pass that sees every email runs the best model there is,
@@ -1286,11 +1322,6 @@ pub struct Stage1Config {
     /// a harder look. Set to `None` when pointing `model` at one that rejects
     /// the field (Haiku 4.5, Sonnet 4.5). Env: `SQUELCH_STAGE1_EFFORT`.
     pub effort: Option<String>,
-    /// How close to the surface threshold counts as a boundary row for
-    /// [`crate::triage::router::EscalationReason::Boundary`]. Widening this
-    /// escalates more mail near the line, which is where a scoring error flips
-    /// visibility. Env: `SQUELCH_STAGE1_BOUNDARY_MARGIN`.
-    pub escalation_boundary_margin: u8,
     /// Cap on the flattened email body (chars) fed into the UNTRUSTED block.
     /// Env: `SQUELCH_STAGE1_MAX_BODY_CHARS`.
     pub max_body_chars: usize,
@@ -1334,7 +1365,6 @@ impl Default for Stage1Config {
             // Stage-1 LLM defaults. Same model as Stage-2; see there.
             model: "claude-opus-5-5".to_string(),
             effort: Some("low".to_string()),
-            escalation_boundary_margin: 10,
             // 6000, not 1500: the old cap was sized for a 200K-context small
             // model and routinely cut the body before the part that decides the
             // verdict (the amount, the date, the ask). The model reading this
@@ -1923,9 +1953,9 @@ pub struct Config {
 
     /// Path to the SQLite store.
     pub db_path: PathBuf,
-    /// Which backend persists OAuth tokens (`keyring` or `file`). Defaults per
-    /// platform (keyring on macOS, file on Linux). Override with
-    /// `SQUELCH_CRED_BACKEND`.
+    /// Which backend persists OAuth tokens (`keyring`, the macOS keychain, on
+    /// macOS only; `file` anywhere). Defaults per platform (keyring on macOS,
+    /// file elsewhere). Override with `SQUELCH_CRED_BACKEND`.
     pub credential_backend: CredentialBackend,
     /// Path to the JSON credentials file used by the `file` backend. Defaults to
     /// `~/.config/squelch/credentials.json`. Ignored by the keyring backend.
@@ -1966,6 +1996,8 @@ pub struct Config {
     /// BYOK carrier APIs. No credentials anywhere means no carrier is ever
     /// polled, which is the default.
     pub carriers: CarriersConfig,
+    /// Auto-translate. Defaults only; read from the `[translate]` table.
+    pub translate: TranslateConfig,
 }
 
 impl Default for Config {
@@ -1992,23 +2024,12 @@ impl Default for Config {
             metrics: MetricsConfig::default(),
             console: ConsoleConfig::default(),
             carriers: CarriersConfig::default(),
+            translate: TranslateConfig::default(),
         }
     }
 }
 
 impl Config {
-    /// The escalation router's tunables, assembled HERE and nowhere else so the
-    /// surface threshold cannot fork: the router's idea of "the line" is the
-    /// same [`NotifyConfig::min_importance`] that decides whether a row earns a
-    /// notification, because a row on the boundary of being seen at all is
-    /// exactly the row worth a second look.
-    pub fn router(&self) -> crate::triage::router::RouterConfig {
-        crate::triage::router::RouterConfig {
-            surface_threshold: self.notify.min_importance,
-            boundary_margin: self.stage1.escalation_boundary_margin,
-        }
-    }
-
     /// Default config path: `~/.config/squelch/config.toml`.
     pub fn default_path() -> Option<PathBuf> {
         std::env::var_os("HOME")
@@ -2397,24 +2418,12 @@ impl Config {
             &mut self.revisit.max_horizon_days,
         );
         env_override(
-            "SQUELCH_REVISIT_DEADLINE_GRACE_HOURS",
-            &mut self.revisit.deadline_grace_hours,
-        );
-        env_override(
             "SQUELCH_REVISIT_DEDUPE_HOURS",
             &mut self.revisit.dedupe_window_hours,
-        );
-        env_override(
-            "SQUELCH_REVISIT_FYE_STALE_DAYS",
-            &mut self.revisit.fye_stale_days,
         );
 
         env_override("SQUELCH_STAGE1_MODEL", &mut self.stage1.model);
         env_override_effort("SQUELCH_STAGE1_EFFORT", &mut self.stage1.effort);
-        env_override(
-            "SQUELCH_STAGE1_BOUNDARY_MARGIN",
-            &mut self.stage1.escalation_boundary_margin,
-        );
         env_override(
             "SQUELCH_STAGE1_MAX_BODY_CHARS",
             &mut self.stage1.max_body_chars,
@@ -3486,24 +3495,20 @@ archive_access_daily_cap = 9
         let cfg = RevisitPassConfig {
             min_lead_hours: i64::MIN,
             max_horizon_days: i64::MAX,
-            deadline_grace_hours: i64::MAX,
             dedupe_window_hours: -5,
             ..RevisitPassConfig::default()
         };
-        let planner = cfg.planner();
-        assert_eq!(planner.min_lead, chrono::Duration::zero());
-        assert_eq!(planner.dedupe_window, chrono::Duration::zero());
-        assert_eq!(
-            planner.max_horizon,
-            chrono::Duration::days(REVISIT_MAX_DAYS)
-        );
-        assert_eq!(
-            planner.deadline_grace,
-            chrono::Duration::days(REVISIT_MAX_DAYS)
-        );
-        // The addition the planner actually performs, which is what panics.
+        assert_eq!(cfg.min_lead(), chrono::Duration::zero());
+        assert_eq!(cfg.dedupe_window(), chrono::Duration::zero());
+        assert_eq!(cfg.max_horizon(), chrono::Duration::days(REVISIT_MAX_DAYS));
+        let off = RevisitPassConfig {
+            max_horizon_days: 0,
+            ..RevisitPassConfig::default()
+        };
+        assert_eq!(off.max_horizon(), chrono::Duration::zero());
+        // The addition the scheduler actually performs, which is what panics.
         let now = chrono::Utc::now();
-        let _ = now + planner.max_horizon;
+        let _ = now + cfg.max_horizon();
     }
 
     /// Both stages run the SAME model on purpose: escalation buys context,

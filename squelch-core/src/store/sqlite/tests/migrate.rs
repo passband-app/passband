@@ -216,10 +216,10 @@ fn migrate_adds_field_reasons_to_a_preexisting_triage_table() {
 }
 
 #[test]
-fn migrate_adds_two_stage_columns_so_ingest_and_both_queues_work() {
+fn migrate_adds_two_stage_columns_so_ingest_works() {
     // A `triage` table with no stage1_model_used / needs_stage2 /
-    // field_reasons. The migration must add them so ingest and both queue
-    // SELECTs, which NAME those columns, don't fail with "no such column".
+    // field_reasons. The migration must add them so ingest, which NAMES those
+    // columns, doesn't fail with "no such column".
     register_vec_extension();
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -239,11 +239,20 @@ fn migrate_adds_two_stage_columns_so_ingest_and_both_queues_work() {
     let acct = store.ensure_account("me@example.com").unwrap();
 
     let id = triaged_row(acct, "g-x", "t-x", None, false, Sensitivity::Normal).ingest(&store);
-    // Both queue SELECTs run cleanly on the upgraded table.
-    let s1 = store.stage1_queue(acct, 10).unwrap();
-    assert_eq!(s1.len(), 1, "the fresh normal row enters Stage-1");
-    assert_eq!(s1[0].message_id, id);
-    assert!(store.stage2_queue(acct, 10).unwrap().is_empty());
+    // The upgraded table carries the columns, and ingest wrote through them.
+    let conn = store.lock().unwrap();
+    let (stage1, needs_stage2): (Option<String>, i64) = conn
+        .query_row(
+            "SELECT stage1_model_used, needs_stage2 FROM triage WHERE message_id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(stage1.is_none(), "a fresh normal row is unmodelled");
+    assert_eq!(
+        needs_stage2, 1,
+        "an unconfident seed is written through the new column"
+    );
 }
 
 #[test]
@@ -1841,6 +1850,75 @@ fn a_rebuild_that_cannot_run_leaves_the_old_index_serving() {
         )
         .unwrap();
     assert!(created.contains("porter"), "rebuilt on retry: {created}");
+}
+
+#[test]
+fn the_translation_columns_arrive_by_rebuild_and_carry_served_translations() {
+    // The definition every mailbox had before auto-translate: stemmed, prefix
+    // indexed, two columns. Adding `tsubject`/`tbody` to `schema.sql` is a
+    // column change, so the open rebuilds, and the refill must pick up the
+    // English of every SERVED translation (done, incomplete) and of no other.
+    let conn = fts_fixture(
+        "CREATE VIRTUAL TABLE messages_fts USING fts5(
+             subject, body, tokenize = 'porter unicode61', prefix = '2 3')",
+    );
+    conn.execute_batch(
+        "CREATE TABLE message_translations(
+             message_id INTEGER PRIMARY KEY, status TEXT NOT NULL,
+             subject TEXT, body TEXT);
+         INSERT INTO messages(id, account_id, gmail_msg_id, subject, body)
+             VALUES (2, 1, 'g2', 'Votre facture', 'votre facture est prête'),
+                    (3, 1, 'g3', 'Ihre Rechnung', 'Ihre Rechnung ist da'),
+                    (4, 1, 'g4', 'Tu factura', 'tu factura está lista');
+         INSERT INTO messages_fts(rowid, subject, body)
+             SELECT id, subject, body FROM messages WHERE id > 1;
+         INSERT INTO message_translations VALUES
+             (2, 'done', 'Your invoice', 'your invoice is ready'),
+             (3, 'incomplete', 'Your bill', 'your invoice is here'),
+             (4, 'failed', 'Your invoice', 'your invoice is ready');",
+    )
+    .unwrap();
+    let matching = |conn: &Connection, q: &str| -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1 ORDER BY rowid")
+            .unwrap();
+        stmt.query_map(params![q], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert!(matching(&conn, "invoice").is_empty());
+
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap();
+
+    let created = stored_fts_sql(&conn);
+    assert!(
+        created.contains("tsubject") && created.contains("tbody"),
+        "{created}"
+    );
+    assert_eq!(fts_rows(&conn), 4, "every message survived the rebuild");
+    assert_eq!(
+        matching(&conn, "invoice"),
+        vec![2, 3],
+        "failed rows serve nothing"
+    );
+    assert_eq!(matching(&conn, "tbody : invoice"), vec![2, 3]);
+    assert_eq!(
+        matching(&conn, "facture"),
+        vec![2],
+        "the original is still indexed"
+    );
+    // Positional readers keep their meaning: column 1 is still the body.
+    let body: String = conn
+        .query_row(
+            "SELECT snippet(messages_fts, 1, '', '', '…', 24) FROM messages_fts
+             WHERE messages_fts MATCH 'facture'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(body.contains("prête"), "{body}");
 }
 
 #[test]

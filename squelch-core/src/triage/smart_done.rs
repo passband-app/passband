@@ -961,6 +961,8 @@ pub async fn judge_at(
         effort: client.effort.as_deref(),
         // One attempt: a failed pass is a smaller sweep, not a wait.
         max_tries: 1,
+        max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(
         &client.http,

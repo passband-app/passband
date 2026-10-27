@@ -265,6 +265,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // When that app last wrote something. NULL on every pre-existing row and
     // NOT backfilled: nothing recorded which app made a past write.
     add_column_if_missing(conn, "device_tokens", "client_action_at", "TEXT")?;
+    // The device zone that app last reported (#526). NULL on every
+    // pre-existing row and NOT backfilled: only the device knows where it is,
+    // and it says so on its first request after it updates.
+    add_column_if_missing(conn, "device_tokens", "client_timezone", "TEXT")?;
     // Per-property triage reasons (JSON object). NULL on pre-existing rows.
     add_column_if_missing(conn, "triage", "field_reasons", "TEXT")?;
 
@@ -284,16 +288,16 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0 CHECK(is_auth IN (0,1))",
     )?;
 
-    // Two-stage triage markers: `stage1_model_used` gates the Stage-1 LLM queue
-    // (NULL == still needs Stage-1), `needs_stage2` is the escalation flag.
+    // Markers from the retired two-stage classifier: `stage1_model_used` gated
+    // the Stage-1 queue, `needs_stage2` was the escalation flag. Kept so old
+    // rows still load.
     let added_stage1 = add_column_if_missing(conn, "triage", "stage1_model_used", "TEXT")?;
     add_column_if_missing(conn, "triage", "needs_stage2", "INTEGER NOT NULL DEFAULT 0")?;
-    // WHICH router arm set `needs_stage2` (see `crate::triage::router`). NULL
-    // means "did not escalate", and also covers every historical row, which
-    // escalated under the old self-report rule and cannot be attributed now.
+    // Which arm of the retired escalation router set `needs_stage2`. NULL
+    // means "did not escalate".
     add_column_if_missing(conn, "triage", "escalation_reason", "TEXT")?;
-    // Re-evaluation counter (see `crate::triage::revisit`). Historical rows
-    // start at 0, which is honest: they have never been revisited.
+    // Re-evaluation counter from the retired revisit planner. Agent triage
+    // counts its revisits in `agent_triage_jobs` instead.
     add_column_if_missing(
         conn,
         "triage",
@@ -1147,9 +1151,11 @@ pub(super) fn normalize_fts_sql(sql: &str) -> String {
 /// exists, so the old definition would live forever on every mailbox that
 /// predates those lines.
 ///
-/// Refilling from `messages(subject, body)` is exact, not approximate: the
-/// message upsert writes the FTS row from those same two columns, so this
-/// reproduces the index rather than reinterpreting it.
+/// Refilling from `messages(subject, body)` plus the served translation is
+/// exact, not approximate: every FTS writer goes through the same
+/// `translations::FTS_ROW_SELECT`, so this reproduces the index rather than
+/// reinterpreting it. The translation columns (`tsubject`, `tbody`) arrived
+/// this way: a column list that differs from `schema.sql`'s is a rebuild.
 ///
 /// THE TRIGGER IS ANY DIFFERENCE AT ALL between the CREATE text in
 /// `sqlite_master` — what SQLite itself stored when the table was made — and
@@ -1212,12 +1218,21 @@ pub(super) fn rebuild_fts_if_stale(conn: &Connection) -> Result<()> {
     // `IF NOT EXISTS` rides along in the canonical text and is a no-op one
     // statement after the DROP; stripping it would mean editing the string,
     // which is how the two copies started drifting in the first place.
+    // The refill is the store's own FTS row SELECT, translations included.
+    // A partial schema (the migration unit tests build them) may lack
+    // `message_translations`; its rows then refill with no translation, which
+    // is what such a mailbox has.
+    let refill = if tables_exist(conn, &["message_translations"])? {
+        super::translations::FTS_ROW_SELECT.to_string()
+    } else {
+        "SELECT id, subject, body, NULL, NULL FROM messages m".to_string()
+    };
     let batch = format!(
         "BEGIN IMMEDIATE;
          DROP TABLE messages_fts;
          {canonical};
-         INSERT INTO messages_fts(rowid, subject, body)
-             SELECT id, subject, body FROM messages;
+         INSERT INTO messages_fts(rowid, subject, body, tsubject, tbody)
+             {refill};
          COMMIT;"
     );
     if let Err(e) = conn.execute_batch(&batch) {

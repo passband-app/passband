@@ -71,7 +71,7 @@ enum SettingsSection: String, CaseIterable, Sendable {
 /// The raw values are stable ids; `label` mirrors what `SectionCard` prints.
 enum SettingsCard: String, CaseIterable, Sendable {
     case you, appearance, notifications, help, developer
-    case mail, search, signature, readTracking
+    case mail, search, translation, signature, readTracking
     case rules, groups
     case assistant
     case agents
@@ -83,7 +83,7 @@ enum SettingsCard: String, CaseIterable, Sendable {
         switch self {
         case .you, .appearance, .notifications, .help, .developer:
             .general
-        case .mail, .search, .signature, .readTracking: .mail
+        case .mail, .search, .translation, .signature, .readTracking: .mail
         case .rules: .rules
         case .groups: .groups
         case .assistant: .assistant
@@ -121,6 +121,7 @@ enum SettingsCard: String, CaseIterable, Sendable {
         case .developer: "Developer"
         case .mail: "Mail"
         case .search: "Search"
+        case .translation: "Translation"
         case .signature: "Signature"
         case .readTracking: "Read tracking"
         case .rules: "Rules"
@@ -292,6 +293,16 @@ enum SettingsSearch {
                 "search", "search order", "results", "ranking", "rank", "sort", "sorting",
                 "order", "recent", "recency", "newest", "best match", "relevance",
                 "oldest first", "date",
+            ]),
+        SettingsEntry(
+            card: .translation,
+            title: "Languages I read",
+            blurb: "Languages you read, whose mail is shown as written instead of translated to English.",
+            keywords: [
+                "translate", "translation", "translated", "translating", "auto translate", "language",
+                "languages", "foreign", "foreign language", "languages i read", "original",
+                "show original", "english", "french", "spanish", "german", "italian",
+                "portuguese", "chinese", "japanese", "korean", "multilingual", "bilingual",
             ]),
         SettingsEntry(
             card: .signature,

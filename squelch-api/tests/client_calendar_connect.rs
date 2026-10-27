@@ -61,7 +61,8 @@ fn resolver(tag: &str, account_id: i64) -> (CalendarCredentials, PathBuf) {
         CredentialBackend::File,
         path.clone(),
         client(),
-    );
+    )
+    .unwrap();
     (resolver, path)
 }
 

@@ -54,6 +54,8 @@ pub async fn run_access(
         schema: json!({"type":"object","properties":{"restricted":{"type":"boolean"},"reason":{"type":"string"}},"required":["restricted","reason"],"additionalProperties":false}),
         effort: connection.effort,
         max_tries: 1,
+        max_tokens: None,
+        disable_thinking: false,
     };
     // The request's own timeout sits behind the deadline, so the shared
     // client's (sized for a Gmail fetch) cannot cut a longer check first as

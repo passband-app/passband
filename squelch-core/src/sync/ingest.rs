@@ -92,7 +92,7 @@ pub fn html_to_text(html: &str) -> String {
 /// (ZWNJ/ZWJ/ZWSP/soft hyphen/BOM) decode to NOTHING — they are invisible
 /// layout hacks (preheader padding), and as literal text they would pollute
 /// FTS tokens and the LLM/embed input.
-fn decode_entities(s: &str) -> String {
+pub(crate) fn decode_entities(s: &str) -> String {
     fn named(name: &str) -> Option<&'static str> {
         Some(match name {
             "nbsp" => " ",
@@ -932,6 +932,17 @@ fn normalize_content_id(raw: Option<&str>) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
+/// A header's first text value, `None` when it is absent or empty.
+fn header_text(value: &mail_parser::HeaderValue<'_>) -> Option<String> {
+    let s = match value {
+        mail_parser::HeaderValue::Text(t) => t.to_string(),
+        mail_parser::HeaderValue::TextList(list) => list.first()?.to_string(),
+        _ => return None,
+    };
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 /// Turn raw fetched bytes into a fully-triaged, store-ready message.
 ///
 /// `known_contact_lookup` is called ONLY for non-sealed mail, with the parsed
@@ -1202,6 +1213,22 @@ pub fn ingest(
         .and_then(crate::timezone::invite_zone)
         .filter(|i| i.organizer != self_addr);
 
+    // THE LANGUAGE, judged locally on the original text (docs/TRANSLATION.md,
+    // "Detection"). Never for spam, which reaches no model, nor for sent mail,
+    // which the user wrote. `Content-Language` is only a tiebreaker; the
+    // message's own header first, then its text part's.
+    let translate_lang = if fetched.is_sent || fetched.is_spam {
+        None
+    } else {
+        let header = parsed.as_ref().and_then(|m| {
+            header_text(m.content_language()).or_else(|| {
+                m.text_part(0)
+                    .and_then(|p| header_text(p.content_language()))
+            })
+        });
+        crate::translate::detect(&subject, &text, header.as_deref())
+    };
+
     let message = NewMessage {
         account_id: fetched.account_id,
         gmail_msg_id,
@@ -1248,6 +1275,8 @@ pub fn ingest(
         notify_eligible_at: None,
         date_offset_minutes,
         invite_zone,
+        translate_lang,
+        translate_over_budget: false,
     }
 }
 
@@ -1295,7 +1324,6 @@ pub fn ingest_sent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::SpamScope;
 
     fn raw(account_id: AccountId, msgid: &str, bytes: &str, is_sent: bool) -> RawFetched {
         RawFetched {
@@ -2808,19 +2836,36 @@ mod tests {
             view.messages[0].is_sent,
             "the outbound copy is flagged for the reader's right-aligned bubble"
         );
-        let updates = store
-            .attention_updates(
-                acct,
-                now - chrono::Duration::days(1),
-                None,
-                None,
-                None,
-                false,
-                SpamScope::Exclude,
-            )
-            .unwrap();
-        assert!(
-            updates.is_empty(),
+        let listed = {
+            use crate::store::SpamScope;
+            use crate::store::agent_triage::{AgentInventoryQuery, AgentTriageStore};
+            store
+                .human_agent_updates(
+                    acct,
+                    &AgentInventoryQuery {
+                        // Far enough back to reach the fixture's July `Date:`,
+                        // so the window cannot be what keeps the list empty.
+                        since: now - chrono::Duration::days(3650),
+                        min_importance: None,
+                        status: None,
+                        band: None,
+                        pending_reminders: false,
+                        spam: SpamScope::Exclude,
+                        ranking: Default::default(),
+                        before: None,
+                        limit: None,
+                    },
+                )
+                .unwrap()
+        };
+        assert!(listed.is_empty(), "sent mail never enters the mail list");
+        let bands = store
+            .stats(acct, now - chrono::Duration::days(3650))
+            .unwrap()
+            .bands;
+        assert_eq!(
+            (bands.standing, bands.new, bands.open),
+            (0, 0, 0),
             "sent mail never enters the attention bands"
         );
         // Recipients still seed contacts, and ride along on the row itself so the

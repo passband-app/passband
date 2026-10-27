@@ -83,6 +83,55 @@ enum Platform {
         #endif
     }
 
+    /// Whether any of the app is on screen RIGHT NOW, frontmost or not: on the
+    /// Mac, some part of one of its windows is visible (closed, minimised,
+    /// hidden, fully covered and other-Space windows are not); on the phone,
+    /// the app is not in the background.
+    @MainActor
+    static var isAppOnScreen: Bool {
+        #if os(macOS)
+            NSApp?.occlusionState.contains(.visible) ?? false
+        #else
+            UIApplication.shared.applicationState != .background
+        #endif
+    }
+
+    /// What `isAppActive` and `isAppOnScreen` answer once the transition the
+    /// notification `name` announces has happened. AppKit posts these after
+    /// its state has moved, so the Mac reads the state. UIKit posts
+    /// `willResignActive` and `willEnterForeground` BEFORE it moves, and a
+    /// Control Center pull-down sends nothing after, so the phone reads the
+    /// name.
+    @MainActor
+    static func presence(after name: Notification.Name) -> (active: Bool, onScreen: Bool) {
+        #if os(macOS)
+            return (isAppActive, isAppOnScreen)
+        #else
+            switch name {
+            case UIApplication.didBecomeActiveNotification: return (true, true)
+            case UIApplication.willResignActiveNotification: return (false, true)
+            case UIApplication.willEnterForegroundNotification: return (false, true)
+            case UIApplication.didEnterBackgroundNotification: return (false, false)
+            default: return (isAppActive, isAppOnScreen)
+            }
+        #endif
+    }
+
+    /// Every notification after which `isAppActive` or `isAppOnScreen` may
+    /// answer differently.
+    #if os(macOS)
+        static let presenceNotifications: [Notification.Name] = [
+            didBecomeActiveNotification, didResignActiveNotification,
+            NSApplication.didChangeOcclusionStateNotification,
+        ]
+    #else
+        static let presenceNotifications: [Notification.Name] = [
+            didBecomeActiveNotification, didResignActiveNotification,
+            UIApplication.didEnterBackgroundNotification,
+            UIApplication.willEnterForegroundNotification,
+        ]
+    #endif
+
     // MARK: - appearance
 
     /// Whether the system is drawing DARK right now. Only for the places that

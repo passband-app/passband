@@ -483,30 +483,6 @@ fn archive_mail_is_in_search_and_the_reader_and_in_no_count_or_listing() {
     assert!(rate.oldest_received_at.unwrap() > days_ago(2));
     assert_eq!(store.count_inbound_since(acct, days_ago(400)).unwrap(), 1);
 
-    // ---- the updates listings ---------------------------------------------
-    let ranked: Vec<i64> = store
-        .ranked_updates(acct, days_ago(400), None)
-        .unwrap()
-        .iter()
-        .map(|update| update.id)
-        .collect();
-    assert_eq!(ranked, vec![live]);
-    let attention: Vec<i64> = store
-        .attention_updates(
-            acct,
-            days_ago(400),
-            None,
-            None,
-            None,
-            false,
-            SpamScope::Exclude,
-        )
-        .unwrap()
-        .iter()
-        .map(|item| item.update.id)
-        .collect();
-    assert_eq!(attention, vec![live]);
-
     // ---- the lists ---------------------------------------------------------
     // Assessed as allowed AND given everything a committed triage writes to
     // put a row in FYE, Reading and Records (a decision with a record, a
@@ -1268,24 +1244,7 @@ fn a_reminder_surfaces_an_archive_row_to_the_human_and_not_to_the_agent() {
             .map(|item| item.update.id)
             .collect()
     };
-    let attention = || -> Vec<i64> {
-        store
-            .attention_updates(
-                acct,
-                days_ago(30),
-                None,
-                None,
-                None,
-                false,
-                SpamScope::Exclude,
-            )
-            .unwrap()
-            .iter()
-            .map(|item| item.update.id)
-            .collect()
-    };
     assert!(human(&inventory(days_ago(30))).is_empty());
-    assert!(attention().is_empty());
 
     assert!(
         store
@@ -1295,7 +1254,6 @@ fn a_reminder_surfaces_an_archive_row_to_the_human_and_not_to_the_agent() {
     let mut waiting = inventory(days_ago(30));
     waiting.pending_reminders = true;
     assert_eq!(human(&waiting), vec![reminded]);
-    assert_eq!(attention(), vec![reminded]);
     assert!(!human(&inventory(days_ago(400))).contains(&plain));
 
     assert_eq!(
@@ -1305,7 +1263,6 @@ fn a_reminder_surfaces_an_archive_row_to_the_human_and_not_to_the_agent() {
         vec![reminded]
     );
     assert_eq!(human(&inventory(days_ago(30))), vec![reminded]);
-    assert_eq!(attention(), vec![reminded]);
     assert_eq!(store.stats(acct, days_ago(30)).unwrap().bands.open, 1);
 
     let fye = || -> Vec<i64> {

@@ -169,16 +169,16 @@ async fn serve_http(addr: SocketAddr) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Smoke test: the server constructs with its 10 tools registered, and with
-    /// no send pipeline behind it (this binary) offers only the 7 that do not
+    /// Smoke test: the server constructs with its 11 tools registered, and with
+    /// no send pipeline behind it (this binary) offers only the 8 that do not
     /// write mail.
     #[test]
     fn constructs_server_and_offers_no_mail_writing_tool() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
         let server = SquelchServer::new(store, "me@localhost").expect("server");
-        assert_eq!(server.tool_count(), 10, "expected exactly 10 MCP tools");
+        assert_eq!(server.tool_count(), 11, "expected exactly 11 MCP tools");
         let offered = server.offered_tool_names();
-        assert_eq!(offered.len(), 7, "{offered:?}");
+        assert_eq!(offered.len(), 8, "{offered:?}");
         assert!(
             !offered
                 .iter()

@@ -1,0 +1,62 @@
+# The AWS `monitor` box (deploy/aws/DESIGN.md, "monitoring"): prometheus,
+# grafana and blackbox, from ECR, on one t4g.small. Lives on the box at
+# /opt/passband-monitor/compose.yaml, but it is not copied there by hand or by
+# CI: Dockerfile.prometheus bakes this file into the prometheus image, and the
+# box's bin/up (bootstrap.sh) copies it out of passband-prometheus:IMAGE_TAG on
+# every start and deploy. So it changes with an ordinary monitor deploy.
+#
+# Interpolated from /opt/passband-monitor/.env, which bootstrap.sh writes and
+# the deploy updates (the SSM document passband-monitor-deploy): ECR_REGISTRY (<account>.dkr.ecr.<region>.amazonaws.com)
+# and IMAGE_TAG (the commit SHA the deploy built). Secrets are NOT in that
+# file: they are fetched from Secrets Manager on every start into per-service
+# env files on tmpfs (/run/passband-monitor, mode 0600), so each container
+# sees only its own, the way each Railway service had only its own variables.
+#
+# Ports: grafana :3000 and prometheus :9090 are published because the ALB
+# targets them (grafana.passband.app, metrics.passband.app); the security group
+# admits only the ALB. blackbox is NOT published, ever.
+name: passband-monitor
+
+x-logging: &logging
+  # The root volume is small; unrotated json logs are how a box fills up.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  prometheus:
+    image: ${ECR_REGISTRY:?}/passband-prometheus:${IMAGE_TAG:?}
+    restart: unless-stopped
+    env_file: /run/passband-monitor/prometheus.env
+    volumes:
+      # 30 days of TSDB (retention is set in the shared entrypoint.sh).
+      - /data/prometheus:/prometheus
+    ports:
+      - "9090:9090"
+    logging: *logging
+
+  grafana:
+    image: ${ECR_REGISTRY:?}/passband-grafana:${IMAGE_TAG:?}
+    restart: unless-stopped
+    env_file: /run/passband-monitor/grafana.env
+    environment:
+      # Non-secret settings Railway carried as service variables.
+      GF_SERVER_ROOT_URL: https://grafana.passband.app
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - /data/grafana:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    logging: *logging
+
+  blackbox:
+    image: ${ECR_REGISTRY:?}/passband-blackbox:${IMAGE_TAG:?}
+    restart: unless-stopped
+    env_file: /run/passband-monitor/blackbox.env
+    # Reachable as blackbox:9115 on the compose network only.
+    expose:
+      - "9115"
+    logging: *logging

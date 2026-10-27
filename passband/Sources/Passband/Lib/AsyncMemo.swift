@@ -153,6 +153,9 @@ final class AsyncMemo<Key: Hashable, Value> {
         return await running.value.value
     }
 
+    /// Whether a resolve for this key is running, without joining it.
+    func isPending(_ key: Key) -> Bool { inFlight[key] != nil }
+
     /// Memoized value, joined resolve, or a new one — in that order.
     @discardableResult
     func resolve(_ key: Key, _ make: @escaping () async -> Value) async -> Value {

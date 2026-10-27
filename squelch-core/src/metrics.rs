@@ -409,6 +409,7 @@ pub struct SyncMetrics {
     /// The 2026-08-19 outage was ~900 of these a day reading as generic
     /// retryables; this is the series a dashboard alerts on.
     llm_config_failures: AtomicU64,
+    translate_config_failures: AtomicU64,
     /// Unix seconds of the last LLM call ANY pass got a real verdict from.
     /// 0 = never, so `time() - metric` fires on a daemon whose LLM path has
     /// never worked rather than evaluating to nothing. Stamped from the Ok
@@ -849,6 +850,15 @@ impl SyncMetrics {
     /// this tenant's LLM path broken" no matter which pass noticed first.
     pub fn record_llm_config_failure(&self) {
         self.llm_config_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One config-level failure of the TRANSLATE pass, counted apart from
+    /// [`Self::record_llm_config_failure`]: translation runs its own model and
+    /// its own cooldown, so a translate model missing from an allow-list must
+    /// not read as "triage is stalled". Once per row per run of releases.
+    pub fn record_translate_config_failure(&self) {
+        self.translate_config_failures
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A first backfill stopped waiting for the embedder at the ceiling and went
@@ -1508,11 +1518,13 @@ pub fn runs_notify_model(category: &str) -> bool {
 }
 
 /// Estimated spend for a ledger rollup, costed exactly as `/client/usage` does.
-/// FOUR arms: `stage2` runs the capable model and its prices,
-/// [`NOTIFY_USAGE_CATEGORY`] runs the small notify model and ITS prices,
-/// [`SMART_DONE_USAGE_CATEGORY`] runs its own mid-sized model and ITS prices,
-/// and everything else — Stage-1, every extractor, revisits — shares the
-/// stage-1 small model's config, so it costs at stage-1 rates.
+/// FIVE arms: [`crate::translate::USAGE_CATEGORY`] runs the translate model at
+/// `translate.price_*`, [`SMART_DONE_USAGE_CATEGORY`] runs its own model at
+/// `smart_done.price_*`, and then the three below.
+/// The three: `stage2` runs the capable model and its prices,
+/// [`NOTIFY_USAGE_CATEGORY`] runs the small notify model and ITS prices, and
+/// everything else — Stage-1, every extractor, revisits — shares the stage-1
+/// small model's config, so it costs at stage-1 rates.
 ///
 /// The notify arm is not a nicety. The fast lane runs on Haiku at roughly a
 /// thousandth of a dollar a message while Stage-1 runs Opus; folding it into the
@@ -1528,6 +1540,13 @@ pub fn estimate_cost_usd(usage: &[LlmCategoryUsage], config: &Config) -> f64 {
                 (
                     config.stage2.price_in_per_mtok,
                     config.stage2.price_out_per_mtok,
+                )
+            } else if u.category == crate::translate::USAGE_CATEGORY {
+                // Its own model (Sonnet 5 by default) and its own prices:
+                // neither the Stage-1 arm's nor the notify model's.
+                (
+                    config.translate.price_in_per_mtok,
+                    config.translate.price_out_per_mtok,
                 )
             } else if runs_notify_model(&u.category) {
                 (
@@ -1793,8 +1812,17 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         "squelchd_llm_config_failures_total",
         MetricKind::Counter,
         "Config-level LLM failures (4xx shared by every row: bad key, disallowed model, \
-         spent gateway budget) across all passes. Rows stay queued; alert on any rate.",
+         spent gateway budget) in triage and notify. Rows stay queued; alert on any rate. \
+         The translate pass counts its own in squelchd_translate_config_failures_total.",
         metrics.get(&metrics.llm_config_failures),
+    );
+    e.scalar(
+        "squelchd_translate_config_failures_total",
+        MetricKind::Counter,
+        "Config-level failures of the translate pass (its model rejected, its key or budget \
+         refused), counted once per row per run of releases. Translations stay queued; \
+         triage is not affected.",
+        metrics.get(&metrics.translate_config_failures),
     );
 
     // 0 until an LLM call has ever answered, for the same reason the sync
@@ -2685,6 +2713,29 @@ mod tests {
         // exact-match on the category, not a prefix.
         let neighbour = estimate_cost_usd(&one_mtok_in("notify_something_else"), &config);
         assert!((neighbour - estimate_cost_usd(&one_mtok_in("stage1"), &config)).abs() < 1e-9);
+    }
+
+    /// The translate pass (docs/TRANSLATION.md) runs Claude Sonnet 5 and is
+    /// priced at its rates, $2 and $10 per MTok by default, not at the
+    /// Stage-1 arm it would otherwise fall through to.
+    #[test]
+    fn cost_prices_the_translate_category_at_sonnet_5_rates() {
+        let config = Config::default();
+        let usage = vec![LlmCategoryUsage {
+            category: crate::translate::USAGE_CATEGORY.to_string(),
+            calls: 1,
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        }];
+        assert!((estimate_cost_usd(&usage, &config) - 12.0).abs() < 1e-9);
+        let mut stage1 = usage.clone();
+        stage1[0].category = "stage1".into();
+        assert!(
+            (estimate_cost_usd(&stage1, &config) - 12.0).abs() > 1e-6,
+            "the Stage-1 arm is a different price, so this cannot pass by coincidence"
+        );
     }
 
     /// THE FOURTH ARM. `smart_done` runs its own model and is priced off

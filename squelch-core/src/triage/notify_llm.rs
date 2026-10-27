@@ -112,6 +112,8 @@ pub async fn classify_at(
         schema: output_schema(),
         effort: cfg.effort.as_deref(),
         max_tries: 1,
+        max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(http, url, api_key, provider, &req, |out: NotifyOutput| {
         if !(0..=100).contains(&out.notify_importance) {
@@ -168,8 +170,7 @@ mod tests {
 
     // ---- a loopback mock that COUNTS its requests -------------------------
     //
-    // stage1_llm's `mock_once` accepts exactly one connection, which cannot
-    // tell "made one attempt" apart from "made three and the mock hung up".
+    // A mock that accepts exactly one connection cannot tell "made one attempt" apart from "made three and the mock hung up".
     // This one keeps accepting and records every request, because the single
     // -attempt property is the whole point of `max_tries: 1`.
 

@@ -43,6 +43,10 @@ struct EmailsView: View {
     /// accessors below keep every key binding reading it as before; they run
     /// when a key fires, not while the body is built.
     @State private var cursor = ListCursor()
+    /// THE LIST'S CLOCK, on the minute: what the rows say with the time alone
+    /// ("3m", a deadline or reminder chip) used to ride on the redraw every
+    /// poll brought, when the header read the stats.
+    @State private var minute = Date()
     private var index: Int {
         get { cursor.index }
         nonmutating set { cursor.index = newValue }
@@ -71,7 +75,7 @@ struct EmailsView: View {
     private var sentPage: Loadable<[SentItem]> { store.sentPage }
 
     /// The cached page MINUS anything resolved since it was fetched: the page
-    /// only reloads on the 10s `store.lastRefresh` poll, so without this filter
+    /// only reloads on the `store.lastRefresh` poll, so without this filter
     /// mail finished from the reader sits here visibly undone until the next tick.
     ///
     /// The parked rows skip it entirely, and must: setting a reminder resolves
@@ -172,8 +176,16 @@ struct EmailsView: View {
     private var verdicted: Bool { triageable && mode != .spam }
 
     var body: some View {
+        let _ = minute
         VStack(spacing: 0) {
             header
+                .task {
+                    await clockTicks(every: 60, while: { Platform.isAppOnScreen }) {
+                        // Not on a fresh mount, which has just drawn with now.
+                        let now = Date()
+                        if abs(now.timeIntervalSince(minute)) >= 1 { minute = now }
+                    }
+                }
             // ABOVE the list rather than inside it, so it does not scroll away.
             // The sentence answers "who put this here", and that question is
             // asked at row 40 as readily as at row 1.
@@ -200,12 +212,12 @@ struct EmailsView: View {
             #endif
         }
         .keyBindings(.list, bindings)
-        // Fires on mount, on each 10s poll AND on a mode switch — only the page
+        // Fires on mount, on each poll AND on a mode switch — only the page
         // being shown is refreshed, so the spam page costs nothing until you go
         // there. The store's short TTL is what makes the mount half free when a
         // tick just landed; the tick half always outruns it and refreshes for real.
-        // IN A LEAF, not on this body: the tick is a new Date every ten
-        // seconds, and a body that reads it re-evaluates every ten seconds —
+        // IN A LEAF, not on this body: the tick is a new Date every poll, and
+        // a body that reads it re-evaluates every poll —
         // every loaded row's worth of view values, for a fetch that usually
         // finds nothing new. The leaf's body is a zero-size rectangle.
         .background { MailRefreshKeeper(mode: mode, reminders: reminders) }
@@ -617,7 +629,7 @@ struct EmailsView: View {
         private var showSpamDoor: Bool { store.spamDoorVisible && mode == .inbox }
         /// The count beside it, when there is one to show.
         private var spamDoorCount: Int? {
-            store.stats?.spam.flatMap { $0 > 0 ? $0 : nil }
+            store.spamCount.flatMap { $0 > 0 ? $0 : nil }
         }
 
         private var phoneHeader: some View {
@@ -697,7 +709,7 @@ struct EmailsView: View {
                             // not track this folder, so before the first visit
                             // there is no count to show and a "0" would be a
                             // claim nobody has checked.
-                            if let spam = store.stats?.spam, spam > 0 {
+                            if let spam = store.spamCount, spam > 0 {
                                 Text("\(spam)")
                                     .font(Typo.num(12, weight: .bold))
                                     .foregroundStyle(

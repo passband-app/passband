@@ -229,7 +229,10 @@ pub struct RowFacts<'a> {
     /// An earlier smart clear took this row and the owner undid it.
     pub given_back: bool,
     /// The mail arrived before opens were recorded at all, so "never opened"
-    /// is not something anybody could know about it.
+    /// is not something anybody could know about it. Only `ignored_sender`
+    /// reads it: `stale_promo` is about the promotion's age and
+    /// `skimmed_sender` about the sender's looks, neither about this message
+    /// going unread.
     pub before_open_ledger: bool,
     /// The sender is a known contact, under a `surface` rule, or recently kept.
     pub sender_protected: bool,
@@ -252,7 +255,7 @@ fn only_glanced(row: &RowFacts<'_>) -> bool {
 /// for all of them, so clearing the row out of Reading would take the bill
 /// off the Billing page too. An event is the one record that does not
 /// protect: an event that has passed is exactly what smart clear is for.
-fn carries_a_record(decision: &MessageDecision) -> bool {
+pub fn carries_a_record(decision: &MessageDecision) -> bool {
     decision
         .records
         .iter()
@@ -429,8 +432,9 @@ fn weigh(row: &RowFacts<'_>, now: DateTime<Utc>) -> Judged {
     // how people keep something; the score says they ignore this sender's
     // mail in general, and this is the piece they did not ignore.
     //
-    // AND "NOT OPENED" HAS TO BE KNOWABLE, here as for `stale_promo` below.
-    // Mail that arrived before opens were recorded has no open on record
+    // AND "NOT OPENED" HAS TO BE KNOWABLE. (`stale_promo` and
+    // `skimmed_sender` do not ask this: theirs is not a claim that this
+    // message went unread.) Mail that arrived before opens were recorded has no open on record
     // because none could have been; the sender's score is evidence about
     // their mail since, not about this piece.
     if !row.opened
@@ -801,7 +805,7 @@ pub const IMPLAUSIBLE_PASS_MIN_ROWS: usize = 10;
 /// pass is thrown away whatever its summaries say. Deliberately high. Half of
 /// a batch really having expired is ordinary (the week after a sale weekend
 /// it is the normal case, and until `ends` is on stored decisions every dated
-/// promotion under two weeks old comes here), so the share of yeses is a poor
+/// promotion under a week old comes here), so the share of yeses is a poor
 /// sign of a steered pass and is only believed at four in five.
 pub const IMPLAUSIBLE_PASS_PERCENT: usize = 80;
 

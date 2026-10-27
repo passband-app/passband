@@ -60,7 +60,9 @@ enum SmartClearCopy {
         case "expired": return "no longer current"
         case "ignored_sender": return "from senders you never open"
         case "skimmed_sender": return "from senders you only glance at"
-        case "stale_promo": return one ? "promotion you never opened" : "promotions you never opened"
+        // Not "never opened": mail from before opens were recorded counts,
+        // and it may have been read in Gmail.
+        case "stale_promo": return one ? "promotion over a week old" : "promotions over a week old"
         default: return nil
         }
     }
@@ -216,7 +218,7 @@ extension SmartClearCopy {
         case "expired": "No longer current"
         case "ignored_sender": "From a sender you never open"
         case "skimmed_sender": "From a sender you only glance at"
-        case "stale_promo": "A promotion you never opened"
+        case "stale_promo": "A promotion over a week old"
         default: "Cleared"
         }
     }

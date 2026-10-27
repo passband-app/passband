@@ -51,8 +51,23 @@ fn batch_tag(batch_id: i64) -> String {
 pub struct SenderMark {
     /// The fatigue score, for `ignored_sender`.
     pub score: Option<u8>,
-    /// The owner glances at their mail and closes it, for `skimmed_sender`.
+    /// The owner glances at their promotions and closes them, for
+    /// `skimmed_sender`.
     pub skimmed: bool,
+    /// The sender's total reported dwell and link clicks when the mark was
+    /// made, for a mark that could sweep anything; `None` otherwise. Step 3
+    /// drops a mark whose sender's totals have moved since (see `scan`).
+    pub attention: Option<(i64, i64)>,
+}
+
+impl SenderMark {
+    /// Could this mark take any row by itself?
+    fn sweeps(&self) -> bool {
+        self.skimmed
+            || self
+                .score
+                .is_some_and(|s| s >= crate::triage::smart_clear::SMART_CLEAR_SENDER_SCORE)
+    }
 }
 
 /// Each measured sender's record, by lowercased address.
@@ -79,6 +94,15 @@ const UNDO_MEMORY_DAYS: i64 = 90;
 /// The newest open on one sender's mail, for the stale-score check. Seeks the
 /// sender index like every per-sender read here.
 const SENDER_LAST_OPEN_SQL: &str = "SELECT MAX(t.opened_at)
+     FROM messages m INDEXED BY idx_messages_from_nocase
+     JOIN triage t ON t.message_id = m.id
+     WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE";
+
+/// A sender's total reported dwell and clicks, for the stale-mark check. An
+/// open stamps `opened_at` once and never again, so a REOPENED message read
+/// for a minute moves nothing the last-open check sees; it moves this.
+const SENDER_ATTENTION_SQL: &str = "SELECT COALESCE(SUM(t.dwell_ms), 0),
+            COALESCE(SUM(t.link_clicks), 0)
      FROM messages m INDEXED BY idx_messages_from_nocase
      JOIN triage t ON t.message_id = m.id
      WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE";
@@ -219,17 +243,27 @@ fn scan(
         None => {
             let (_, groups) = busiest_senders(&items);
             let mut scores = SenderScores::new();
+            let mut totals = conn.prepare(SENDER_ATTENTION_SQL)?;
             for (sender, _, _) in &groups {
                 let measured = measurer.measure(sender)?;
-                scores.insert(
-                    sender.clone(),
-                    SenderMark {
-                        score: measured.score,
-                        skimmed: crate::triage::sender_fatigue::habitually_skimmed(
-                            &measured.signals,
-                        ),
-                    },
-                );
+                let signals = &measured.signals;
+                let protected =
+                    signals.known_contact || signals.surface_rule || signals.kept_recently;
+                let mut mark = SenderMark {
+                    score: measured.score,
+                    skimmed: crate::triage::sender_fatigue::habitually_skimmed(
+                        &measured.promo_attention,
+                        protected,
+                    ),
+                    attention: None,
+                };
+                if mark.sweeps() {
+                    mark.attention =
+                        Some(totals.query_row(params![account_id, sender], |r| {
+                            Ok((r.get(0)?, r.get(1)?))
+                        })?);
+                }
+                scores.insert(sender.clone(), mark);
             }
             scores
         }
@@ -244,30 +278,33 @@ fn scan(
         .map(|item| item.thread_id)
         .collect();
 
-    // A SCORE FROM BEFORE AN OPEN IS NOT REUSED. Opening mail is the one
-    // thing the owner can do during a model call that LOWERS a sender's
-    // score, and a sender at 77 with one more open may be a sender at 72. So
-    // any sender whose mail was opened after step 1 read the store is
-    // unscored for this press: nothing of theirs goes as `ignored_sender`.
-    // The same goes for the skim mark: that open may have been a long read.
-    // Asked only of senders whose reused mark could sweep anything.
+    // A MARK FROM BEFORE THE OWNER LOOKED AGAIN IS NOT REUSED. Opening mail
+    // is the one thing the owner can do during a model call that LOWERS a
+    // sender's score, and a sender at 77 with one more open may be a sender
+    // at 72. Reading it is what undoes a skim mark. So a sender whose mail
+    // was opened after step 1 read the store, OR whose reported dwell or
+    // clicks have moved since (a reopened message stamps no new open), is
+    // unmarked for this press: nothing of theirs goes as `ignored_sender` or
+    // `skimmed_sender`. Asked only of senders whose mark could sweep.
     if let Some(scanned_at) = earlier.and_then(|scan| scan.scanned_at) {
         let mut last_open = conn.prepare(SENDER_LAST_OPEN_SQL)?;
+        let mut totals = conn.prepare(SENDER_ATTENTION_SQL)?;
         for (sender, mark) in scores.iter_mut() {
-            let sweeps_by_score = mark
-                .score
-                .is_some_and(|s| s >= crate::triage::smart_clear::SMART_CLEAR_SENDER_SCORE);
-            if !sweeps_by_score && !mark.skimmed {
+            if !mark.sweeps() {
                 continue;
             }
             let opened: Option<String> =
                 last_open.query_row(params![account_id, sender], |r| r.get(0))?;
             // A stamp that will not parse cannot be shown to be older.
-            let stale = opened.is_some_and(|at| {
+            let opened_since = opened.is_some_and(|at| {
                 DateTime::parse_from_rfc3339(&at)
                     .map_or(true, |at| at.with_timezone(&Utc) > scanned_at)
             });
-            if stale {
+            let now_totals: (i64, i64) =
+                totals.query_row(params![account_id, sender], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            // A mark with no totals recorded cannot be shown to be current.
+            let looked_since = mark.attention != Some(now_totals);
+            if opened_since || looked_since {
                 *mark = SenderMark::default();
             }
         }

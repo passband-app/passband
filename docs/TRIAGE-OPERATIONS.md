@@ -519,15 +519,19 @@ Each cleared message has exactly one reason, first match:
    owner never opened this message, and it was received at or after the open
    ledger began (before that, "never opened" cannot be known). On a ledger under 14 days old no sender has
    a score, so this takes nothing.
-4. `skimmed_sender`: a promotion from a sender the owner habitually glances at
-   and closes (`sender_fatigue::habitually_skimmed`): at least 3 reported opens
-   with no link ever followed, and a median read fraction under 10% (or, when
-   too little of the mail is long enough to have one, a median look under 3
-   seconds). This message was never opened, or was opened for under 3 seconds
+4. `skimmed_sender`: a promotion from a sender whose promotions the owner
+   habitually glances at and closes (`sender_fatigue::habitually_skimmed`),
+   judged over the sender's sampled opens (the 25 newest reported) cut to
+   those whose decision is a Reading promotion carrying no record, so glances
+   at the same sender's receipts do not count: at least 3 such opens, no link
+   followed in any of them, and a median read fraction under 10% with a median
+   look under 8 seconds (or, when too little of the mail is long enough to have
+   a fraction, a median look under 3 seconds). This message was never opened, or was opened for under 3 seconds
    with no click; an open no client reported on is left alone. There is no
    ledger-age floor: every input is a look the owner took, so it is evidence
    from the first day. Known contacts, `surface` rules and kept senders never
-   qualify.
+   qualify. A sender whose mail is opened, or whose reported dwell or clicks
+   change, while the model is being asked loses the mark for that press.
 5. `stale_promo`: a promotion (the decision's `reading_kind`, else promotional
    and not editorial kinds), received 7 or more days ago and never opened in
    Passband. Mail from before the open ledger counts: a promotion a week old

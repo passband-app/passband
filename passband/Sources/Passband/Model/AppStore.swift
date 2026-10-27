@@ -1064,6 +1064,10 @@ final class AppStore {
         }
         let e = epoch
         smartClearWorking = true
+        await settleAttention()
+        // An account switch while the looks were landing: this press was for
+        // the mailbox that is gone.
+        guard e == epoch else { return }
         // A second run closes the first one's undo: the daemon undoes by
         // batch, and two receipts in one corner would be two countdowns.
         smartClearReceipt = nil
@@ -1361,6 +1365,9 @@ final class AppStore {
     /// Untracked, because nothing draws it; a view body that happened to call
     /// one of the doors below must not become a reader of the dwell ledger.
     @ObservationIgnored private var attention = AttentionClock()
+    /// The reports last sent, so a later flush queues behind them and smart
+    /// clear can wait for every look to land before it judges anyone's.
+    @ObservationIgnored private var attentionFlight: Task<Void, Never>?
     /// The epoch `attention` was last touched under. Message ids are one
     /// daemon's SQLite ints, so time banked against account A's message 40 is
     /// a lie about account B's message 40. Compared on every touch rather than
@@ -3248,7 +3255,9 @@ final class AppStore {
         let reports = withAttention { clock, _ in clock.drain() }
         guard !reports.isEmpty, !RehearsalMode.isEnabled else { return }
         let e = epoch
-        Task {
+        let prior = attentionFlight
+        attentionFlight = Task {
+            await prior?.value
             for report in reports {
                 guard isCurrent(e) else { return }
                 await APIClient.shared.reportAttention(
@@ -3256,6 +3265,15 @@ final class AppStore {
                     linkClicks: report.linkClicks)
             }
         }
+    }
+
+    /// Close any open stint and wait until every look is reported. Smart
+    /// clear judges a sender by how long their mail was looked at, so a read
+    /// still in this process when the press goes out would be judged a
+    /// glance. Bounded by the reports' own request timeouts.
+    func settleAttention() async {
+        attentionBlur()
+        await attentionFlight?.value
     }
 
     // MARK: - live arrivals

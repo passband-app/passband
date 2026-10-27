@@ -8,9 +8,8 @@ use super::reading_senders::{
 use super::smart_clear::{apply, content, promo, row, time};
 use super::support::*;
 use crate::store::agent_triage::AgentTriageStore;
-use crate::store::sqlite::smart_clear::SenderMark;
 use crate::triage::decision::{
-    AuthKind, EvidenceRef, MessageDecision, RecordProposal, ThreadAttentionDecision,
+    AuthKind, EmailKind, EvidenceRef, MessageDecision, RecordProposal, ThreadAttentionDecision,
 };
 use crate::triage::smart_clear::ClearReason;
 use chrono::Duration;
@@ -496,11 +495,8 @@ fn a_score_from_the_scan_does_not_outrank_what_the_owner_did_since() {
             .smart_clear_scan(acct, Utc::now(), &inventory, 200)
             .unwrap();
         assert_eq!(
-            scan.sender_scores.get(NEWS),
-            Some(&SenderMark {
-                score: Some(77),
-                skimmed: false
-            })
+            scan.sender_scores.get(NEWS).and_then(|mark| mark.score),
+            Some(77)
         );
         store
             .acknowledge_agent_message(acct, first, Utc::now())
@@ -1023,6 +1019,118 @@ fn a_skimmed_senders_promotions_clear_on_a_young_ledger() {
     for id in read.iter().chain([&loved_unopened]) {
         assert_eq!(row(&store, *id).0, "new", "a sender read properly stays");
     }
+}
+
+/// Seed a skimmed sender on a two-day ledger: three promos glanced at for a
+/// second each, and one unopened. Returns (the glanced ids, the unopened id).
+fn skimmed_sender(store: &SqliteStore, acct: AccountId) -> (Vec<i64>, i64) {
+    let now = Utc::now();
+    let ledger = (now - Duration::days(2)).to_rfc3339();
+    store
+        .set_app_setting(acct, OPEN_LEDGER_SINCE_KEY, &ledger)
+        .unwrap();
+    store
+        .set_app_setting(acct, DWELL_LEDGER_SINCE_KEY, &ledger)
+        .unwrap();
+    let seed = |key: &str, glance: bool| {
+        let id = mail(store, acct, key, "deals@skim.example", 2);
+        into_reading(store, acct, id);
+        if glance {
+            store
+                .acknowledge_agent_message(acct, id, now - Duration::hours(30))
+                .unwrap();
+            store.record_message_attention(acct, id, 1_000, 0).unwrap();
+        }
+        id
+    };
+    let glanced = (0..3).map(|i| seed(&format!("g{i}"), true)).collect();
+    (glanced, seed("unopened", false))
+}
+
+/// THE SKIM MARK IS DROPPED WHEN THE OWNER LOOKS AGAIN during the model call,
+/// even when the look is a REOPEN, which stamps no new `opened_at`.
+#[test]
+fn a_skim_mark_from_the_scan_does_not_outlive_a_read_since() {
+    let inventory = crate::store::agent_triage::AgentListQuery::default();
+    let apply_after = |store: &SqliteStore, acct, scan: &_| {
+        store
+            .smart_clear_apply(acct, Utc::now(), &inventory, 200, scan, &Default::default())
+            .unwrap()
+    };
+    // Untouched: the mark holds and the sender's promos go.
+    {
+        let (store, acct) = store();
+        let (_, unopened) = skimmed_sender(&store, acct);
+        let scan = store
+            .smart_clear_scan(acct, Utc::now(), &inventory, 200)
+            .unwrap();
+        assert!(scan.sender_scores["deals@skim.example"].skimmed);
+        let outcome = apply_after(&store, acct, &scan);
+        assert!(
+            outcome
+                .cleared
+                .contains(&(unopened, ClearReason::SkimmedSender))
+        );
+    }
+    // A glanced-at promo REOPENED and read for a minute while the model
+    // thinks: no new open stamp, but the dwell moved, so nothing goes.
+    {
+        let (store, acct) = store();
+        let (glanced, unopened) = skimmed_sender(&store, acct);
+        let scan = store
+            .smart_clear_scan(acct, Utc::now(), &inventory, 200)
+            .unwrap();
+        store
+            .record_message_attention(acct, glanced[0], 60_000, 0)
+            .unwrap();
+        let outcome = apply_after(&store, acct, &scan);
+        assert!(outcome.cleared.is_empty(), "{:?}", outcome.cleared);
+        assert_eq!(row(&store, unopened).0, "new");
+    }
+}
+
+/// A shop's receipts glanced at are complete reads of receipts. They do not
+/// make its promotions "skimmed".
+#[test]
+fn glances_at_a_senders_receipts_do_not_mark_its_promotions_skimmed() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let ledger = (now - Duration::days(2)).to_rfc3339();
+    store
+        .set_app_setting(acct, OPEN_LEDGER_SINCE_KEY, &ledger)
+        .unwrap();
+    store
+        .set_app_setting(acct, DWELL_LEDGER_SINCE_KEY, &ledger)
+        .unwrap();
+    for i in 0..3 {
+        let id = mail(
+            &store,
+            acct,
+            &format!("receipt{i}"),
+            "orders@shop.example",
+            2,
+        );
+        into_reading_with(&store, acct, id, |d| {
+            d.kinds = vec![EmailKind::Receipt];
+            d.reading_kind = None;
+        });
+        store
+            .acknowledge_agent_message(acct, id, now - Duration::hours(30))
+            .unwrap();
+        store.record_message_attention(acct, id, 1_000, 0).unwrap();
+    }
+    let sale = mail(&store, acct, "sale", "orders@shop.example", 2);
+    into_reading(&store, acct, sale);
+    let outcome = apply(&store, acct, &[]);
+    assert!(
+        !outcome
+            .cleared
+            .iter()
+            .any(|(_, r)| *r == ClearReason::SkimmedSender),
+        "{:?}",
+        outcome.cleared
+    );
+    assert_eq!(row(&store, sale).0, "new");
 }
 
 /// The rule suggester's digest hands SUBJECTS to a model. Auth and restricted

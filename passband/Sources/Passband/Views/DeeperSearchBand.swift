@@ -105,9 +105,17 @@ struct DeeperSearchBand: View {
             if search.laneStarted && !session.transcript.isEmpty && (openInChat == nil || hostedChatOffered) {
                 Button { (openInChat ?? store.openSearchLaneInChat)() } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(Typo.ui(10, weight: .semibold))
-                        .foregroundStyle(Palette.inkFaint)
-                        .frame(width: Space.scaled(18), height: Space.scaled(18))
+                        #if os(macOS)
+                            .font(Typo.ui(10, weight: .semibold))
+                            .foregroundStyle(Palette.inkFaint)
+                            .frame(width: Space.scaled(18), height: Space.scaled(18))
+                        #else
+                            // A thumb's target: the way into the whole answer.
+                            .font(Typo.ui(14, weight: .semibold))
+                            .foregroundStyle(Palette.inkDim)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(Palette.hairline))
+                        #endif
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

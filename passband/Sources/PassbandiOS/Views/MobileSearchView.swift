@@ -119,13 +119,6 @@ struct MobileSearchView: View {
         return store.search.laneStarted || store.search.lastVerdict?.isDeeper == true
     }
 
-    /// The tallest the band may get above the hits. A phone with the keyboard
-    /// up has roughly 400pt between the field and the keys, and one answer is
-    /// eight cards; capped here, the band scrolls inside itself and the first
-    /// hits stay on screen under it. Scrolling the hits drops the keyboard,
-    /// which gives them the rest.
-    private static let bandCeiling: CGFloat = 230
-
     /// What the explainer promises about questions, which the setting decides.
     private var questionLine: String {
         switch prefs.deeperSearch {
@@ -139,12 +132,6 @@ struct MobileSearchView: View {
         @Bindable var store = store
 
         VStack(spacing: 0) {
-            // ABOVE whichever shape is below, the hits or "No matches": a
-            // three-word query no one message carries is exactly the one that
-            // comes back empty, and that is when the lane is worth most.
-            if bandMounted {
-                band
-            }
             content
         }
             .background(Palette.canvas)
@@ -203,17 +190,17 @@ struct MobileSearchView: View {
             }
     }
 
-    /// The lane's answer, drawn by the Mac's own band, in a bounded scroller so
-    /// it can never take the hits off screen (`SidePanel.strippedBand`, sized
-    /// for a phone). `fixedSize` keeps a two-line band two lines tall.
+    /// The lane's answer, drawn by the Mac's own band, AS THE FIRST ROW OF THE
+    /// RESULTS: as tall as the answer wants, and the screen scrolls past it to
+    /// the hits rather than the band scrolling inside a cap of its own.
     private var band: some View {
-        ScrollView {
-            DeeperSearchBand(expanded: false, openInChat: continueInChat)
-                .padding(.top, 8)
-        }
-        .frame(maxHeight: Self.bandCeiling)
-        .fixedSize(horizontal: false, vertical: true)
-        .scrollDismissesKeyboard(.immediately)
+        DeeperSearchBand(expanded: false, openInChat: continueInChat)
+            .padding(.top, 8)
+    }
+
+    /// What sits under the agent's answer is the plain search, and says so.
+    private var resultsHeader: some View {
+        StatusHeader(title: "Search results")
     }
 
     // MARK: - the three shapes
@@ -226,22 +213,41 @@ struct MobileSearchView: View {
             // The ask row rides above the empty states too, and especially
             // above "No matches" — that is the exact moment the words are worth
             // handing to something that can go look.
-            VStack(spacing: 0) {
-                if !term.isEmpty {
-                    askRow.padding(.horizontal, 16)
-                    Divider().overlay(Palette.hairline)
+            if bandMounted {
+                // The agent's answer first, at its full height, then the
+                // search under its own header, all in one scroll. No ask row
+                // while the band is up: the band is already the agent here.
+                ScrollView {
+                    VStack(spacing: 0) {
+                        band
+                        resultsHeader.padding(.horizontal, 16)
+                        emptySenders
+                        emptyState.frame(minHeight: 220)
+                    }
                 }
-                // Above "No matches" too: the name may be in nobody's subject
-                // or body and still be somebody who writes.
-                ForEach(senders) { sender in
-                    SenderRow(sender: sender) { show(sender) }
-                        .padding(.horizontal, 16)
-                    Divider().overlay(Palette.hairline)
+                .scrollDismissesKeyboard(.immediately)
+            } else {
+                VStack(spacing: 0) {
+                    if !term.isEmpty {
+                        askRow.padding(.horizontal, 16)
+                        Divider().overlay(Palette.hairline)
+                    }
+                    emptySenders
+                    emptyState
                 }
-                emptyState
             }
         } else {
             hitList
+        }
+    }
+
+    /// Above "No matches" too: the name may be in nobody's subject or body
+    /// and still be somebody who writes.
+    private var emptySenders: some View {
+        ForEach(senders) { sender in
+            SenderRow(sender: sender) { show(sender) }
+                .padding(.horizontal, 16)
+            Divider().overlay(Palette.hairline)
         }
     }
 
@@ -251,7 +257,15 @@ struct MobileSearchView: View {
             // Guarded on the term rather than assumed from the hits: clearing
             // the field empties them one render later, and an "Ask the agent"
             // row quoting nothing at all is a row in that gap.
-            if !term.isEmpty {
+            if bandMounted {
+                // No row inset: the band carries its own side margin, and
+                // inset twice it sat a step inside the header and the hits.
+                band
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets())
+                resultsHeader.plainRow()
+            } else if !term.isEmpty {
                 askRow.plainRow()
             }
             ForEach(senders) { sender in
@@ -282,7 +296,11 @@ struct MobileSearchView: View {
                 if store.search.showsListing {
                     if i == 0 { StatusHeader(title: "Newest first").plainRow() }
                 } else if i == 0 || hit.is_done != hits[i - 1].is_done {
-                    StatusHeader(isDone: hit.is_done).plainRow()
+                    // Under "Search results" a bare "Results" would say it
+                    // twice; Done / Not done still split the run beneath it.
+                    if !(bandMounted && hit.is_done == nil) {
+                        StatusHeader(isDone: hit.is_done).plainRow()
+                    }
                 }
                 HitRow(hit: hit) {
                     // OPENING A HIT IS WHERE A QUERY STOPS BEING KEYSTROKES,

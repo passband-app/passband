@@ -154,6 +154,18 @@ fn client_router(state: ApiState) -> Router {
             "/client/thread/{thread_id}/opened",
             post(handlers::mark_thread_opened),
         )
+        // "Translate what I am showing." The GET serves an archive thread's
+        // translations as `deferred` and buys nothing, for the same prefetch
+        // reason; the reader displaying the thread asks here. HUMAN DOOR ONLY.
+        .route(
+            "/client/thread/{thread_id}/translate",
+            post(handlers::translate_thread),
+        )
+        // "Languages I read": mail in them is never translated.
+        .route(
+            "/client/translate-config",
+            get(handlers::get_translate_config).post(handlers::set_translate_config),
+        )
         .route("/client/attachments/{id}", get(handlers::get_attachment))
         // FILES ON THEIR WAY OUT (see the handlers' header). The upload carries
         // its own body limit: the router's default is 2 MB, sized for JSON, and
@@ -246,6 +258,12 @@ fn client_router(state: ApiState) -> Router {
         .route(
             "/client/sealed/{message_id}/reveal",
             post(handlers::reveal_sealed),
+        )
+        // The owner's "That was me / Not me" on one auth message. Human door
+        // only: the agent door never reads or writes a verdict.
+        .route(
+            "/client/sealed/{message_id}/verdict",
+            put(handlers::put_sealed_verdict),
         )
         .route(
             "/client/shredder",

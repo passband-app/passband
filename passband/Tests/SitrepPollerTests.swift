@@ -12,6 +12,8 @@ struct SitrepPollerTests {
         let poller = SitrepPoller.shared
         let api = APIClient.shared
         let store = AppStore.shared
+        // One band row on both answers: the stale one must retire nothing.
+        api.feed = Feed(items: [FeedItem(row: AttentionUpdate(id: 7, thread_id: "t7", senderString: "a"))])
         let old = Task { await poller.pull() }
         await until { api.requests == 1 }
 
@@ -24,6 +26,7 @@ struct SitrepPollerTests {
         api.finish(1)
         _ = await old.value
         expect(store.stats == nil, "stale response must not populate practice")
+        expect(ThreadPrefetch.shared.retired.isEmpty, "a stale answer's rows retire nothing")
         expect(Badge.refreshes == 0, "stale response must not update badge")
         expect(store.lastRefresh == nil, "stale response must not mark a refresh")
         expect(store.statsEpoch == nil, "stale response must not claim the stats for any epoch")
@@ -34,6 +37,9 @@ struct SitrepPollerTests {
         api.finish(2)
         _ = await (fresh.value, joined.value)
         expect(store.stats?.total == 2, "fresh fixture response reaches the board")
+        expect(ThreadPrefetch.shared.retired.map { $0.0 } == ["t7"] && ThreadPrefetch.shared.retired.map { $0.1 } == [7],
+               "a pull hands every band row to the thread cache: \(ThreadPrefetch.shared.retired)")
+        api.feed = Feed()
         expect(store.statsEpoch == store.epoch, "the stats are stamped with the epoch they were asked under")
         expect(Badge.refreshes == 1, "only the current request has side effects")
 
@@ -408,7 +414,8 @@ struct RefreshError { var message: String; var kind: ErrorKind }
     }
     func finish(_ id: Int) { pending.removeValue(forKey: id)!.resume(returning: Stats(total: id)) }
     func fail(_ id: Int) { pending.removeValue(forKey: id)!.resume(throwing: APIError(message: "old failure", kind: .unknown)) }
-    func getFeed(destination: String, limit: Int) async throws -> Feed { Feed() }
+    var feed = Feed()
+    func getFeed(destination: String, limit: Int) async throws -> Feed { feed }
     func getUpdates(_ params: UpdatesParams) async throws -> Updates { Updates() }
     func listSealed() async throws -> [Int] { [] }
     func refreshMail() async throws {}
@@ -432,7 +439,21 @@ enum Analytics {
     static func capture(_ event: String, _ properties: [String: Int]) {}
     static func daily(_ event: String, _ properties: [String: Int]) {}
 }
+@MainActor final class ThreadPrefetch {
+    static let shared = ThreadPrefetch()
+    var retired: [(String, Int)] = []
+    func retire(_ rows: some Sequence<(String, Int)>) { retired.append(contentsOf: rows) }
+}
 @MainActor final class ImageWarmer {
     static let shared = ImageWarmer()
     func noteSitrepLanded() {}
+}
+
+/// The verdict ledger's view of sealed lists (Lib/AuthCode.swift): numbered
+/// fetches, stale lists dropped. Every list is fresh here.
+@MainActor final class AuthDecisions {
+    static let shared = AuthDecisions()
+    func beginListFetch() -> Int { 0 }
+    func isFresh(_ fetch: Int) -> Bool { true }
+    func listed(_ rows: [Int], fetch: Int) {}
 }

@@ -268,6 +268,7 @@ enum AgentTools {
                 "subject": hit.subject,
                 "date": hit.received_at,
                 "snippet": hit.snippet,
+                "from_me": hit.from_me ?? false,
             ])
         }
         // How far back the search could see, passed straight through so the
@@ -1105,8 +1106,11 @@ enum AgentTools {
                 reach for it again, reworded, when the first try comes back empty: \
                 the right mail usually lacks one of the words you used. Operators \
                 go in the query beside the words: from:<name or address fragment>, \
+                in:sent (only mail the user wrote; from:me means the same), \
                 after:YYYY-MM-DD, before:YYYY-MM-DD. A query of only operators \
-                lists the matching mail newest first. \
+                lists the matching mail newest first. Recipients are not \
+                searchable: there is no to:. \
+                from_me on a result means the user wrote it. \
                 Search only covers mail since `indexed_since`: when nothing \
                 matches, say that search covers mail since that date, not that \
                 the mail does not exist. `archive` says how far back older mail \
@@ -1119,7 +1123,7 @@ enum AgentTools {
                 properties: [
                     "query": .init(
                         type: "string",
-                        description: "What to look for, phrased naturally, plus any from:, after:, before: operators."),
+                        description: "What to look for, phrased naturally, plus any from:, in:sent, after:, before: operators."),
                     "limit": .init(
                         type: "integer",
                         description: "Max results (default 8, max 20). Use 20 when hunting for something."),

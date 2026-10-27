@@ -28,6 +28,10 @@ enum EventBanner {
     static let eventKey = "passband.event_id"
     static let messageKey = "passband.message_id"
     static let authKey = "passband.is_auth"
+    /// The sender's ADDRESS, on auth banners only, so a tap can put up the
+    /// reveal with a name on it before the sealed list has loaded. Never a
+    /// subject or summary: those can hold the code itself.
+    static let senderKey = "passband.sender"
     /// The posting account's uuid, as a string (userInfo has to survive being
     /// written to disk by the system and read back into a later launch).
     static let accountKey = "passband.account_id"
@@ -44,6 +48,40 @@ enum EventBanner {
     /// A new Passband version is ready. The tap fronts the window, where the
     /// update card is already waiting, and is not a mail open either.
     static let updateRoute = "update"
+
+    /// Where a notification tap goes, decided from its userInfo alone. Pure,
+    /// so the one rule that matters most here is pinned by a test: a tap on
+    /// AUTH mail never fetches a body. It opens the audited reveal (it has the
+    /// message id the reveal needs) or, without one, the Auth page.
+    enum TapRoute: Equatable, Sendable {
+        case update
+        case test
+        case reveal(messageId: Int, threadId: String, sender: String)
+        case authPage
+        case message(Int)
+        case event(UnresolvedPush)
+        case thread(String?)
+    }
+
+    static func tapRoute(_ userInfo: [AnyHashable: Any]) -> TapRoute {
+        let route = userInfo[routeKey] as? String
+        if route == updateRoute { return .update }
+        if route == testRoute { return .test }
+        let messageId =
+            (userInfo[messageKey] as? Int) ?? (userInfo[messageKey] as? String).flatMap(Int.init)
+        let flagged = (userInfo[authKey] as? Bool) ?? false
+        if flagged || route == authRoute {
+            guard let messageId else { return .authPage }
+            return .reveal(
+                messageId: messageId, threadId: userInfo[threadKey] as? String ?? "",
+                sender: userInfo[senderKey] as? String ?? "")
+        }
+        if let messageId { return .message(messageId) }
+        if let unresolved = unresolvedPush(userInfo["event_id"] as? String) {
+            return .event(unresolved)
+        }
+        return .thread(userInfo[threadKey] as? String)
+    }
 
     /// The relay's original push survives when device enrichment times out.
     /// Keep its account-qualified event handle so a tap can resolve the email.

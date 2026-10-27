@@ -49,6 +49,18 @@ struct RehearsalAPITests {
             let merchant = try await read("thread/practice-\(id)", as: ClientThreadView.self)
             precondition(merchant.messages[0].from_name == "Rainforest" && merchant.messages[0].from_addr == "orders@rainforest.example")
         }
+        // The languages card answers in practice, and a save replaces the set
+        // with the daemon's rule: unknown codes and English dropped.
+        let languages = try await read("translate-config", as: TranslateConfig.self)
+        precondition(languages.active && languages.read_languages.isEmpty && !languages.available.isEmpty)
+        var setLanguages = request("translate-config", method: "POST")
+        setLanguages.httpBody = try JSONSerialization.data(withJSONObject: ["read_languages": ["FR", "en", "zz", "es"]])
+        let (savedData, saved) = try await api.response(for: setLanguages)
+        precondition(saved.statusCode == 200)
+        let savedView = try JSONDecoder().decode(TranslateConfig.self, from: savedData)
+        precondition(savedView.read_languages == ["fr", "es"])
+        let reread = try await read("translate-config", as: TranslateConfig.self)
+        precondition(reread.read_languages == ["fr", "es"])
         let receipts = try await read("receipts", as: [Receipt].self)
         let shipments = try await read("shipments", as: [Shipment].self)
         let banking = try await read("banking", as: [BankingRecord].self)

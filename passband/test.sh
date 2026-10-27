@@ -200,6 +200,13 @@ run_suite sitrep-poller \
   Sources/Passband/Model/SitrepPoller.swift \
   Tests/SitrepPollerTests.swift
 
+# The launch image warm: the rows on screen at once, the rest after a quiet
+# stretch, never on Low Power Mode or a costly path, never for an old account.
+run_suite image-warmer \
+  Sources/Passband/Lib/Concurrency.swift \
+  Sources/Passband/Model/ImageWarmer.swift \
+  Tests/ImageWarmerTests.swift
+
 run_suite onboarding-rehearsal \
   Sources/Passband/Model/OnboardingRehearsal.swift \
   Tests/OnboardingRehearsalTests.swift
@@ -498,6 +505,17 @@ run_suite need-today \
 # typed wrong there fails at the only place it can still be seen — the client
 # read a decode error on a fire-and-forget POST as a failed request and reported
 # that it could not reach a spam folder it had just synced perfectly.
+# Auto-translate's wire (docs/TRANSLATION.md): every field tolerant, because
+# the notification extension decodes the same message, and which version of a
+# message the reader shows, under which frame key.
+run_suite translation-wire \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/TranslationRefresh.swift \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Lib/ThreadStyle.swift \
+  Sources/Passband/Lib/Quotes.swift \
+  Tests/TranslationWireTests.swift
+
 run_suite spam-wire \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SubjectText.swift \
@@ -579,6 +597,21 @@ run_suite sealed-event \
   Sources/Passband/Lib/AuthLabels.swift \
   Sources/Passband/Model/EventBanner.swift \
   Tests/SealedEventTests.swift
+
+# What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
+# sealed row from both daemon versions, which kinds open a question and for
+# how long, explained alerts, new-device bursts, critical changes, and the move
+# of the old device-local ledger up to a daemon that keeps verdicts. Pure, so
+# the Auth page, the rail badge and the phone all count by the one copy.
+run_suite auth-policy \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AuthPolicy.swift \
+  Tests/AuthPolicyTests.swift
 
 # Whether a search is a lookup or a question, what the setting lets that verdict
 # do, the single-slot queue that keeps the agent lane narrowing one need instead

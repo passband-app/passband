@@ -120,17 +120,22 @@ extension UpdateVerbs {
     /// trailing edge is where a thumb flicks without looking.
     var isSpamPage: Bool { AppStore.shared.mailMode == .spam }
 
-    /// Trailing edge (drag LEFT): the resolve. Done leads because it is the one
-    /// verb a triage run repeats, and it is what a full swipe commits.
-    var trailingVerbs: [SwipeVerb] {
-        let done =
-            finished
+    /// Done alone, or nothing on a finished row: the whole rail of an auth
+    /// row in For your eyes, which opens only in the reveal.
+    var doneVerbs: [SwipeVerb] {
+        finished
             ? []
             : [
                 SwipeVerb(
                     title: "Done", symbol: "checkmark", tint: Palette.positive,
                     destructive: true, run: { self.done(via: .swipe) })
             ]
+    }
+
+    /// Trailing edge (drag LEFT): the resolve. Done leads because it is the one
+    /// verb a triage run repeats, and it is what a full swipe commits.
+    var trailingVerbs: [SwipeVerb] {
+        let done = doneVerbs
         if isSpamPage { return done }
         return done + [
             SwipeVerb(title: "Tune", symbol: "slider.horizontal.3", tint: Palette.accent, run: tune)

@@ -126,9 +126,21 @@ resource "aws_vpc_security_group_egress_rule" "monitor_https" {
   to_port           = 443
 }
 
+# Tailscale: STUN and WireGuard out, so tailnet clients get direct paths
+# instead of DERP relays over 443. Outbound only; nothing listens publicly.
+resource "aws_vpc_security_group_egress_rule" "monitor_tailscale" {
+  for_each          = { stun = 3478, wireguard = 41641 }
+  security_group_id = aws_security_group.monitor.id
+  description       = "Tailscale ${each.key} out"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "udp"
+  from_port         = each.value
+  to_port           = each.value
+}
+
 resource "aws_vpc_security_group_egress_rule" "monitor_http" {
   security_group_id = aws_security_group.monitor.id
-  description       = "HTTP out (blackbox http->https redirect probes)"
+  description       = "HTTP out (blackbox http to https redirect probes)"
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "tcp"
   from_port         = 80

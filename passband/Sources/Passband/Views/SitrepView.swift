@@ -7,7 +7,7 @@
 import SwiftUI
 
 /// How many ranked standing items show before the quiet "{n} more" expander.
-private let eyesVisible = 10
+private let eyesVisible = BoardFold.forYourEyes
 
 /// THE FOR-YOUR-EYES WALK: the queue the reader is handed when an email is
 /// opened from this band, so `E` (done + next) can step through it without
@@ -21,9 +21,14 @@ private let eyesVisible = 10
 ///
 /// Computed at KEY-PRESS AND CLICK TIME ONLY. It re-ranks the standing list,
 /// which is the cost `SitrepCursor` exists to keep out of the render path.
+///
+/// AUTH MAIL IS NOT ON THE WALK. It sits in this band when it needs a ruling
+/// (critical, or "Not me"), and from here it opens in the audited one-time
+/// reveal, not the reader, so a walk that stepped onto it would leave the walk.
+/// Detected by the row's own decision first (`AppStore.authMeta(for:)`).
 @MainActor
 private func eyesWalk(_ store: AppStore) -> [AttentionUpdate] {
-    store.sitrep.standing
+    store.sitrep.standing.filter { store.authMeta(for: $0) == nil }
 }
 
 /// The sitrep's hover + keyboard cursor, in an `@Observable` box rather than
@@ -70,11 +75,6 @@ struct SitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
 
-    /// How long a board row's thread stays good in the prefetch cache. Longer
-    /// than the default: a board row is the likeliest click in the app, and a
-    /// reader opened from a stale copy heals itself — the poll refetches in
-    /// place the moment it sees a newer message (AppStore.noteThreadArrival).
-    static let boardFresh: TimeInterval = 5 * 60
     /// How many of the top rows are worth a pre-rendered frame. Bounded by
     /// WebFramePool's prerendered tier; each is a live content process.
     private static let prerenderRows = 4
@@ -82,13 +82,19 @@ struct SitrepView: View {
     /// The whole warm for a list of board rows: threads first, then frames
     /// for the top few.
     fileprivate static func warmBoard(_ ids: [String]) {
-        ThreadPrefetch.shared.warm(
-            ids, immediate: eyesVisible, spacing: .milliseconds(150), fresh: boardFresh)
+        ThreadPrefetch.shared.warm(ids, immediate: eyesVisible, spacing: .milliseconds(150))
         FramePrewarmer.shared.want(Array(ids.prefix(prerenderRows)))
     }
 
     /// Hover + keyboard cursor. A reference, deliberately — see `SitrepCursor`.
     @State private var cursor = SitrepCursor()
+    /// THE BOARD'S CLOCK, on the half minute. What its own body works out from
+    /// the time alone (the records rail emptying as calendar rows end and
+    /// today's receipts and deliveries age out) used to ride on the redraw
+    /// every poll brought, because the board read the stats and they change
+    /// every poll; it no longer does, so the beat is kept here, at the
+    /// calendar card's own thirty seconds.
+    @State private var clock = Date()
 
     /// Below this page width the records rail stops being a pinned column and
     /// stacks under the left content, the whole page scrolling as one — a
@@ -169,7 +175,11 @@ struct SitrepView: View {
                 headline: store.fyeHeadline,
                 regenerating: store.fyeHeadlineRegenerating,
                 regenerate: { Task { await store.regenerateFyeHeadline() } },
-                empty: emptyHero)
+                // Asked only over an empty board, the one place the hero says
+                // it: the line is read off the stats (the sync clock moves
+                // every poll), and asking for it always made the whole board
+                // a reader of them.
+                empty: store.sitrep.standing.isEmpty ? emptyHero : nil)
                 .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
                 .padding(.horizontal, Self.gutter)
                 .padding(.bottom, Space.scaled(18))
@@ -256,6 +266,13 @@ struct SitrepView: View {
             }
         #endif
         .animation(.easeInOut(duration: 0.3), value: recordsEmpty)
+        .task {
+            await clockTicks(every: 30, while: { Platform.isAppOnScreen }) {
+                // Not on a fresh mount, which has just drawn with now.
+                let now = Date()
+                if abs(now.timeIntervalSince(clock)) >= 1 { clock = now }
+            }
+        }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
         .keyContext(.sitrep)
         .keyBindings(.sitrep, bindings)
@@ -313,12 +330,12 @@ struct SitrepView: View {
     /// Nothing for your eyes, and truly so: the board has loaded, and it is not
     /// empty only because sync or triage is stuck.
     private var isClear: Bool {
-        store.stats != nil && store.sitrep.standing.isEmpty && emptyHero == nil
+        store.hasStats && store.sitrep.standing.isEmpty && emptyHero == nil
     }
 
     /// The reading cards as the zone draws them.
     private var readingSenders: [ReadingSender] {
-        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+        store.readingOnBoard
     }
 
     /// Clear AND nothing to read: the board with nothing on it at all, which
@@ -333,7 +350,8 @@ struct SitrepView: View {
     /// Every records card would only say it has nothing. Four cards of "No
     /// receipts today." is a dashboard of absences, so the rail steps aside.
     private var recordsEmpty: Bool {
-        CalendarZone.rows(store, now: Date()).isEmpty
+        _ = clock
+        return CalendarZone.rows(store, now: Date()).isEmpty
             && ShipmentsZone.rows(store).isEmpty
             && BankingZone.rows(store).isEmpty
             && ReceiptsZone.rows(store).isEmpty
@@ -477,7 +495,9 @@ struct SitrepView: View {
                     // No closures passed down: a stored closure is never equal to
                     // last render's, so handing rows their actions that way meant
                     // SwiftUI could not skip a single one when the parent redrew.
-                    if RehearsalMode.isEnabled && u.id == 1 {
+                    if let meta = store.authMeta(for: u) {
+                        AuthEyesRow(update: u, meta: meta, index: i, cursor: cursor)
+                    } else if RehearsalMode.isEnabled && u.id == 1 {
                         ObligationRow(update: u, index: i, cursor: cursor)
                             .tourTarget(.maya)
                     } else if RehearsalMode.isEnabled && u.id == 11 {
@@ -563,6 +583,11 @@ struct SitrepView: View {
             },
             KeyBinding("Enter", "open email") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Auth mail opens in the audited one-time reveal.
+                if let meta = store.authMeta(for: u) {
+                    store.requestReveal(meta)
+                    return
+                }
                 store.openThread(u.thread_id, queue: eyesWalk(store), from: .sitrep)
             },
             // Space STARTS the walk: no highlight needed, so it is the one key
@@ -573,6 +598,11 @@ struct SitrepView: View {
                 let walk = eyesWalk(store)
                 let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
                 guard let u else { return false }
+                // A highlighted auth row opens the reveal, not a walk.
+                if let meta = store.authMeta(for: u) {
+                    store.requestReveal(meta)
+                    return true
+                }
                 store.startWalk(u.thread_id, queue: walk)
                 return true
             },
@@ -582,10 +612,16 @@ struct SitrepView: View {
             // inside the reader once the reply is away.
             KeyBinding("r", "reply") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Replying opens the reader on the sealed body; from here, an
+                // auth row only ever opens the reveal.
+                guard store.authMeta(for: u) == nil else { return }
                 Actions.reply(u, queue: eyesWalk(store))
             },
             KeyBinding("v", "fix triage") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 store.openTriageFix(
                     TriageFixTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line))
@@ -595,10 +631,16 @@ struct SitrepView: View {
             // the list's `t` is never consulted from this page.
             KeyBinding("t", "tune sender") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 Actions.tune(sender: u.sender)
             },
             KeyBinding("h", "remind me later") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 store.openRemind(
                     RemindTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line,
@@ -990,6 +1032,71 @@ private struct BoardWarmKeeper: View {
     }
 }
 
+// MARK: - auth row
+
+/// Auth mail in For your eyes: a critical account change nobody has ruled on,
+/// or one the owner said was not them. Its body is sealed, so this row shows
+/// the model's one-line summary and a lock, never prefetches the thread
+/// (`ThreadPrefetch.refuses`), and opens the audited one-time reveal. The
+/// human thread view would serve it; this row simply never asks.
+private struct AuthEyesRow: View {
+    @Environment(AppStore.self) private var store
+    let update: AttentionUpdate
+    let meta: SealedMeta
+    let index: Int
+    let cursor: SitrepCursor
+
+    @State private var hover = RowHover()
+
+    private var tone: Color { meta.isCritical ? Palette.danger : Palette.lock }
+
+    var body: some View {
+        Button {
+            cursor.index = index
+            store.requestReveal(meta)
+        } label: {
+            HStack(spacing: Space.scaled(9)) {
+                Avatar(sender: update.senderString, size: 22)
+                Text(SenderCache.resolved(update.senderString).displayName)
+                    .font(Typo.ui(12, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(1)
+                    .layoutPriority(2)
+                Image(systemName: "lock.fill")
+                    .font(Typo.ui(10))
+                    .foregroundStyle(tone)
+                    .help("Sealed. Opening it reveals it once and writes an audit entry.")
+                Text(update.one_line.isEmpty ? AuthCopy.label(meta.kind) : update.one_line)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkDim)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Chip(
+                    text: meta.isCritical ? "Critical" : AuthCopy.label(meta.kind),
+                    tone: tone,
+                    symbol: meta.isCritical ? "exclamationmark.triangle.fill" : AuthCopy.symbol(meta.kind),
+                    filled: meta.isCritical
+                )
+                .layoutPriority(3)
+            }
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.scaled(7))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background {
+            ObligationWash(index: index, cursor: cursor, hover: hover, tint: tone)
+        }
+        .onHover { over in
+            hover.on = over
+            if over { cursor.hover(index) }
+        }
+        .accessibilityLabel(
+            "\(AuthCopy.label(meta.kind)) from \(SenderCache.resolved(update.senderString).displayName), sealed")
+    }
+}
+
 // MARK: - obligation row
 
 private struct ObligationRow: View {
@@ -1097,7 +1204,7 @@ private struct ObligationRow: View {
                 // The pointer resting on a row is the best predictor of the
                 // next click: make sure its thread is cached (a no-op when it
                 // already is) and, a beat later, rendered.
-                ThreadPrefetch.shared.prefetch(update.thread_id, fresh: SitrepView.boardFresh)
+                ThreadPrefetch.shared.prefetch(update.thread_id, fresh: ThreadPrefetch.warmFresh)
                 FramePrewarmer.shared.nudge(update.thread_id)
             }
         }

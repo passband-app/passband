@@ -54,11 +54,20 @@ struct MobileSitrepView: View {
     /// across the two shells rather than forking it for the phone.
     @State private var cursor = SitrepCursor()
 
-    /// How many ranked standing items show before the "{n} more" expander —
-    /// four, well short of the Mac's ten, because a phone's fold is shorter and
-    /// four ranked rows plus the expander still fit under it with the hero.
-    private static let eyesVisible = 4
+    /// How many ranked standing items show before the "{n} more" expander;
+    /// see `BoardFold` for why four.
+    fileprivate static let eyesVisible = BoardFold.forYourEyes
     @State private var expanded = false
+    /// THE BOARD'S CLOCK, on the minute: what the rows say with the time alone
+    /// ("3m", a deadline chip) and today's date in the headline's key used to
+    /// ride on the redraw every poll brought, when the board read the stats.
+    @State private var minute = Date()
+
+    /// Warm the threads behind the rows showing, the first four at once.
+    fileprivate static func warm(_ visible: [AttentionUpdate]) {
+        ThreadPrefetch.shared.warm(
+            visible.map(\.thread_id), immediate: eyesVisible, spacing: .milliseconds(150))
+    }
 
     /// When the drag now in flight started, to tell a page swipe from a row's.
     @State private var dragBegan: Date?
@@ -94,6 +103,7 @@ struct MobileSitrepView: View {
     }
 
     var body: some View {
+        let _ = minute
         // Preserve the server order on every device.
         let ranked = store.sitrep.standing
         let visible = expanded ? ranked : Array(ranked.prefix(Self.eyesVisible))
@@ -107,7 +117,11 @@ struct MobileSitrepView: View {
                 banner
                 hero
                 if !ranked.isEmpty {
-                    forYourEyes(visible: visible, overflow: overflow, queue: ranked)
+                    // Auth mail stays off the reader's queue: it opens in the
+                    // one-time reveal, never in the reader.
+                    forYourEyes(
+                        visible: visible, overflow: overflow,
+                        queue: ranked.filter { store.authMeta(for: $0) == nil })
                 } else if isClear {
                     // An empty board is the best state this app has, and it
                     // should not look like a broken one.
@@ -120,12 +134,19 @@ struct MobileSitrepView: View {
                 if !(reading.isEmpty && ranked.isEmpty) {
                     ReadingZone(senders: reading, cursor: cursor)
                 }
-                footnote
+                BoardFootnote(bannerShowing: bannerShowing)
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
         .background(Palette.canvas)
+        .task {
+            await clockTicks(every: 60, while: { Platform.isAppOnScreen }) {
+                // Not on a fresh mount, which has just drawn with now.
+                let now = Date()
+                if abs(now.timeIntervalSince(minute)) >= 1 { minute = now }
+            }
+        }
         .navigationTitle("Sitrep")
         .navigationBarTitleDisplayMode(.inline)
         // THE TWO DOORS OFF THE DASHBOARD: who you are, and the one verb this
@@ -186,11 +207,15 @@ struct MobileSitrepView: View {
         // asking here as well is what makes a cold launch paint from one round of
         // requests rather than from whichever zone happened to mount first.
         .task { await store.refreshZones() }
-        .onAppear {
-            ThreadPrefetch.shared.warm(
-                store.sitrep.standing.map(\.thread_id), immediate: Self.eyesVisible,
-                spacing: .milliseconds(150))
-        }
+        // THE ROWS ON SCREEN, not the band: this ran on every return to the
+        // tab and warmed every standing thread, up to two hundred fetches for
+        // four rows anybody could tap. Expanding the list, or a row changing,
+        // warms what that brings into view, and every poll keeps them warm (a
+        // copy lapses, or a reply drops it); a warm of threads already cached
+        // asks nothing.
+        .onAppear { Self.warm(visible) }
+        .onChange(of: visible.map(\.id)) { _, _ in Self.warm(visible) }
+        .background { VisibleWarmKeeper(rows: visible) }
         .onChange(of: visible.count) { _, count in
             if count == 0 { expanded = false }
         }
@@ -215,13 +240,13 @@ struct MobileSitrepView: View {
     }
 
     private var reading: [ReadingSender] {
-        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+        store.readingOnBoard
     }
 
     /// Nothing for your eyes, and truly so: the board has loaded, and it is
     /// not empty only because sync or triage is stuck.
     private var isClear: Bool {
-        store.stats != nil && store.sitrep.standing.isEmpty
+        store.hasStats && store.sitrep.standing.isEmpty
             && store.syncStatus.emptyHero(
                 queued: store.triageWaiting, lastSync: store.daemonLastSync) == nil
     }
@@ -258,8 +283,12 @@ struct MobileSitrepView: View {
         // Only "all clear" when triage has actually run; the footnote says why.
         HeroLine.title(
             headline: store.fyeHeadline, count: store.sitrep.standing.count,
-            empty: store.syncStatus.emptyHero(
-                queued: store.triageWaiting, lastSync: store.daemonLastSync)?.title)
+            // Asked only over an empty board, the one place it is said: the
+            // line is read off the stats, which change every poll.
+            empty: store.sitrep.standing.isEmpty
+                ? store.syncStatus.emptyHero(
+                    queued: store.triageWaiting, lastSync: store.daemonLastSync)?.title
+                : nil)
     }
 
     // MARK: - for your eyes
@@ -280,14 +309,24 @@ struct MobileSitrepView: View {
             VStack(spacing: 2) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { _, u in
                     let verbs = UpdateVerbs(update: u, queue: queue, surface: .sitrep)
-                    SwipeRow(leading: verbs.leadingVerbs, trailing: verbs.trailingVerbs) {
-                        UpdateRow(
-                            update: u,
-                            selected: false,
-                            onHover: {},
-                            onOpen: verbs.open)
+                    if let meta = store.authMeta(for: u) {
+                        // Sealed: summary and a lock, a tap opens the audited
+                        // reveal, and the only swipe is Done. Reply, remind,
+                        // archive and tune all start from somewhere this row
+                        // does not send auth mail.
+                        SwipeRow(leading: [], trailing: verbs.doneVerbs) {
+                            MobileAuthEyesRow(update: u, meta: meta) { store.requestReveal(meta) }
+                        }
+                    } else {
+                        SwipeRow(leading: verbs.leadingVerbs, trailing: verbs.trailingVerbs) {
+                            UpdateRow(
+                                update: u,
+                                selected: false,
+                                onHover: {},
+                                onOpen: verbs.open)
+                        }
+                        .updateContextMenu(verbs)
                     }
-                    .updateContextMenu(verbs)
                 }
                 if overflow > 0 {
                     // THE WHOLE ROW IS THE BUTTON, and only the pill is drawn.
@@ -321,15 +360,23 @@ struct MobileSitrepView: View {
             }
         }
     }
+}
 
-    // MARK: - footnote
+// MARK: - footnote
 
-    /// The page's last line: how fresh the board is, and what went wrong if
-    /// anything did. The Mac says this in its masthead; a phone has no masthead
-    /// to say it in, and "when did this last update" is the one question a
-    /// glanceable surface owes an answer to.
-    @ViewBuilder
-    private var footnote: some View {
+/// The page's last line: how fresh the board is, and what went wrong if
+/// anything did. The Mac says this in its masthead; a phone has no masthead
+/// to say it in, and "when did this last update" is the one question a
+/// glanceable surface owes an answer to.
+///
+/// ITS OWN VIEW: the stamp is read off the stats and the client's refresh
+/// time, and both move every poll. Inline, that made the whole board a reader
+/// of them; here only this line redraws.
+private struct BoardFootnote: View {
+    @Environment(AppStore.self) private var store
+    let bannerShowing: Bool
+
+    var body: some View {
         if let refreshError = store.refreshError {
             Label(refreshError.message, systemImage: "exclamationmark.triangle.fill")
                 .font(Typo.micro)
@@ -350,5 +397,75 @@ struct MobileSitrepView: View {
                 .foregroundStyle(stamp.warn ? Palette.warn : Palette.inkFaintest)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Auth mail in For your eyes, at phone scale: a critical account change nobody
+/// has ruled on, or one the owner said was not them. The model's one-line
+/// summary and a lock; the body is sealed and is never fetched to draw this.
+struct MobileAuthEyesRow: View {
+    let update: AttentionUpdate
+    let meta: SealedMeta
+    let onOpen: () -> Void
+
+    private var tone: Color { meta.isCritical ? Palette.danger : Palette.lock }
+
+    var body: some View {
+        ListRow(
+            selected: false, cornerRadius: 10, tint: tone, hPadding: 10, vPadding: 8,
+            hoverFill: false, action: onOpen
+        ) { _, _ in
+            HStack(alignment: .top, spacing: 10) {
+                Avatar(sender: update.senderString, size: 26)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(SenderCache.resolved(update.senderString).displayName)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(tone)
+                        Spacer(minLength: 4)
+                        Text(Fmt.relAge(meta.received_at))
+                            .font(Typo.num(11))
+                            .foregroundStyle(Palette.inkFaintest)
+                    }
+                    Text(update.one_line.isEmpty ? AuthCopy.label(meta.kind) : update.one_line)
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkDim)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Label(
+                        meta.isCritical ? "Critical" : AuthCopy.label(meta.kind),
+                        systemImage: meta.isCritical
+                            ? "exclamationmark.triangle.fill" : AuthCopy.symbol(meta.kind)
+                    )
+                    .font(Typo.micro)
+                    .foregroundStyle(tone)
+                }
+            }
+        }
+        .accessibilityLabel(
+            "\(AuthCopy.label(meta.kind)) from \(SenderCache.resolved(update.senderString).displayName), sealed")
+    }
+}
+
+/// Re-warms the rows showing on every poll, as the Mac's board keeper does.
+/// A zero-size view of its own so that reading the poll heartbeat invalidates
+/// it and not the board.
+private struct VisibleWarmKeeper: View {
+    @Environment(AppStore.self) private var store
+    let rows: [AttentionUpdate]
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            // THE ROWS ON SCREEN ONLY, as the Mac's keeper does: with the
+            // list expanded, re-warming all of it every poll would start a
+            // long trickle every ten seconds.
+            .onChange(of: store.lastRefresh) { _, _ in
+                MobileSitrepView.warm(Array(rows.prefix(MobileSitrepView.eyesVisible)))
+            }
     }
 }

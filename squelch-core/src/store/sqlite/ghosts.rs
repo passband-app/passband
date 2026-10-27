@@ -4278,6 +4278,7 @@ mod tests {
             auth: AuthAssessment {
                 kinds: vec![AuthKind::LoginAlert],
                 evidence: vec![],
+                critical: false,
             },
             ..ev.decision()
         };

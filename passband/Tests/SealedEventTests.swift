@@ -48,6 +48,7 @@ struct SealedEventTests {
         anUnnamedSenderStillSaysSomething()
         authBannersOfOneMailboxShareAGroup()
         genericPushStillIdentifiesItsAccountAndEvent()
+        anAuthTapNeverRoutesToTheReader()
         var taps = NotificationTapQueue<Int>()
         let account = UUID()
         taps.enqueue(91, accountId: account)
@@ -394,4 +395,40 @@ struct SealedEventTests {
         expect(EventBanner.unresolvedPush("not-an-account:42") == nil, "invalid account is rejected")
     }
 
+
+    /// A tap on auth mail must never reach `getMessage` (the body, unaudited):
+    /// it opens the reveal when it names a message, else the Auth page.
+    static func anAuthTapNeverRoutesToTheReader() {
+        typealias K = EventBanner
+        // The Mac's live banner for an event marked is_auth.
+        let mac: [AnyHashable: Any] = [
+            K.threadKey: "t1", K.eventKey: 5, K.messageKey: 42, K.authKey: true,
+            K.senderKey: "noreply@github.com", K.accountKey: "x",
+        ]
+        expect(K.tapRoute(mac) == .reveal(messageId: 42, threadId: "t1", sender: "noreply@github.com"), "Mac auth banner reveals")
+        // The iOS extension's auth push: route auth plus the message id.
+        let ios: [AnyHashable: Any] = [
+            K.routeKey: K.authRoute, K.messageKey: 43, K.authKey: true, K.threadKey: "t2",
+            K.senderKey: "no-reply@accounts.google.com",
+        ]
+        expect(K.tapRoute(ios) == .reveal(messageId: 43, threadId: "t2", sender: "no-reply@accounts.google.com"), "iOS auth push reveals")
+        // A message id stored as a string still reveals.
+        let stringId: [AnyHashable: Any] = [K.messageKey: "44", K.authKey: true]
+        expect(K.tapRoute(stringId) == .reveal(messageId: 44, threadId: "", sender: ""), "string id")
+        // A legacy auth route with no message id: the Auth page, never a fetch.
+        let legacy: [AnyHashable: Any] = [K.routeKey: K.authRoute, K.accountKey: "x"]
+        expect(K.tapRoute(legacy) == .authPage, "legacy auth route opens the Auth page")
+        let flaggedNoId: [AnyHashable: Any] = [K.authKey: true, K.threadKey: "t3"]
+        expect(K.tapRoute(flaggedNoId) == .authPage, "auth without a message id opens the Auth page")
+        // Ordinary mail is unchanged.
+        let normal: [AnyHashable: Any] = [K.threadKey: "t4", K.messageKey: 45, K.authKey: false]
+        expect(K.tapRoute(normal) == .message(45), "normal mail opens the message")
+        expect(K.tapRoute([K.threadKey: "t5"]) == .thread("t5"), "thread-only")
+        expect(K.tapRoute([K.routeKey: K.testRoute, K.messageKey: 1]) == .test, "test banner opens nothing")
+        expect(K.tapRoute([K.routeKey: K.updateRoute]) == .update, "update banner")
+        let account = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        expect(
+            K.tapRoute(["event_id": "\(account.uuidString):9"])
+                == .event(.init(accountId: account, eventId: 9)), "an unresolved push resolves its event")
+    }
 }

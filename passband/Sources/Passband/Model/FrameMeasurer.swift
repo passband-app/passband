@@ -99,6 +99,13 @@ final class FrameMeasurer {
 
     // MARK: - the pass
 
+    /// One document to measure: a message as one version of it draws, and the
+    /// key that version's height is filed under.
+    private struct Job {
+        let shown: ClientMessage
+        let key: String
+    }
+
     /// Measure every message in this thread that has no height on file, and
     /// call back ONCE when the whole thread is measured. That includes calling
     /// back immediately with nothing to do, which is what a second open looks
@@ -108,7 +115,10 @@ final class FrameMeasurer {
         allowRemote: Bool, token: String, onFinished: @escaping () -> Void
     ) {
         reset()
-        guard width > 0 else { return }
+        guard width > 0 else {
+            releaseIfPressed()
+            return
+        }
         // Before the filter below asks what is already on file: a height taken
         // at the other density is on file and wrong.
         ReaderMetrics.sync()
@@ -123,14 +133,27 @@ final class FrameMeasurer {
 
         // NEWEST FIRST: the thread opens on the newest message with the history
         // above it, so the next size anybody needs is the one just behind them.
-        let jobs = messages.reversed().filter { message in
-            guard let html = message.html, !html.isEmpty else { return false }
+        //
+        // BOTH VERSIONS of a translated message: the English first, since that
+        // is what opens, and then, behind every message's English, the
+        // original, so "show original" opens at its real height rather than a
+        // guess that snaps. Each is the document the card draws for that
+        // version, under that version's key.
+        let newestFirst = Array(messages.reversed())
+        let versions: [Job] =
+            newestFirst.map { Job(shown: $0.presented(), key: style.frameKey(for: $0)) }
+            + newestFirst.filter { $0.readyTranslation != nil }.map {
+                Job(shown: $0.presented(original: true), key: style.frameKey(for: $0, original: true))
+            }
+        let jobs = versions.filter { job in
+            guard let html = job.shown.html, !html.isEmpty else { return false }
             // AUTHORITATIVE, not merely present: a height a live frame put
             // there is a stopgap taken inside a box it had sized itself, and
             // replacing exactly those is what this pass is for.
-            return FrameHeights.shared.authoritative(style.frameKey(message.id)) == nil
+            return FrameHeights.shared.authoritative(job.key) == nil
         }
         guard !jobs.isEmpty else {
+            releaseIfPressed()
             onFinished()
             return
         }
@@ -141,19 +164,21 @@ final class FrameMeasurer {
             // that is to stop rather than to spend a second and a bit per
             // message learning it twenty times.
             var misses = 0
-            for message in jobs {
+            for job in jobs {
                 if Task.isCancelled { return }
                 guard let self else { return }
-                let height = await self.measure(message, allowRemote: allowRemote)
+                let height = await self.measure(job.shown, allowRemote: allowRemote)
                 if Task.isCancelled { return }
                 // The setting moved while this document was being measured:
                 // the number is true of a drawing nobody will see, and filed as
                 // authoritative it would outrank the frame that is showing the
                 // real one. The reader starts a pass of its own for the flip.
-                guard ReaderMetrics.current == metrics else { return }
+                guard ReaderMetrics.current == metrics else {
+                    self.finish()
+                    return
+                }
                 if height > 0 {
-                    FrameHeights.shared.set(
-                        style.frameKey(message.id), height, authoritative: true)
+                    FrameHeights.shared.set(job.key, height, authoritative: true)
                     misses = 0
                 } else {
                     misses += 1
@@ -161,11 +186,27 @@ final class FrameMeasurer {
                 }
             }
             guard let self, !Task.isCancelled else { return }
-            // The frame stays warm for the next thread; only the pass ends.
-            self.reset()
+            // The frame stays warm for the next thread (but see `finish`); only
+            // the pass ends.
+            self.finish()
             onFinished()
         }
     }
+
+    #if os(iOS)
+        /// Let the kept frame go while no pass is using it: the pool is
+        /// draining (memory is short, or the app has left the screen) and an
+        /// idle frame is a parked content process. The next pass builds
+        /// another, a launch's ~76ms. One mid-pass is the open reader's and is
+        /// left alone.
+        func releaseIdleFrame() {
+            guard pass == nil, let frame else { return }
+            frame.stopLoading()
+            frame.navigationDelegate = nil
+            self.frame = nil
+            relay = nil
+        }
+    #endif
 
     /// The reader leaving. TOKEN-SCOPED because a thread switch is two events
     /// in an order SwiftUI does not promise: the incoming reader may start its
@@ -173,7 +214,20 @@ final class FrameMeasurer {
     /// throw away the pass that had just begun.
     func cancel(token: String) {
         guard self.token == token else { return }
+        finish()
+    }
+
+    /// A pass over, however it ended. On the phone, while the pool is holding
+    /// back (`WebFramePool.isPressed`), the kept frame goes with it.
+    private func finish() {
         reset()
+        releaseIfPressed()
+    }
+
+    private func releaseIfPressed() {
+        #if os(iOS)
+            if WebFramePool.shared.isPressed { releaseIdleFrame() }
+        #endif
     }
 
     /// Stop. Heights already taken stay taken — they are true regardless of
@@ -278,6 +332,8 @@ final class FrameMeasurer {
         }
     }
 
+    /// `message` is already the version being measured (ClientMessage.presented),
+    /// so its html is the document the card draws for it.
     private static func prepare(_ message: ClientMessage) async -> EmailWebView.Prepared {
         let html = message.html ?? ""
         let allow = message.allowsTrackers
@@ -415,4 +471,14 @@ private final class MeasureRelay: NSObject, WKNavigationDelegate {
     /// A load that was claimed and then never started. Left standing, the claim
     /// would be spent on somebody else's navigation.
     func forgetOwnLoad() { pendingOwnLoads = max(0, pendingOwnLoads - 1) }
+}
+
+extension ThreadStyle {
+    /// The key for `message` as the reader draws it (ClientMessage.presented):
+    /// translated unless there is no ready translation or the reader asked for
+    /// the original. Here rather than beside `frameKey` because ThreadStyle (and
+    /// ThreadPrefetch) are compiled by the tests without the wire types.
+    func frameKey(for message: ClientMessage, original: Bool = false) -> String {
+        frameKey(message.id, translated: !original && message.readyTranslation != nil)
+    }
 }

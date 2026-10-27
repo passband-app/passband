@@ -22,5 +22,6 @@ mod spam;
 mod specialists;
 mod support;
 mod tracking;
+mod translations;
 mod triage_stages;
 mod zones;

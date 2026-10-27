@@ -52,6 +52,164 @@ macro_rules! own_mail_sql {
 }
 const OWN_MAIL: &str = own_mail_sql!();
 
+/// Auth mail, over alias `d` (the message's `agent_message_decisions` row,
+/// LEFT JOINed): its decision names an auth kind. The Rust form is
+/// `AuthAssessment::is_auth`.
+macro_rules! auth_mail_sql {
+    () => {
+        "(COALESCE(json_array_length(d.decision_json,'$.auth.kinds'),0)>0)"
+    };
+}
+
+/// A takeover-class account change that holds FYE, over alias `d` and the
+/// message alias `$m`: `critical` beside `account_change`, from a sender
+/// that did not explicitly fail authentication (`auth_pass = 0`; NULL, never
+/// evaluated, still counts). A spoof of the service's own address is not a
+/// critical change. A look-alike domain passes for itself, which is the
+/// prompt's to catch. The Rust form is `AuthAssessment::is_critical` plus
+/// the same `auth_pass` test (`SealedMessage::critical` is this value).
+macro_rules! auth_critical_sql {
+    ($m:literal) => {
+        concat!(
+            "(json_extract(d.decision_json,'$.auth.critical')=1 AND EXISTS(SELECT 1 FROM \
+               json_each(d.decision_json,'$.auth.kinds') WHERE value='account_change') \
+             AND COALESCE(",
+            $m,
+            ".auth_pass,1)!=0)"
+        )
+    };
+}
+
+/// AN AUTH MESSAGE THAT HOLDS FYE, over aliases `d` (decision), `v`
+/// (`auth_verdicts`, LEFT JOINed on the same message) and the message alias
+/// `$m`: the owner said "Not me", or it is a critical account change
+/// ([`auth_critical_sql!`]) they have not ruled on. A "That was me" lets go.
+/// Only meaningful where `auth_mail_sql!` holds. The same predicate decides
+/// FYE membership (through [`auth_fye_threads_cte!`]), spares a message from
+/// thread-wide sweeps ([`holds_fye_triage_sql!`]) and keeps it from the
+/// shredder.
+macro_rules! auth_fye_sql {
+    ($m:literal) => {
+        concat!(
+            "(COALESCE(v.verdict='not_mine',",
+            auth_critical_sql!($m),
+            ",0))"
+        )
+    };
+}
+
+/// The key a message's thread is grouped by: its thread id, or the message
+/// alone when it has none.
+macro_rules! thread_key_sql {
+    ($m:literal) => {
+        concat!(
+            "(CASE WHEN ",
+            $m,
+            ".thread_id='' THEN '#'||",
+            $m,
+            ".id ELSE ",
+            $m,
+            ".thread_id END)"
+        )
+    };
+}
+
+/// THE AUTH ARM OF FYE MEMBERSHIP, thread-level, as two CTEs to put after a
+/// query's `WITH`: `auth_fye_threads(account_id, thread_key, id)` holds, per
+/// thread, the newest not-done auth message that [`auth_fye_sql!`] holds for.
+/// A thread qualifies when ANY of its auth messages does, so a critical
+/// change is not lost behind the sign-in alert Gmail threads after it, and
+/// that message is the one the FYE row shows. LEFT JOIN it on
+/// `thread_key_sql!` of the outer message (or the attention row's thread).
+///
+/// COMPUTED ONCE PER QUERY, from the few rows that can qualify: decisions
+/// flagged critical (`idx_decisions_critical`, a partial index on exactly
+/// that expression, kept in step with `schema.sql`; the plan test
+/// `auth_fye_threads_read_the_critical_index` fails if they drift) and "Not
+/// me" verdicts. Never a per-row subquery: the
+/// sitrep inventory and the stats run it over the whole window.
+///
+/// NO REVISION CHECK: it reads the message's standing decision, so a
+/// critical change or a "Not me" stays in FYE through a body heal or a
+/// re-fetch (which bump the state revision) until the re-triage lands, the
+/// way the sweeps and the shredder read it.
+///
+/// ONE DEFINITION for the FYE list, the sitrep's placement and Standing
+/// band, and the stats tiers, so they cannot drift
+/// (`auth_fye_list_and_placement_agree` pins that they do). The owner's
+/// thread pin and a fired reminder still win, applied by each caller exactly
+/// as for all FYE mail.
+macro_rules! auth_fye_threads_cte {
+    () => {
+        concat!(
+            "auth_hold AS (
+               SELECT account_id, message_id FROM agent_message_decisions
+                WHERE CASE WHEN json_valid(decision_json) THEN json_extract(decision_json,'$.auth.critical') END = 1
+               UNION
+               SELECT account_id, message_id FROM auth_verdicts WHERE verdict='not_mine'),
+             auth_fye_threads AS (
+               SELECT account_id, thread_key, id FROM (
+                 SELECT fm.account_id, ",
+            thread_key_sql!("fm"),
+            " AS thread_key, fm.id,
+                   ROW_NUMBER() OVER (PARTITION BY fm.account_id, ",
+            thread_key_sql!("fm"),
+            " ORDER BY fm.received_at DESC, fm.id DESC) AS pick
+                 FROM auth_hold h
+                 JOIN messages fm ON fm.account_id=h.account_id AND fm.id=h.message_id
+                 JOIN agent_message_decisions d ON d.account_id=fm.account_id AND d.message_id=fm.id
+                 LEFT JOIN auth_verdicts v ON v.account_id=fm.account_id AND v.message_id=fm.id
+                 LEFT JOIN triage ft ON ft.account_id=fm.account_id AND ft.message_id=fm.id
+                 WHERE fm.is_sent=0 AND fm.is_spam=0 AND fm.is_archive=0
+                   AND COALESCE(ft.status,'new')!='done' AND ",
+            auth_mail_sql!(),
+            " AND ",
+            auth_fye_sql!("fm"),
+            ") WHERE pick=1)"
+        )
+    };
+}
+
+/// A message that holds its place against thread-wide sweeps, correlated to
+/// the `triage` row being updated: [`auth_fye_sql!`], an auth message ruled
+/// "Not me" or an unruled critical change. Done on ANOTHER message of the
+/// thread (the Auth page archiving the sign-in alert beside it, a reminder,
+/// an unsubscribe) must not clear it; a ruling, or done on the message
+/// itself, does.
+macro_rules! holds_fye_triage_sql {
+    () => {
+        concat!(
+            "EXISTS(SELECT 1 FROM agent_message_decisions d \
+               JOIN messages hm ON hm.account_id=d.account_id AND hm.id=d.message_id \
+               LEFT JOIN auth_verdicts v ON v.account_id=d.account_id AND v.message_id=d.message_id \
+             WHERE d.account_id=triage.account_id AND d.message_id=triage.message_id \
+               AND CASE WHEN json_valid(d.decision_json) THEN ",
+            auth_mail_sql!(),
+            " AND ",
+            auth_fye_sql!("hm"),
+            " ELSE 0 END)"
+        )
+    };
+}
+
+/// Auth Page membership, over `m`, `t` (triage), `s` (agent_message_state)
+/// and `d`: the agent classified it as auth, or it is an unmigrated legacy
+/// row the old pipeline sealed. `triage.sensitivity` alone is never the
+/// test: the agent pipeline no longer writes it.
+macro_rules! sealed_membership_sql {
+    () => {
+        "(json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0 \
+          OR (s.message_id IS NULL AND t.sensitivity='sealed'))"
+    };
+}
+
+/// The `auth_verdicts` join [`auth_fye_sql!`] reads, onto messages `m`.
+macro_rules! auth_verdict_join_sql {
+    () => {
+        " LEFT JOIN auth_verdicts v ON v.account_id=m.account_id AND v.message_id=m.id "
+    };
+}
+
 pub(crate) mod agent_budget;
 /// An archive row nobody has assessed, over aliases `m` (messages) and `a`
 /// (its `agent_message_state`, LEFT JOINed): stored to be found, never
@@ -208,6 +366,7 @@ mod specialists;
 #[cfg(test)]
 mod tests;
 mod tracking;
+mod translations;
 mod triage_stages;
 mod zones;
 
@@ -592,6 +751,18 @@ impl SqliteStore {
     #[cfg(test)]
     pub(crate) fn execute_batch_for_test(&self, sql: &str) {
         self.lock().unwrap().execute_batch(sql).unwrap();
+    }
+
+    /// One integer off the store's connection, for a test outside this
+    /// module that has to read a row no store method returns.
+    #[cfg(test)]
+    pub(crate) fn query_i64_for_test(&self, sql: &str) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        self.lock()
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .optional()
+            .unwrap()
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -1401,6 +1572,16 @@ impl Store for SqliteStore {
         self.sealed_body(account_id, message_id)
     }
 
+    fn set_auth_verdict(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        verdict: Option<crate::types::AuthVerdict>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.set_auth_verdict(account_id, message_id, verdict, now)
+    }
+
     fn sent_listing(
         &self,
         account_id: AccountId,
@@ -1718,6 +1899,15 @@ impl Store for SqliteStore {
         self.stage1_usage_since(account_id, since_day)
     }
 
+    fn category_usage_since(
+        &self,
+        account_id: AccountId,
+        since_day: &str,
+        category: &str,
+    ) -> Result<Stage2Usage> {
+        self.category_usage_since(account_id, since_day, category)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn extract_bump_usage(
         &self,
@@ -1867,5 +2057,81 @@ impl Store for SqliteStore {
     /// embedder, including one attached late in the background.
     fn embedder(&self) -> Option<std::sync::Arc<dyn crate::embed::Embedder>> {
         SqliteStore::embedder(self)
+    }
+
+    fn queue_translation(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        source_lang: &str,
+        deferred: bool,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.queue_translation(account_id, message_id, source_lang, deferred, now)
+    }
+
+    fn claim_translations(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::store::TranslationJob>> {
+        self.claim_translations(account_id, now, limit)
+    }
+
+    fn record_translation(
+        &self,
+        job: &crate::store::TranslationJob,
+        write: &crate::store::TranslationWrite<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.record_translation(job, write, now)
+    }
+
+    fn read_languages(&self, account_id: AccountId) -> Result<Vec<String>> {
+        self.read_languages(account_id)
+    }
+
+    fn set_read_languages(
+        &self,
+        account_id: AccountId,
+        codes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        self.set_read_languages(account_id, codes, now)
+    }
+
+    fn promote_deferred_translations(
+        &self,
+        account_id: AccountId,
+        thread_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        self.promote_deferred_translations(account_id, thread_id, now)
+    }
+
+    fn message_translations(
+        &self,
+        account_id: AccountId,
+        message_ids: &[i64],
+    ) -> Result<Vec<crate::store::MessageTranslation>> {
+        self.message_translations(account_id, message_ids)
+    }
+
+    fn upsert_translation_vector(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        embedding: &[f32],
+    ) -> Result<()> {
+        self.upsert_translation_vector(account_id, message_id, embedding)
+    }
+
+    fn translations_missing_vectors(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+    ) -> Result<Vec<crate::store::MissingVector>> {
+        self.translations_missing_vectors(account_id, limit)
     }
 }

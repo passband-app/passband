@@ -284,6 +284,8 @@ pub async fn classify_at(
         // One retry's worth of patience: the job has its own budget, and the
         // fallback (hand the link to the user) is never wrong.
         max_tries: 2,
+        max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(
         &client.http,

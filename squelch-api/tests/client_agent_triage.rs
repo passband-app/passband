@@ -219,6 +219,20 @@ async fn agent_search_fills_results_after_pending_leading_matches() {
     assert_eq!(body["items"][0]["id"], id);
 }
 
+/// RECIPIENTS ARE HUMAN-DOOR DATA: `to:` would answer "did this go to X" one
+/// fragment at a time. Refused outright, never silently dropped, so a caller
+/// cannot read an unfiltered page as a filtered one. `in:sent` is fine.
+#[tokio::test]
+async fn the_agent_door_refuses_a_recipient_filter() {
+    let h = harness(|_, _| {});
+    for q in ["lease%20to:dan", "to:d", "in:sent%20to:dan"] {
+        let (status, _) = get(&h, &format!("/client/agent/search?q={q}&mode=keyword")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{q}");
+    }
+    let (status, _) = get(&h, "/client/agent/search?q=in:sent&mode=keyword").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// A HEALTHY IDLE MAILBOX READS AS CLEAR. A verdict that asks to look again
 /// in three days leaves a queued revisit job behind (revisits are on by
 /// default), and `/client/stats` must not count it as an email waiting for

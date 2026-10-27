@@ -283,6 +283,14 @@ actor APIClient {
         return try decode(T.self, from: data)
     }
 
+    private func putNoContent(_ path: String, body: Encodable? = nil) async throws {
+        var payload: Data? = nil
+        if let body { payload = try Self.encoder.encode(AnyEncodable(body)) }
+        let req = try buildRequest(
+            path: path, method: .PUT, query: [:], body: payload, timeout: Self.requestTimeout)
+        _ = try await perform(req)
+    }
+
     private func postNoContent(_ path: String, body: Encodable? = nil) async throws {
         var payload: Data? = nil
         if let body { payload = try Self.encoder.encode(AnyEncodable(body)) }
@@ -452,6 +460,17 @@ actor APIClient {
         let escaped =
             threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
         try await postNoContent("/client/thread/\(escaped)/opened")
+    }
+
+    /// Ask the daemon to translate this thread's ARCHIVE mail, whose
+    /// translations `getThread` serves as `deferred` and leaves unbought.
+    /// Called by the reader DISPLAYING the thread, and by nothing else: the
+    /// prefetch reads threads nobody opened, and archive mail spends nothing
+    /// unprompted. Idempotent on the daemon, so a reopen may ask again.
+    func translateThread(_ threadId: String) async throws {
+        let escaped =
+            threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
+        try await postNoContent("/client/thread/\(escaped)/translate")
     }
 
     /// Whether this daemon can share invites, and what the mail could say.
@@ -863,8 +882,26 @@ actor APIClient {
 
     /// Reveal exactly one sealed body: audited server-side, `no-store`, and the
     /// returned body must live in view state only — see docs/SECURITY.md §4.
-    func revealSealed(_ id: Int) async throws -> RevealedSealed {
-        try await post("/client/sealed/\(id)/reveal")
+    ///
+    /// `source` says where the reveal came from: nil for one the human asked
+    /// for on a page (the Auth page, a For-your-eyes row), "notification" for
+    /// a banner tap. The daemon's pairing counts only interactive reveals as
+    /// "the owner used this code". Sent as `?source=` only when set (absent
+    /// means interactive); a daemon older than the parameter has no query
+    /// extractor on this route and ignores it.
+    func revealSealed(_ id: Int, source: String? = nil) async throws -> RevealedSealed {
+        try await post("/client/sealed/\(id)/reveal", query: ["source": source])
+    }
+
+    /// Record (or, with nil, clear) the owner's ruling on one piece of auth
+    /// mail: "mine" or "not_mine". Human door only. A daemon older than the
+    /// route answers 404 or 405, which `AuthDecisions` reads as "keep the
+    /// ruling in this Mac's ledger"; a new daemon 404s a message that is not
+    /// auth mail. The wire string rather than `AuthVerdict` so this file stays
+    /// compilable in the test suites that build it without the auth policy.
+    func putSealedVerdict(_ id: Int, verdict: String?) async throws {
+        try await putNoContent(
+            "/client/sealed/\(id)/verdict", body: SealedVerdictBody(verdict: verdict))
     }
 
     // MARK: - lifecycle / actions
@@ -1155,6 +1192,21 @@ actor APIClient {
     @discardableResult
     func setTrackingDefault(_ enabled: Bool) async throws -> TrackingConfig {
         try await post("/client/tracking-config", body: TrackingConfigBody(default_enabled: enabled))
+    }
+
+    // MARK: - translation languages
+
+    /// The languages left untranslated. A daemon older than the setting
+    /// answers 404, which the card reads as "not offered here".
+    func getTranslateConfig() async throws -> TranslateConfig {
+        try await get("/client/translate-config")
+    }
+
+    /// Replace the whole set. The answer is the daemon's post-write view, with
+    /// anything it refused already dropped.
+    @discardableResult
+    func setReadLanguages(_ codes: [String]) async throws -> TranslateConfig {
+        try await post("/client/translate-config", body: TranslateConfigBody(read_languages: codes))
     }
 
     // MARK: - agent write access

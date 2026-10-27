@@ -68,6 +68,12 @@ struct ActionLayer: View {
                 GroupEditor(request: request) { store.closeGroupEditor() }
             }
             if !store.authQueue.isEmpty { AuthCodeModal() }
+            // Auth mail opened from outside the Auth page: an auth row in For
+            // your eyes, or a notification tap on auth mail.
+            if let meta = store.revealRequest {
+                RevealPanel(meta: meta, source: store.revealSource) { store.revealRequest = nil }
+                    .id(meta.id)
+            }
             if let target = store.triageFix {
                 TriageFixPalette(target: target) { store.closeTriageFix() }
             }

@@ -575,20 +575,25 @@ projection does.
   domain, or the full address on a shared domain): email text is never
   trusted, so a stranger's reply in the thread cannot lead to a done.
   Applied, it is the owner's own Done, the same thread-wide write
-  (`DONE_THREAD_SQL` in `store/sqlite/attention.rs`), so the thread leaves
-  FYE and every band exactly as if the owner had closed it. Each message it
-  moved from new gets an `auto_done` row with the model's reason, capped,
-  never logged and never put in a prompt. A done that fails a rail is
-  dropped; the rest of the decision still commits, except that a re-check
-  that did not close the thread cannot take it out of FYE (`hold_fye`):
-  done and leaving FYE are one act, so a refused done never hides the
-  thread by the side door. Because it is the
+  (`AGENT_DONE_THREAD_SQL` in `store/sqlite/attention.rs`: the owner's
+  `DONE_THREAD_SQL`, sparing a sibling that holds FYE, minus rows already
+  done, which keep their own close time and smart clear's batch), so the
+  thread leaves FYE and every band exactly as if the owner had closed it.
+  Each message it closed gets an `auto_done` row with the model's reason,
+  capped, never logged and never put in a prompt. A RE-CHECK MOVES MAIL
+  ONLY BY ITS DONE: it writes no placement at all (FYE flag,
+  representative, Reading destination, related threads), so a refused or
+  absent done never hides mail by the side door, and an applied done leaves
+  the FYE flag as the owner's Done does, so the undo brings the thread
+  back. A done that fails a rail is dropped; the rest of the decision
+  still commits. Because it is the
   owner's Done, the prompt asks for it only when the model is certain
   nothing in the thread needs the owner.
 - **Reversible and sticky.** Done mail stays searchable, and the owner can
   undo or reopen it like any other (the undo reopens the one row the owner
   saw, which brings the thread back). A thread with any `auto_done` row is
-  never auto-done again, so whatever the owner did with it stands. While it
+  never auto-done again, mail that arrives in it later included, so
+  whatever the owner did with it stands. While it
   is still done from the agent, the rule suggester reads it as not yet
   handled, not as the owner clearing that sender's mail unopened.
 

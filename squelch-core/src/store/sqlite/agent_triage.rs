@@ -1393,7 +1393,7 @@ fn apply_done(
     }
     let at = now.to_rfc3339();
     conn.execute(
-        super::attention::DONE_THREAD_SQL,
+        super::attention::AGENT_DONE_THREAD_SQL,
         params![at, job.account_id, job.message_id],
     )?;
     let reason = crate::text::truncate_chars(done.reason.trim(), AUTO_DONE_REASON_CHARS);
@@ -2289,16 +2289,22 @@ impl AgentTriageStore for SqliteStore {
                 job.message_id
             ],
         )?;
-        tx.execute(
-            "DELETE FROM agent_message_destinations WHERE account_id=?1 AND message_id=?2",
-            params![job.account_id, job.message_id],
-        )?;
-        // Done first: on a re-check, done and leaving FYE are one act, so the
-        // attention below needs to know whether the done went through.
         let done = apply_done(&tx, job, decision, Utc::now())?;
-        let hold_fye = job.trigger.starts_with("revisit:") && done != Some(DoneOutcome::Applied);
+        // A RE-CHECK MOVES MAIL ONLY BY ITS DONE. For the owner, done and
+        // leaving FYE are one act: a re-check writes no placement at all (no
+        // FYE flag, no representative, no Reading destination, no related
+        // thread), so a refused or absent done cannot hide mail by the side
+        // door, and an applied done leaves placement as the owner's own Done
+        // would, so their undo brings the thread straight back.
+        let recheck = job.trigger.starts_with("revisit:");
+        if !recheck {
+            tx.execute(
+                "DELETE FROM agent_message_destinations WHERE account_id=?1 AND message_id=?2",
+                params![job.account_id, job.message_id],
+            )?;
+        }
         // Sent/spam access reviews cannot populate human placement surfaces.
-        if !current.message.is_sent && !current.message.is_spam {
+        if !recheck && !current.message.is_sent && !current.message.is_spam {
             for destination in &decision.destinations {
                 let value = match destination {
                     MessageDestination::Reading => "reading",
@@ -2312,7 +2318,6 @@ impl AgentTriageStore for SqliteStore {
                 &current.message.thread_id,
                 job.message_id,
                 &decision.attention,
-                hold_fye,
             )?;
             replace_attention_sources(&tx, job.account_id, &current.message.thread_id, sources)?;
             for update in &decision.related_updates {
@@ -2322,7 +2327,6 @@ impl AgentTriageStore for SqliteStore {
                     &update.thread_id,
                     job.message_id,
                     &update.attention,
-                    hold_fye,
                 )?;
                 replace_attention_sources(&tx, job.account_id, &update.thread_id, sources)?;
             }
@@ -3060,7 +3064,6 @@ fn apply_attention(
     thread: &str,
     fallback_message: i64,
     attention: &ThreadAttentionDecision,
-    hold_fye: bool,
 ) -> Result<()> {
     let existing:Option<String>=conn.query_row("SELECT attention_json FROM agent_thread_attention WHERE account_id=?1 AND thread_id=?2",
         params![account,thread],
@@ -3086,13 +3089,6 @@ fn apply_attention(
         }
     }
     let mut attention = attention.clone();
-    // HOLD: on a re-check whose done did not go through (refused by a rail,
-    // or never asked), a thread in FYE stays in FYE. For the owner, done and
-    // leaving FYE are one act, so a refused done must not hide the thread by
-    // the side door. The owner's own placement below still wins.
-    if hold_fye && existing.show_in_fye {
-        attention.show_in_fye = true;
-    }
     if let Some(show) = thread_fye_override(conn, account, thread)? {
         attention.show_in_fye = show;
     }
@@ -8824,15 +8820,38 @@ mod auto_done_tests {
     /// The whole path: a re-check's done is the owner's Done, so it closes
     /// the THREAD: the re-checked message and its `new` sibling, each with
     /// `resolved_at` equal to its ledger row's `done_at` and the model's
-    /// reason capped. A sibling the owner already closed is closed again, as
-    /// their own Done would, with no ledger row (the daemon did not close
-    /// it). Another thread is untouched, and a revisit set beside the done
+    /// reason capped. A sibling already closed is left exactly as it was:
+    /// one the owner closed keeps the time they closed it, and one smart
+    /// clear closed keeps its batch (`resolved_by`), so that batch's undo
+    /// still reaches it; neither gets a ledger row. Another thread is
+    /// untouched, and a revisit set beside the done
     /// is not queued: a closed message needs no further re-check.
     #[test]
     fn a_revisit_done_closes_the_thread_with_a_ledger_row_per_closed_message() {
         let store = fixture();
         sibling(&store, 4, "new");
         sibling(&store, 6, "done");
+        sibling(&store, 7, "done");
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE triage SET resolved_by='smart-batch' WHERE message_id=7",
+                [],
+            )
+            .unwrap();
+        let before = |id: i64| -> (String, Option<String>, Option<String>) {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status,resolved_at,resolved_by FROM triage WHERE account_id=1 AND message_id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        let closed_before = (before(6), before(7));
         let reason = format!("The concert was last night. {}", "x".repeat(500));
         let mut verdict = done_verdict(1, &reason);
         verdict.revisit = Some(RevisitRequest {
@@ -8857,7 +8876,11 @@ mod auto_done_tests {
                 "{message}: resolved_at is the ledger's done_at"
             );
         }
-        assert_eq!(status(&store, 6).0, "done");
+        assert_eq!(
+            (before(6), before(7)),
+            closed_before,
+            "closed siblings untouched"
+        );
         assert_eq!(status(&store, 2), ("new".into(), None), "another thread");
         assert_eq!(revisits_queued(&store, 1), 0, "no revisit after a done");
         assert!(stored_done(&store, 1).is_some());
@@ -8950,8 +8973,12 @@ mod auto_done_tests {
             let context = store.load_agent_context(&job).unwrap();
             (job, context)
         };
+        // The model's natural answer: done, and nothing for FYE. The FYE flag
+        // is not the done's to write, or the undo below would bring back a
+        // thread that is still flagged hidden.
         let mut verdict = done_verdict(1, "over");
         verdict.attention.relevant_message_ids = vec![1, 4];
+        verdict.attention.show_in_fye = false;
         commit_thread(insert_revisit("2026-10-20T00:00:00+00:00"), &verdict);
         assert!(
             !fye().iter().any(|(thread, _)| thread == "one"),
@@ -9194,20 +9221,35 @@ mod auto_done_tests {
         );
     }
 
-    /// Done and leaving FYE are one act on a re-check. A thread in FYE whose
-    /// re-check does not close it (a rail refused the done, or the model
-    /// asked for none) stays in FYE even when the model's attention says
-    /// hide: otherwise a refused done hides the thread by the side door. An
-    /// ordinary run is not held: the model still places new mail freely.
+    /// A RE-CHECK MOVES MAIL ONLY BY ITS DONE. Every re-check answer here
+    /// says hide: thread `one` out of FYE, no Reading destination, and a
+    /// related update hiding thread `two`. On a re-check none of it is
+    /// written, whether the done applies, a rail refuses it, or none is
+    /// asked: done and leaving FYE are one act, and an applied done leaves
+    /// the FYE flag as the owner's Done would. An ordinary run is not held:
+    /// the model still places mail freely.
     #[test]
-    fn a_recheck_that_does_not_close_the_thread_cannot_hide_it() {
-        let shown = |store: &SqliteStore| -> bool {
+    fn a_recheck_writes_no_placement() {
+        use crate::triage::decision::RelatedAttentionUpdate;
+        let shown = |store: &SqliteStore, thread: &str| -> bool {
             store
                 .lock()
                 .unwrap()
                 .query_row(
                     "SELECT json_extract(attention_json,'$.show_in_fye') FROM agent_thread_attention
-                     WHERE account_id=1 AND thread_id='one'",
+                     WHERE account_id=1 AND thread_id=?1",
+                    [thread],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let reading = |store: &SqliteStore| -> bool {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agent_message_destinations
+                     WHERE account_id=1 AND message_id=1 AND destination='reading')",
                     [],
                     |r| r.get(0),
                 )
@@ -9215,26 +9257,23 @@ mod auto_done_tests {
         };
         let own_reply = "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
              VALUES(5,1,'5','one','a@test','re: subject','2026-01-02T00:00:00+00:00','snippet','body')";
-        for (name, trigger, setup, asks_done, stays) in [
-            (
-                "refused done",
-                "revisit:2026-10-20T00:00:00+00:00",
-                own_reply,
-                true,
-                true,
-            ),
-            (
-                "re-check, no done",
-                "revisit:2026-10-20T00:00:00+00:00",
-                "SELECT 1",
-                false,
-                true,
-            ),
-            ("ordinary run", "retriage", "SELECT 1", false, false),
+        const RECHECK: &str = "revisit:2026-10-20T00:00:00+00:00";
+        // (name, trigger, setup, asks for done, closes, placement kept)
+        for (name, trigger, setup, asks_done, closes, kept) in [
+            ("applied done", RECHECK, "SELECT 1", true, true, true),
+            ("refused done", RECHECK, own_reply, true, false, true),
+            ("re-check, no done", RECHECK, "SELECT 1", false, false, true),
+            ("ordinary run", "retriage", "SELECT 1", false, false, false),
         ] {
             let store = fixture();
-            commit(&store, claim(&store, 1), &decision(1));
-            assert!(shown(&store), "{name}: starts in FYE");
+            let mut first = decision(1);
+            first.destinations = vec![MessageDestination::Reading];
+            commit(&store, claim(&store, 1), &first);
+            commit(&store, claim(&store, 2), &decision(2));
+            assert!(
+                shown(&store, "one") && shown(&store, "two") && reading(&store),
+                "{name}: starts placed"
+            );
             {
                 let conn = store.lock().unwrap();
                 conn.execute_batch(setup).unwrap();
@@ -9258,9 +9297,28 @@ mod auto_done_tests {
                 decision(1)
             };
             verdict.attention.show_in_fye = false;
-            commit(&store, (job, context), &verdict);
-            assert_eq!(status(&store, 1).0, "new", "{name}: not closed");
-            assert_eq!(shown(&store), stays, "{name}");
+            verdict.destinations = vec![];
+            let two = store.agent_thread_context(1, "two").unwrap();
+            let mut hide_two = two.attention.unwrap();
+            hide_two.show_in_fye = false;
+            verdict.related_updates.push(RelatedAttentionUpdate {
+                thread_id: "two".into(),
+                expected_revision: two.revision.attention_revision,
+                attention: hide_two,
+                evidence: vec![],
+            });
+            let sources = store.snapshot_agent_sources(1, &[1, 2]).unwrap();
+            assert_eq!(
+                store
+                    .commit_agent_decision(&job, &context, &verdict, &sources)
+                    .unwrap(),
+                AgentCommitOutcome::Applied,
+                "{name}"
+            );
+            assert_eq!(status(&store, 1).0 == "done", closes, "{name}: closed");
+            assert_eq!(shown(&store, "one"), kept, "{name}: own thread");
+            assert_eq!(shown(&store, "two"), kept, "{name}: related thread");
+            assert_eq!(reading(&store), kept, "{name}: reading");
         }
     }
 

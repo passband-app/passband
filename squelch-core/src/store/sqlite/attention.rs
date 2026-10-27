@@ -51,8 +51,10 @@ pub(super) const CANONICAL_MAIL_CTE: &str = concat!(
 /// deferral in `set_reminder`, and the triage agent's auto-done
 /// (`agent_triage::apply_done`), which is the owner's Done made for them and
 /// must leave the bands exactly as the owner's own would.
-pub(super) const DONE_THREAD_SQL: &str = concat!(
-    "UPDATE triage
+macro_rules! done_thread_sql {
+    () => {
+        concat!(
+            "UPDATE triage
      SET status = 'done', resolved_at = ?1, resolved_by = NULL, reminded_at = NULL
      WHERE account_id = ?2
        AND (message_id = ?3 OR (message_id IN (
@@ -61,9 +63,19 @@ pub(super) const DONE_THREAD_SQL: &str = concat!(
                             AND sib.thread_id = me.thread_id
            WHERE me.account_id = ?2 AND me.id = ?3
              AND me.thread_id != '') AND NOT ",
-    holds_fye_triage_sql!(),
-    "))"
-);
+            holds_fye_triage_sql!(),
+            "))"
+        )
+    };
+}
+pub(super) const DONE_THREAD_SQL: &str = done_thread_sql!();
+
+/// [`DONE_THREAD_SQL`] for the triage agent's auto-done: the same write, minus
+/// rows already `done`. The owner re-doing a closed row takes it over (its
+/// `resolved_by` cleared, its `resolved_at` now); the agent is not the owner,
+/// so a smart-cleared sibling keeps its batch (and that batch's undo), and a
+/// row the owner closed keeps the time they closed it.
+pub(super) const AGENT_DONE_THREAD_SQL: &str = concat!(done_thread_sql!(), " AND status != 'done'");
 
 /// The recency window every human-door listing runs under (`?2` is the caller's
 /// `since`), plus the ONE exemption from it: a row carrying a reminder, pending

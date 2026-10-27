@@ -1418,6 +1418,10 @@ fn sources_latest(conn: &Connection, account: AccountId, id: i64) -> Result<Opti
     Ok(latest)
 }
 
+/// A scheduler candidate: message, content revision, its ledger's ask time
+/// and when its dates were last read, and whether it was ruled out then.
+type AskCandidate = (i64, i64, Option<String>, Option<String>, bool);
+
 impl SqliteStore {
     /// Queue the past-event re-check (see [`ASK_GRACE`]) for every message
     /// whose ask time has come, returning the message ids queued. Called from
@@ -1430,7 +1434,8 @@ impl SqliteStore {
     /// owner (authenticated mail made it), a start that has passed, and the
     /// owner actually going (`committed`, or marked going, and not
     /// dismissed: a mass invite nobody accepted is left to the agent's own
-    /// revisit); that is still `new` with no reminder pending or fired;
+    /// revisit); that is `new` or `open` (reopened mail still closes after
+    /// its event) with no reminder pending or fired;
     /// received, not spam, not the archive tier, never auto-done before, with
     /// no own mail in its thread and nobody else's words in it
     /// ([`super::agent_triage::foreign_words`]), and ELIGIBLE to feed a ghost.
@@ -1457,7 +1462,10 @@ impl SqliteStore {
     /// time moves more than [`RE_ASK_AFTER`] past the answered one.
     /// `event_revisit_asked` keeps the last ask time queued or answered, and
     /// when its dates were last read, so a tick on mail already answered
-    /// whose dates have not changed reads no decision JSON.
+    /// whose dates have not changed reads no decision JSON. Mail ruled out
+    /// after that read (not eligible, or somebody else's words in its
+    /// thread) is kept there as `skipped`, and is read again only once its
+    /// dates or decision change.
     pub(super) fn schedule_past_event_revisits(
         &self,
         account: AccountId,
@@ -1475,9 +1483,10 @@ impl SqliteStore {
         let now_key = sort_key(&EventTime::At(now.fixed_offset()));
         // The cheap tests, on columns alone. A ghost whose start is after now
         // is never due (every ask time is later than its start).
-        let candidates: Vec<(i64, i64, Option<String>, Option<String>)> = tx
+        let candidates: Vec<AskCandidate> = tx
             .prepare(&format!(
-                "SELECT DISTINCT m.id,a.revision,l.ask_at,l.asked_at FROM ghost_event_sources s
+                "SELECT DISTINCT m.id,a.revision,l.ask_at,l.asked_at,COALESCE(l.skipped,0)
+                 FROM ghost_event_sources s
                  JOIN triage t ON t.account_id=s.account_id AND t.message_id=s.message_id
                  JOIN messages m ON m.account_id=s.account_id AND m.id=s.message_id
                  JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
@@ -1504,7 +1513,7 @@ impl SqliteStore {
                 own = super::OWN_MAIL,
             ))?
             .query_map(params![account, now_key], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?
             .collect::<std::result::Result<_, _>>()?;
         if candidates.is_empty() {
@@ -1523,6 +1532,11 @@ impl SqliteStore {
         // answered, or the last one queued), so the next tick takes the cheap
         // path.
         let mut settled_at: Vec<(i64, String)> = Vec::new();
+        // Read and ruled out by something only a change to its dates or
+        // decision could undo (not eligible, or somebody else's words in its
+        // thread, which more mail only adds to): kept as `skipped`, so the
+        // next tick does not read it all again.
+        let mut skipped: Vec<(i64, String)> = Vec::new();
         {
             let mut fed = tx.prepare(
                 "SELECT DISTINCT ghost_id FROM ghost_event_sources
@@ -1561,7 +1575,7 @@ impl SqliteStore {
                 "SELECT {ELIGIBLE},ed.decision_json FROM messages m {ELIGIBLE_JOINS}
                  WHERE m.account_id=?1 AND m.id=?2"
             ))?;
-            'messages: for (message, revision, asked_raw, asked_at) in candidates {
+            'messages: for (message, revision, asked_raw, asked_at, was_skipped) in candidates {
                 let asked = asked_raw.as_deref().and_then(instant);
                 let ghosts: Vec<i64> = fed
                     .query_map(params![account, message], |r| r.get(0))?
@@ -1596,6 +1610,14 @@ impl SqliteStore {
                 if asks >= EVENT_ASKS_PER_MESSAGE || pending > 0 {
                     continue;
                 }
+                // Ruled out before, and nothing its dates come from changed.
+                if was_skipped
+                    && let Some(asked_at) = asked_at.as_deref()
+                    && !changed
+                        .query_row(params![account, message, asked_at], |r| r.get::<_, bool>(0))?
+                {
+                    continue;
+                }
                 let answer: Option<DateTime<Utc>> = answered
                     .query_row(params![account, message], |r| r.get::<_, String>(0))
                     .optional()?
@@ -1614,18 +1636,21 @@ impl SqliteStore {
                 {
                     continue;
                 }
+                let floor_raw = floor.to_rfc3339();
                 let Some((eligible, decision)) = stored
                     .query_row(params![account, message], |r| {
                         Ok((r.get::<_, bool>(0)?, r.get::<_, Option<String>>(1)?))
                     })
                     .optional()?
                 else {
+                    skipped.push((message, floor_raw));
                     continue;
                 };
                 let Some(decision) = decision
                     .filter(|_| eligible)
                     .and_then(|raw| serde_json::from_str::<MessageDecision>(&raw).ok())
                 else {
+                    skipped.push((message, floor_raw));
                     continue;
                 };
                 for &id in &ghosts {
@@ -1665,12 +1690,13 @@ impl SqliteStore {
                 // Nobody else's words in its thread: a done could not rest
                 // on them (the rail is `apply_done`'s; this saves the call).
                 if super::agent_triage::foreign_words(&tx, account, message)?.is_some() {
+                    skipped.push((message, ask_at.to_rfc3339()));
                     continue;
                 }
                 due.push((message, revision, ask_at));
             }
         }
-        if due.is_empty() && settled_at.is_empty() {
+        if due.is_empty() && settled_at.is_empty() && skipped.is_empty() {
             return Ok(Vec::new());
         }
         let at = now.to_rfc3339();
@@ -1683,13 +1709,17 @@ impl SqliteStore {
                  VALUES(?1,?2,'triage',?3,?4,0,?5) ON CONFLICT DO NOTHING",
             )?;
             let mut ledger = tx.prepare(
-                "INSERT INTO event_revisit_asked(account_id,message_id,ask_at,asked_at)
-                 VALUES(?1,?2,?3,?4) ON CONFLICT(account_id,message_id)
-                 DO UPDATE SET ask_at=excluded.ask_at,asked_at=excluded.asked_at",
+                "INSERT INTO event_revisit_asked(account_id,message_id,ask_at,asked_at,skipped)
+                 VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account_id,message_id)
+                 DO UPDATE SET ask_at=excluded.ask_at,asked_at=excluded.asked_at,
+                               skipped=excluded.skipped",
             )?;
             // Read and settled, so the next tick takes the cheap path.
             for (message, ask) in settled_at {
-                ledger.execute(params![account, message, ask, at])?;
+                ledger.execute(params![account, message, ask, at, false])?;
+            }
+            for (message, ask) in skipped {
+                ledger.execute(params![account, message, ask, at, true])?;
             }
             let mut asks = tx.prepare(
                 "SELECT COUNT(*) FROM agent_triage_jobs
@@ -1713,7 +1743,7 @@ impl SqliteStore {
                         at
                     ])?;
                 }
-                ledger.execute(params![account, message, ask, at])?;
+                ledger.execute(params![account, message, ask, at, false])?;
                 if inserted == 1 {
                     queued.push(message);
                 }
@@ -6169,6 +6199,47 @@ mod tests {
             sql(&store, update);
             assert_eq!(!schedule(&store, 1, LATER).is_empty(), asked, "{name}");
         }
+    }
+
+    /// RULED OUT ONCE, NOT RE-READ EVERY TICK. Mail with a stranger's words
+    /// in its thread is read, ruled out, and kept as `skipped`: removing the
+    /// stranger behind the scheduler's back (no date or decision changed)
+    /// leaves it skipped, so the tick did not read it again. Once its
+    /// decision changes it is read again, and now it is asked about.
+    #[test]
+    fn mail_ruled_out_is_read_again_only_when_its_dates_change() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        sql(
+            &store,
+            "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+             VALUES(9,1,'9','checkin','someone@elsewhere.example','re','2026-10-01T00:00:00+00:00','','',1)",
+        );
+        assert!(schedule(&store, 1, LATER).is_empty());
+        let skipped = |store: &SqliteStore| -> i64 {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT skipped FROM event_revisit_asked WHERE account_id=1 AND message_id=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(skipped(&store), 1);
+        sql(&store, "DELETE FROM messages WHERE id=9");
+        assert!(schedule(&store, 1, LATER).is_empty(), "not read again");
+        sql(
+            &store,
+            "UPDATE agent_message_decisions SET decided_at='2099-01-01T00:00:00+00:00' WHERE message_id=1",
+        );
+        assert_eq!(
+            schedule(&store, 1, LATER),
+            vec![1],
+            "read again once it changed"
+        );
+        assert_eq!(skipped(&store), 0);
     }
 
     /// Mail the rails would refuse is not asked about (each alone): own mail

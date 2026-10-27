@@ -1965,6 +1965,9 @@ CREATE TABLE IF NOT EXISTS event_revisit_asked (
     message_id INTEGER NOT NULL,
     ask_at     TEXT NOT NULL,
     asked_at   TEXT NOT NULL,
+    -- 1: read and ruled out (not eligible, or somebody else's words in its
+    -- thread); read again only once its dates or decision change.
+    skipped    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, message_id)
 );
 -- The row goes with its message, as the auto-done ledger's does.

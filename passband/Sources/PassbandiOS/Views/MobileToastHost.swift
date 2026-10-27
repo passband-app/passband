@@ -18,6 +18,10 @@ import SwiftUI
 
 struct MobileToastHost: View {
     @Environment(AppStore.self) private var store
+    /// The sitrep tab is in front with nothing over it. The shell knows the
+    /// tab; the store's `showsSitrepCorner` does not (its `activeView` only
+    /// follows the two tabs that have one).
+    var sitrepShowing = false
 
     var body: some View {
         // The Spacers + fixedSize are load-bearing exactly as they are on the
@@ -30,7 +34,8 @@ struct MobileToastHost: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(
-            !store.toasts.isEmpty || !store.undos.isEmpty || violation != nil || showsTray)
+            !store.toasts.isEmpty || !store.undos.isEmpty || violation != nil || showsTray
+                || receipt != nil)
         // The ledger scan behind the ignored-unsubscribe notice, once a minute.
         .background { ViolationScanKeeper() }
     }
@@ -45,6 +50,16 @@ struct MobileToastHost: View {
         store.threadId == nil && store.compose == nil && !UnsubscribeJobs.shared.items.isEmpty
     }
 
+    /// THE SMART CLEAR RECEIPT: where it was pressed, the sitrep, with no
+    /// reader, composer or list over it. The Mac's bottom-right corner card,
+    /// given the thumb's edge instead.
+    private var receipt: AppStore.SmartClearReceipt? {
+        guard sitrepShowing, store.threadId == nil, store.compose == nil,
+            !store.smartClearListOpen
+        else { return nil }
+        return store.smartClearReceipt
+    }
+
     private var stack: some View {
         GlassEffectContainer(spacing: 10) {
             VStack(spacing: 8) {
@@ -53,6 +68,12 @@ struct MobileToastHost: View {
                 // long it is, and a card that wide runs off both edges.
                 if showsTray {
                     UnsubscribeTray()
+                        .containerRelativeFrame(.horizontal) { width, _ in width - 32 }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                if let receipt {
+                    SmartClearReceiptCard(receipt: receipt)
+                        .id(receipt.id)
                         .containerRelativeFrame(.horizontal) { width, _ in width - 32 }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -88,6 +109,7 @@ struct MobileToastHost: View {
         .animation(Motion.toast, value: store.undos.count)
         .animation(Motion.toast, value: violation)
         .animation(Motion.toast, value: showsTray)
+        .animation(Motion.toast, value: receipt?.id)
     }
 
     /// The undo chip. Two targets in one pill: the label states what happened,

@@ -1419,30 +1419,29 @@ struct AssistantSection: View {
             // different spender: this one runs unasked, on a search that looked
             // like a question (docs/SEARCH.md §6.5).
             //
-            // Mac only. The phone's search field still counts spaces and hands
-            // the whole query to the agent (MobileSearchView), so there is no
-            // lane there to configure and a picker that changed nothing would
-            // be worse than no picker.
-            #if os(macOS)
-                SectionCard(label: "Deeper search") {
-                    SettingsRow(title: "When", detail: prefs.deeperSearch.blurb) {
+            // ON BOTH SHELLS. The phone's search tab judges every settled query
+            // through the same policy as the Mac's panel (MobileSearchView), so
+            // it spends unasked too, and a lane with no off switch on the device
+            // running it would be the one thing worse than no lane. The pref is
+            // per device (UserDefaults), so each shell needs its own picker.
+            SectionCard(label: "Deeper search") {
+                SettingsRow(title: "When", detail: prefs.deeperSearch.blurb) {
+                    GlassSegmented(
+                        options: DeeperSearchChoice.allCases.map { ($0, $0.label) },
+                        selection: $prefs.deeperSearch)
+                }
+                if prefs.deeperSearch != .off {
+                    RowDivider()
+                    SettingsRow(
+                        title: "Model",
+                        detail: "Separate from the chat's, because this one runs on every question-shaped search."
+                    ) {
                         GlassSegmented(
-                            options: DeeperSearchChoice.allCases.map { ($0, $0.label) },
-                            selection: $prefs.deeperSearch)
-                    }
-                    if prefs.deeperSearch != .off {
-                        RowDivider()
-                        SettingsRow(
-                            title: "Model",
-                            detail: "Separate from the chat's, because this one runs on every question-shaped search."
-                        ) {
-                            GlassSegmented(
-                                options: AssistantModel.allCases.map { ($0, $0.shortLabel) },
-                                selection: $prefs.searchLaneModel)
-                        }
+                            options: AssistantModel.allCases.map { ($0, $0.shortLabel) },
+                            selection: $prefs.searchLaneModel)
                     }
                 }
-            #endif
+            }
         }
         .task { status = await AssistantKeyStore.statusAsync() }
     }

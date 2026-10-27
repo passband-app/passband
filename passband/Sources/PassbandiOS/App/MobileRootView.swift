@@ -341,7 +341,7 @@ private struct MobileShell: View {
         // scroll the stack simply sits a little higher than it needs to, which is
         // the harmless direction to be wrong in.
         .overlay(alignment: .bottom) {
-            MobileToastHost()
+            MobileToastHost(sitrepShowing: tab == .sitrep && door.pane == nil)
                 .padding(.bottom, 68)
         }
         // The two modals the Mac stacks in its action layer, mounted here on the
@@ -404,6 +404,17 @@ private struct MobileShell: View {
             if let target = store.remindTarget {
                 RemindPalette(target: target) { store.closeRemind() }
                     .presentationDragIndicator(.visible)
+            }
+        }
+        // SMART CLEAR'S FULL LIST, off the same `store.smartClearListOpen` the
+        // Mac's content pane takes over on. A sheet, because a phone has no
+        // content pane; every way out (Done, a drag down, the receipt going)
+        // runs `closeSmartClearList`, which starts the undo clock again.
+        .sheet(isPresented: smartClearListOpen) {
+            if let receipt = store.smartClearReceipt {
+                SmartClearListSheet(receipt: receipt)
+                    .presentationDragIndicator(.visible)
+                    .presentationBackground(Palette.canvas)
             }
         }
         // SHARE PASSBAND, off the same `store.shareSheetOpen` the Mac's shell
@@ -540,6 +551,14 @@ private struct MobileShell: View {
         Binding(
             get: { store.shareSheetOpen },
             set: { store.shareSheetOpen = $0 })
+    }
+
+    /// The smart clear list, off the store's own flag; a drag down runs the
+    /// same `closeSmartClearList()` Done does, so the clock always restarts.
+    private var smartClearListOpen: Binding<Bool> {
+        Binding(
+            get: { store.smartClearListOpen && store.smartClearReceipt != nil },
+            set: { if !$0 { store.closeSmartClearList() } })
     }
 
     /// The add-account sheet is a plain flag on the store rather than a derived

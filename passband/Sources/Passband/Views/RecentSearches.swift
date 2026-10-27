@@ -20,26 +20,33 @@
 import SwiftUI
 
 struct RecentSearches: View {
-    /// Newest first, as the store keeps them.
-    let queries: [String]
+    /// Newest first, as the store keeps them: searches, and the questions the
+    /// agent was asked from the field (a chat bubble, the first message).
+    let entries: [RecentEntry]
     /// The armed row, -1 for none. Owned by the panel (`store.search.index`),
     /// which is the same index that arms hit rows — there is only ever one of
     /// these lists on screen, so there is only ever one selection.
     let armed: Int
-    let onRun: (String) -> Void
+    let onRun: (RecentEntry) -> Void
     let onClear: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            ForEach(Array(queries.enumerated()), id: \.offset) { i, query in
+            ForEach(Array(entries.enumerated()), id: \.offset) { i, entry in
                 Button {
-                    onRun(query)
+                    onRun(entry)
                 } label: {
                     HStack(spacing: Space.s8) {
+                        if entry.kind == .question {
+                            Image(systemName: "bubble.left")
+                                .font(Typo.ui(10.5, weight: .medium))
+                                .foregroundStyle(Palette.accent)
+                                .accessibilityLabel("Question")
+                        }
                         // The reader's own words, rendered as Text and never as
                         // markup — the same rule the hit rows follow, and this
                         // string has been round-tripped through UserDefaults.
-                        Text(query)
+                        Text(entry.text)
                             .font(Typo.row)
                             .foregroundStyle(i == armed ? Palette.ink : Palette.inkDim)
                             .lineLimit(1)

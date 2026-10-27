@@ -102,7 +102,7 @@ struct SearchView: View {
     /// copied into `@State`, so a search remembered while the panel is open
     /// (opening a hit does exactly that) is on screen the moment the field is
     /// cleared again.
-    private var recents: [String] { RecentSearchStore.shared.queries }
+    private var recents: [RecentEntry] { RecentSearchStore.shared.entries }
 
     /// THE EMPTY STATE HAS SOMETHING TO SAY: nothing has been typed, and there
     /// is history to offer. Keyed on the field being blank rather than on the
@@ -135,7 +135,8 @@ struct SearchView: View {
     /// nothing rather than "no matches." at a question nobody asked.
     private var answered: Bool {
         store.search.answers(
-            store.search.query.trimmed, sort: prefs.searchSort, related: prefs.searchIncludeRelated)
+            store.search.query.trimmed, sort: prefs.searchSort, related: prefs.searchIncludeRelated,
+            plainOrder: store.searchPlainOrder)
     }
 
     var body: some View {
@@ -228,7 +229,7 @@ struct SearchView: View {
             // throwing the scroll offset away (see the note above).
             if showingRecents {
                 RecentSearches(
-                    queries: recents, armed: store.search.index,
+                    entries: recents, armed: store.search.index,
                     onRun: { run($0) }, onClear: { clearRecents() }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -288,7 +289,8 @@ struct SearchView: View {
         // screen until the reader edits their query. An array because tuples do
         // not conform to Equatable and `task(id:)` needs one value.
         .task(id: [store.search.query, prefs.searchSort.rawValue,
-                   String(prefs.searchIncludeRelated), String(store.search.revision)]) {
+                   String(prefs.searchIncludeRelated), String(store.search.revision),
+                   String(store.searchPlainOrder)]) {
             await runSearch()
         }
         .task(id: store.search.query) {
@@ -424,14 +426,13 @@ struct SearchView: View {
             .padding(.bottom, Space.s6)
     }
 
-    /// The header that goes above hit `i`, if one does. A ranked search is
-    /// split where the status turns over; a listing is one run in date order,
-    /// so it gets one header saying which way the dates go.
+    /// The header that goes above hit `i`, if one does: only a listing gets
+    /// one, saying which way its dates run. A ranked search is ONE list, with
+    /// no Done / Not done split; an older daemon still sends unfinished mail
+    /// first until it is rolled to plain order (`AppStore.searchPlainOrder`),
+    /// and the labels do not wait for that.
     private func header(above i: Int) -> String? {
-        let hits = store.search.hits
-        if store.search.showsListing { return i == 0 ? "Newest first" : nil }
-        guard i == 0 || hits[i].is_done != hits[i - 1].is_done else { return nil }
-        return hits[i].is_done.map { $0 ? "Done" : "Not done" } ?? "Results"
+        store.search.showsListing && i == 0 ? "Newest first" : nil
     }
 
     /// The band as the STRIP draws it: above the hits, and never allowed to
@@ -478,8 +479,8 @@ struct SearchView: View {
             // field, a hit opens, and the bare bar expands the panel into
             // fullscreen previews.
             KeyBinding("Enter", enterDescription, allowInInput: true) {
-                if showingRecents, let query = recents[safe: store.search.index] {
-                    run(query)
+                if showingRecents, let entry = recents[safe: store.search.index] {
+                    run(entry)
                 } else if let sender = senders[safe: senderIndex] {
                     show(sender)
                 } else if store.search.index >= 0 {
@@ -585,7 +586,19 @@ struct SearchView: View {
     /// Run a remembered query: it goes into the FIELD, the way accepting a
     /// sender does, and the panel's own debounced task does the rest. Nothing
     /// is opened — the reader may want to narrow it first.
-    private func run(_ query: String) {
+    private func run(_ entry: RecentEntry) {
+        // A question goes back to the agent; a search goes back in the field.
+        // Its saved chat comes back in the ⌘K bar when there is one; without
+        // one, it is asked again.
+        if entry.kind == .question {
+            if store.openQuestionFromHistory(entry.text) {
+                store.askBarOpen = true
+            } else {
+                focused = true
+            }
+            return
+        }
+        let query = entry.text
         store.search.query = query
         // Disarm on the way: the armed row belonged to the recents list, and
         // leaving the index at 2 would point at hit row 2 the moment results
@@ -601,9 +614,10 @@ struct SearchView: View {
         // before a trip to Settings and rebuilt after one.
         let sort = prefs.searchSort
         let related = prefs.searchIncludeRelated
+        let plainOrder = store.searchPlainOrder
         let revision = store.search.revision
         let sameRanking = term == store.search.fetchedQuery && sort == store.search.fetchedSort
-            && related == store.search.fetchedRelated
+            && related == store.search.fetchedRelated && plainOrder == store.search.fetchedPlainOrder
         let selectedID = sameRanking ? store.search.hits[safe: store.search.index]?.id : nil
         // A bare operator (`from:` with the menu opening under it) is not a
         // search yet: the daemon would drop the valueless token and 400 the
@@ -614,6 +628,7 @@ struct SearchView: View {
             store.search.error = nil
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             store.search.diagnostics = nil
             store.search.nextCursor = nil
             // AND NOTHING IS ARMED. The index outlives the hits it was counted
@@ -634,7 +649,7 @@ struct SearchView: View {
         // predecessor used to rely on someone else covering (backspace inside
         // the debounce window lands here). The CURRENT task owns the flag now;
         // see the cancelled exits below.
-        guard !store.search.answers(term, sort: sort, related: related) else {
+        guard !store.search.answers(term, sort: sort, related: related, plainOrder: plainOrder) else {
             loading = false
             return
         }
@@ -653,7 +668,8 @@ struct SearchView: View {
             // PARTIAL, mode by preference, unfinished first and snippets
             // cleaned: all of that is `SearchFetch`, shared with the phone. The
             // agent's own searches never go through it.
-            let page = try await SearchFetch.page(term, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                term, sort: sort, related: related, plainOrder: plainOrder)
             // AND AGAIN AFTER THE AWAIT, which the iOS twin has always done
             // (`MobileSearchView`). A response landing in the window between
             // `task(id:)` cancelling this task and URLSession noticing resolves
@@ -674,6 +690,7 @@ struct SearchView: View {
             store.search.fetchedQuery = term
             store.search.fetchedSort = sort
             store.search.fetchedRelated = related
+            store.search.fetchedPlainOrder = plainOrder
             store.search.fetchedRevision = revision
             // Warm the head of the page only. Search rows are read and chosen
             // from, not swept, so the rest can wait for a real click — and the
@@ -697,6 +714,7 @@ struct SearchView: View {
             // resurrecting a stale error over stale hits.
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             // The diagnostics go with the query they described: judging the
             // next search on the last one's counts is exactly the mistake
             // pairing them prevents.
@@ -761,12 +779,18 @@ struct SearchView: View {
         // way to serve it.
         let sort = store.search.fetchedSort
         let related = store.search.fetchedRelated ?? false
+        // And the ORDER, for the same reason: page 2 of a grouped ranking asked
+        // in plain order skips hits. A flip mid-scroll re-fetches page 1
+        // through `runSearch` (`answers` keys on it).
+        let plainOrder = store.search.fetchedPlainOrder ?? store.searchPlainOrder
         let revision = store.search.revision
         loadingMore = true
         defer { loadingMore = false }
         do {
-            let page = try await SearchFetch.page(term, cursor: cursor, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                term, cursor: cursor, sort: sort, related: related, plainOrder: plainOrder)
             guard term == store.search.fetchedQuery, store.search.nextCursor == cursor,
+                  plainOrder == store.search.fetchedPlainOrder,
                   sort == store.search.fetchedSort, sort == prefs.searchSort,
                   related == store.search.fetchedRelated, related == prefs.searchIncludeRelated,
                   revision == store.search.revision else {
@@ -939,17 +963,7 @@ private struct HitRow: View {
     }
 
     private func highlight(_ text: String, matches: [String]) -> AttributedString {
-        var attr = AttributedString(text)
-        for term in matches where !term.isEmpty {
-            var from = attr.startIndex
-            while from < attr.endIndex,
-                let range = attr[from...].range(of: term, options: .caseInsensitive) {
-                attr[range].backgroundColor = Palette.searchMatch
-                attr[range].foregroundColor = Palette.searchMatchInk
-                from = range.upperBound
-            }
-        }
-        return attr
+        SearchHighlight.paint(text, matches: matches)
     }
 }
 

@@ -253,6 +253,11 @@ struct SearchSession: Sendable, Equatable {
     /// has to re-rank, or the setting silently does nothing until the reader
     /// edits their query.
     var fetchedSort: SearchSortChoice?
+    /// Whether those hits were asked for in plain ranked order
+    /// (`AppStore.searchPlainOrder` at the time). Pinned for the scroll like
+    /// the sort, because a cursor is an offset into ONE ranking and the flag
+    /// can flip between pages; a flip re-fetches page 1 instead.
+    var fetchedPlainOrder: Bool?
     /// What retrieval did with `fetchedQuery`, as the daemon reported it: the
     /// strict/any counts and each term's document frequency. Parked BESIDE the
     /// fetched query because it describes exactly that fetch — the classifier
@@ -668,6 +673,8 @@ final class AppStore {
         if dead != gmailDisconnected { gmailDisconnected = dead }
         let draftsV2 = stats?.drafts_v2 == true
         if draftsV2 != draftsV2Available { draftsV2Available = draftsV2 }
+        let plainOrder = stats?.search_plain_order == true
+        if plainOrder != searchPlainOrder { searchPlainOrder = plainOrder }
         let scheduled = stats?.scheduled_send == true
         if scheduled != scheduledSendAvailable { scheduledSendAvailable = scheduled }
         let sharing = stats?.invite_sharing == true
@@ -1660,6 +1667,10 @@ final class AppStore {
         // Keyed by `authThreadIds`, which the feed rows' own decisions feed
         // too, so a blank sealed list cannot reopen the door.
         ThreadPrefetch.shared.refuses = { AppStore.shared.authThreadIds.contains($0) }
+        // A conversation that belongs to a question in search history is saved
+        // whenever one of its runs ends; see `saveQuestionChat`.
+        assistant.onRunEnded = { [weak self] in self?.saveQuestionChat(from: $0) }
+        searchLane.onRunEnded = { [weak self] in self?.saveQuestionChat(from: $0) }
     }
 
     // MARK: - settings
@@ -4254,7 +4265,7 @@ final class AppStore {
             return
         }
         guard canExpandSearchLane else { return }
-        assistant.adopt(searchLane)
+        adoptSearchLaneIntoChat()
         askBarOpen = true
     }
 
@@ -4295,8 +4306,124 @@ final class AppStore {
     func finishLaneHandoff() {
         guard askBarWatchesLane, !searchLane.running else { return }
         askBarWatchesLane = false
-        assistant.adopt(searchLane)
+        adoptSearchLaneIntoChat()
     }
+
+    /// THE CHAT TAKES THE LANE'S CONVERSATION, and with it the question that
+    /// conversation answers, so the follow-ups asked here are what tapping
+    /// that question in history brings back. Every handoff goes through here
+    /// (both of the Mac's and the phone's "continue in chat"), so none can move
+    /// the conversation and leave its question behind.
+    ///
+    /// THE CHAT'S SAVED COPY STILL WINS (the rule `saveQuestionChat` keeps).
+    /// If the chat was already the conversation behind this same question
+    /// before adopting, its follow-ups are what history saved for it, and the
+    /// lane's copy (the lane narrowed on underneath since) is not written over
+    /// them ON DISK. The LIVE chat does hold the lane's copy now (`adopt`
+    /// replaces it, as it always has), so tapping the question in history this
+    /// session opens that, and the chat's next run end saves it over the old
+    /// follow-ups: asking "continue in chat" again is the reader choosing the
+    /// newer conversation. What this rule spares is only the saved copy, in
+    /// case nothing more is asked.
+    func adoptSearchLaneIntoChat() {
+        let heldSameQuestion = chatQuestionKey != nil && chatQuestionKey == laneQuestionKey
+        let before = assistant.conversationId
+        assistant.adopt(searchLane)
+        // `adopt` refuses while either side is running; nothing moved then.
+        guard assistant.conversationId != before else { return }
+        chatQuestion = laneQuestionKey.map {
+            QuestionTag(key: $0, conversation: assistant.conversationId)
+        }
+        guard !heldSameQuestion else { return }
+        saveQuestionChat(from: assistant)
+    }
+
+    // MARK: - question chats
+
+    /// A conversation's claim to be the chat behind a question in search
+    /// history: the question's key, and which conversation the session was
+    /// holding when the claim was made. A session that has since been cleared
+    /// (a new chat, a lane reset or restarting itself, an account switch) holds
+    /// a different conversation, so the claim lapses on its own and no path
+    /// that replaces a conversation has to remember to drop it.
+    private struct QuestionTag {
+        var key: String
+        var conversation: Int
+    }
+
+    private var laneQuestion: QuestionTag?
+    private var chatQuestion: QuestionTag?
+
+    private var laneQuestionKey: String? {
+        guard let tag = laneQuestion, tag.conversation == searchLane.conversationId else {
+            return nil
+        }
+        return tag.key
+    }
+
+    private var chatQuestionKey: String? {
+        guard let tag = chatQuestion, tag.conversation == assistant.conversationId else {
+            return nil
+        }
+        return tag.key
+    }
+
+    /// A run has ended in one of the two sessions: keep its conversation as
+    /// the chat behind its question, if it has one. THE CHAT WINS: once the
+    /// reader has taken a question's conversation into the chat, that is the
+    /// copy tapping the question opens, and the lane narrowing on underneath
+    /// does not overwrite it.
+    private func saveQuestionChat(from session: AssistantSession) {
+        let key: String?
+        if session === assistant {
+            key = chatQuestionKey
+        } else if session === searchLane {
+            let lane = laneQuestionKey
+            key = lane == chatQuestionKey ? nil : lane
+        } else {
+            key = nil
+        }
+        guard let key, let snapshot = session.snapshot() else { return }
+        QuestionChats.shared.save(snapshot, forKey: key)
+    }
+
+    /// A QUESTION TAPPED IN SEARCH HISTORY: bring back the chat it had, in the
+    /// ⌘K chat, rather than ask it all over again. True means the chat now
+    /// holds that conversation and the caller should show it (the Mac's bar,
+    /// the phone's push); false means there was nothing to bring back and the
+    /// question has been asked again instead (`askAgainFromHistory`).
+    ///
+    /// A CHAT MID-ANSWER IS NEVER REPLACED. If it is answering this very
+    /// question it is simply shown; if it is busy with something else, the
+    /// question is asked again in search, which leaves that run alone (the
+    /// same refusal the lane's "continue in chat" makes).
+    func openQuestionFromHistory(_ text: String) -> Bool {
+        let key = QuestionChats.key(forQuestion: text)
+        if chatQuestionKey == key {
+            askBarWatchesLane = false
+            RecentSearchStore.shared.rememberQuestion(text)
+            return true
+        }
+        // A snapshot the chat cannot take up (see `canRestore`: a tool it no
+        // longer offers) is as good as none: the question is asked again.
+        guard !assistant.running, let snapshot = QuestionChats.shared.snapshot(forKey: key),
+            assistant.canRestore(snapshot)
+        else {
+            askAgainFromHistory(text)
+            return false
+        }
+        restoreQuestionChat(snapshot, key: key)
+        // Opened again is asked again, as far as the ring's order goes.
+        RecentSearchStore.shared.rememberQuestion(text)
+        return true
+    }
+
+    private func restoreQuestionChat(_ snapshot: ConversationSnapshot, key: String) {
+        askBarWatchesLane = false
+        assistant.restore(snapshot)
+        chatQuestion = QuestionTag(key: key, conversation: assistant.conversationId)
+    }
+
 
     /// ⌘⇧K and the bar's own button. Ends a watch first, so "new chat" can
     /// never clear the search lane it happened to be showing.
@@ -4308,6 +4435,14 @@ final class AppStore {
 
     private var searchEvidenceTask: Task<Void, Never>?
     var preparingSearchEvidence: Bool { searchEvidenceTask != nil }
+
+    /// A question from search history, asked again: its words go back in the
+    /// field and to the agent. With deeper search off it is simply searched.
+    func askAgainFromHistory(_ text: String) {
+        search.query = text
+        search.index = -1
+        requestDeeperSearch()
+    }
 
     /// Run the words currently in the field, even before keyword results arrive.
     func requestDeeperSearch() {
@@ -4357,6 +4492,13 @@ final class AppStore {
                     if term != current { term = current; continue }
                     self.search.laneQuery = term
                     self.searchLane.sendAuthorizedSearch(term, hits: page.items)
+                    // The conversation's first message is a line of search
+                    // history, drawn as a question (both shells), and this
+                    // conversation is the chat that line brings back.
+                    RecentSearchStore.shared.rememberQuestion(term)
+                    self.laneQuestion = QuestionTag(
+                        key: QuestionChats.key(forQuestion: term),
+                        conversation: self.searchLane.conversationId)
                     self.searchEvidenceTask = nil
                     return
                 }
@@ -4424,6 +4566,12 @@ final class AppStore {
             search.laneQuery = query
             search.refinementCount = searchLane.refinementCount
             captureLaneStart(search.laneTrigger)
+            // A new conversation is a new line of history, with its own chat,
+            // exactly as `startDeeperSearch` records the first one.
+            RecentSearchStore.shared.rememberQuestion(query)
+            laneQuestion = QuestionTag(
+                key: QuestionChats.key(forQuestion: query),
+                conversation: searchLane.conversationId)
         }
     }
 
@@ -4778,6 +4926,16 @@ final class AppStore {
     /// on an old daemon. Note `DraftSaver.save` tells the two nil cases apart;
     /// this flag does not need to. Stored: see `noteStats`.
     private(set) var draftsV2Available = false
+
+    /// Whether panel search asks for plain ranked order: no Not done / Done
+    /// split, the owner's sent mail kept by `include_sent`. Read off the
+    /// stats, STRICTLY `== true`, so an older daemon (or no stats yet) keeps
+    /// the grouped ask that brings sent mail into its keyword results.
+    /// A first page reads it live; a page after the first passes the value
+    /// that page was fetched under (`SearchSession.fetchedPlainOrder`), since
+    /// a cursor is an offset into one ranking and the flag can flip mid-scroll
+    /// (the first stats landing, a daemon roll). Stored: see `noteStats`.
+    private(set) var searchPlainOrder = false
 
     /// Fetch the drafts list into `draftsRows`. The drafts page calls it on open.
     ///
@@ -5190,7 +5348,8 @@ final class AppStore {
     func confirmDiscard() {
         guard let asked = discardAsk else { return }
         discardAsk = nil
-        guard compose?.id == asked else { return }
+        // A send that started while the card was up owns the composer now.
+        guard compose?.id == asked, compose?.sending != true else { return }
         discardCompose()
     }
 

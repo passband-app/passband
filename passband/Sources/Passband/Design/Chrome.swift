@@ -131,6 +131,14 @@ enum MeterSlot {
         static var hPadding: CGFloat { Space.s12 }
         static var vPadding: CGFloat { Space.scaled(9) }
         static let radius: CGFloat = 10
+        /// The screen's side margin, which a zone title, a day heading and a
+        /// row's own words all line up on.
+        static let gutter: CGFloat = 16
+        /// What a row's list inset is when the row carries `hPadding` of its
+        /// own: the press wash bleeds out into the margin, the words stay on
+        /// the gutter. Rows were drawn a padding's width inside everything
+        /// above them, which cost a narrow phone 24pt of every line.
+        static var bleed: CGFloat { gutter - hPadding }
         /// The avatar, or whatever stands where one would.
         static let mark: CGFloat = 26
         /// Mark to text.

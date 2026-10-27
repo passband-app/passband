@@ -1397,6 +1397,12 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// that means anything. See `AppStore.draftsV2Available` and
     /// `DraftSaver.save`, which also has to tell "no" from "not asked yet".
     var drafts_v2: Bool?
+    /// Whether `include_sent` on `/client/search` exists, so a search can ask
+    /// for plain ranked order (no Not done / Done split) and keep the owner's
+    /// sent mail. ABSENT on an older daemon, and absence reads as no: that
+    /// daemon ignores the key, and dropping `unfinished_first` there would
+    /// lose sent mail from keyword results. See `AppStore.searchPlainOrder`.
+    var search_plain_order: Bool?
     /// Whether this daemon keeps an outbox (`/client/scheduled`). ABSENT on an
     /// older daemon, and absence reads as no: every schedule door is hidden
     /// rather than offered as a 404 on the click. See

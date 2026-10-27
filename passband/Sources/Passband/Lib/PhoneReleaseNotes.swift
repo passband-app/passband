@@ -101,6 +101,33 @@ enum PhoneReleaseNotes {
     /// THE TABLE. Newest first, and the only place a phone note is written.
     static let all: [PhoneReleaseNote] = [
         PhoneReleaseNote(
+            version: "0.0.10",
+            date: "2026-10-27",
+            headline: "Less to Wade Through",
+            features: [
+                PhoneFeature(
+                    "Smart clear",
+                    detail: "Tap smart clear on Reading to clear what has expired and what you never open. Undo puts all of it back.",
+                    symbol: "checkmark.rectangle.stack"),
+                PhoneFeature(
+                    "Search asks the agent for you",
+                    detail: "Type a question in Search and the agent looks through your mail for the answer, right above your results.",
+                    symbol: "sparkle.magnifyingglass"),
+                PhoneFeature(
+                    "Mail in your language",
+                    detail: "Email written in a language you do not read arrives translated. Tap show original to see it as sent.",
+                    symbol: "character.bubble"),
+            ],
+            also: [
+                PhoneAside(
+                    "The person icon opens your accounts, with Settings at the bottom",
+                    symbol: "gearshape"),
+                PhoneAside("Delete a message you are writing with the trash in the corner", symbol: "trash"),
+                PhoneAside("Choose the languages you read in Account, under Mail", symbol: "globe"),
+                PhoneAside("Press and drag to select text in plain emails", symbol: "text.cursor"),
+                PhoneAside("Bug fixes"),
+            ]),
+        PhoneReleaseNote(
             version: "0.0.9",
             date: "2026-10-10",
             headline: "Faster to Find",

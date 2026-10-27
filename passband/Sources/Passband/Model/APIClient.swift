@@ -413,6 +413,9 @@ actor APIClient {
     /// debounced panel fetch sends it; the agent's `search_mail` never does — a
     /// model's query is a settled sentence, not a half-typed word, and prefixing
     /// its last token would quietly widen every search it makes.
+    /// `includeSent` keeps the owner's sent mail in a keyword search without
+    /// `unfinishedFirst`'s status grouping; only a daemon advertising
+    /// `search_plain_order` reads it (see `SearchOrder`).
     func search(
         _ q: String,
         limit: Int? = nil,
@@ -421,6 +424,7 @@ actor APIClient {
         sort: SearchSortChoice? = nil,
         partial: Bool = false,
         unfinishedFirst: Bool = false,
+        includeSent: Bool = false,
         forAgent: Bool = false
     ) async throws -> SearchPage {
         try await get(
@@ -429,6 +433,7 @@ actor APIClient {
                 "q": q, "limit": limit.map(String.init), "cursor": cursor, "mode": mode?.rawValue,
                 "sort": sort?.rawValue, "partial": partial ? "1" : nil,
                 "unfinished_first": unfinishedFirst ? "true" : nil,
+                "include_sent": includeSent ? "true" : nil,
             ])
     }
 

@@ -4,7 +4,7 @@
 
 use std::sync::Mutex;
 
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 
 use super::{EmbedSettings, Embedder};
 use crate::error::{CoreError, Result};
@@ -69,7 +69,7 @@ fn load_session(settings: &EmbedSettings) -> Result<(TextEmbedding, usize)> {
         );
     }
 
-    let opts = InitOptions::new(model)
+    let opts = TextInitOptions::new(model)
         .with_cache_dir(settings.cache_dir.clone())
         .with_show_download_progress(!already_cached)
         .with_max_length(settings.max_tokens);
@@ -141,7 +141,7 @@ impl Embedder for FastEmbedder {
 }
 
 /// What [`resolve_model`] settles a config string into: the fastembed variant to
-/// hand [`InitOptions`], the `model_code` it matched (the config string may be an
+/// hand [`TextInitOptions`], the `model_code` it matched (the config string may be an
 /// alias, and the logs want the real identity), the dimension fastembed reports
 /// for it, and the `model_file` inside that repo, which is what
 /// [`model_appears_cached`] asks the cache about.

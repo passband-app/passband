@@ -49,9 +49,11 @@ use super::messages::is_known_contact_conn;
 use super::rules::list_sender_rules_conn;
 use super::*;
 use crate::store::agent_triage::AgentListQuery;
+use crate::triage::decision::MessageDecision;
 use crate::triage::rules::match_sender_rule;
 use crate::triage::sender_fatigue::{
-    self, OpenSample, Reason, SenderSignals, keep_in_force, summarize_attention, word_count,
+    self, AttentionSummary, OpenSample, Reason, SenderSignals, keep_in_force, summarize_attention,
+    word_count,
 };
 
 /// How far back a sender's statistics look, before the ledger floor shortens
@@ -149,6 +151,11 @@ pub(crate) const SENDER_OPENS_SQL: &str = concat!(
 /// reads and not the markup around it.
 const MESSAGE_BODY_SQL: &str = "SELECT body FROM messages WHERE account_id = ?1 AND id = ?2";
 
+/// One message's stored triage decision, by primary key, for the promotion
+/// half of the dwell sample.
+const MESSAGE_DECISION_SQL: &str =
+    "SELECT decision_json FROM agent_message_decisions WHERE account_id = ?1 AND message_id = ?2";
+
 /// The `unsubscribes` row for a sender the owner already asked to stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SenderUnsubscribed {
@@ -201,6 +208,10 @@ pub(super) struct Measured {
     pub kept_at: Option<DateTime<Utc>>,
     pub score: Option<u8>,
     pub reasons: Vec<Reason>,
+    /// The dwell sample cut to the sender's PROMOTIONS that carry no record,
+    /// for smart clear's `skimmed_sender` (see
+    /// [`sender_fatigue::habitually_skimmed`]). Not part of the score.
+    pub promo_attention: AttentionSummary,
 }
 
 /// The cheap half of [`Measured`]: who the owner has said to leave alone.
@@ -234,6 +245,7 @@ pub(super) struct SenderMeasurer<'c> {
     counts: rusqlite::Statement<'c>,
     opens: rusqlite::Statement<'c>,
     body: rusqlite::Statement<'c>,
+    decision: rusqlite::Statement<'c>,
     unsubscribed: rusqlite::Statement<'c>,
     kept: rusqlite::Statement<'c>,
     floor_text: String,
@@ -259,6 +271,7 @@ impl<'c> SenderMeasurer<'c> {
             counts: conn.prepare(SENDER_COUNTS_SQL)?,
             opens: conn.prepare(SENDER_OPENS_SQL)?,
             body: conn.prepare(MESSAGE_BODY_SQL)?,
+            decision: conn.prepare(MESSAGE_DECISION_SQL)?,
             // Both stored lowercased by every writer, so each table's unique
             // index serves its probe.
             unsubscribed: conn.prepare(
@@ -350,6 +363,7 @@ impl<'c> SenderMeasurer<'c> {
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut samples = Vec::new();
+        let mut promo_samples = Vec::new();
         for (id, opened_at, dwell_ms, link_clicks) in opened_rows {
             let in_ledger = DateTime::parse_from_rfc3339(&opened_at)
                 .is_ok_and(|at| at.with_timezone(&Utc) >= self.dwell_floor);
@@ -361,13 +375,27 @@ impl<'c> SenderMeasurer<'c> {
             let words = self.body.query_row(params![self.account_id, id], |r| {
                 Ok(word_count(r.get_ref(0)?.as_str().unwrap_or("")))
             })?;
-            samples.push(OpenSample {
+            let sample = OpenSample {
                 dwell_ms: dwell_ms.max(0) as u64,
                 link_clicks: link_clicks.clamp(0, i64::from(u32::MAX)) as u32,
                 words,
-            });
+            };
+            samples.push(sample);
+            // A decision that is missing or will not parse is not a
+            // promotion: the failure falls toward NOT sweeping.
+            let decision: Option<MessageDecision> = self
+                .decision
+                .query_row(params![self.account_id, id], |r| r.get::<_, String>(0))
+                .optional()?
+                .and_then(|json| serde_json::from_str(&json).ok());
+            if decision.is_some_and(|d| {
+                d.is_reading_promotion() && !crate::triage::smart_clear::carries_a_record(&d)
+            }) {
+                promo_samples.push(sample);
+            }
         }
         let attention = summarize_attention(&samples);
+        let promo_attention = summarize_attention(&promo_samples);
         let standing = self.standing(sender)?;
 
         // The ACTUAL length, never the nominal ninety: a ledger two weeks old
@@ -398,6 +426,7 @@ impl<'c> SenderMeasurer<'c> {
             kept_at: standing.kept_at,
             score,
             reasons,
+            promo_attention,
         })
     }
 }

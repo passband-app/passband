@@ -316,13 +316,14 @@ async fn smart_clear_clears_a_batch_reports_it_and_undo_gives_it_back() {
     assert_eq!(
         body["by_reason"],
         json!({"event_passed": 0, "offer_ended": 1, "expired": 0,
-               "ignored_sender": 0, "stale_promo": 2})
+               "ignored_sender": 0, "skimmed_sender": 0, "stale_promo": 2})
     );
     let mut ids: Vec<i64> = serde_json::from_value(body["message_ids"].clone()).unwrap();
     ids.sort();
     assert_eq!(ids, [stale_a, stale_b, ended]);
     // No model is configured, and the essay had a summary worth asking about.
     assert_eq!(body["model"], "skipped_unconfigured");
+    assert_eq!(body["model_detail"], Value::Null);
     assert_eq!(open_in_reading(&h).await, [essay, today]);
     // The sibling of a cleared message was not resolved with it.
     let updates = h
@@ -575,7 +576,7 @@ async fn the_model_sees_summaries_and_dates_only_and_its_stray_answers_are_ignor
     assert_eq!(
         body["by_reason"],
         json!({"event_passed": 0, "offer_ended": 1, "expired": 1,
-               "ignored_sender": 0, "stale_promo": 0})
+               "ignored_sender": 0, "skimmed_sender": 0, "stale_promo": 0})
     );
     let mut ids: Vec<i64> = serde_json::from_value(body["message_ids"].clone()).unwrap();
     ids.sort();
@@ -618,6 +619,7 @@ async fn a_failed_model_pass_degrades_to_stored_facts() {
     let undecided = reading(&h.store, h.acct, "b", 3, "Sale ended yesterday", |_| {});
     let body = press(&h).await;
     assert_eq!(body["model"], "skipped_failed");
+    assert_eq!(body["model_detail"], "error");
     assert_eq!(body["message_ids"], json!([stale]));
     assert_eq!(open_in_reading(&h).await, [undecided]);
     assert_eq!(seen.lock().unwrap().bodies.len(), 1, "one try, no retry");
@@ -771,6 +773,7 @@ async fn a_pass_that_calls_nearly_everything_expired_is_discarded() {
     let stale = reading(&h.store, h.acct, "stale", 20, "Old sale", |_| {});
     let body = press(&h).await;
     assert_eq!(body["model"], "skipped_failed");
+    assert_eq!(body["model_detail"], "discarded");
     assert_eq!(body["message_ids"], json!([stale]));
     ids.sort();
     assert_eq!(open_in_reading(&h).await, ids);
@@ -815,16 +818,21 @@ async fn a_second_press_while_one_is_running_is_refused() {
 }
 
 /// On a new account the backfill arrived before any open could be recorded.
-/// Those promotions are not "never opened", and a press leaves them.
+/// A promotion a week old and still in Reading is stale all the same: staleness
+/// is about the promotion, not about the owner's habits. An essay is not.
 #[tokio::test]
-async fn a_new_accounts_backfilled_promotions_are_not_swept_as_stale() {
+async fn a_new_accounts_backfilled_promotions_are_swept_as_stale() {
     let h = harness(|_, _| {});
     let old = reading(&h.store, h.acct, "a", 20, "Autumn sale", |_| {});
+    let essay = reading(&h.store, h.acct, "b", 20, "On walking", |d| {
+        d.kinds = vec![EmailKind::Editorial];
+        d.reading_kind = Some(ReadingKind::Content);
+    });
     // The ledger began with the account, a moment ago.
     h.store
         .set_app_setting(h.acct, "opened_ledger_since", &Utc::now().to_rfc3339())
         .unwrap();
     let body = press(&h).await;
-    assert_eq!(body["cleared"], 0);
-    assert_eq!(open_in_reading(&h).await, [old]);
+    assert_eq!(body["message_ids"], json!([old]));
+    assert_eq!(open_in_reading(&h).await, [essay]);
 }

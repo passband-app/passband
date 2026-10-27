@@ -47,7 +47,7 @@ struct SmartClearTests {
         precondition(
             lines.map(\.spoken) == [
                 "3 events that already happened", "5 offers that ended", "4 no longer current",
-                "20 from senders you never open", "11 promotions you never opened",
+                "20 from senders you never open", "11 promotions over a week old",
             ], "\(lines.map(\.spoken))")
     }
 
@@ -59,7 +59,7 @@ struct SmartClearTests {
         precondition(
             lines.map(\.spoken) == [
                 "1 event that already happened", "1 offer that ended", "1 no longer current",
-                "1 from senders you never open", "1 promotion you never opened",
+                "1 from senders you never open", "1 promotion over a week old",
             ], "\(lines.map(\.spoken))")
     }
 
@@ -89,6 +89,22 @@ struct SmartClearTests {
         precondition(
             SmartClearCopy.nothing(model: "skipped_failed")
                 == "Nothing obvious to clear. The closer look did not run this time.")
+        precondition(SmartClearCopy.modelNote("ok", detail: "timeout") == nil)
+        precondition(
+            SmartClearCopy.modelNote("skipped_failed", detail: "timeout")
+                == "The closer look ran out of time.")
+        precondition(
+            SmartClearCopy.modelNote("skipped_failed", detail: "discarded")
+                == "The closer look's answer did not add up, so it was set aside.")
+        precondition(
+            SmartClearCopy.modelNote("skipped_failed", detail: "from_the_future")
+                == SmartClearCopy.modelMissedNote)
+        precondition(
+            SmartClearCopy.modelNote("skipped_cap") == "The closer look is done for today.")
+        precondition(SmartClearCopy.why("skimmed_sender") == "From a sender you only glance at")
+        precondition(
+            SmartClearCopy.lines(byReason: ["skimmed_sender": 4]).map(\.spoken)
+                == ["4 from senders you only glance at"])
     }
 
     static func undoneSaysWhatCameBack() {
@@ -128,7 +144,7 @@ struct SmartClearTests {
         precondition(SmartClearCopy.why("offer_ended") == "The offer ended")
         precondition(SmartClearCopy.why("expired") == "No longer current")
         precondition(SmartClearCopy.why("ignored_sender") == "From a sender you never open")
-        precondition(SmartClearCopy.why("stale_promo") == "A promotion you never opened")
+        precondition(SmartClearCopy.why("stale_promo") == "A promotion over a week old")
         precondition(SmartClearCopy.why("from_the_future") == "Cleared", "neutral, never a guess")
         precondition(SmartClearCopy.why("") == "Cleared")
         for code in SmartClearCopy.order + ["zz"] {
@@ -149,7 +165,7 @@ struct SmartClearTests {
         precondition(
             groups.map(\.heading) == [
                 "1 event that already happened", "2 offers that ended",
-                "1 promotion you never opened", "2 others",
+                "1 promotion over a week old", "2 others",
             ], "the page says what the receipt says: \(groups.map(\.heading))")
         precondition(groups.map(\.items.count).reduce(0, +) == 6, "every row is somewhere")
         precondition(

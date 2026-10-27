@@ -678,7 +678,7 @@
             for item in items { byReason[item.reason, default: 0] += 1 }
             return AppStore.SmartClearReceipt(
                 batchId: "fixture", cleared: items.count, senders: 5, byReason: byReason,
-                messageIds: items.map(\.id), modelMissed: false, createdAt: now,
+                messageIds: items.map(\.id), modelNote: nil, createdAt: now,
                 clock: SmartClearClock(startedAt: now, lasting: 3600), items: items)
         }
     }

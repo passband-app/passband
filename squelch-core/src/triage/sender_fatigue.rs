@@ -261,6 +261,59 @@ pub fn median(values: &mut [u64]) -> Option<u64> {
     }
 }
 
+/// The read fraction under which a sender's mail is habitually skimmed: a
+/// tenth of the time its words take. The fatigue score's own strongest skim.
+pub const SKIM_READ_FRACTION: f32 = 0.10;
+
+/// The median look, in milliseconds, under which mail with no length to judge
+/// against is habitually glanced at. The fatigue score's own brief look.
+pub const BRIEF_LOOK_MS: u64 = 3_000;
+
+/// The longest median look that can still be a skim, however long the mail.
+/// A promotion's flattened text is padded with alt text and legal footer, so
+/// an 800-word promo looked at for fifteen seconds reads as a tenth "read";
+/// fifteen seconds is somebody looking. Eight is a glance down the page.
+pub const SKIM_MAX_DWELL_MS: u64 = 8_000;
+
+/// Does the owner open this sender's PROMOTIONS and close them in a glance?
+///
+/// `promos` is the attention summary of the sender's opened promotions only
+/// (the store builds it from the same sample as the score, keeping rows whose
+/// decision is a Reading promotion and carries no record). A glance at a
+/// shop's receipt or shipping notice is a complete read of a receipt; it says
+/// nothing about the shop's sales mail, and must not tip it into a sweep.
+///
+/// Smart clear's `skimmed_sender` reads this, and it deliberately does NOT
+/// wait for [`MIN_COVERED_DAYS`] the way [`score`] does. That floor exists
+/// because "unopened" means nothing on a young ledger. Every input here is a
+/// look the owner actually took, recorded when it happened, so three of them
+/// say as much on day one as on day ninety.
+///
+/// Yes when, over at least [`MIN_ATTENTION_SAMPLE`] reported opens and with
+/// no link followed in any of them (a click is the strongest sign mail earns
+/// its keep), either the median read fraction is under [`SKIM_READ_FRACTION`]
+/// with a median look under [`SKIM_MAX_DWELL_MS`], or, when too little of it
+/// is long enough to have a fraction, the median look is under
+/// [`BRIEF_LOOK_MS`]. Never when `protected` (a known contact, a `surface`
+/// rule, or a sender the owner chose to keep).
+pub fn habitually_skimmed(promos: &AttentionSummary, protected: bool) -> bool {
+    if protected || promos.clicks > 0 {
+        return false;
+    }
+    if promos.read_sample >= MIN_ATTENTION_SAMPLE {
+        return promos
+            .median_read_fraction
+            .is_some_and(|fraction| fraction < SKIM_READ_FRACTION)
+            && promos
+                .median_dwell_ms
+                .is_some_and(|dwell| dwell < SKIM_MAX_DWELL_MS);
+    }
+    promos.dwell_sample >= MIN_ATTENTION_SAMPLE
+        && promos
+            .median_dwell_ms
+            .is_some_and(|dwell| dwell < BRIEF_LOOK_MS)
+}
+
 /// Score one sender, 0 (keep) to 100 (the owner has plainly stopped reading
 /// them), with the reasons ordered by how much each contributed.
 pub fn score(signals: &SenderSignals) -> (Option<u8>, Vec<Reason>) {
@@ -399,6 +452,59 @@ pub fn score(signals: &SenderSignals) -> (Option<u8>, Vec<Reason>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `n` short promos, each looked at for `dwell_ms`.
+    fn looks(n: usize, dwell_ms: u64) -> AttentionSummary {
+        summarize_attention(&vec![
+            OpenSample {
+                dwell_ms,
+                link_clicks: 0,
+                words: 20,
+            };
+            n
+        ])
+    }
+
+    #[test]
+    fn skimmed_needs_three_short_looks_and_no_clicks() {
+        assert!(habitually_skimmed(&looks(3, 1_200), false));
+        assert!(
+            !habitually_skimmed(&looks(2, 1_200), false),
+            "not a habit yet"
+        );
+        assert!(!habitually_skimmed(&looks(3, 4_000), false));
+        let mut clicked = looks(3, 1_200);
+        clicked.clicks = 1;
+        assert!(
+            !habitually_skimmed(&clicked, false),
+            "a click is mail that worked"
+        );
+    }
+
+    #[test]
+    fn skimmed_judges_long_mail_by_read_fraction_and_a_dwell_cap() {
+        let long = |dwell_ms| {
+            summarize_attention(
+                &[OpenSample {
+                    dwell_ms,
+                    link_clicks: 0,
+                    words: 800,
+                }; 3],
+            )
+        };
+        // 800 words is about 200s to read. Five seconds is a skim.
+        assert!(habitually_skimmed(&long(5_000), false));
+        // Fifteen seconds is under a tenth "read", and is somebody looking.
+        assert!(!habitually_skimmed(&long(15_000), false));
+        // Read through.
+        assert!(!habitually_skimmed(&long(150_000), false));
+    }
+
+    #[test]
+    fn skimmed_is_never_said_of_a_protected_sender() {
+        assert!(habitually_skimmed(&looks(5, 500), false));
+        assert!(!habitually_skimmed(&looks(5, 500), true));
+    }
 
     /// A sender with history and nothing else said about them.
     fn base(received: u32, opened: u32) -> SenderSignals {

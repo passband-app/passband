@@ -46,8 +46,32 @@ fn batch_tag(batch_id: i64) -> String {
     format!("smart_clear:{batch_id}")
 }
 
-/// Each measured sender's fatigue score, by lowercased address.
-pub type SenderScores = HashMap<String, Option<u8>>;
+/// What one measured sender's record says, for the sender reasons.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SenderMark {
+    /// The fatigue score, for `ignored_sender`.
+    pub score: Option<u8>,
+    /// The owner glances at their promotions and closes them, for
+    /// `skimmed_sender`.
+    pub skimmed: bool,
+    /// The sender's total reported dwell and link clicks when the mark was
+    /// made, for a mark that could sweep anything; `None` otherwise. Step 3
+    /// drops a mark whose sender's totals have moved since (see `scan`).
+    pub attention: Option<(i64, i64)>,
+}
+
+impl SenderMark {
+    /// Could this mark take any row by itself?
+    fn sweeps(&self) -> bool {
+        self.skimmed
+            || self
+                .score
+                .is_some_and(|s| s >= crate::triage::smart_clear::SMART_CLEAR_SENDER_SCORE)
+    }
+}
+
+/// Each measured sender's record, by lowercased address.
+pub type SenderScores = HashMap<String, SenderMark>;
 
 /// What step 1 hands to step 3 across the model call.
 #[derive(Debug, Clone, Default)]
@@ -70,6 +94,15 @@ const UNDO_MEMORY_DAYS: i64 = 90;
 /// The newest open on one sender's mail, for the stale-score check. Seeks the
 /// sender index like every per-sender read here.
 const SENDER_LAST_OPEN_SQL: &str = "SELECT MAX(t.opened_at)
+     FROM messages m INDEXED BY idx_messages_from_nocase
+     JOIN triage t ON t.message_id = m.id
+     WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE";
+
+/// A sender's total reported dwell and clicks, for the stale-mark check. An
+/// open stamps `opened_at` once and never again, so a REOPENED message read
+/// for a minute moves nothing the last-open check sees; it moves this.
+const SENDER_ATTENTION_SQL: &str = "SELECT COALESCE(SUM(t.dwell_ms), 0),
+            COALESCE(SUM(t.link_clicks), 0)
      FROM messages m INDEXED BY idx_messages_from_nocase
      JOIN triage t ON t.message_id = m.id
      WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE";
@@ -157,14 +190,15 @@ pub struct SmartClearOutcome {
 }
 
 /// One row's own state, by primary key: (kept close, status, opened, a
-/// reminder pending or fired). "Kept close" is `sealed_mail_sql!`, the one
+/// reminder pending or fired, reported dwell, reported link clicks). "Kept close" is `sealed_mail_sql!`, the one
 /// definition, so auth and restricted mail is protected by its stored
 /// decision and not only by the retired `sensitivity` column.
 const ROW_STATE_SQL: &str = concat!(
     "SELECT ",
     sealed_mail_sql!(),
     ", t.status, t.opened_at IS NOT NULL,
-            t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL
+            t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL,
+            COALESCE(t.dwell_ms, 0), COALESCE(t.link_clicks, 0)
      FROM triage t JOIN messages m ON m.account_id = t.account_id AND m.id = t.message_id
      WHERE t.account_id = ?1 AND t.message_id = ?2"
 );
@@ -209,8 +243,27 @@ fn scan(
         None => {
             let (_, groups) = busiest_senders(&items);
             let mut scores = SenderScores::new();
+            let mut totals = conn.prepare(SENDER_ATTENTION_SQL)?;
             for (sender, _, _) in &groups {
-                scores.insert(sender.clone(), measurer.measure(sender)?.score);
+                let measured = measurer.measure(sender)?;
+                let signals = &measured.signals;
+                let protected =
+                    signals.known_contact || signals.surface_rule || signals.kept_recently;
+                let mut mark = SenderMark {
+                    score: measured.score,
+                    skimmed: crate::triage::sender_fatigue::habitually_skimmed(
+                        &measured.promo_attention,
+                        protected,
+                    ),
+                    attention: None,
+                };
+                if mark.sweeps() {
+                    mark.attention =
+                        Some(totals.query_row(params![account_id, sender], |r| {
+                            Ok((r.get(0)?, r.get(1)?))
+                        })?);
+                }
+                scores.insert(sender.clone(), mark);
             }
             scores
         }
@@ -225,27 +278,34 @@ fn scan(
         .map(|item| item.thread_id)
         .collect();
 
-    // A SCORE FROM BEFORE AN OPEN IS NOT REUSED. Opening mail is the one
-    // thing the owner can do during a model call that LOWERS a sender's
-    // score, and a sender at 77 with one more open may be a sender at 72. So
-    // any sender whose mail was opened after step 1 read the store is
-    // unscored for this press: nothing of theirs goes as `ignored_sender`.
-    // Asked only of senders whose reused score could sweep anything.
+    // A MARK FROM BEFORE THE OWNER LOOKED AGAIN IS NOT REUSED. Opening mail
+    // is the one thing the owner can do during a model call that LOWERS a
+    // sender's score, and a sender at 77 with one more open may be a sender
+    // at 72. Reading it is what undoes a skim mark. So a sender whose mail
+    // was opened after step 1 read the store, OR whose reported dwell or
+    // clicks have moved since (a reopened message stamps no new open), is
+    // unmarked for this press: nothing of theirs goes as `ignored_sender` or
+    // `skimmed_sender`. Asked only of senders whose mark could sweep.
     if let Some(scanned_at) = earlier.and_then(|scan| scan.scanned_at) {
         let mut last_open = conn.prepare(SENDER_LAST_OPEN_SQL)?;
-        for (sender, score) in scores.iter_mut() {
-            if score.is_none_or(|s| s < crate::triage::smart_clear::SMART_CLEAR_SENDER_SCORE) {
+        let mut totals = conn.prepare(SENDER_ATTENTION_SQL)?;
+        for (sender, mark) in scores.iter_mut() {
+            if !mark.sweeps() {
                 continue;
             }
             let opened: Option<String> =
                 last_open.query_row(params![account_id, sender], |r| r.get(0))?;
             // A stamp that will not parse cannot be shown to be older.
-            let stale = opened.is_some_and(|at| {
+            let opened_since = opened.is_some_and(|at| {
                 DateTime::parse_from_rfc3339(&at)
                     .map_or(true, |at| at.with_timezone(&Utc) > scanned_at)
             });
-            if stale {
-                *score = None;
+            let now_totals: (i64, i64) =
+                totals.query_row(params![account_id, sender], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            // A mark with no totals recorded cannot be shown to be current.
+            let looked_since = mark.attention != Some(now_totals);
+            if opened_since || looked_since {
+                *mark = SenderMark::default();
             }
         }
     }
@@ -259,8 +319,8 @@ fn scan(
     )?;
 
     // WHEN OPENS BEGAN TO BE RECORDED. Mail from before it has no open on
-    // record because none could have been, which `stale_promo` must not read
-    // as the owner never opening it.
+    // record because none could have been, which `ignored_sender` must not
+    // read as the owner never opening this message.
     let open_ledger = open_ledger_since(conn, account_id)?;
 
     let mut state = conn.prepare(ROW_STATE_SQL)?;
@@ -280,13 +340,15 @@ fn scan(
             }
         };
         // A message with no triage row has no status to write and is skipped.
-        let Some((sealed, status, opened, reminder)) = state
+        let Some((sealed, status, opened, reminder, dwell_ms, link_clicks)) = state
             .query_row(params![account_id, item.message_id], |r| {
                 Ok((
                     r.get::<_, bool>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, bool>(2)?,
                     r.get::<_, bool>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
                 ))
             })
             .optional()?
@@ -306,13 +368,16 @@ fn scan(
             thread_attention: Some(&item.attention),
             received_at,
             opened,
+            dwell_ms: dwell_ms.max(0) as u64,
+            link_clicks: link_clicks.clamp(0, i64::from(u32::MAX)) as u32,
             sealed,
             reminder,
             in_fye: fye_threads.contains(&item.thread_id),
             given_back: given_back.contains(&item.message_id),
             before_open_ledger: received_at < open_ledger,
             sender_protected,
-            sender_score: scores.get(&sender).copied().flatten(),
+            sender_score: scores.get(&sender).and_then(|mark| mark.score),
+            sender_skimmed: scores.get(&sender).is_some_and(|mark| mark.skimmed),
         };
         out.push(Scanned {
             message_id: item.message_id,

@@ -444,13 +444,17 @@ open Reading mail that has expired or that the owner plainly does not want:
 { "batch_id": "17",
   "cleared": 43, "senders": 17,
   "by_reason": { "event_passed": 3, "offer_ended": 5, "expired": 4,
-                 "ignored_sender": 20, "stale_promo": 11 },
+                 "ignored_sender": 20, "skimmed_sender": 6, "stale_promo": 11 },
   "message_ids": [812, 790],
   "rows": [ { "message_id": 812, "reason": "offer_ended",
               "sender": "deals@shop.example", "sender_name": "Shop Deals",
               "subject": "Last day: 20% off", "received_at": "2026-09-28T14:02:11+00:00" } ],
-  "model": "ok" }
+  "model": "ok", "model_detail": null }
 ```
+
+`model` is `ok` or a `skipped_*` code (see the handler). With `skipped_failed`,
+`model_detail` says why, from a closed set: `refused`, `timeout`, `discarded`
+(the model answered and its answer failed the checks below) or `error`.
 
 `batch_id` is `null` and nothing is recorded when nothing was cleared; `rows`
 and `message_ids` are then empty.
@@ -515,12 +519,25 @@ Each cleared message has exactly one reason, first match:
    owner never opened this message, and it was received at or after the open
    ledger began (before that, "never opened" cannot be known). On a ledger under 14 days old no sender has
    a score, so this takes nothing.
-4. `stale_promo`: a promotion (the decision's `reading_kind`, else promotional
-   and not editorial kinds), received 14 or more days ago, never opened, and
-   received at or after the open ledger began. Mail from before the ledger (the
-   whole backfill of a new account) has no open on record because none could
-   be recorded, so it is never stale. Content is never stale.
-5. Rows none of those took, whose decision has no usable date, are put to a
+4. `skimmed_sender`: a promotion from a sender whose promotions the owner
+   habitually glances at and closes (`sender_fatigue::habitually_skimmed`),
+   judged over the sender's sampled opens (the 25 newest reported) cut to
+   those whose decision is a Reading promotion carrying no record, so glances
+   at the same sender's receipts do not count: at least 3 such opens, no link
+   followed in any of them, and a median read fraction under 10% with a median
+   look under 8 seconds (or, when too little of the mail is long enough to have
+   a fraction, a median look under 3 seconds). This message was never opened, or was opened for under 3 seconds
+   with no click; an open no client reported on is left alone. There is no
+   ledger-age floor: every input is a look the owner took, so it is evidence
+   from the first day. Known contacts, `surface` rules and kept senders never
+   qualify. A sender whose mail is opened, or whose reported dwell or clicks
+   change, while the model is being asked loses the mark for that press.
+5. `stale_promo`: a promotion (the decision's `reading_kind`, else promotional
+   and not editorial kinds), received 7 or more days ago and never opened in
+   Passband. Mail from before the open ledger counts: a promotion a week old
+   that is still in Reading has had its week, wherever it was read. Content is
+   never stale.
+6. Rows none of those took, whose decision has no usable date, are put to a
    model once. It answers `expired`, or `offer_ended` / `event_passed` when it
    can tell which.
 

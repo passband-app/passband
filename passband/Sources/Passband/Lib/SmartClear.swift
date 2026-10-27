@@ -12,7 +12,9 @@ import Foundation
 enum SmartClearCopy {
     /// The daemon's reason codes, in the order the receipt lists them: the
     /// ones nobody could argue with first.
-    static let order = ["event_passed", "offer_ended", "expired", "ignored_sender", "stale_promo"]
+    static let order = [
+        "event_passed", "offer_ended", "expired", "ignored_sender", "skimmed_sender", "stale_promo",
+    ]
 
     /// "43 emails cleared". The receipt's headline.
     static func headline(cleared: Int) -> String {
@@ -57,7 +59,10 @@ enum SmartClearCopy {
         // mail it was: so neither does this.
         case "expired": return "no longer current"
         case "ignored_sender": return "from senders you never open"
-        case "stale_promo": return one ? "promotion you never opened" : "promotions you never opened"
+        case "skimmed_sender": return "from senders you only glance at"
+        // Not "never opened": mail from before opens were recorded counts,
+        // and it may have been read in Gmail.
+        case "stale_promo": return one ? "promotion over a week old" : "promotions over a week old"
         default: return nil
         }
     }
@@ -72,10 +77,23 @@ enum SmartClearCopy {
     /// happen: what was cleared is still true, and it is not the whole job.
     static let modelMissedNote = "The closer look did not run this time."
 
+    /// The note for why the closer look did not happen, nil when nothing was
+    /// missed. `detail` is the daemon's `model_detail`; one this build does
+    /// not know gets the plain note.
+    static func modelNote(_ model: String?, detail: String? = nil) -> String? {
+        guard modelMissed(model) else { return nil }
+        if model == "skipped_cap" { return "The closer look is done for today." }
+        switch detail {
+        case "timeout": return "The closer look ran out of time."
+        case "discarded": return "The closer look's answer did not add up, so it was set aside."
+        default: return modelMissedNote
+        }
+    }
+
     /// Nothing was cleared. A toast, never a receipt.
-    static func nothing(model: String?) -> String {
-        modelMissed(model)
-            ? "Nothing obvious to clear. \(modelMissedNote)" : "Reading is already current."
+    static func nothing(model: String?, detail: String? = nil) -> String {
+        guard let note = modelNote(model, detail: detail) else { return "Reading is already current." }
+        return "Nothing obvious to clear. \(note)"
     }
 
     /// This daemon has no smart clear route.
@@ -199,7 +217,8 @@ extension SmartClearCopy {
         case "offer_ended": "The offer ended"
         case "expired": "No longer current"
         case "ignored_sender": "From a sender you never open"
-        case "stale_promo": "A promotion you never opened"
+        case "skimmed_sender": "From a sender you only glance at"
+        case "stale_promo": "A promotion over a week old"
         default: "Cleared"
         }
     }

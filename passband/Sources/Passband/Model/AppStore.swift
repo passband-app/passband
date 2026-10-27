@@ -993,8 +993,9 @@ final class AppStore {
         var senders: Int
         var byReason: [String: Int]
         var messageIds: [Int]
-        /// The model pass was meant to run and did not.
-        var modelMissed: Bool
+        /// Why the model pass was meant to run and did not; nil when it ran
+        /// or was never needed.
+        var modelNote: String?
         var createdAt = Date()
         /// When the receipt, and the undo on it, leave. A clock that can be
         /// stopped: looking at the full list costs none of the window.
@@ -1063,6 +1064,10 @@ final class AppStore {
         }
         let e = epoch
         smartClearWorking = true
+        await settleAttention()
+        // An account switch while the looks were landing: this press was for
+        // the mailbox that is gone.
+        guard e == epoch else { return }
         // A second run closes the first one's undo: the daemon undoes by
         // batch, and two receipts in one corner would be two countdowns.
         smartClearReceipt = nil
@@ -1104,12 +1109,14 @@ final class AppStore {
                 "offer_ended": result.by_reason["offer_ended"] ?? 0,
                 "expired": result.by_reason["expired"] ?? 0,
                 "ignored_sender": result.by_reason["ignored_sender"] ?? 0,
+                "skimmed_sender": result.by_reason["skimmed_sender"] ?? 0,
                 "stale_promo": result.by_reason["stale_promo"] ?? 0,
                 "model_ran": result.model == "ok",
                 "undoable": result.batch_id != nil,
             ])
         guard result.cleared > 0 else {
-            pushToast(SmartClearCopy.nothing(model: result.model), .info)
+            pushToast(
+                SmartClearCopy.nothing(model: result.model, detail: result.model_detail), .info)
             return
         }
         showSmartClearReceipt(result)
@@ -1126,7 +1133,7 @@ final class AppStore {
         let receipt = SmartClearReceipt(
             batchId: result.batch_id, cleared: result.cleared, senders: result.senders,
             byReason: result.by_reason, messageIds: result.message_ids,
-            modelMissed: SmartClearCopy.modelMissed(result.model),
+            modelNote: SmartClearCopy.modelNote(result.model, detail: result.model_detail),
             createdAt: now, clock: SmartClearClock(startedAt: now, lasting: ttl),
             items: result.rows.map { rows in
                 rows.map {
@@ -1358,6 +1365,9 @@ final class AppStore {
     /// Untracked, because nothing draws it; a view body that happened to call
     /// one of the doors below must not become a reader of the dwell ledger.
     @ObservationIgnored private var attention = AttentionClock()
+    /// The reports last sent, so a later flush queues behind them and smart
+    /// clear can wait for every look to land before it judges anyone's.
+    @ObservationIgnored private var attentionFlight: Task<Void, Never>?
     /// The epoch `attention` was last touched under. Message ids are one
     /// daemon's SQLite ints, so time banked against account A's message 40 is
     /// a lie about account B's message 40. Compared on every touch rather than
@@ -3245,7 +3255,9 @@ final class AppStore {
         let reports = withAttention { clock, _ in clock.drain() }
         guard !reports.isEmpty, !RehearsalMode.isEnabled else { return }
         let e = epoch
-        Task {
+        let prior = attentionFlight
+        attentionFlight = Task {
+            await prior?.value
             for report in reports {
                 guard isCurrent(e) else { return }
                 await APIClient.shared.reportAttention(
@@ -3253,6 +3265,15 @@ final class AppStore {
                     linkClicks: report.linkClicks)
             }
         }
+    }
+
+    /// Close any open stint and wait until every look is reported. Smart
+    /// clear judges a sender by how long their mail was looked at, so a read
+    /// still in this process when the press goes out would be judged a
+    /// glance. Bounded by the reports' own request timeouts.
+    func settleAttention() async {
+        attentionBlur()
+        await attentionFlight?.value
     }
 
     // MARK: - live arrivals

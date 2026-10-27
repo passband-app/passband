@@ -369,7 +369,9 @@ pub async fn attention(
 /// error: `skipped_nothing_to_ask` (no undecided row has a summary),
 /// `skipped_unconfigured` (no key), `skipped_cap` (the day's passes are
 /// spent), `skipped_failed` (a refusal, a timeout, an error, or an answer that
-/// called nearly every row expired and was thrown away whole).
+/// failed its checks and was thrown away whole). With `skipped_failed`,
+/// `model_detail` says which: `refused`, `timeout`, `discarded` or `error`;
+/// it is `null` otherwise.
 ///
 /// `rows` is the receipt's full list: one entry per message written done, in
 /// `message_ids`' order, with its subject, sender, date and reason, read in
@@ -429,6 +431,7 @@ pub async fn smart_clear(State(state): State<ApiState>) -> Result<impl IntoRespo
     .await?;
 
     let mut verdicts = std::collections::HashMap::new();
+    let mut model_detail: Option<&'static str> = None;
     let model = if scan.asks.is_empty() {
         "skipped_nothing_to_ask"
     } else if let Some(client) = state.smart_clear.clone() {
@@ -470,6 +473,7 @@ pub async fn smart_clear(State(state): State<ApiState>) -> Result<impl IntoRespo
                 verdicts = pass.verdicts;
                 "ok"
             } else {
+                model_detail = pass.failure;
                 "skipped_failed"
             }
         }
@@ -527,6 +531,7 @@ pub async fn smart_clear(State(state): State<ApiState>) -> Result<impl IntoRespo
             "message_ids": outcome.cleared.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             "rows": rows,
             "model": model,
+            "model_detail": model_detail,
         })),
     ))
 }

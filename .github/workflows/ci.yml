@@ -200,7 +200,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       # --no-fail-fast so a red PR reports every failing binary, not the first.
       #
@@ -211,7 +211,7 @@ jobs:
       # Not cargo-nextest: it was tried (process per test) and the spawn cost
       # of 3,650 tests on binaries this large doubled the work instead.
       - name: test
-        run: cargo test --workspace --no-fail-fast -- --test-threads=8
+        run: cargo test --locked --workspace --no-fail-fast -- --test-threads=8
         env:
           SQUELCH_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
 

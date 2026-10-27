@@ -424,17 +424,13 @@ struct SearchView: View {
             .padding(.bottom, Space.s6)
     }
 
-    /// The header that goes above hit `i`, if one does. A ranked search is
-    /// split where the status turns over; a listing is one run in date order,
-    /// so it gets one header saying which way the dates go.
+    /// The header that goes above hit `i`, if one does: only a listing gets
+    /// one, saying which way its dates run. A ranked search is ONE list, with
+    /// no Done / Not done split; an older daemon still sends unfinished mail
+    /// first until it is rolled to plain order (`AppStore.searchPlainOrder`),
+    /// and the labels do not wait for that.
     private func header(above i: Int) -> String? {
-        let hits = store.search.hits
-        if store.search.showsListing { return i == 0 ? "Newest first" : nil }
-        // PLAIN ORDER (a daemon that offers it): ranked as found, not split by
-        // status, so there is no turn-over to label.
-        if store.searchPlainOrder { return nil }
-        guard i == 0 || hits[i].is_done != hits[i - 1].is_done else { return nil }
-        return hits[i].is_done.map { $0 ? "Done" : "Not done" } ?? "Results"
+        store.search.showsListing && i == 0 ? "Newest first" : nil
     }
 
     /// The band as the STRIP draws it: above the hits, and never allowed to

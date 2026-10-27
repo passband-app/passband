@@ -204,24 +204,23 @@ struct MobileSearchView: View {
         store.search.diagnostics?.terms.map(\.text) ?? []
     }
 
-    /// What sits under the agent's answer is the plain search, and says so
-    /// with weight: a full rule and a heading in ink, so the agent's reading
-    /// and the list of mail never read as one block.
+    /// What sits under the agent's answer is the plain search, and says so:
+    /// the small caps every list header here uses, with a rule run out from
+    /// the label to the edge, so the agent's reading and the mail below it
+    /// never read as one block.
     private var resultsHeader: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        HStack(spacing: 10) {
+            Text("All results")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .textCase(.uppercase)
+                .tracking(0.6)
+                .fixedSize()
+                .accessibilityAddTraits(.isHeader)
             Rectangle()
                 .fill(Palette.hairlineStrong)
                 .frame(height: 1)
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.inkDim)
-                Text("Search results")
-                    .font(Typo.ui(14, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
+                .accessibilityHidden(true)
         }
         .padding(.top, 18)
         .padding(.bottom, 4)
@@ -312,25 +311,16 @@ struct MobileSearchView: View {
                 BandNote(error).plainRow()
             }
             ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
-                // The Done / Not done split the Mac draws, from the same
-                // unfinished-first order: without the header the order reads
-                // as the sort preference being ignored halfway down.
-                //
                 // A LISTING (one sender's mail, operators and no words) is
-                // not split: it is one run in date order under one header.
+                // one run in date order under one header saying so.
                 if store.search.showsListing {
                     if i == 0 { StatusHeader(title: "Newest first").plainRow() }
-                } else if store.searchPlainOrder {
-                    // Ranked as found, not split by status: nothing to label
-                    // (the Mac's `header(above:)` says the same).
-                    EmptyView()
-                } else if i == 0 || hit.is_done != hits[i - 1].is_done {
-                    // Under "Search results" a bare "Results" would say it
-                    // twice; Done / Not done still split the run beneath it.
-                    if !(bandMounted && hit.is_done == nil) {
-                        StatusHeader(isDone: hit.is_done).plainRow()
-                    }
                 }
+                // NO DONE / NOT DONE HEADERS, on either shell (the Mac's
+                // `header(above:)` agrees): results are one ranked list. An
+                // older daemon still sends unfinished mail first until it is
+                // rolled to plain order (`AppStore.searchPlainOrder`); the
+                // labels do not wait for that.
                 HitRow(hit: hit, terms: terms) {
                     // OPENING A HIT IS WHERE A QUERY STOPS BEING KEYSTROKES,
                     // on this shell as on the Mac: the ring's one rule, called
@@ -734,17 +724,11 @@ private struct HitRow: View {
     }
 }
 
-// MARK: - the Done / Not done split
+// MARK: - list headers
 
-/// The small header the Mac puts between unfinished and finished hits. nil is
-/// an older daemon that does not say, which gets a plain "Results": unknown is
-/// not unfinished.
+/// A small-caps list header ("Newest first" over a sender's listing).
 private struct StatusHeader: View {
     let title: String
-
-    init(isDone: Bool?) {
-        title = isDone.map { $0 ? "Done" : "Not done" } ?? "Results"
-    }
 
     init(title: String) {
         self.title = title

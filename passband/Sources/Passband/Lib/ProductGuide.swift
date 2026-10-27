@@ -547,11 +547,11 @@ enum ProductGuide {
         - Subjects and bodies, by keyword and by meaning. Subject words count more, word forms match (password finds passwords), and a quoted phrase has to appear exactly.
         - Login codes and spam are not searchable.
         - Search covers the mail Passband has indexed. Where the older-mail archive is on, that includes up to a year of mail from before Passband was connected, added gradually in the background and listed with finished mail, and the assistant can say how far back search currently reaches.
-        - Unfinished mail is listed first, and the matching words are highlighted.
+        - Results are one list ranked by the search order setting, with the matching words highlighted, on the Mac and the iPhone.
 
         Finding a sender:
         - Typing a name or an email address lists up to three matching senders above the results, each with how many emails they have sent. Down arrow and Enter, Tab, or a click picks one.
-        - Picking a sender shows every email from them, newest first, in one list that is not split into Not done and Done. The field then reads from: and their address, and more words typed after it search within their mail.
+        - Picking a sender shows every email from them, newest first, in one list. The field then reads from: and their address, and more words typed after it search within their mail.
         - It works the same way in the phone's Search tab: tap the sender.
 
         Operators:

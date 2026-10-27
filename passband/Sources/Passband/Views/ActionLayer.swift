@@ -66,6 +66,11 @@ struct ActionLayer: View {
                 .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)
             }
 
+            // THE DISCOVERY RING'S FOUND MOMENT. Above the toasts and the
+            // tray, under every palette and modal below: the moment only ever
+            // arrives when none of them is up, and one raised over it covers it.
+            DiscoveryLayer()
+
             if let request = store.ruleEditor {
                 // Keyed by the request: a click on an in-effect rule swaps the
                 // request under an open card, and without a fresh identity the

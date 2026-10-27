@@ -3923,10 +3923,11 @@ private struct MessageCard: View, Equatable {
                 allowTrackers: message.allowsTrackers,
                 attachments: message.attachmentList,
                 textHeight: Self.guessedBody(message, style: style, original: showingOriginal),
-                bubble: chat, mine: mine, findID: message.id, disclosures: disclosures,
+                bubble: chat, mine: mine, findID: message.id,
                 // Received mail only: a click in the user's own sent message
                 // says nothing about a sender.
-                attentionMessageId: mine ? nil : message.id)
+                attentionMessageId: mine ? nil : message.id,
+                disclosures: disclosures)
             .id(translated)
         } else {
             PlainBody(

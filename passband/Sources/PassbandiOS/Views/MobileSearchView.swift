@@ -102,7 +102,7 @@ struct MobileSearchView: View {
     /// The remembered queries, newest first. Read through the store rather than
     /// copied, so a search remembered by opening a hit is already in the list
     /// when the reader comes back and clears the field.
-    private var recents: [String] { RecentSearchStore.shared.queries }
+    private var recents: [RecentEntry] { RecentSearchStore.shared.entries }
 
     /// The resting tab has history to offer. Keyed on the FIELD being blank,
     /// the Mac's rule: mid-edit the hits belong to the previous query, and old
@@ -134,7 +134,7 @@ struct MobileSearchView: View {
         VStack(spacing: 0) {
             content
         }
-            .background(Palette.canvas)
+            .background(Palette.canvas.ignoresSafeArea())
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.inline)
             // Bound STRAIGHT to the store, which is what makes a tab hop free:
@@ -382,9 +382,17 @@ struct MobileSearchView: View {
             .padding(.top, 14)
             .padding(.bottom, 4)
             .plainRow()
-            ForEach(Array(recents.enumerated()), id: \.offset) { _, query in
-                RecentRow(query: query) { store.search.query = query }
-                    .plainRow()
+            ForEach(Array(recents.enumerated()), id: \.offset) { _, entry in
+                RecentRow(entry: entry) {
+                    // A question goes back to the agent; a search back in the
+                    // field. The Mac's recents do the same.
+                    if entry.kind == .question {
+                        store.askAgainFromHistory(entry.text)
+                    } else {
+                        store.search.query = entry.text
+                    }
+                }
+                .plainRow()
             }
             Text(questionLine)
                 .font(Typo.rowSub)
@@ -803,17 +811,21 @@ private struct SenderRow: View {
 /// lists feel like one surface. The query is the reader's own words rendered
 /// as Text, never as markup, and it has been through UserDefaults.
 private struct RecentRow: View {
-    let query: String
+    let entry: RecentEntry
     let onRun: () -> Void
+
+    private var question: Bool { entry.kind == .question }
 
     var body: some View {
         Button(action: onRun) {
             HStack(spacing: 11) {
-                Image(systemName: "clock.arrow.circlepath")
+                // A question the agent was asked wears a chat bubble; a search
+                // the clock. The line is the words either way.
+                Image(systemName: question ? "bubble.left" : "clock.arrow.circlepath")
                     .font(.system(size: 14))
-                    .foregroundStyle(Palette.inkFaintest)
+                    .foregroundStyle(question ? Palette.accent : Palette.inkFaintest)
                     .frame(width: 18)
-                Text(query)
+                Text(entry.text)
                     .font(.system(size: 15))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
@@ -828,7 +840,7 @@ private struct RecentRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(query)
-        .accessibilityHint("Searches for this again")
+        .accessibilityLabel(question ? "Question: \(entry.text)" : entry.text)
+        .accessibilityHint(question ? "Asks the agent again" : "Searches for this again")
     }
 }

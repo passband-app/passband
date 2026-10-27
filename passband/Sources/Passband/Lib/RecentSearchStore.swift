@@ -30,6 +30,10 @@ final class RecentSearchStore {
     /// state re-renders when a search is remembered under it.
     private(set) var queries: [String] = []
 
+    /// The ring read back as searches and questions (`RecentEntry`), which is
+    /// what both shells draw.
+    var entries: [RecentEntry] { queries.map(RecentEntry.init(stored:)) }
+
     private init() { reload() }
 
     /// Re-read for whatever account is live NOW. Called by the account switch
@@ -65,6 +69,16 @@ final class RecentSearchStore {
     func remember(_ session: SearchSession) {
         guard let term = session.fetchedQuery else { return }
         record(term)
+    }
+
+    /// Put a question the agent was asked from the search field in the ring:
+    /// its FIRST message, the words the conversation began with. Called once
+    /// per conversation, when those words actually go to the agent; the
+    /// narrowings typed after it are the same question and are not lines.
+    func rememberQuestion(_ text: String) {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return }
+        record(RecentEntry(kind: .question, text: words).stored)
     }
 
     /// Forget the lot. Search terms are the reader's own words about their own

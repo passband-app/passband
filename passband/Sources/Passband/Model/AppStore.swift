@@ -4311,6 +4311,14 @@ final class AppStore {
     private var searchEvidenceTask: Task<Void, Never>?
     var preparingSearchEvidence: Bool { searchEvidenceTask != nil }
 
+    /// A question from search history, asked again: its words go back in the
+    /// field and to the agent. With deeper search off it is simply searched.
+    func askAgainFromHistory(_ text: String) {
+        search.query = text
+        search.index = -1
+        requestDeeperSearch()
+    }
+
     /// Run the words currently in the field, even before keyword results arrive.
     func requestDeeperSearch() {
         if searchLaneHasConversation {
@@ -4359,6 +4367,9 @@ final class AppStore {
                     if term != current { term = current; continue }
                     self.search.laneQuery = term
                     self.searchLane.sendAuthorizedSearch(term, hits: page.items)
+                    // The conversation's first message is a line of search
+                    // history, drawn as a question (both shells).
+                    RecentSearchStore.shared.rememberQuestion(term)
                     self.searchEvidenceTask = nil
                     return
                 }

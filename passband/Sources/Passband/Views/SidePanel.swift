@@ -102,7 +102,7 @@ struct SearchView: View {
     /// copied into `@State`, so a search remembered while the panel is open
     /// (opening a hit does exactly that) is on screen the moment the field is
     /// cleared again.
-    private var recents: [String] { RecentSearchStore.shared.queries }
+    private var recents: [RecentEntry] { RecentSearchStore.shared.entries }
 
     /// THE EMPTY STATE HAS SOMETHING TO SAY: nothing has been typed, and there
     /// is history to offer. Keyed on the field being blank rather than on the
@@ -228,7 +228,7 @@ struct SearchView: View {
             // throwing the scroll offset away (see the note above).
             if showingRecents {
                 RecentSearches(
-                    queries: recents, armed: store.search.index,
+                    entries: recents, armed: store.search.index,
                     onRun: { run($0) }, onClear: { clearRecents() }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -477,8 +477,8 @@ struct SearchView: View {
             // field, a hit opens, and the bare bar expands the panel into
             // fullscreen previews.
             KeyBinding("Enter", enterDescription, allowInInput: true) {
-                if showingRecents, let query = recents[safe: store.search.index] {
-                    run(query)
+                if showingRecents, let entry = recents[safe: store.search.index] {
+                    run(entry)
                 } else if let sender = senders[safe: senderIndex] {
                     show(sender)
                 } else if store.search.index >= 0 {
@@ -584,7 +584,14 @@ struct SearchView: View {
     /// Run a remembered query: it goes into the FIELD, the way accepting a
     /// sender does, and the panel's own debounced task does the rest. Nothing
     /// is opened — the reader may want to narrow it first.
-    private func run(_ query: String) {
+    private func run(_ entry: RecentEntry) {
+        // A question goes back to the agent; a search goes back in the field.
+        if entry.kind == .question {
+            store.askAgainFromHistory(entry.text)
+            focused = true
+            return
+        }
+        let query = entry.text
         store.search.query = query
         // Disarm on the way: the armed row belonged to the recents list, and
         // leaving the index at 2 would point at hit row 2 the moment results

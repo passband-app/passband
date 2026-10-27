@@ -141,6 +141,11 @@
             // Thursday?", which is all the practice search matches on, so the
             // band sits over one real hit. The practice API sends no
             // diagnostics, so the no-strict-hits trigger cannot be staged here.
+            // SEARCH HISTORY with a question in it: wants `--fixture-tab search`.
+            case "recents":
+                RecentSearchStore.shared.record("delta receipt")
+                RecentSearchStore.shared.rememberQuestion("when does my flight to Denver leave")
+                RecentSearchStore.shared.record("from:maya@studio.example")
             case "search-lane":
                 store.search.query = "thursday?"
             case "accounts":

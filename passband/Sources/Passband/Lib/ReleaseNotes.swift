@@ -79,6 +79,7 @@ enum ReleaseVignette: String, CaseIterable, Sendable {
     case mailList, flow, unsubscribe, clearStack
     case smartBlock
     case loginCode, agentWrite, smartUnsubscribe
+    case smartClear, autoTranslate, archiveSearch, autoDone
     /// Not a drawn scene: the agent ad's own conversation, live.
     case agentSession
 }
@@ -269,19 +270,19 @@ enum ReleaseNotes {
                 ReleaseItem(
                     .app, "Smart clear",
                     detail: "One press clears Reading mail that has run its course",
-                    symbol: "checkmark.circle"),
+                    symbol: "checkmark.circle", vignette: .smartClear),
                 ReleaseItem(
                     .app, "Auto-translate",
                     detail: "Mail in another language arrives with an English version",
-                    symbol: "character.bubble"),
+                    symbol: "character.bubble", vignette: .autoTranslate),
                 ReleaseItem(
                     .app, "Search a year back",
                     detail: "Find mail from before you joined Passband",
-                    symbol: "clock.arrow.circlepath"),
+                    symbol: "clock.arrow.circlepath", vignette: .archiveSearch),
                 ReleaseItem(
                     .app, "Auto-done",
                     detail: "Mail that is no longer important is cleared automatically",
-                    symbol: "calendar.badge.checkmark"),
+                    symbol: "calendar.badge.checkmark", vignette: .autoDone),
                 ReleaseItem(.app, "See opens under mail you sent"),
                 ReleaseItem(.app, "Search mail you wrote with `in:sent` and `from:me`"),
                 ReleaseItem(.app, "Login and security mail is better sorted"),

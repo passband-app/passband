@@ -26,6 +26,10 @@ extension ReleaseVignette {
         case .loginCode: LoginCodeScene.self
         case .agentWrite: AgentWriteScene.self
         case .smartUnsubscribe: SmartUnsubscribeScene.self
+        case .smartClear: SmartClearScene.self
+        case .autoTranslate: AutoTranslateScene.self
+        case .archiveSearch: ArchiveSearchScene.self
+        case .autoDone: AutoDoneScene.self
         case .agentSession: nil
         }
     }
@@ -1427,5 +1431,776 @@ enum SmartUnsubscribeScene: VignetteDrawing {
         layer.fill(arrow, with: .color(down > 0.5 ? VignettePalette.phosphorHot : VignettePalette.phosphor))
         layer.stroke(
             arrow, with: .color(Color.white.opacity(0.9)), style: StrokeStyle(lineWidth: 0.6, lineJoin: .round))
+    }
+}
+
+// MARK: - parts the 0.0.15 scenes share
+
+extension VignetteKit {
+    /// A small calendar page: an event, as a mark rather than a date.
+    static func calendarMark(_ ctx: inout GraphicsContext, center: CGPoint, size: CGFloat, color: Color) {
+        let rect = CGRect(x: center.x - size / 2, y: center.y - size * 0.42, width: size, height: size * 0.9)
+        let page = Path(roundedRect: rect, cornerRadius: size * 0.18, style: .continuous)
+        ctx.stroke(page, with: .color(color), lineWidth: 0.6)
+        ctx.fill(
+            Path(CGRect(x: rect.minX + 0.3, y: rect.minY + size * 0.24, width: rect.width - 0.6, height: 0.6)),
+            with: .color(color))
+        for dx in [-size * 0.22, size * 0.22] {
+            ctx.fill(
+                Path(roundedRect: CGRect(x: center.x + dx - 0.35, y: rect.minY - size * 0.12, width: 0.7, height: size * 0.26),
+                     cornerRadius: 0.35),
+                with: .color(color))
+        }
+    }
+
+    /// A price tag: an offer, the kind of mail that ends.
+    static func tagMark(_ ctx: inout GraphicsContext, center: CGPoint, size: CGFloat, color: Color) {
+        let h = size * 0.38, w = size / 2
+        var tag = Path()
+        tag.move(to: CGPoint(x: center.x - w, y: center.y))
+        tag.addLine(to: CGPoint(x: center.x - w * 0.45, y: center.y - h))
+        tag.addLine(to: CGPoint(x: center.x + w, y: center.y - h))
+        tag.addLine(to: CGPoint(x: center.x + w, y: center.y + h))
+        tag.addLine(to: CGPoint(x: center.x - w * 0.45, y: center.y + h))
+        tag.closeSubpath()
+        ctx.stroke(tag, with: .color(color), style: StrokeStyle(lineWidth: 0.6, lineJoin: .round))
+        ctx.fill(
+            Path(ellipseIn: CGRect(x: center.x - w * 0.42, y: center.y - 0.55, width: 1.1, height: 1.1)),
+            with: .color(color))
+    }
+
+    /// A parcel: an order, the kind of mail that is over once it ships.
+    static func parcelMark(_ ctx: inout GraphicsContext, center: CGPoint, size: CGFloat, color: Color) {
+        let rect = CGRect(x: center.x - size * 0.45, y: center.y - size * 0.4, width: size * 0.9, height: size * 0.8)
+        ctx.stroke(Path(roundedRect: rect, cornerRadius: size * 0.12, style: .continuous), with: .color(color), lineWidth: 0.6)
+        ctx.fill(Path(CGRect(x: rect.minX, y: rect.minY + rect.height * 0.32, width: rect.width, height: 0.6)), with: .color(color))
+        ctx.fill(Path(CGRect(x: center.x - 0.3, y: rect.minY, width: 0.6, height: rect.height * 0.32)), with: .color(color))
+    }
+
+    /// A rounded button with a bar for its name, lit and pressable: the
+    /// actor when a scene's gesture is a click rather than a key.
+    static func pill(
+        _ ctx: inout GraphicsContext, _ rect: CGRect, label: CGFloat, labelX: CGFloat? = nil, pressed: Double,
+        actor: Bool = true
+    ) {
+        let rect = rect.offsetBy(dx: 0, dy: CGFloat(pressed))
+        let cap = Path(roundedRect: rect, cornerRadius: rect.height / 2)
+        var glow = ctx
+        if pressed > 0 { glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8 * pressed), radius: 5)) }
+        glow.fill(cap, with: .color(VignettePalette.faint))
+        if actor {
+            glow.fill(cap, with: .color(VignettePalette.phosphor.opacity(0.18 + 0.77 * pressed)))
+            ctx.stroke(cap, with: .color(VignettePalette.phosphor.opacity(0.9)), lineWidth: 0.7)
+        } else {
+            ctx.stroke(cap, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        }
+        bar(
+            &ctx, CGRect(x: labelX ?? (rect.minX + 5), y: rect.midY - 1.1, width: label, height: 2.2),
+            actor ? (pressed > 0.5 ? Color.white : VignettePalette.phosphorHot) : VignettePalette.dim)
+    }
+}
+
+// MARK: - smart clear
+
+/// SMART CLEAR: the Reading zone, six senders' cards, and three of them have
+/// run their course. Each says why with a small mark where its count would
+/// be: an event that has happened (a calendar), an offer that ended (a tag),
+/// an order that shipped (a parcel). One press on the zone's own pill, it
+/// works for a breath, and those three take their checks and go while the
+/// rest stay exactly where they were. Then the receipt rises in the corner,
+/// as the app's does: a headline, a line per reason carrying the same mark
+/// and its count, and an Undo that drains to say how long it lasts.
+///
+/// The marks are the lesson: the cards that went are the ones that said they
+/// were over, and the receipt says so in the same words.
+///
+/// The seam: the receipt goes, and new mail rises into the three gaps, drawn
+/// as the cards the loop began on.
+enum SmartClearScene: VignetteDrawing {
+    /// The receipt up with its three lines, the three gaps it accounts for.
+    static let posterTime: Double = 2.95
+
+    private enum Reason { case event, offer, parcel }
+    private struct Card {
+        let tint: Int
+        let name: CGFloat
+        let lines: (CGFloat, CGFloat)
+        let reason: Reason?
+    }
+
+    /// Three rows of three, read across: the expired ones are wherever
+    /// they happen to be, not lined up for the camera.
+    private static let cards: [Card] = [
+        Card(tint: 0, name: 26, lines: (30, 22), reason: nil),
+        Card(tint: 2, name: 20, lines: (32, 18), reason: .offer),
+        Card(tint: 1, name: 28, lines: (24, 30), reason: nil),
+        Card(tint: 1, name: 30, lines: (26, 30), reason: .event),
+        Card(tint: 2, name: 22, lines: (30, 24), reason: nil),
+        Card(tint: 0, name: 24, lines: (28, 20), reason: nil),
+        Card(tint: 2, name: 18, lines: (32, 26), reason: nil),
+        Card(tint: 1, name: 26, lines: (22, 30), reason: nil),
+        Card(tint: 0, name: 20, lines: (30, 22), reason: .parcel),
+    ]
+    private static let cardSize = CGSize(width: 70, height: 24)
+    private static let pill = CGRect(x: 180, y: 10, width: 50, height: 11)
+    /// The receipt is a corner card OVER the board, as the app's is, set
+    /// square on the last column so nothing peeks round it.
+    private static let receipt = CGRect(x: 160, y: 26, width: 70, height: 80)
+
+    // The beats.
+    private static let press: Double = 0.55
+    private static let checks: [Double] = [1.2, 1.32, 1.44]
+    private static let goneFrom: Double = 1.62
+    private static let receiptIn: Double = 1.95
+    private static let receiptOut: Double = 3.85
+    private static let refill: Double = 4.12
+
+    private static func origin(_ index: Int) -> CGPoint {
+        CGPoint(x: 10 + CGFloat(index % 3) * (cardSize.width + 5), y: 26 + CGFloat(index / 3) * (cardSize.height + 4))
+    }
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        // The zone's heading, and its pill in the corner.
+        VignetteKit.bar(&ctx, CGRect(x: 11, y: 14.2, width: 28, height: 3), VignettePalette.ink.opacity(0.55))
+        VignetteKit.bar(&ctx, CGRect(x: 43, y: 14.5, width: 14, height: 2.4), VignettePalette.dim)
+        drawPill(&ctx, t: t)
+
+        var expiredSeen = 0
+        for (index, card) in cards.enumerated() {
+            if card.reason == nil {
+                drawCard(&ctx, card, at: origin(index), opacity: 1, dy: 0, check: 0)
+                continue
+            }
+            let at = checks[expiredSeen]
+            expiredSeen += 1
+            let check = ease(t, at, at + 0.14)
+            let gone = ease(t, goneFrom, goneFrom + 0.3)
+            let back = ease(t, refill + 0.05 * Double(expiredSeen), refill + 0.05 * Double(expiredSeen) + 0.32)
+            if gone < 1 {
+                drawCard(&ctx, card, at: origin(index), opacity: 1 - gone, dy: -6 * CGFloat(gone), check: check)
+            } else if back > 0 {
+                drawCard(&ctx, card, at: origin(index), opacity: back, dy: 8 * CGFloat(1 - back), check: 0)
+            }
+        }
+        drawReceipt(&ctx, t: t)
+    }
+
+    /// The zone's pill: a check-stack mark and its name, then the app's
+    /// spinner while it tidies up.
+    private static func drawPill(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let pressed = VignetteClock.press(t, at: press)
+        VignetteKit.pill(&ctx, pill, label: 28, labelX: pill.minX + 15, pressed: pressed)
+        let working = ease(t, press + 0.12, press + 0.22) - ease(t, checks[0] - 0.1, checks[0])
+        let mark = CGPoint(x: pill.minX + 8.5, y: pill.midY + CGFloat(pressed))
+        VignetteKit.check(&ctx, center: mark, size: 2.4, progress: 1, opacity: 1 - working)
+        VignetteKit.arc(
+            &ctx, center: mark, radius: 2.6, head: t * 1.6, sweep: 0.3, color: VignettePalette.phosphorHot,
+            lineWidth: 0.9, opacity: working)
+    }
+
+    /// The reason a card has run its course, as its mark.
+    private static func reasonMark(_ ctx: inout GraphicsContext, _ reason: Reason, center: CGPoint, size: CGFloat, color: Color) {
+        switch reason {
+        case .event: VignetteKit.calendarMark(&ctx, center: center, size: size, color: color)
+        case .offer: VignetteKit.tagMark(&ctx, center: center, size: size, color: color)
+        case .parcel: VignetteKit.parcelMark(&ctx, center: center, size: size, color: color)
+        }
+    }
+
+    /// One sender's card, after ReadingCard: a square hero on the left, the
+    /// name and its count across the top, two lines of summary under.
+    private static func drawCard(
+        _ ctx: inout GraphicsContext, _ card: Card, at origin: CGPoint, opacity: Double, dy: CGFloat, check: Double
+    ) {
+        guard opacity > 0.001 else { return }
+        var layer = ctx
+        layer.opacity *= opacity
+        layer.translateBy(x: 0, y: dy)
+        let rect = CGRect(origin: origin, size: cardSize)
+        let shape = Path(roundedRect: rect, cornerRadius: 6, style: .continuous)
+        layer.fill(shape, with: .color(VignettePalette.card))
+        layer.fill(shape, with: .color(VignettePalette.faint))
+        layer.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        if check > 0 {
+            layer.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.85 * check)), lineWidth: 0.7)
+        }
+        let hero = CGRect(x: rect.minX + 4, y: rect.minY + 4, width: 16, height: 16)
+        layer.fill(
+            Path(roundedRect: hero, cornerRadius: 3.5, style: .continuous),
+            with: .color(VignettePalette.avatar[card.tint].opacity(VignetteClock.mix(0.5, 0.28, check))))
+        let x = rect.minX + 24
+        VignetteKit.bar(
+            &layer, CGRect(x: x, y: rect.minY + 5.5, width: card.name, height: 2.8),
+            VignettePalette.ink.opacity(VignetteClock.mix(0.85, 0.4, check)))
+        VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 12, width: card.lines.0, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 16.5, width: card.lines.1, height: 2.2), VignettePalette.dim)
+        let corner = CGPoint(x: rect.maxX - 8, y: rect.minY + 7)
+        if let reason = card.reason {
+            reasonMark(&layer, reason, center: corner, size: 6, color: VignettePalette.ink.opacity(0.6 * (1 - check)))
+            VignetteKit.check(&layer, center: corner, size: 3, progress: check)
+        } else {
+            VignetteKit.bar(&layer, CGRect(x: rect.maxX - 13, y: rect.minY + 6, width: 8, height: 2.2), VignettePalette.dim)
+        }
+    }
+
+    /// The receipt, after SmartClearReceiptCard: its name, how many went,
+    /// from how many senders, a line per reason (the mark, a count, the
+    /// words), and Undo, draining.
+    private static func drawReceipt(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let arrive = ease(t, receiptIn, receiptIn + 0.32)
+        let leave = ease(t, receiptOut, receiptOut + 0.3)
+        guard arrive > 0, leave < 1 else { return }
+        var layer = ctx
+        layer.opacity *= arrive * (1 - leave)
+        layer.translateBy(x: 10 * CGFloat(1 - arrive) + 8 * CGFloat(leave), y: 0)
+        let shape = Path(roundedRect: receipt, cornerRadius: 8, style: .continuous)
+        var lifted = layer
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.5), radius: 6))
+        lifted.fill(shape, with: .color(VignettePalette.cap))
+        layer.stroke(shape, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+
+        let x = receipt.minX + 8
+        VignetteKit.check(&layer, center: CGPoint(x: x + 2.4, y: receipt.minY + 9.5), size: 2.2, progress: 1, opacity: 0.8)
+        VignetteKit.bar(&layer, CGRect(x: x + 7, y: receipt.minY + 8.4, width: 24, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: x, y: receipt.minY + 17, width: 46, height: 4.6), VignettePalette.ink.opacity(0.9))
+        VignetteKit.bar(&layer, CGRect(x: x, y: receipt.minY + 25.5, width: 26, height: 2.2), VignettePalette.dim)
+
+        let reasons: [(Reason, CGFloat)] = [(.event, 40), (.offer, 30), (.parcel, 36)]
+        for (index, line) in reasons.enumerated() {
+            let shown = ease(t, receiptIn + 0.24 + 0.1 * Double(index), receiptIn + 0.44 + 0.1 * Double(index))
+            var row = layer
+            row.opacity *= shown
+            let y = receipt.minY + 38 + CGFloat(index) * 9
+            reasonMark(&row, line.0, center: CGPoint(x: x + 3, y: y), size: 5.4, color: VignettePalette.phosphorHot)
+            VignetteKit.bar(&row, CGRect(x: x + 10, y: y - 1.3, width: 4, height: 2.6), VignettePalette.ink.opacity(0.85))
+            VignetteKit.bar(&row, CGRect(x: x + 17, y: y - 1.1, width: line.1, height: 2.2), VignettePalette.dim)
+        }
+
+        // Undo, and how long it has left: the rule under it drains.
+        VignetteKit.bar(&layer, CGRect(x: x, y: receipt.maxY - 12, width: 14, height: 2.4), VignettePalette.phosphorHot.opacity(0.85))
+        let left = 1 - VignetteClock.ramp(t, receiptIn + 0.3, receiptOut + 0.3)
+        let track = CGRect(x: x, y: receipt.maxY - 6, width: receipt.width - 16, height: 1)
+        VignetteKit.bar(&layer, track, VignettePalette.faint)
+        VignetteKit.bar(
+            &layer, CGRect(x: track.minX, y: track.minY, width: max(1, track.width * CGFloat(left)), height: 1),
+            VignettePalette.phosphor.opacity(0.7))
+    }
+}
+
+// MARK: - auto-translate
+
+/// AUTO-TRANSLATE: an email in Japanese, open in the reader. Its words are
+/// square glyphs, set solid the way the script sets, so it reads as another
+/// language at a glance without a character on screen. Under the header the
+/// caption says it is translating (the app's own strip: a mark, a line, a
+/// spinner). Then the English lands where the Japanese was, line by line
+/// from the subject down, as words with spaces between them, in the actor
+/// colour, cooling to ink once it is all there. The spinner gives way to
+/// "show original", because the original is one click away and stays.
+///
+/// No key: nobody asked for this. That is the lesson.
+///
+/// The seam: the read email lifts away and the next one rises, in Japanese,
+/// drawn as the one the loop began on.
+enum AutoTranslateScene: VignetteDrawing {
+    /// English landed and cooled, the caption offering the original.
+    static let posterTime: Double = 2.9
+
+    private static let page = CGRect(x: 30, y: 10, width: 180, height: 96)
+    private static let cell: CGFloat = 3.8
+    private static let pitch: CGFloat = 4.7
+
+    /// The Japanese: glyphs per line, with the gaps where its punctuation
+    /// falls. The English: word widths per line.
+    private static let japanese: [[Int]] = [[9, 12, 8], [14, 10, 6], [11, 9, 12], [7, 6]]
+    private static let english: [[CGFloat]] = [
+        [12, 20, 8, 16, 26, 10, 18, 14], [18, 10, 24, 14, 8, 22, 16, 12],
+        [8, 26, 12, 18, 10, 20, 14, 16], [16, 22, 10, 18],
+    ]
+    private static let subjectJapanese: [Int] = [7, 6]
+    private static let subjectEnglish: [CGFloat] = [22, 14, 30, 18]
+
+    // The beats.
+    private static let landFrom: Double = 0.7
+    private static let lineStep: Double = 0.2
+    private static let lineSpan: Double = 0.3
+    private static let cool: Double = 2.05
+    private static let leave: Double = 3.8
+    private static let next: Double = 3.92
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let going = ease(t, leave, leave + 0.28)
+        if going < 1 {
+            drawPage(&ctx, t: t, live: true, dy: -10 * CGFloat(going), opacity: 1 - going)
+        }
+        if t >= next {
+            let back = ease(t, next, next + 0.42)
+            drawPage(&ctx, t: t, live: false, dy: 10 * CGFloat(1 - back), opacity: back)
+        }
+    }
+
+    /// How far line `index` (0 the subject, then the body) has turned into
+    /// English.
+    private static func turned(_ index: Int, _ t: Double) -> Double {
+        let from = landFrom + lineStep * Double(index)
+        return VignetteClock.ramp(t, from, from + lineSpan)
+    }
+
+    private static func drawPage(_ ctx: inout GraphicsContext, t: Double, live: Bool, dy: CGFloat, opacity: Double) {
+        guard opacity > 0.001 else { return }
+        let ease = VignetteClock.ease
+        var layer = ctx
+        layer.opacity *= opacity
+        layer.translateBy(x: 0, y: dy)
+        let shape = Path(roundedRect: page, cornerRadius: 7, style: .continuous)
+        layer.fill(shape, with: .color(VignettePalette.card))
+        layer.fill(shape, with: .color(VignettePalette.faint))
+        layer.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+
+        // Who wrote it, in their own name: the sender line stays as written.
+        let x = page.minX + 12
+        VignetteKit.avatar(&layer, center: CGPoint(x: x + 5, y: page.minY + 13), diameter: 10, tint: 2)
+        glyphs(&layer, [5], x: x + 14, y: page.minY + 8.6, size: 3.2, pitch: 4, color: VignettePalette.ink.opacity(0.8))
+        VignetteKit.bar(&layer, CGRect(x: x + 14, y: page.minY + 15, width: 30, height: 2.2), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: page.maxX - 26, y: page.minY + 9.5, width: 14, height: 2.2), VignettePalette.dim)
+
+        let cooled = live ? ease(t, cool, cool + 0.4) : 1
+        // The subject, then the body.
+        let subjectY = page.minY + 27
+        line(&layer, japanese: subjectJapanese, english: subjectEnglish, x: x, y: subjectY, size: 4.4, height: 3.6,
+             turn: live ? turned(0, t) : 0, cooled: cooled, ink: 0.9)
+        for index in japanese.indices {
+            line(&layer, japanese: japanese[index], english: english[index], x: x, y: page.minY + 50 + CGFloat(index) * 9,
+                 size: cell, height: 2.6, turn: live ? turned(index + 1, t) : 0, cooled: cooled, ink: 0.62)
+        }
+        drawCaption(&layer, t: t, live: live, y: page.minY + 39)
+    }
+
+    /// One line, in Japanese or in English or on its way between: the
+    /// glyphs fade as the words write on over them, left to right.
+    private static func line(
+        _ ctx: inout GraphicsContext, japanese: [Int], english: [CGFloat], x: CGFloat, y: CGFloat, size: CGFloat,
+        height: CGFloat, turn: Double, cooled: Double, ink: Double
+    ) {
+        if turn < 1 {
+            var original = ctx
+            original.opacity *= 1 - VignetteClock.ease(turn, 0, 0.6)
+            glyphs(&original, japanese, x: x, y: y - size / 2, size: size, pitch: size + 0.9,
+                   color: VignettePalette.ink.opacity(ink))
+        }
+        guard turn > 0 else { return }
+        let total = english.reduce(0, +) + CGFloat(english.count - 1) * 3
+        let reach = total * CGFloat(turn)
+        var wx = x
+        for width in english {
+            let shown = min(width, reach - (wx - x))
+            if shown > 0 {
+                let rect = CGRect(x: wx, y: y - height / 2, width: max(height, shown), height: height)
+                VignetteKit.bar(&ctx, rect, VignettePalette.phosphor.opacity(1 - cooled))
+                VignetteKit.bar(&ctx, rect, VignettePalette.ink.opacity(ink * cooled))
+            }
+            wx += width + 3
+        }
+        if turn < 1 {
+            var hot = ctx
+            hot.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.9), radius: 2.5))
+            VignetteKit.bar(
+                &hot, CGRect(x: x + reach - height, y: y - height / 2, width: height, height: height),
+                VignettePalette.phosphorHot)
+        }
+    }
+
+    /// Square glyphs in runs, a gap where the punctuation falls.
+    private static func glyphs(
+        _ ctx: inout GraphicsContext, _ runs: [Int], x: CGFloat, y: CGFloat, size: CGFloat, pitch: CGFloat, color: Color
+    ) {
+        var gx = x
+        for run in runs {
+            for _ in 0..<run {
+                ctx.fill(
+                    Path(roundedRect: CGRect(x: gx, y: y, width: size, height: size), cornerRadius: size * 0.22),
+                    with: .color(color))
+                gx += pitch
+            }
+            gx += pitch * 0.8
+        }
+    }
+
+    /// The caption, after TranslationStrip: the translate mark (a glyph and
+    /// a letter), the line, then a spinner while it works and "show
+    /// original" once it is done. Micro type, faint, no fill and no edge.
+    private static func drawCaption(_ ctx: inout GraphicsContext, t: Double, live: Bool, y: CGFloat) {
+        let ease = VignetteClock.ease
+        let ready = live ? ease(t, cool - 0.1, cool + 0.15) : 0
+        let x = page.minX + 12
+        ctx.fill(
+            Path(roundedRect: CGRect(x: x, y: y - 1.6, width: 3.2, height: 3.2), cornerRadius: 0.7),
+            with: .color(VignettePalette.dim))
+        VignetteKit.bar(&ctx, CGRect(x: x + 4.2, y: y - 0.2, width: 2.4, height: 2), VignettePalette.dim)
+        VignetteKit.bar(
+            &ctx, CGRect(x: x + 10, y: y - 1.1, width: VignetteClock.mix(46, 40, ready), height: 2.2), VignettePalette.dim)
+        let trailing = x + 10 + VignetteClock.mix(46, 40, ready) + 5
+        // Seven whole turns a loop, so the spinner on the next email picks
+        // up exactly where the first one's began.
+        VignetteKit.arc(
+            &ctx, center: CGPoint(x: trailing + 2, y: y), radius: 2.2, head: t * 7 / loop, sweep: 0.3,
+            color: VignettePalette.ink.opacity(0.55), lineWidth: 0.8, opacity: 1 - ready)
+        var action = ctx
+        action.opacity *= ready
+        action.fill(Path(ellipseIn: CGRect(x: trailing - 0.6, y: y - 0.6, width: 1.2, height: 1.2)), with: .color(VignettePalette.dim))
+        VignetteKit.bar(&action, CGRect(x: trailing + 3.5, y: y - 1.1, width: 26, height: 2.2), VignettePalette.phosphorHot.opacity(0.9))
+    }
+}
+
+// MARK: - search a year back
+
+/// SEARCH A YEAR BACK: the search field, and under it the year of your mail
+/// as a line: a year ago on the left, now on the right, and a pin where you
+/// joined Passband. Search used to reach only the stretch since the pin,
+/// lit faintly at rest. A query types itself in and the reach runs left
+/// from now, past the pin and on to the year's start; each hit it passes
+/// lights on the line, and its row drops into the results in the same
+/// tint, newest first. Most of what it finds is from before the pin.
+///
+/// No key: search runs as you type.
+///
+/// The seam: the query is erased, the results and the reach go, and the
+/// empty field and faint stretch the loop began on are left.
+enum ArchiveSearchScene: VignetteDrawing {
+    /// The reach at the year's start, every hit lit and listed.
+    static let posterTime: Double = 2.6
+
+    private static let field = CGRect(x: 10, y: 10, width: 220, height: 14)
+    private static let lineY: CGFloat = 36
+    private static let yearAgo: CGFloat = 20
+    private static let now: CGFloat = 220
+    private static let joined: CGFloat = 178
+
+    /// The hits, newest first: where each sits on the year, and its row.
+    private static let hits: [(x: CGFloat, tint: Int, sender: CGFloat, subject: CGFloat)] = [
+        (204, 0, 26, 58), (188, 1, 20, 72), (146, 2, 30, 50), (98, 0, 24, 66), (44, 1, 28, 54),
+    ]
+
+    // The beats.
+    private static let typeFrom: Double = 0.22
+    private static let typeTo: Double = 0.66
+    private static let reachFrom: Double = 0.74
+    private static let reachTo: Double = 2.04
+    private static let eraseFrom: Double = 3.95
+    private static let eraseTo: Double = 4.3
+
+    /// The reach's head, from now back to a year ago.
+    private static func head(_ t: Double) -> CGFloat {
+        VignetteClock.mix(now, yearAgo, VignetteClock.ease(t, reachFrom, reachTo))
+    }
+
+    /// When the reach passes a point on the line.
+    private static func passes(_ x: CGFloat) -> Double {
+        // Invert the smoothstep by bisection: the beat is wherever the head
+        // actually is, so a hit never lights before the reach gets to it.
+        var lo = reachFrom, hi = reachTo
+        for _ in 0..<24 {
+            let mid = (lo + hi) / 2
+            if head(mid) > x { lo = mid } else { hi = mid }
+        }
+        return hi
+    }
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let erased = ease(t, eraseFrom, eraseTo)
+        drawField(&ctx, t: t, erased: erased)
+        drawYear(&ctx, t: t, erased: erased)
+
+        // The results, newest first, each dropping in as its hit lights.
+        for (index, hit) in hits.enumerated() {
+            let at = passes(hit.x)
+            let shown = ease(t, at, at + 0.22) * (1 - ease(t, eraseFrom + 0.04 * Double(index), eraseTo + 0.04 * Double(index)))
+            guard shown > 0.001 else { continue }
+            var row = ctx
+            row.opacity *= shown
+            row.translateBy(x: 0, y: -4 * CGFloat(1 - ease(t, at, at + 0.22)))
+            let y = 52 + CGFloat(index) * 11.5
+            let mid = y + 4.5
+            let lit = ease(t, at, at + 0.1) * (1 - ease(t, at + 0.35, at + 0.7))
+            let rect = CGRect(x: 10, y: y - 1, width: 220, height: 11)
+            let shape = Path(roundedRect: rect, cornerRadius: 3.5, style: .continuous)
+            row.fill(shape, with: .color(VignettePalette.phosphor.opacity(0.1 * lit)))
+            VignetteKit.avatar(&row, center: CGPoint(x: 18, y: mid), diameter: 6, tint: hit.tint)
+            VignetteKit.bar(&row, CGRect(x: 26, y: mid - 1.4, width: hit.sender, height: 2.8), VignettePalette.ink.opacity(0.8))
+            VignetteKit.bar(&row, CGRect(x: 64, y: mid - 1.4, width: hit.subject, height: 2.8), VignettePalette.ink.opacity(0.6))
+            VignetteKit.bar(
+                &row, CGRect(x: 64 + hit.subject + 4, y: mid - 1.2, width: 136 - hit.subject - 4, height: 2.4),
+                VignettePalette.dim.opacity(0.7))
+            // A date, wider the older it is: a day, then a month and a year.
+            let date: CGFloat = hit.x > joined ? 12 : 20
+            VignetteKit.bar(&row, CGRect(x: 230 - date - 2, y: mid - 1.2, width: date, height: 2.4), VignettePalette.dim)
+        }
+    }
+
+    /// The field: a lens, and the query writing itself on.
+    private static func drawField(_ ctx: inout GraphicsContext, t: Double, erased: Double) {
+        let ease = VignetteClock.ease
+        let shape = Path(roundedRect: field, cornerRadius: 7, style: .continuous)
+        let focus = ease(t, typeFrom - 0.2, typeFrom) * (1 - ease(t, eraseTo, eraseTo + 0.3))
+        ctx.fill(shape, with: .color(VignettePalette.faint))
+        ctx.stroke(shape, with: .color(VignettePalette.edge.opacity(1 - focus)), lineWidth: 0.5)
+        ctx.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.6 * focus)), lineWidth: 0.7)
+        let lens = CGPoint(x: field.minX + 10, y: field.midY - 0.6)
+        ctx.stroke(Path(ellipseIn: CGRect(x: lens.x - 2.6, y: lens.y - 2.6, width: 5.2, height: 5.2)),
+                   with: .color(VignettePalette.dim), lineWidth: 0.8)
+        var handle = Path()
+        handle.move(to: CGPoint(x: lens.x + 1.9, y: lens.y + 1.9))
+        handle.addLine(to: CGPoint(x: lens.x + 3.8, y: lens.y + 3.8))
+        ctx.stroke(handle, with: .color(VignettePalette.dim), style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
+
+        let typed = VignetteClock.ramp(t, typeFrom, typeTo) * (1 - erased)
+        guard typed > 0 else { return }
+        let words: [CGFloat] = [22, 30]
+        let full = words.reduce(0, +) + 3
+        let reach = full * CGFloat(typed)
+        var x = field.minX + 19
+        for width in words {
+            let shown = min(width, reach - (x - field.minX - 19))
+            if shown > 0 {
+                VignetteKit.bar(&ctx, CGRect(x: x, y: field.midY - 1.4, width: max(2.8, shown), height: 2.8),
+                                VignettePalette.ink.opacity(0.85))
+            }
+            x += width + 3
+        }
+        if t < reachTo {
+            ctx.fill(Path(CGRect(x: field.minX + 19 + reach + 1.2, y: field.midY - 3, width: 0.7, height: 6)),
+                     with: .color(VignettePalette.phosphorHot))
+        }
+    }
+
+    /// The year: a line from a year ago to now, months ticked, the pin where
+    /// you joined, the old reach faint, and the new one running past it.
+    private static func drawYear(_ ctx: inout GraphicsContext, t: Double, erased: Double) {
+        let ease = VignetteClock.ease
+        // Before you joined: there, but dashed, because it was out of reach.
+        var before = Path()
+        before.move(to: CGPoint(x: yearAgo, y: lineY))
+        before.addLine(to: CGPoint(x: joined, y: lineY))
+        ctx.stroke(before, with: .color(Color.white.opacity(0.18)), style: StrokeStyle(lineWidth: 0.8, lineCap: .round, dash: [2, 2.5]))
+        var since = Path()
+        since.move(to: CGPoint(x: joined, y: lineY))
+        since.addLine(to: CGPoint(x: now, y: lineY))
+        ctx.stroke(since, with: .color(VignettePalette.phosphor.opacity(0.4)), style: StrokeStyle(lineWidth: 1, lineCap: .round))
+        for month in 0...12 {
+            let x = yearAgo + (now - yearAgo) * CGFloat(month) / 12
+            ctx.fill(Path(CGRect(x: x - 0.25, y: lineY + 2.5, width: 0.5, height: 2)), with: .color(Color.white.opacity(0.16)))
+        }
+        // Now, and the pin where you joined.
+        ctx.fill(Path(ellipseIn: CGRect(x: now - 1.8, y: lineY - 1.8, width: 3.6, height: 3.6)), with: .color(VignettePalette.ink.opacity(0.8)))
+        ctx.fill(Path(roundedRect: CGRect(x: joined - 0.4, y: lineY - 7, width: 0.8, height: 7), cornerRadius: 0.4),
+                 with: .color(VignettePalette.ink.opacity(0.6)))
+        ctx.fill(Path(ellipseIn: CGRect(x: joined - 2.2, y: lineY - 9.4, width: 4.4, height: 4.4)), with: .color(VignettePalette.ink.opacity(0.75)))
+        VignetteKit.bar(&ctx, CGRect(x: joined - 9, y: lineY + 6.5, width: 18, height: 2), VignettePalette.dim)
+
+        // The reach.
+        let shown = ease(t, reachFrom - 0.05, reachFrom + 0.05) * (1 - erased)
+        if shown > 0 {
+            let x = head(t)
+            var glow = ctx
+            glow.opacity *= shown
+            glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 3))
+            var reach = Path()
+            reach.move(to: CGPoint(x: now, y: lineY))
+            reach.addLine(to: CGPoint(x: x, y: lineY))
+            glow.stroke(reach, with: .color(VignettePalette.phosphor), style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
+            let moving = 1 - ease(t, reachTo - 0.1, reachTo + 0.2)
+            glow.fill(Path(ellipseIn: CGRect(x: x - 1.8, y: lineY - 1.8, width: 3.6, height: 3.6)),
+                      with: .color(VignettePalette.phosphorHot.opacity(moving)))
+        }
+        // The hits, each lit as the reach passes it.
+        for hit in hits {
+            let at = passes(hit.x)
+            let lit = ease(t, at, at + 0.12) * (1 - erased)
+            guard lit > 0 else { continue }
+            var dot = ctx
+            dot.opacity *= lit
+            dot.addFilter(.shadow(color: VignettePalette.avatar[hit.tint].opacity(0.8), radius: 2.5))
+            VignetteKit.avatar(&dot, center: CGPoint(x: hit.x, y: lineY), diameter: VignetteClock.mix(3, 5, lit), tint: hit.tint, opacity: 1)
+        }
+    }
+}
+
+// MARK: - auto-done
+
+/// AUTO-DONE: your inbox, with an invitation at the top, and over it the day
+/// going by: a strip of time sliding past a fixed now, the invitation's event
+/// on it in the inviter's tint. The event comes up to now and passes under
+/// it, lit while it is happening. Once it has ended, the invitation takes its
+/// check, every email in its thread with it (the thread's edge under the
+/// row), and slips out of the inbox on its own; the mail below closes up.
+/// Later a new invitation lands on top, for the next event on the strip.
+///
+/// No key and no pointer anywhere, which is the whole point.
+///
+/// The seam: the strip has moved exactly one event along and every event is
+/// drawn alike, and the invitation that lands is the one the loop began on.
+enum AutoDoneScene: VignetteDrawing {
+    /// The event just past now, the invitation checked and still there.
+    static let posterTime: Double = 1.5
+
+    private static let sender = 1
+    private static let nowX: CGFloat = 120
+    private static let strip = CGRect(x: 10, y: 10, width: 220, height: 18)
+    private static let period: CGFloat = 110
+    private static let eventX: CGFloat = 128
+    private static let eventWidth: CGFloat = 36
+    private static let laneTop: CGFloat = 38
+    private static let pitch: CGFloat = 15
+
+    // The beats.
+    private static let scrollFrom: Double = 0.35
+    private static let scrollTo: Double = 2.15
+    /// When the event starts under now, and when it has ended: wherever the
+    /// strip actually puts it, so the check never comes before the end.
+    private static let began: Double = crosses(eventX - nowX)
+    private static let ended: Double = crosses(eventX + eventWidth - nowX)
+    private static let leaveFrom: Double = ended + 0.45
+    private static let closeFrom: Double = leaveFrom + 0.28
+    private static let landFrom: Double = 3.35
+
+    private static func scrolled(_ t: Double) -> CGFloat {
+        period * CGFloat(VignetteClock.ease(t, scrollFrom, scrollTo))
+    }
+
+    /// The moment the strip has scrolled `distance`, by bisection.
+    private static func crosses(_ distance: CGFloat) -> Double {
+        var lo = scrollFrom, hi = scrollTo
+        for _ in 0..<24 {
+            let mid = (lo + hi) / 2
+            if scrolled(mid) < distance { lo = mid } else { hi = mid }
+        }
+        return hi
+    }
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        // While the invitation's event is under now, the invitation is lit.
+        let during = ease(t, began, began + 0.12) * (1 - ease(t, ended, ended + 0.12))
+        drawStrip(&ctx, offset: scrolled(t))
+        drawLane(&ctx, t: t, during: during)
+    }
+
+    /// The day: hour ticks, the events on it, and now.
+    private static func drawStrip(_ ctx: inout GraphicsContext, offset: CGFloat) {
+        var band = ctx
+        band.clipToLayer { mask in
+            mask.fill(
+                Path(strip),
+                with: .linearGradient(
+                    Gradient(stops: [
+                        .init(color: .clear, location: 0), .init(color: .black, location: 0.12),
+                        .init(color: .black, location: 0.88), .init(color: .clear, location: 1),
+                    ]),
+                    startPoint: CGPoint(x: strip.minX, y: 0), endPoint: CGPoint(x: strip.maxX, y: 0)))
+        }
+        // Ticks every hour, scrolling with the day.
+        let tick: CGFloat = 11
+        var x = strip.minX - offset.truncatingRemainder(dividingBy: tick)
+        while x <= strip.maxX {
+            band.fill(Path(CGRect(x: x - 0.25, y: strip.maxY - 3, width: 0.5, height: 3)), with: .color(Color.white.opacity(0.16)))
+            x += tick
+        }
+        band.fill(Path(CGRect(x: strip.minX, y: strip.maxY - 0.25, width: strip.width, height: 0.5)), with: .color(VignettePalette.edge))
+        // The events, one a period, all alike.
+        for k in -1...2 {
+            let left = eventX + period * CGFloat(k) - offset
+            guard left < strip.maxX, left + eventWidth > strip.minX else { continue }
+            let rect = CGRect(x: left, y: strip.minY + 3, width: eventWidth, height: 9)
+            let under = left <= nowX && left + eventWidth >= nowX
+            let past = left + eventWidth < nowX
+            let shape = Path(roundedRect: rect, cornerRadius: 2.5, style: .continuous)
+            band.fill(shape, with: .color(VignettePalette.avatar[sender].opacity(past ? 0.14 : under ? 0.5 : 0.32)))
+            band.stroke(shape, with: .color(under ? VignettePalette.phosphor.opacity(0.8) : VignettePalette.edge), lineWidth: under ? 0.7 : 0.5)
+            VignetteKit.bar(&band, CGRect(x: rect.minX + 4, y: rect.midY - 1, width: 18, height: 2),
+                            VignettePalette.ink.opacity(past ? 0.3 : 0.75))
+        }
+        // Now: a fixed line, and the day goes by under it.
+        var glow = ctx
+        glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 2.5))
+        glow.fill(Path(roundedRect: CGRect(x: nowX - 0.5, y: strip.minY, width: 1, height: strip.height + 1), cornerRadius: 0.5),
+                  with: .color(VignettePalette.phosphor))
+        glow.fill(Path(ellipseIn: CGRect(x: nowX - 2, y: strip.minY - 2, width: 4, height: 4)), with: .color(VignettePalette.phosphorHot))
+    }
+
+    private struct Row { let tint: Int; let sender: CGFloat; let subject: CGFloat }
+    private static let rows: [Row] = [
+        Row(tint: 0, sender: 24, subject: 54), Row(tint: 2, sender: 30, subject: 44),
+        Row(tint: 0, sender: 20, subject: 62), Row(tint: 2, sender: 26, subject: 48),
+        Row(tint: 0, sender: 22, subject: 58),
+    ]
+
+    /// The inbox: the invitation on top, mail under it.
+    private static func drawLane(_ ctx: inout GraphicsContext, t: Double, during: Double) {
+        let ease = VignetteClock.ease
+        let check = ease(t, ended + 0.06, ended + 0.22)
+        let leave = ease(t, leaveFrom, leaveFrom + 0.3)
+        let close = ease(t, closeFrom, closeFrom + 0.36)
+        let land = ease(t, landFrom, landFrom + 0.4)
+        var lane = ctx
+        VignetteKit.clipFading(&lane, CGRect(x: 0, y: laneTop - 4, width: 240, height: 120 - laneTop + 4), fade: 18)
+
+        // Everything under the invitation moves up as it goes and down as the
+        // next one lands: net, one row's worth of nothing.
+        let shift = CGFloat(close - land)
+        for (index, row) in rows.enumerated() {
+            let y = laneTop + pitch * (CGFloat(index + 1) - shift)
+            drawRow(&lane, y: y, tint: row.tint, sender: row.sender, subject: row.subject)
+        }
+        if leave < 1 {
+            var going = lane
+            going.opacity *= 1 - leave
+            going.translateBy(x: 24 * CGFloat(leave), y: 0)
+            drawInvite(&going, y: laneTop, lit: max(during, check), check: check)
+        }
+        if land > 0 {
+            var coming = lane
+            coming.opacity *= land
+            coming.translateBy(x: 0, y: -6 * CGFloat(1 - land))
+            drawInvite(&coming, y: laneTop, lit: 0, check: 0)
+        }
+    }
+
+    /// The invitation: a thread, so a second edge shows under it, a calendar
+    /// mark where the time would be.
+    private static func drawInvite(_ ctx: inout GraphicsContext, y: CGFloat, lit: Double, check: Double) {
+        let rect = CGRect(x: 10, y: y, width: 220, height: 12)
+        let under = CGRect(x: 14, y: y + 2.6, width: 212, height: 12)
+        ctx.fill(Path(roundedRect: under, cornerRadius: 4, style: .continuous), with: .color(VignettePalette.card.opacity(0.7)))
+        ctx.stroke(Path(roundedRect: under, cornerRadius: 4, style: .continuous), with: .color(VignettePalette.edge), lineWidth: 0.5)
+        let shape = Path(roundedRect: rect, cornerRadius: 4, style: .continuous)
+        ctx.fill(shape, with: .color(VignettePalette.card))
+        ctx.fill(shape, with: .color(VignettePalette.phosphor.opacity(0.08 * lit)))
+        ctx.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        if lit > 0 {
+            ctx.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.85 * lit)), lineWidth: 0.7)
+        }
+        let mid = rect.midY
+        let fade = VignetteClock.mix(1, 0.45, check)
+        VignetteKit.avatar(&ctx, center: CGPoint(x: 19, y: mid), diameter: 6, tint: sender, opacity: 0.9 * fade)
+        VignetteKit.bar(&ctx, CGRect(x: 27, y: mid - 1.4, width: 28, height: 2.8), VignettePalette.ink.opacity(0.85 * fade))
+        VignetteKit.bar(&ctx, CGRect(x: 65, y: mid - 1.4, width: 52, height: 2.8), VignettePalette.ink.opacity(0.85 * fade))
+        VignetteKit.bar(&ctx, CGRect(x: 121, y: mid - 1.2, width: 60, height: 2.4), VignettePalette.dim.opacity(fade))
+        VignetteKit.calendarMark(&ctx, center: CGPoint(x: 206, y: mid), size: 6, color: VignettePalette.avatar[sender].opacity(0.9 * fade))
+        VignetteKit.check(&ctx, center: CGPoint(x: 220, y: mid), size: 2.8, progress: check)
+    }
+
+    private static func drawRow(_ ctx: inout GraphicsContext, y: CGFloat, tint: Int, sender: CGFloat, subject: CGFloat) {
+        guard y < 122 else { return }
+        let mid = y + 6
+        VignetteKit.avatar(&ctx, center: CGPoint(x: 19, y: mid), diameter: 6, tint: tint)
+        VignetteKit.bar(&ctx, CGRect(x: 27, y: mid - 1.4, width: sender, height: 2.8), VignettePalette.ink.opacity(0.6))
+        VignetteKit.bar(&ctx, CGRect(x: 65, y: mid - 1.4, width: subject, height: 2.8), VignettePalette.ink.opacity(0.6))
+        VignetteKit.bar(&ctx, CGRect(x: 65 + subject + 4, y: mid - 1.2, width: 150 - subject - 4, height: 2.4), VignettePalette.dim.opacity(0.7))
+        VignetteKit.bar(&ctx, CGRect(x: 217, y: mid - 1.2, width: 11, height: 2.4), VignettePalette.dim)
     }
 }

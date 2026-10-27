@@ -150,6 +150,9 @@ final class EventStream {
     private static let resourceTimeout: TimeInterval = 24 * 60 * 60
 
     private let resident = ResidentTask()
+    /// When the live connection opened (its 200 arrived). Frames for events
+    /// older than this are the replay of what happened while the app was away.
+    private var connectedAt = Date.distantFuture
     private var cursor: Int?
     private var cursorLoaded = false
 
@@ -215,6 +218,7 @@ final class EventStream {
                 // poller are what tell the human their token is wrong.
                 return
             }
+            connectedAt = Date()
             // THE BYTE LOOP IS OFF THE MAIN ACTOR. This class is main-actor
             // (it writes the store and posts notifications), and the loop
             // used to run here too — which meant one main-actor hop PER BYTE
@@ -300,6 +304,16 @@ final class EventStream {
             // is what keeps this stream from having an opinion about which
             // account is live.
             AppStore.shared.noteLiveEvent(event, accountId: accountId)
+            // NO BANNER FOR THE PHONE'S BACKLOG. While the app was closed each
+            // of these reached the lock screen as a push; replayed now, they
+            // would pop up again the moment the app opens. The board already
+            // shows them. The Mac has no push behind it, so its catch-up
+            // banners are the only word it gets and they stay.
+            #if os(iOS)
+                if EventBanner.isBacklog(createdAt: event.created_at, connectedAt: connectedAt) {
+                    return
+                }
+            #endif
             Notifier.shared.post(event, accountId: accountId)
         } else if let signal = AgentOpenSignal.parse(frame.data) {
             // Not a notification and not in the log: it has no id of its own

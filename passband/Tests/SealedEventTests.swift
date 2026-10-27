@@ -36,6 +36,7 @@ struct SealedEventTests {
         """.utf8))
         expect(auth.isAuth && EventBanner.copy(for: auth).sound, "Login alerts carry explicit auth and sound even at low importance")
         aLoginCodeIsReadOutOfTheDaemonsSentenceAndNothingElse()
+        theReplayAfterAnOpenIsBacklog()
         aFocusHoldsThePanelBackOnlyWhenAskedTo()
         anOrdinaryEventDecodesWithNoSealedKey()
         aSealedEventCarriesItsKind()
@@ -325,6 +326,28 @@ struct SealedEventTests {
             expect(!everything.contains(chip), "the chip \(chip) reaches no field of the banner")
             expect(!everything.contains("2026"), "nor the date it was made from")
         }
+    }
+
+    /// The phone's open: events older than the connection (less a grace for
+    /// clock skew) were already pushed and are not bannered again; anything
+    /// at or after it is live; a stamp nobody can read is never backlog.
+    static func theReplayAfterAnOpenIsBacklog() {
+        let connected = EventBanner.eventDate("2026-10-27T15:00:00Z")!
+        expect(
+            EventBanner.isBacklog(createdAt: "2026-10-27T09:12:00Z", connectedAt: connected),
+            "mail from this morning, replayed on open, is backlog")
+        expect(
+            EventBanner.isBacklog(createdAt: "2026-10-27T14:59:30.250Z", connectedAt: connected),
+            "fractional-second stamps parse too")
+        expect(
+            !EventBanner.isBacklog(createdAt: "2026-10-27T14:59:50Z", connectedAt: connected),
+            "inside the skew grace is live")
+        expect(
+            !EventBanner.isBacklog(createdAt: "2026-10-27T15:00:05Z", connectedAt: connected),
+            "after the connection is live")
+        expect(
+            !EventBanner.isBacklog(createdAt: "not a date", connectedAt: connected),
+            "an unreadable stamp is bannered rather than lost")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

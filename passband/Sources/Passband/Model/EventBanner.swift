@@ -127,6 +127,28 @@ enum EventBanner {
         return .authSignal(kind)
     }
 
+    /// BACKLOG: an event that happened before the feed connected, replayed
+    /// from the cursor the app last saved. On the phone a push already put it
+    /// on the lock screen while the app was closed, so bannering it again the
+    /// moment the app opens is an old notification popping up on open. Live
+    /// events (after the connection) are never backlog. `grace` absorbs clock
+    /// skew between the daemon and the device. An unreadable stamp is never
+    /// backlog: a missed banner is worse than a repeated one.
+    static func isBacklog(createdAt: String, connectedAt: Date, grace: TimeInterval = 15) -> Bool {
+        guard let created = eventDate(createdAt) else { return false }
+        return created < connectedAt.addingTimeInterval(-grace)
+    }
+
+    /// RFC 3339, with or without fractional seconds (the daemon writes both
+    /// shapes across versions).
+    static func eventDate(_ text: String) -> Date? {
+        let plain = ISO8601DateFormatter()
+        if let date = plain.date(from: text) { return date }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: text)
+    }
+
     static func shouldPresentForeground(appActive: Bool, windowVisible: Bool, isTest: Bool, isAuth: Bool) -> Bool {
         isTest || isAuth || !(appActive && windowVisible)
     }

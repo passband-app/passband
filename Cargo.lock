@@ -4728,7 +4728,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-api"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4760,7 +4760,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-broker"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "axum",
@@ -4779,7 +4779,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-control"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "age",
  "anyhow",
@@ -4817,7 +4817,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-core"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "age",
  "ammonia",
@@ -4859,14 +4859,14 @@ dependencies = [
 
 [[package]]
 name = "squelch-httpauth"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "subtle",
 ]
 
 [[package]]
 name = "squelch-mcp"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4892,14 +4892,14 @@ dependencies = [
 
 [[package]]
 name = "squelch-ratelimit"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "http",
 ]
 
 [[package]]
 name = "squelch-relay"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "axum",
@@ -4920,7 +4920,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-tui"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4932,7 +4932,7 @@ dependencies = [
 
 [[package]]
 name = "squelch-warden"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "age",
  "anyhow",
@@ -4956,7 +4956,7 @@ dependencies = [
 
 [[package]]
 name = "squelchd"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "axum",

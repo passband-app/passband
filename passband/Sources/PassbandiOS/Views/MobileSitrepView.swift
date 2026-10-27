@@ -167,10 +167,12 @@ struct MobileSitrepView: View {
         // that a glyph is a door and the reason a bare icon still looks tappable.
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                // The whole Account page, which arrives from the same side
-                // the glyph is on (see AccountDoor).
+                // The picker, exactly what the swipe from the left edge
+                // opens: the glyph and the gesture are one door. The full
+                // Account page is the drawer's Settings button.
                 Button {
-                    AccountDoor.shared.pane = .page
+                    Haptics.tick()
+                    AccountDoor.shared.pane = .picker
                 } label: {
                     Image(systemName: "person.crop.circle")
                         .foregroundStyle(Palette.accent)
@@ -317,6 +319,7 @@ struct MobileSitrepView: View {
                         SwipeRow(leading: [], trailing: verbs.doneVerbs) {
                             MobileAuthEyesRow(update: u, meta: meta) { store.requestReveal(meta) }
                         }
+                        .padding(.horizontal, -PhoneRow.hPadding)
                     } else {
                         SwipeRow(leading: verbs.leadingVerbs, trailing: verbs.trailingVerbs) {
                             UpdateRow(
@@ -325,6 +328,9 @@ struct MobileSitrepView: View {
                                 onHover: {},
                                 onOpen: verbs.open)
                         }
+                        // The row's words on the zone title's line; its press
+                        // wash and swipe rails bleed into the card's padding.
+                        .padding(.horizontal, -PhoneRow.hPadding)
                         .updateContextMenu(verbs)
                     }
                 }
@@ -412,7 +418,7 @@ struct MobileAuthEyesRow: View {
 
     var body: some View {
         ListRow(
-            selected: false, cornerRadius: 10, tint: tone, hPadding: 10, vPadding: 8,
+            selected: false, cornerRadius: 10, tint: tone, hPadding: PhoneRow.hPadding, vPadding: 8,
             hoverFill: false, action: onOpen
         ) { _, _ in
             HStack(alignment: .top, spacing: 10) {

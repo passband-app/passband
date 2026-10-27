@@ -322,17 +322,10 @@ enum SettingsSearch {
             ]),
     ]
 
-    /// The assistant pane's settings. The last two are the deeper-search lane's
-    /// and are MAC ONLY, for the reason AssistantSection fences the card
-    /// itself: the phone's search still counts spaces and has no lane, so a
-    /// phone search that offered these would render a card without them.
-    private static let assistantEntries: [SettingsEntry] = {
-        var entries = baseAssistantEntries
-        #if os(macOS)
-            entries += deeperSearchEntries
-        #endif
-        return entries
-    }()
+    /// The assistant pane's settings. The last two are the deeper-search lane's,
+    /// on both shells now that the phone's search tab runs the lane too (see
+    /// AssistantSection).
+    private static let assistantEntries: [SettingsEntry] = baseAssistantEntries + deeperSearchEntries
 
     private static let deeperSearchEntries: [SettingsEntry] = [
         SettingsEntry(

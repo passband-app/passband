@@ -58,7 +58,7 @@ struct MobileAgentView: View {
 
     var body: some View {
         transcript
-            .background(Palette.canvas)
+            .background(Palette.canvas.ignoresSafeArea())
             .navigationTitle("Agent")
             // A citation or an email card opens mail, and leaving it should
             // come back to the conversation, not to the search field under it.

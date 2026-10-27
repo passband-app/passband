@@ -566,7 +566,7 @@ struct EmailsView: View {
                     // Sent rows carry no triage, so no swipe verbs — the row is
                     // a door to the thread and nothing else (`triageable` says
                     // the same thing to the keyboard).
-                    sentList.plainRow()
+                    sentList.plainRow(bleed: true)
                 } else if !hasRows {
                     note.plainRow()
                     if page.value != nil, page.error == nil { olderMailFooter.plainRow() }
@@ -597,7 +597,7 @@ struct EmailsView: View {
                 onOpen: verbs.open
             )
             .opacity(isDone(u) ? 0.6 : 1)
-            .plainRow()
+            .plainRow(bleed: true)
             .swipeVerbs(verbs)
             .updateContextMenu(verbs)
         }

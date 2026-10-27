@@ -1232,8 +1232,15 @@ fn replace_attention_sources(
     Ok(())
 }
 
-fn attention_sources_allowed(conn: &Connection, account: AccountId, thread: &str) -> Result<bool> {
-    let mut statement=conn.prepare("SELECT s.source_message_id,s.source_revision,a.revision FROM agent_attention_sources s
+/// The messages a thread's attention was read from, or `None` when one of them
+/// has moved past the revision the attention read: then the attention is
+/// stale and nothing it says may go out the agent door.
+fn current_attention_sources(
+    conn: &Connection,
+    account: AccountId,
+    thread: &str,
+) -> Result<Option<Vec<i64>>> {
+    let mut statement=conn.prepare_cached("SELECT s.source_message_id,s.source_revision,a.revision FROM agent_attention_sources s
         LEFT JOIN agent_message_state a ON a.account_id=s.account_id AND a.message_id=s.source_message_id
         WHERE s.account_id=?1 AND s.thread_id=?2")?;
     let sources = statement
@@ -1245,14 +1252,14 @@ fn attention_sources_allowed(conn: &Connection, account: AccountId, thread: &str
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut ids = Vec::with_capacity(sources.len());
     for (id, expected, actual) in sources {
-        if actual != Some(expected)
-            || !super::messages::external_message_allowed_conn(conn, account, id)?
-        {
-            return Ok(false);
+        if actual != Some(expected) {
+            return Ok(None);
         }
+        ids.push(id);
     }
-    Ok(true)
+    Ok(Some(ids))
 }
 
 /// Revisit limits apply to the message's entire history, not just its current
@@ -1817,9 +1824,8 @@ impl AgentTriageStore for SqliteStore {
         let conn = self.lock()?;
         config.validate().map_err(CoreError::InvalidInput)?;
         let mut items = list_items(&conn, account, "fye", now)?;
-        restrict_external_items(&conn, account, &mut items)?;
         rank_items(&mut items, config, now);
-        items.truncate(limit);
+        restrict_external_items(&conn, account, &mut items, limit)?;
         Ok(items)
     }
     fn external_agent_reading(
@@ -1837,13 +1843,12 @@ impl AgentTriageStore for SqliteStore {
     ) -> Result<Vec<AgentListItem>> {
         let conn = self.lock()?;
         let mut items = list_items_with_query(&conn, account, "reading", Utc::now(), query)?;
-        restrict_external_items(&conn, account, &mut items)?;
         items.sort_by(|a, b| {
             b.received_at
                 .cmp(&a.received_at)
                 .then_with(|| b.message_id.cmp(&a.message_id))
         });
-        items.truncate(limit);
+        restrict_external_items(&conn, account, &mut items, limit)?;
         Ok(items)
     }
     fn external_agent_decision(&self, account: AccountId, message: i64) -> Result<MessageDecision> {
@@ -1852,10 +1857,14 @@ impl AgentTriageStore for SqliteStore {
         // The message itself by name: the thread guard omits an unassessed
         // archive row instead of failing on it, which is right for a sibling
         // and would be a leak for the row being asked about.
-        if !super::messages::external_message_allowed_conn(&conn, account, message)? {
+        if !super::messages::thread_allowed_with_conn(
+            &conn,
+            account,
+            &source.thread_id,
+            &[message],
+        )? {
             return Err(CoreError::NotFound);
         }
-        super::messages::thread_guard_and_subject(&conn, account, &source.thread_id)?;
         let encoded:Option<String>=conn.query_row("SELECT decision_json FROM agent_message_decisions WHERE account_id=?1 AND message_id=?2",params![account,message],|row|row.get(0)).optional()?;
         decode(&encoded.ok_or(CoreError::NotFound)?)
     }
@@ -1874,13 +1883,12 @@ impl AgentTriageStore for SqliteStore {
     ) -> Result<Vec<AgentListItem>> {
         let conn = self.lock()?;
         let mut items = list_items_with_query(&conn, account, "records", Utc::now(), query)?;
-        restrict_external_items(&conn, account, &mut items)?;
         items.sort_by(|a, b| {
             b.received_at
                 .cmp(&a.received_at)
                 .then_with(|| b.message_id.cmp(&a.message_id))
         });
-        items.truncate(limit);
+        restrict_external_items(&conn, account, &mut items, limit)?;
         Ok(items)
     }
     fn agent_shipment_is_hidden(
@@ -3023,32 +3031,40 @@ impl SqliteStore {
     }
 }
 
+/// The external listings' restriction, in the order the listing will be
+/// served, keeping the first `limit` rows that may go out the agent door.
+/// A row passes when its thread's attention is current and drawn from allowed
+/// mail, its thread passes the guard every external thread read does, and the
+/// row's message and the message whose decision it shows are allowed
+/// ([`super::messages::ListingJudge`]: one walk for a thread's only row, a
+/// thread listed more than once judged once). Whether a row may go out does
+/// not depend on the rows around it, so stopping at `limit` keeps exactly
+/// what filtering everything and then truncating would.
 fn restrict_external_items(
     conn: &Connection,
     account: AccountId,
     items: &mut Vec<AgentListItem>,
+    limit: usize,
 ) -> Result<()> {
-    let mut allowed = Vec::with_capacity(items.len());
-    for item in items.drain(..) {
-        if attention_sources_allowed(conn, account, &item.thread_id)?
-            && super::messages::external_message_allowed_conn(conn, account, item.message_id)?
-            && super::messages::external_message_allowed_conn(
-                conn,
-                account,
-                item.decision_source_message_id,
-            )?
-        {
-            match super::messages::thread_guard_and_subject(conn, account, &item.thread_id) {
-                Ok(_) => {
-                    // The display name is the human door's alone: untrusted
-                    // header text never rides out on an agent-facing listing.
-                    let mut item = item;
-                    item.from_name = None;
-                    allowed.push(item)
-                }
-                Err(CoreError::NotFound) => {}
-                Err(error) => return Err(error),
-            }
+    let mut judge =
+        super::messages::ListingJudge::new(items.iter().map(|item| item.thread_id.as_str()));
+    let attention = |thread: &str| current_attention_sources(conn, account, thread);
+    let mut allowed = Vec::with_capacity(items.len().min(limit));
+    for mut item in items.drain(..) {
+        if allowed.len() == limit {
+            break;
+        }
+        if judge.allowed(
+            conn,
+            account,
+            &item.thread_id,
+            &[item.message_id, item.decision_source_message_id],
+            attention,
+        )? {
+            // The display name is the human door's alone: untrusted header
+            // text never rides out on an agent-facing listing.
+            item.from_name = None;
+            allowed.push(item);
         }
     }
     *items = allowed;
@@ -3473,6 +3489,18 @@ fn append_due_reminders(
 mod tests {
     use super::*;
     use crate::triage::decision::{AccessAssessment, EmailKind};
+    /// The thread half of an external listing row (current attention from
+    /// allowed mail, and the thread's guard), from the production pieces.
+    pub(super) fn thread_half_allowed(conn: &Connection, account: AccountId, thread: &str) -> bool {
+        match current_attention_sources(conn, account, thread).unwrap() {
+            None => false,
+            Some(ids) => {
+                super::super::messages::thread_allowed_with_conn(conn, account, thread, &ids)
+                    .unwrap()
+            }
+        }
+    }
+
     pub(super) fn fixture() -> SqliteStore {
         let store = SqliteStore::open_in_memory().unwrap();
         {
@@ -3817,6 +3845,406 @@ mod tests {
         assert!(compared > 400, "{compared}");
         assert!(deeper > 300, "{deeper}");
         assert_eq!(kinds.len(), 2, "{kinds:?}");
+    }
+
+    /// The set access check walks once and SEEKS every table, on a store with
+    /// no `sqlite_stat1`: each hop and each stale-source probe is a primary
+    /// key seek from the walk's row, and nothing but the walk and its seeds is
+    /// scanned.
+    #[test]
+    fn set_access_check_seeks_every_table() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        let stats: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='sqlite_stat1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats, 0, "the pin is for a store without statistics");
+        let plan = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                super::super::messages::EXTERNAL_MESSAGES_ALLOWED_SQL
+            ))
+            .unwrap()
+            .query_map(params![1, "[1,2]"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            plan.iter()
+                .filter(|line| line.starts_with("MATERIALIZE dependencies"))
+                .count(),
+            1,
+            "the walk is shared by both checks:\n{plan:#?}"
+        );
+        let hops: Vec<usize> = plan
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.starts_with(
+                    "SEARCH d USING COVERING INDEX sqlite_autoindex_agent_decision_sources_1 (account_id=? AND message_id=?)",
+                ) || line.starts_with(
+                    "SEARCH d USING INDEX sqlite_autoindex_agent_decision_sources_1 (account_id=? AND message_id=?)",
+                )
+            })
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            hops.len(),
+            2,
+            "the hop and the stale-source probe:\n{plan:#?}"
+        );
+        assert!(
+            hops.iter().all(|&at| at > 0 && plan[at - 1] == "SCAN p"),
+            "each is a seek from the walk's row:\n{plan:#?}"
+        );
+        for seek in [
+            "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)",
+            "SEARCH c USING INDEX sqlite_autoindex_agent_triage_corrections_1 (account_id=? AND message_id=? AND field=?)",
+        ] {
+            assert!(
+                plan.iter().any(|line| line.starts_with(seek)),
+                "{seek}:\n{plan:#?}"
+            );
+        }
+        assert!(
+            plan.iter()
+                .filter(|line| line.starts_with("SCAN"))
+                .all(|line| line == "SCAN p"
+                    || line == "SCAN CONSTANT ROW"
+                    || line.starts_with("SCAN json_each VIRTUAL TABLE")),
+            "only the walk and its seeds are scanned:\n{plan:#?}"
+        );
+    }
+
+    /// ONE WALK ANSWERS WHAT THE PER-MESSAGE CHECKS ANSWERED. The statement
+    /// that checked one message at a time is kept here as the oracle, and
+    /// every caller that now asks about a set at once is held to what the old
+    /// code made of the per-message answers: a set (all of it allowed), a
+    /// thread's guard (siblings an external reader counts, all allowed), a
+    /// thread's attention (current, and from allowed mail), a listed item
+    /// (its attention, its two messages, its thread) and the agent door's
+    /// batched second look (the message and its thread). Over seeded random
+    /// stores: every assessment state and a missing one, owner's seals and
+    /// corrections that are not seals, sources read at a revision that has
+    /// since moved, cycles, archive rows an external reader does not count,
+    /// ids that do not exist and a second account's rows.
+    #[test]
+    fn set_access_checks_match_the_per_message_check() {
+        use super::super::messages::{
+            external_messages_allowed_conn, external_thread_ids_conn, thread_guard_and_subject,
+        };
+        const PER_MESSAGE_SQL: &str = "WITH RECURSIVE dependencies(message_id) AS (
+             SELECT ?2
+             UNION
+             SELECT d.source_message_id FROM agent_decision_sources d
+             JOIN dependencies p ON p.message_id=d.message_id
+             WHERE d.account_id=?1
+         )
+         SELECT EXISTS(SELECT 1 FROM messages WHERE account_id=?1 AND id=?2)
+           AND NOT EXISTS(
+             SELECT 1 FROM dependencies d
+             LEFT JOIN messages m ON m.id=d.message_id AND m.account_id=?1
+             LEFT JOIN agent_message_state a ON a.message_id=d.message_id AND a.account_id=?1
+             WHERE m.id IS NULL OR a.access IS NULL OR a.access!='allowed'
+               OR EXISTS(SELECT 1 FROM agent_triage_corrections c WHERE c.account_id=?1
+                   AND c.message_id=d.message_id AND c.field='external_access' AND c.value_json='true')
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM agent_decision_sources d
+             JOIN dependencies p ON p.message_id=d.message_id
+             LEFT JOIN agent_message_state a ON a.message_id=d.source_message_id AND a.account_id=?1
+             WHERE d.account_id=?1 AND (a.revision IS NULL OR a.revision!=d.source_revision)
+           )";
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n) as i64
+        };
+        let threads: Vec<String> = (0..12).map(|t| format!("t{t}")).collect();
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO accounts(id,email,created_at) VALUES(1,'a@test','2026-01-01'),(2,'b@test','2026-01-01')",
+                [],
+            )
+            .unwrap();
+        // (allowed, refused) per kind of question, so none of them is vacuous.
+        let mut seen = [[0usize; 2]; 6];
+        let mut tally = |kind: usize, allowed: bool| seen[kind][usize::from(!allowed)] += 1;
+        for graph in 0..16 {
+            let mut door: Vec<(i64, i64, i64, String, bool)> = Vec::new();
+            {
+                let conn = store.lock().unwrap();
+                conn.execute_batch(
+                    "DELETE FROM agent_triage_corrections; DELETE FROM agent_attention_sources;
+                     DELETE FROM agent_decision_sources; DELETE FROM agent_message_state;
+                     DELETE FROM messages;",
+                )
+                .unwrap();
+                let account_of = |id: i64| if id <= 40 { 1 } else { 2 };
+                let mut revision = std::collections::HashMap::new();
+                for id in 1..=50 {
+                    conn.execute(
+                        "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,
+                             received_at,snippet,body,is_archive)
+                         VALUES(?1,?2,?3,?4,'sender@test','subject','2026-01-01T00:00:00+00:00','','',?5)",
+                        params![
+                            id,
+                            account_of(id),
+                            id.to_string(),
+                            threads[next(12) as usize],
+                            next(5) == 0
+                        ],
+                    )
+                    .unwrap();
+                    let access = match next(20) {
+                        0 => None,
+                        1 => Some("pending"),
+                        2 => Some("restricted"),
+                        _ => Some("allowed"),
+                    };
+                    if let Some(access) = access {
+                        let at = 1 + next(2);
+                        revision.insert(id, at);
+                        conn.execute(
+                            "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,revision,access)
+                             VALUES(?1,?2,'{}',?3,?4)",
+                            params![account_of(id), id, at, access],
+                        )
+                        .unwrap();
+                    }
+                }
+                // Mostly read at the source's current revision; one in twelve
+                // has since moved (or never had one).
+                let read_at =
+                    |source: i64, roll: i64, revision: &std::collections::HashMap<i64, i64>| {
+                        if roll == 0 {
+                            3
+                        } else {
+                            revision.get(&source).copied().unwrap_or(1)
+                        }
+                    };
+                for _ in 0..40 {
+                    let (message, source) = (1 + next(50), 1 + next(50));
+                    let account = if next(6) == 0 { 2 } else { account_of(message) };
+                    conn.execute(
+                        "INSERT OR IGNORE INTO agent_decision_sources(account_id,message_id,source_message_id,source_revision)
+                         VALUES(?1,?2,?3,?4)",
+                        params![account, message, source, read_at(source, next(12), &revision)],
+                    )
+                    .unwrap();
+                }
+                for _ in 0..14 {
+                    let source = 1 + next(50);
+                    conn.execute(
+                        "INSERT OR IGNORE INTO agent_attention_sources(account_id,thread_id,source_message_id,source_revision)
+                         VALUES(?1,?2,?3,?4)",
+                        params![
+                            if next(6) == 0 { 2 } else { account_of(source) },
+                            threads[next(12) as usize],
+                            source,
+                            read_at(source, next(12), &revision)
+                        ],
+                    )
+                    .unwrap();
+                }
+                // A seal, and two corrections that are not one.
+                for (field, value) in [
+                    ("external_access", "true"),
+                    ("external_access", "false"),
+                    ("importance", "true"),
+                ] {
+                    let id = 1 + next(50);
+                    conn.execute(
+                        "INSERT OR IGNORE INTO agent_triage_corrections(account_id,message_id,field,value_json,source_revision,updated_at)
+                         VALUES(?1,?2,?3,?4,1,'2026-01-01')",
+                        params![account_of(id), id, field, value],
+                    )
+                    .unwrap();
+                }
+                let one = |account: i64, id: i64| -> bool {
+                    conn.prepare_cached(PER_MESSAGE_SQL)
+                        .unwrap()
+                        .query_row(params![account, id], |r| r.get(0))
+                        .unwrap()
+                };
+                for account in [1, 2] {
+                    let ok = |id: i64| one(account, id);
+                    // The siblings an external reader counts, spelled out here
+                    // rather than read through the code under test: all but an
+                    // archive row nobody has assessed (and the owner has not
+                    // sealed).
+                    let guard = |thread: &str| {
+                        let ids: Vec<i64> = conn
+                            .prepare(
+                                "SELECT m.id FROM messages m
+                                 LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+                                 WHERE m.account_id=?1 AND m.thread_id=?2 AND NOT (m.is_archive=1
+                                   AND (a.access IS NULL OR a.access='pending')
+                                   AND NOT EXISTS(SELECT 1 FROM agent_triage_corrections c
+                                       WHERE c.account_id=m.account_id AND c.message_id=m.id
+                                         AND c.field='external_access' AND c.value_json='true'))",
+                            )
+                            .unwrap()
+                            .query_map(params![account, thread], |r| r.get(0))
+                            .unwrap()
+                            .map(|id| id.unwrap())
+                            .collect();
+                        assert_eq!(
+                            ids,
+                            external_thread_ids_conn(&conn, account, thread).unwrap(),
+                            "the siblings the guard counts"
+                        );
+                        !ids.is_empty() && ids.into_iter().all(ok)
+                    };
+                    let attention = |thread: &str| {
+                        conn.prepare(
+                            "SELECT s.source_message_id,s.source_revision,a.revision FROM agent_attention_sources s
+                             LEFT JOIN agent_message_state a ON a.account_id=s.account_id AND a.message_id=s.source_message_id
+                             WHERE s.account_id=?1 AND s.thread_id=?2",
+                        )
+                        .unwrap()
+                        .query_map(params![account, thread], |r| {
+                            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
+                        })
+                        .unwrap()
+                        .map(|row| row.unwrap())
+                        .all(|(id, expected, actual)| actual == Some(expected) && ok(id))
+                    };
+                    assert!(!external_messages_allowed_conn(&conn, account, &[]).unwrap());
+                    for _ in 0..60 {
+                        let set: Vec<i64> = (0..1 + next(5)).map(|_| 1 + next(55)).collect();
+                        let want = set.iter().all(|&id| ok(id));
+                        assert_eq!(
+                            external_messages_allowed_conn(&conn, account, &set).unwrap(),
+                            want,
+                            "graph {graph}, account {account}, set {set:?}"
+                        );
+                        tally(0, want);
+                    }
+                    for thread in &threads {
+                        let want = guard(thread);
+                        assert_eq!(
+                            thread_guard_and_subject(&conn, account, thread).is_ok(),
+                            want,
+                            "graph {graph}, account {account}, guard {thread}"
+                        );
+                        tally(1, want);
+                        let want = attention(thread) && guard(thread);
+                        assert_eq!(
+                            thread_half_allowed(&conn, account, thread),
+                            want,
+                            "graph {graph}, account {account}, thread half {thread}"
+                        );
+                        tally(2, want);
+                    }
+                    let mut listed = Vec::new();
+                    for _ in 0..30 {
+                        let thread = &threads[next(12) as usize];
+                        let (message, source) = (1 + next(50), 1 + next(50));
+                        let want = attention(thread) && ok(message) && ok(source) && guard(thread);
+                        // A thread's only row: one walk.
+                        let only = super::super::messages::ListingJudge::new([thread.as_str()])
+                            .allowed(&conn, account, thread, &[message, source], |thread| {
+                                current_attention_sources(&conn, account, thread)
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            only, want,
+                            "graph {graph}, account {account}, item {message}/{source} in {thread}"
+                        );
+                        tally(3, want);
+                        listed.push((thread.clone(), message, source, want));
+                        door.push((
+                            account,
+                            message,
+                            source,
+                            thread.clone(),
+                            ok(message) && ok(source) && guard(thread),
+                        ));
+                    }
+                    // The listing as a whole, where 30 rows over 12 threads
+                    // repeat threads and take the judged-once path.
+                    let mut items: Vec<AgentListItem> = listed
+                        .iter()
+                        .map(|(thread, message, source, _)| AgentListItem {
+                            message_id: *message,
+                            decision_source_message_id: *source,
+                            thread_id: thread.clone(),
+                            from_addr: "sender@test".into(),
+                            from_name: Some("Sender".into()),
+                            subject: "subject".into(),
+                            received_at: "2026-01-01T00:00:00+00:00".into(),
+                            decision: MessageDecision::default(),
+                            attention: ThreadAttentionDecision::default(),
+                            score: 0.0,
+                            unresolved_since: None,
+                            ranking: None,
+                        })
+                        .collect();
+                    let mut first = items.clone();
+                    restrict_external_items(&conn, account, &mut items, usize::MAX).unwrap();
+                    // Stopping at a limit keeps the same rows, cut.
+                    restrict_external_items(&conn, account, &mut first, 5).unwrap();
+                    assert_eq!(
+                        first.iter().map(|item| item.message_id).collect::<Vec<_>>(),
+                        items
+                            .iter()
+                            .take(5)
+                            .map(|item| item.message_id)
+                            .collect::<Vec<_>>(),
+                        "graph {graph}, account {account}, listing cut at 5"
+                    );
+                    let kept: Vec<(String, i64, i64)> = items
+                        .iter()
+                        .map(|item| {
+                            assert!(item.from_name.is_none());
+                            (
+                                item.thread_id.clone(),
+                                item.message_id,
+                                item.decision_source_message_id,
+                            )
+                        })
+                        .collect();
+                    let want: Vec<(String, i64, i64)> = listed
+                        .iter()
+                        .filter(|row| row.3)
+                        .map(|(thread, message, source, _)| (thread.clone(), *message, *source))
+                        .collect();
+                    assert_eq!(kept, want, "graph {graph}, account {account}, listing");
+                    for row in &listed {
+                        tally(5, row.3);
+                    }
+                }
+            }
+            for account in [1, 2] {
+                let rows: Vec<_> = door.iter().filter(|row| row.0 == account).collect();
+                let asked: Vec<(i64, i64, &str)> = rows
+                    .iter()
+                    .map(|row| (row.1, row.2, row.3.as_str()))
+                    .collect();
+                let got = store.external_listing_allowed(account, &asked).unwrap();
+                assert_eq!(got.len(), rows.len(), "one answer per row");
+                for (row, got) in rows.iter().zip(got) {
+                    assert_eq!(got, row.4, "graph {graph}, door {row:?}");
+                    tally(4, row.4);
+                }
+            }
+        }
+        for (kind, [allowed, refused]) in seen.into_iter().enumerate() {
+            assert!(
+                allowed >= 10 && refused >= 10,
+                "question {kind} was not tried both ways: {allowed} allowed, {refused} refused"
+            );
+        }
     }
 
     #[test]
@@ -7892,7 +8320,7 @@ mod inventory_tests {
 
 #[cfg(test)]
 mod dependency_tests {
-    use super::tests::{claim, decision, fixture};
+    use super::tests::{claim, decision, fixture, thread_half_allowed};
     use super::*;
     use crate::triage::decision::{EmailKind, RelatedAttentionUpdate};
 
@@ -8090,7 +8518,7 @@ mod dependency_tests {
             conn.execute("DELETE FROM messages WHERE id=1", []).unwrap();
             conn.execute("DELETE FROM agent_message_state WHERE message_id=1", [])
                 .unwrap();
-            assert!(!attention_sources_allowed(&conn, 1, "two").unwrap());
+            assert!(!thread_half_allowed(&conn, 1, "two"));
         }
         assert_eq!(
             store

@@ -6,10 +6,11 @@
 // covers it. A navigation push comes in from the right, which is the direction
 // of "deeper"; these are not deeper than the sitrep, they are beside it.
 //
-//   - A SWIPE opens the PICKER: which mailbox, one tap to change it, and the
-//     two doors onward (add one, or the whole Account page). It is the phone's
-//     answer to the Mac's rail of accounts and its ⌘1..⌘9.
-//   - THE GLYPH opens the ACCOUNT PAGE: the same page it always was, in a
+//   - A SWIPE, or THE GLYPH, opens the PICKER: which mailbox, one tap to
+//     change it, a way to add one, and Settings pinned at the drawer's foot.
+//     It is the phone's answer to the Mac's rail of accounts and its ⌘1..⌘9.
+//     The glyph and the gesture are one door, so neither surprises.
+//   - SETTINGS opens the ACCOUNT PAGE: the same page it always was, in a
 //     stack of its own so its panes still push the ordinary way inside it.
 //
 // The shell mounts both (`AccountPanes`, in MobileRootView) over the tab bar.
@@ -117,11 +118,19 @@ struct AccountSwitcher: View {
 
 // MARK: - the picker
 
-/// The drawer's contents: the mailboxes, and the two ways onward.
+/// The drawer's contents: the mailboxes, a way to add one, and Settings at
+/// the foot.
 struct AccountPicker: View {
     @Environment(AppStore.self) private var store
 
     var body: some View {
+        VStack(spacing: 0) {
+            mailboxes
+            settings
+        }
+    }
+
+    private var mailboxes: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -147,10 +156,6 @@ struct AccountPicker: View {
                         AccountDoor.shared.close()
                         store.addAccountSheetOpen = true
                     }
-                    Hairline()
-                    door("person.crop.circle", "Account and settings") {
-                        AccountDoor.shared.pane = .page
-                    }
                 }
                 .padding(.vertical, 4)
                 .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
@@ -159,6 +164,21 @@ struct AccountPicker: View {
             .padding(.bottom, 28)
         }
         .scrollBounceBehavior(.basedOnSize)
+    }
+
+    /// THE FULL ACCOUNT PAGE, pinned to the drawer's foot where the thumb
+    /// already is, the way a phone's side drawer keeps its settings. Outside
+    /// the scroll, so a long list of mailboxes never pushes it off screen.
+    private var settings: some View {
+        door("gearshape", "Settings") {
+            Haptics.tick()
+            AccountDoor.shared.pane = .page
+        }
+        .padding(.vertical, 4)
+        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
     }
 
     private func door(_ symbol: String, _ title: String, _ action: @escaping () -> Void)

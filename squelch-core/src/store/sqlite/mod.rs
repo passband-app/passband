@@ -61,7 +61,7 @@ const OWN_MAIL: &str = own_mail_sql!();
 ///   (`sealed_messages`).
 /// - the stored decision RESTRICTS external access, or a person's correction
 ///   does, or the access assessment came back `restricted`. The refusing half
-///   of what the agent door reads (`messages::external_message_allowed_conn`).
+///   of what the agent door reads (`messages::external_messages_allowed_conn`).
 /// - the retired `triage.sensitivity` column says so. NOTHING IN THE AGENT
 ///   PIPELINE WRITES IT ANY MORE (ingest always writes `normal`), so on its
 ///   own it guards only unmigrated legacy rows and rows a person sealed
@@ -341,9 +341,9 @@ macro_rules! archive_askable_sql {
 /// THE EXTERNAL SEARCH PREFILTER, over alias `m`: a cheap NECESSARY condition
 /// for an external reader to be shown a row, written so a recall leg can carry
 /// it in its own WHERE. IT AUTHORIZES NOTHING. The authority is
-/// `messages::external_message_allowed_conn` plus
-/// `messages::thread_guard_and_subject`, and every candidate that passes this
-/// still goes through both before a field of it leaves the store.
+/// `messages::external_messages_allowed_conn` plus the thread guard
+/// (`messages::thread_allowed_with_conn`), and every candidate that passes
+/// this still goes through both before a field of it leaves the store.
 ///
 /// What it is for: a row an external reader cannot be shown must not take a
 /// place in a recall window, or which readable rows come back (and in what
@@ -933,7 +933,7 @@ impl SqliteStore {
     /// `sensitivity = 'sealed'` as a denial (docs/SECURITY.md §4); what gates
     /// them is the confirm flag and audit ladder in squelch-api's
     /// `guarded_action`. The access authority for the agent door is
-    /// `messages.rs:external_message_allowed_conn` (via `thread_guard_and_subject`
+    /// `messages.rs:external_messages_allowed_conn` (via `thread_allowed_with_conn`
     /// / [`Self::external_thread_allowed`]), which this lookup does NOT apply, so
     /// never hand its result to an agent-facing path.
     pub fn action_message_ref(

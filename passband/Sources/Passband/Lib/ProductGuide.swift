@@ -409,7 +409,7 @@ enum ProductGuide {
         Groups:
         - "groups" on the To line addresses a saved group. New messages only, not replies or forwards.
         - Groups are made in Settings > Groups (key {key:groups}): n new, e or Enter edit, x delete.
-        - On the iPhone, Groups is under the person icon at the top left of the Sitrep: + makes one, tap opens it, swipe a group to the left to edit or delete it.
+        - On the iPhone, Groups is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom): + makes one, tap opens it, swipe a group to the left to edit or delete it.
         - Each group is set to go out one way: To (one email, everyone sees the list), Bcc (one email, nobody sees anyone else) or Individually (a separate email per person).
 
         Sending:
@@ -512,7 +512,7 @@ enum ProductGuide {
 
         Managing them:
         - In Settings > Rules: j / k move, e or Enter or a click edits, x deletes (with undo).
-        - On the iPhone, Rules is under the person icon at the top left of the Sitrep: + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
+        - On the iPhone, Rules is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom): + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
         - Rules are grouped by what they do (allow, filter, mute) and then by domain.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
         - Rules live in Passband only. They never change anything in Gmail.
@@ -547,11 +547,11 @@ enum ProductGuide {
         - Subjects and bodies, by keyword and by meaning. Subject words count more, word forms match (password finds passwords), and a quoted phrase has to appear exactly.
         - Login codes and spam are not searchable.
         - Search covers the mail Passband has indexed. Where the older-mail archive is on, that includes up to a year of mail from before Passband was connected, added gradually in the background and listed with finished mail, and the assistant can say how far back search currently reaches.
-        - Unfinished mail is listed first, and the matching words are highlighted.
+        - Results are one list ranked by the search order setting, with the matching words highlighted, on the Mac and the iPhone.
 
         Finding a sender:
         - Typing a name or an email address lists up to three matching senders above the results, each with how many emails they have sent. Down arrow and Enter, Tab, or a click picks one.
-        - Picking a sender shows every email from them, newest first, in one list that is not split into Not done and Done. The field then reads from: and their address, and more words typed after it search within their mail.
+        - Picking a sender shows every email from them, newest first, in one list. The field then reads from: and their address, and more words typed after it search within their mail.
         - It works the same way in the phone's Search tab: tap the sender.
 
         Operators:
@@ -571,6 +571,7 @@ enum ProductGuide {
         - When a search reads like a question ("where is the wifi password"), an agent reads the mail alongside the results and points at the answer with email cards and one line.
         - Settings > Assistant > Deeper search sets when it runs: Automatic, On request (a button to press) or Off. It has a model setting of its own.
         - "Open in chat", or ⌘Enter, continues the same question in this assistant with room for follow-ups.
+        - On the iPhone it works the same way in the Search tab, above the results, with the same setting under Assistant on the Account page. The expand arrow on it opens the conversation in the agent chat once it has finished. The Ask the agent row above the results does what the Mac's Ask agent button does: it asks the agent, then opens the conversation in the chat once there is one. With Deeper search off it is turned off, as on the Mac.
         """
 
     private static let loginCodes = """
@@ -651,7 +652,7 @@ enum ProductGuide {
         - While a new version is waiting, a down-arrow icon sits near the bottom of the sidebar. Clicking it brings the card back.
         - The Passband menu has "Check for Updates…". The installed version is printed at the bottom right of Settings.
         - Settings > General > Help has "What's new" for the release notes and "Practice inbox" to replay the tour.
-        - On the iPhone, "What's new" is under the person icon at the top left of the Sitrep, in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it. The iPhone has no practice inbox.
+        - On the iPhone, "What's new" is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom), in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it. The iPhone has no practice inbox.
 
         Usage and audit:
         - Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days.
@@ -672,7 +673,7 @@ enum ProductGuide {
     private static func whatsNewOnPhone(running: String?) -> String {
         let reopen =
             "The iPhone shows this once per version, full screen, a page per feature. To see it "
-            + "again, tap the person icon at the top left of the Sitrep, then General, then "
+            + "again, tap the person icon at the top left of the Sitrep, then Settings, then General, then "
             + "What's new."
         guard let running else {
             return "This build does not report its version, so there are no release notes to read. " + reopen

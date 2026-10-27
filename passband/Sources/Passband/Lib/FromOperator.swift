@@ -138,3 +138,25 @@ enum FromOperator {
         return query[...]
     }
 }
+
+/// HOW A PANEL SEARCH ASKS FOR ITS ORDER. Beside `FromOperator.isListing`
+/// because it is the same question asked of the same query, and because this
+/// file compiles alone in test.sh while `SearchFetch` cannot.
+///
+/// PLAIN RANKED ORDER on a daemon that advertises `search_plain_order`: no
+/// status grouping, sent mail kept by `include_sent`. On an older daemon the
+/// old ask, `unfinished_first` for anything but a listing, because that flag
+/// is also what brings sent mail into its keyword searches.
+///
+/// A LISTING is asked exactly as before on either daemon: newest first, no
+/// grouping and no `include_sent`, so a picked sender's page does not change.
+///
+/// Semantic/hybrid pages in either order come back as a `recall:` cursor,
+/// which that daemon accepts beside either ask, so a scroll that straddles
+/// the flag landing is not refused (its next page is simply in the new order).
+enum SearchOrder {
+    static func ask(_ term: String, plainOrder: Bool) -> (unfinishedFirst: Bool, includeSent: Bool) {
+        if FromOperator.isListing(term) { return (false, false) }
+        return plainOrder ? (false, true) : (true, false)
+    }
+}

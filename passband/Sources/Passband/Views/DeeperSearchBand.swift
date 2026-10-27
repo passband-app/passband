@@ -22,6 +22,13 @@ struct DeeperSearchBand: View {
     /// identical, which is the point of one view rather than two.
     let expanded: Bool
 
+    /// Where "continue in chat" goes, for a shell whose chat is not the Mac's
+    /// ⌘K bar. nil is the Mac: `openSearchLaneInChat` opens the bar, and the bar
+    /// takes a still-running lane over when it finishes. The phone has no bar
+    /// to watch the lane from, so it passes its own push here and the button
+    /// only offers itself once the lane is idle and the chat can adopt it.
+    var openInChat: (() -> Void)? = nil
+
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
     private var session: AssistantSession { store.searchLane }
@@ -61,6 +68,16 @@ struct DeeperSearchBand: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(Palette.hairline, lineWidth: 0.75)
         )
+        // THE WHOLE BOX IS THE WAY INTO THE CHAT, on a shell that hosts its
+        // own (the phone): a tap anywhere but on an email card, or on one of
+        // the box's own buttons, opens the conversation. Those are Buttons and
+        // take their own taps first; this hears only what lands between them.
+        // Only once there is a conversation the chat can take.
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onTapGesture {
+            guard let openInChat, tapOpensChat else { return }
+            openInChat()
+        }
         .padding(.horizontal, expanded ? 0 : Space.s14)
         .padding(.bottom, expanded ? 0 : Space.s8)
         // STRUCTURE ONLY, for AskBar's reason: rows arriving is a change worth
@@ -95,24 +112,56 @@ struct DeeperSearchBand: View {
             // THE WAY OUT OF THE ONE-LINE ANSWER. The band is kept thin on
             // purpose; somebody who wants the whole answer, or to ask a
             // follow-up, takes the conversation to ⌘K, where it has room.
-            if search.laneStarted && !session.transcript.isEmpty {
-                Button { store.openSearchLaneInChat() } label: {
+            if search.laneStarted && !session.transcript.isEmpty && (openInChat == nil || hostedChatOffered) {
+                Button { (openInChat ?? store.openSearchLaneInChat)() } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(Typo.ui(10, weight: .semibold))
-                        .foregroundStyle(Palette.inkFaint)
-                        .frame(width: Space.scaled(18), height: Space.scaled(18))
+                        #if os(macOS)
+                            .font(Typo.ui(10, weight: .semibold))
+                            .foregroundStyle(Palette.inkFaint)
+                            .frame(width: Space.scaled(18), height: Space.scaled(18))
+                        #else
+                            // A thumb's target: the way into the whole answer.
+                            .font(Typo.ui(14, weight: .semibold))
+                            .foregroundStyle(Palette.inkDim)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(Palette.hairline))
+                        #endif
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(!store.canOpenSearchLaneInChat)
+                .disabled(openInChat == nil ? !store.canOpenSearchLaneInChat : !hostedChatReady)
                 .help(expandHelp)
+                .accessibilityLabel("Continue in chat")
             }
         }
     }
 
     private var expandHelp: String {
+        if openInChat != nil {
+            return hostedChatReady
+                ? "Continue in chat: the full answer, and room for follow-ups."
+                : "The chat is busy answering something else."
+        }
         if !store.canOpenSearchLaneInChat { return "The chat is busy answering something else." }
         return "Continue in chat: the full answer, and room for follow-ups. ⌘Return"
+    }
+
+    /// The box's background tap goes to the chat: the same moment the expand
+    /// button is offered and enabled.
+    private var tapOpensChat: Bool {
+        search.laneStarted && !session.transcript.isEmpty && hostedChatOffered && hostedChatReady
+    }
+
+    /// A caller-owned chat is offered once the lane has stopped talking: there
+    /// is no bar to hand a running lane to, and `adopt` refuses a live one.
+    private var hostedChatOffered: Bool {
+        !session.running && !store.preparingSearchEvidence
+    }
+
+    /// And it can take the conversation right now: it already holds this one,
+    /// or it is not busy with another.
+    private var hostedChatReady: Bool {
+        store.chatHoldsSearchLane || store.canExpandSearchLane
     }
 
     // MARK: - the lane's own rows
@@ -170,10 +219,27 @@ struct DeeperSearchBand: View {
                 .foregroundStyle(Palette.inkFaint)
             Spacer(minLength: Space.s4)
             if let trigger = offeredTrigger {
-                Button("ask the agent") { store.startDeeperSearch(trigger: trigger) }
-                    .buttonStyle(.glass)
-                    .font(Typo.chip)
-                    .help("Runs the assistant over these results. It costs a model call.")
+                #if os(macOS)
+                    Button("ask the agent") { store.startDeeperSearch(trigger: trigger) }
+                        .buttonStyle(.glass)
+                        .font(Typo.chip)
+                        .help("Runs the assistant over these results. It costs a model call.")
+                #else
+                    // PLAIN, with the glass painted by hand. On the phone the
+                    // band is a List row, and a Button of any other style in a
+                    // row can take a tap anywhere on the row: a stray tap would
+                    // spend a model call the reader never asked for.
+                    Button { store.startDeeperSearch(trigger: trigger) } label: {
+                        Text("ask the agent")
+                            .font(Typo.chip)
+                            .foregroundStyle(Palette.ink)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .glassCapsule()
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                #endif
             }
         }
     }

@@ -237,10 +237,18 @@ struct ComposePane: View {
                 // it is the composer, and "compose / new message" spent the
                 // bar's widest stretch saying so. The drafts page still names
                 // itself, because a list of drafts is not self-evident.
+                //
+                // THE TRASH TAKES THE LEADING CORNER, where every phone's
+                // composer keeps its way out, and as far from send as the bar
+                // allows. A drag down keeps the mail; this is the door that
+                // does not, so it asks first. Not on the drafts page, where
+                // each row has its own delete.
                 if onList {
                     Text("drafts")
                         .font(Typo.serif(24, weight: .medium))
                         .foregroundStyle(Palette.ink)
+                } else {
+                    discardButton
                 }
                 draftsToggle(compose)
             #endif
@@ -295,25 +303,62 @@ struct ComposePane: View {
         .overlay(alignment: .bottom) { Hairline() }
     }
 
-    #if os(macOS)
-        /// Delete this message outright, after a confirm (`DiscardConfirm`).
-        /// Inked like the expand button beside it rather than in danger red:
-        /// the card it opens is where the warning lives.
-        private var discardButton: some View {
-            Button {
-                store.askDiscardCompose()
-            } label: {
-                Image(systemName: "trash")
+    /// Delete this message outright, after a confirm. Inked like the
+    /// header's other controls rather than in danger red: the confirm is
+    /// where the warning lives. On the Mac that is `DiscardConfirm`, in the
+    /// action layer; on a phone the composer is a sheet that an overlay on
+    /// the shell would draw under, so it is the system's own confirmation
+    /// dialog, hung on the button, off the same `store.discardAsk`.
+    private var discardButton: some View {
+        Button {
+            store.askDiscardCompose()
+        } label: {
+            Image(systemName: "trash")
+                #if os(macOS)
                     .font(Typo.ui(11, weight: .semibold))
                     .frame(width: Space.scaled(22), height: Space.scaled(22))
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Palette.inkFaint)
-            .pointingHand()
-            .help("delete this message")
-            .accessibilityLabel("Delete message")
+                #else
+                    .font(Typo.ui(15, weight: .medium))
+                    .frame(width: 34, height: 34)
+                #endif
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .foregroundStyle(Palette.inkFaint)
+        .pointingHand()
+        .help("delete this message")
+        .accessibilityLabel("Delete message")
+        #if !os(macOS)
+            .confirmationDialog(
+                "Delete this message?", isPresented: discardAsked, titleVisibility: .visible
+            ) {
+                // THE ASK IS PINNED HERE, at presentation. The dialog may
+                // write its binding false (running `cancelDiscardAsk`)
+                // before it runs this action, and a confirm that read the
+                // store's ask afterwards would find nothing and delete
+                // nothing, after saying it would.
+                Button("Delete message", role: .destructive) { [asked = store.discardAsk] in
+                    store.discardAsk = asked
+                    store.confirmDiscard()
+                }
+                Button("Keep writing", role: .cancel) { store.cancelDiscardAsk() }
+            } message: {
+                Text("It will not be kept in drafts, and this cannot be undone.")
+            }
+        #endif
+    }
+
+    #if !os(macOS)
+        /// The confirm's presence, derived from the store so a dismissal by
+        /// tapping off runs the same `cancelDiscardAsk()` Keep writing does.
+        private var discardAsked: Binding<Bool> {
+            Binding(
+                get: { store.discardAsk != nil && store.discardAsk == store.compose?.id },
+                set: { if !$0 { store.cancelDiscardAsk() } })
+        }
+    #endif
+
+    #if os(macOS)
 
         /// Open the pane out to a centred column over the page, or back.
         private var expandButton: some View {

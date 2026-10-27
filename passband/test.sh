@@ -693,6 +693,16 @@ run_suite recent-search-ring \
   Sources/Passband/Lib/RecentSearchRing.swift \
   Tests/RecentSearchRingTests.swift
 
+# The chat behind a question in search history, written down and read back:
+# every wire block (tool_use inputs with fields this app never heard of, too)
+# returns as itself and re-encodes to the bytes the provider was sent, and a
+# card or chip left mid-flight is settled before it is kept.
+run_suite conversation-snapshot \
+  Sources/Passband/Assistant/JSONValue.swift \
+  Sources/Passband/Assistant/Transcript.swift \
+  Sources/Passband/Assistant/ConversationSnapshot.swift \
+  Tests/ConversationSnapshotTests.swift
+
 # ⌘F in the reader: matches in a string, the cursor walking them across a
 # thread's messages (wrap, skip, the backwards step into an uncounted message),
 # and the session reconciling its text estimate with what a frame reports.

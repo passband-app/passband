@@ -1,0 +1,56 @@
+# cargo-deny: run by the `deny` job in ci.yml on Rust changes and weekly.
+# Locally: `cargo install cargo-deny --locked && cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Every entry needs a reason someone can check, and goes when a fix exists.
+# Reviewed 2026-10-26.
+ignore = [
+    # rsa: Marvin timing attack on RSA *private-key* operations. Pulled in by
+    # jsonwebtoken's rust_crypto backend. Production only VERIFIES RS256 with a
+    # public JWK (squelch-mcp/src/auth.rs); the only private-key use is the
+    # test fixture signer (squelch-mcp/src/testing.rs). No fixed rsa release.
+    { id = "RUSTSEC-2023-0071", reason = "RSA private-key ops only in tests; prod verifies with public keys" },
+    # crypto-bigint 0.5: timing variability. Reached through p256, which
+    # signs the relay's APNs provider JWT with ES256 (squelch-relay/src/jwt.rs).
+    # An attacker would need fine timing of signatures the relay makes on its
+    # own key, from outside the box. No fixed 0.5.x. Leaves with a move of
+    # jsonwebtoken to its aws_lc_rs backend, which also drops rsa above.
+    { id = "RUSTSEC-2026-0387", reason = "APNs ES256 signing only; no 0.5.x fix; tracked for aws_lc_rs move" },
+    # Unmaintained, not vulnerable. paste is a proc-macro used by ratatui and
+    # tokenizers; basic-toml is read at build time by age's i18n macros.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro, transitive" },
+    { id = "RUSTSEC-2026-0374", reason = "unmaintained, build-time only via age's i18n macros" },
+]
+
+[licenses]
+version = 2
+# What the dependency tree actually uses today, all permissive or weak
+# file-level copyleft (MPL-2.0), compatible with shipping MIT binaries. A new
+# license fails CI so someone looks at it before it ships.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+# The workspace's own crates depend on each other by path with no version,
+# which cargo-deny counts as a wildcard. Registry wildcards are not used.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

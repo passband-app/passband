@@ -3,19 +3,19 @@
 # simulator — which is the only Passband testing cheap enough to run per-PR
 # on a macOS runner.
 #
-# Path-filtered at the workflow level so a Rust-only PR never spins up a
-# 10x-billed macOS runner at all. Consequence: do NOT mark this check
-# required in branch protection — a path-skipped workflow reports no status,
-# and a required-but-absent check leaves non-client PRs stuck on "expected".
+# A Rust-only PR never spins up a 10x-billed macOS runner: on a PR a cheap
+# Linux `changes` job checks the path set first, and on a push to main the
+# workflow-level path filter does. `gate` always reports, and is the check
+# branch protection requires (same pattern as ci.yml): it passes when `test`
+# passed or was correctly skipped (no client change, or a draft PR).
 
 name: ci-passband
 
 on:
   pull_request:
-    paths:
-      - "passband/**"
-      - "docs/CHANGELOG.md"
-      - ".github/workflows/ci-passband.yml"
+    # ready_for_review: a draft skips `test`, so marking it ready has to
+    # start a run. See "Draft PRs" in CLAUDE.md.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
     paths:
@@ -31,12 +31,45 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # paths-filter lists a PR's files through the API
+    outputs:
+      client: ${{ steps.out.outputs.client }}
+    steps:
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            client:
+              - "passband/**"
+              - "docs/CHANGELOG.md"
+              - ".github/workflows/ci-passband.yml"
+      - id: out
+        env:
+          EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          F_CLIENT: ${{ steps.filter.outputs.client }}
+        run: |
+          case "$EVENT" in
+            push) client=true ;;
+            pull_request) if [ "$DRAFT" = true ]; then client=false; else client=$F_CLIENT; fi ;;
+            *) client=false ;;
+          esac
+          echo "client=$client" >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT draft=$DRAFT client=$client"
+
   test:
+    needs: changes
+    if: needs.changes.outputs.client == 'true'
     # macos-26 defaults to Xcode 26.x — the same major the project builds with
     # locally. macos-15 tops out at Xcode 16 / Swift 6.1 and is too old.
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: test
         run: ./passband/test.sh
@@ -46,3 +79,17 @@ jobs:
       # catches the document drifting behind the table; this does.
       - name: changelog is current
         run: ./passband/make-changelog.sh --check
+
+  # The required check. Always runs; skipped counts as a pass.
+  gate:
+    if: always()
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needs: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) exit 1 ;; esac
+          done

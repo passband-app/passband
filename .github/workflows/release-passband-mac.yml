@@ -28,10 +28,15 @@ env:
 jobs:
   release-passband:
     runs-on: macos-26
+    # The signing and publishing secrets live in this GitHub environment,
+    # which only this workflow's own release tags may deploy to, and only
+    # admins may push those tags (tag ruleset). Another workflow or branch
+    # cannot read them.
+    environment: release-mac
     steps:
       # Full history: the build number is the commit count, and a shallow
       # clone would mint a tiny CFBundleVersion that breaks monotonicity.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 

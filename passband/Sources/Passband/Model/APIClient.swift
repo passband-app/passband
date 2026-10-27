@@ -68,6 +68,14 @@ actor APIClient {
     private var config: Config?
     private let session: URLSession
 
+    /// The configured daemon answered 404 to an attention report: it predates
+    /// the route, and will go on predating it until it is upgraded. Remembered
+    /// so a session against an old daemon costs ONE wasted request rather than
+    /// one per message read. Per connection, not per process: `configure` and
+    /// `deconfigure` clear it, because the next account's daemon is a
+    /// different build with its own answer.
+    private var attentionUnsupported = false
+
     /// 15s is generous for a local daemon. Without a hard timeout a daemon dying
     /// mid-request hangs forever and wedges a poller's in-flight guard with it.
     private static let requestTimeout: TimeInterval = 15
@@ -130,12 +138,14 @@ actor APIClient {
         // Normalize: strip trailing slashes so we can join with `/client/...`.
         while base.hasSuffix("/") { base.removeLast() }
         config = Config(baseURL: base, token: bearer)
+        attentionUnsupported = false
     }
 
     /// Forget the configured daemon. After this, requests fail with "client
     /// not configured" instead of presenting a token the user asked to forget.
     func deconfigure() {
         config = nil
+        attentionUnsupported = false
     }
 
     private func requireConfig() throws -> Config {
@@ -283,6 +293,14 @@ actor APIClient {
         return try decode(T.self, from: data)
     }
 
+    private func putNoContent(_ path: String, body: Encodable? = nil) async throws {
+        var payload: Data? = nil
+        if let body { payload = try Self.encoder.encode(AnyEncodable(body)) }
+        let req = try buildRequest(
+            path: path, method: .PUT, query: [:], body: payload, timeout: Self.requestTimeout)
+        _ = try await perform(req)
+    }
+
     private func postNoContent(_ path: String, body: Encodable? = nil) async throws {
         var payload: Data? = nil
         if let body { payload = try Self.encoder.encode(AnyEncodable(body)) }
@@ -321,6 +339,35 @@ actor APIClient {
 
     func markMessageOpened(_ messageId: Int) async throws {
         try await postNoContent("/client/v2/messages/\(messageId)/opened")
+    }
+
+    /// How long a received message was at the reader's focus and how many of
+    /// its links were clicked: the evidence behind smart clear's sender scores.
+    ///
+    /// DOES NOT THROW, unlike its neighbours, because there is no caller that
+    /// could do anything with the failure. This is best-effort telemetry about
+    /// reading; a toast for it, or a retry that turns a daemon restart into a
+    /// queue of replays, would cost the reader more than the lost number is
+    /// worth. A report that fails is dropped.
+    ///
+    /// 404 IS "this daemon has no such route", and latches (see
+    /// `attentionUnsupported`). The latch is only set if the daemon that
+    /// answered is still the configured one: an account switch landing while
+    /// the request was out must not have the old daemon's 404 silence the new
+    /// one.
+    ///
+    /// Nothing is sent for the practice inbox. Its mail is fixtures and its
+    /// message ids are made up; the fixture transport would only refuse the
+    /// route, but refusing HERE means the request is never built at all.
+    func reportAttention(messageId: Int, dwellMs: UInt64, linkClicks: UInt32) async {
+        guard !RehearsalMode.isEnabled, !attentionUnsupported, let asked = config?.baseURL else { return }
+        do {
+            try await postNoContent(
+                "/client/v2/messages/\(messageId)/attention",
+                body: AttentionBody(dwell_ms: dwellMs, link_clicks: linkClicks))
+        } catch let error as APIError where error.status == 404 {
+            if config?.baseURL == asked { attentionUnsupported = true }
+        } catch {}
     }
 
     /// `peek: true` reads the same rows WITHOUT stamping the seen-ledger — for a
@@ -452,6 +499,17 @@ actor APIClient {
         let escaped =
             threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
         try await postNoContent("/client/thread/\(escaped)/opened")
+    }
+
+    /// Ask the daemon to translate this thread's ARCHIVE mail, whose
+    /// translations `getThread` serves as `deferred` and leaves unbought.
+    /// Called by the reader DISPLAYING the thread, and by nothing else: the
+    /// prefetch reads threads nobody opened, and archive mail spends nothing
+    /// unprompted. Idempotent on the daemon, so a reopen may ask again.
+    func translateThread(_ threadId: String) async throws {
+        let escaped =
+            threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
+        try await postNoContent("/client/thread/\(escaped)/translate")
     }
 
     /// Whether this daemon can share invites, and what the mail could say.
@@ -857,14 +915,60 @@ actor APIClient {
             body: UnsubResolutionBody(sender: sender, resolution: resolution.rawValue))
     }
 
+    // MARK: - reading smart clear
+
+    /// The daemon's smart clear runs a model pass and may take about twenty
+    /// seconds; the default idle timer would give up first and report a
+    /// clean-up that is still happening as a failure.
+    private static let smartClearTimeout: TimeInterval = 45
+
+    /// Ask the daemon to mark expired and plainly unwanted Reading mail done.
+    /// nil when this daemon predates the route.
+    ///
+    /// Never asked of the practice inbox: its mail is fixtures.
+    func smartClear() async throws -> SmartClearResult? {
+        guard !RehearsalMode.isEnabled else { return nil }
+        do {
+            return try await post(
+                "/client/v2/reading/smart_clear", body: EmptyBody(),
+                timeout: Self.smartClearTimeout)
+        } catch let error as APIError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Reopen exactly what one smart clear cleared.
+    func undoSmartClear(batchId: String) async throws -> SmartClearUndone {
+        let id = batchId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? batchId
+        return try await post("/client/v2/reading/smart_clear/\(id)/undo", body: EmptyBody())
+    }
+
     // MARK: - sealed
 
     func listSealed() async throws -> [SealedMeta] { try await get("/client/sealed") }
 
     /// Reveal exactly one sealed body: audited server-side, `no-store`, and the
     /// returned body must live in view state only — see docs/SECURITY.md §4.
-    func revealSealed(_ id: Int) async throws -> RevealedSealed {
-        try await post("/client/sealed/\(id)/reveal")
+    ///
+    /// `source` says where the reveal came from: nil for one the human asked
+    /// for on a page (the Auth page, a For-your-eyes row), "notification" for
+    /// a banner tap. The daemon's pairing counts only interactive reveals as
+    /// "the owner used this code". Sent as `?source=` only when set (absent
+    /// means interactive); a daemon older than the parameter has no query
+    /// extractor on this route and ignores it.
+    func revealSealed(_ id: Int, source: String? = nil) async throws -> RevealedSealed {
+        try await post("/client/sealed/\(id)/reveal", query: ["source": source])
+    }
+
+    /// Record (or, with nil, clear) the owner's ruling on one piece of auth
+    /// mail: "mine" or "not_mine". Human door only. A daemon older than the
+    /// route answers 404 or 405, which `AuthDecisions` reads as "keep the
+    /// ruling in this Mac's ledger"; a new daemon 404s a message that is not
+    /// auth mail. The wire string rather than `AuthVerdict` so this file stays
+    /// compilable in the test suites that build it without the auth policy.
+    func putSealedVerdict(_ id: Int, verdict: String?) async throws {
+        try await putNoContent(
+            "/client/sealed/\(id)/verdict", body: SealedVerdictBody(verdict: verdict))
     }
 
     // MARK: - lifecycle / actions
@@ -1155,6 +1259,21 @@ actor APIClient {
     @discardableResult
     func setTrackingDefault(_ enabled: Bool) async throws -> TrackingConfig {
         try await post("/client/tracking-config", body: TrackingConfigBody(default_enabled: enabled))
+    }
+
+    // MARK: - translation languages
+
+    /// The languages left untranslated. A daemon older than the setting
+    /// answers 404, which the card reads as "not offered here".
+    func getTranslateConfig() async throws -> TranslateConfig {
+        try await get("/client/translate-config")
+    }
+
+    /// Replace the whole set. The answer is the daemon's post-write view, with
+    /// anything it refused already dropped.
+    @discardableResult
+    func setReadLanguages(_ codes: [String]) async throws -> TranslateConfig {
+        try await post("/client/translate-config", body: TranslateConfigBody(read_languages: codes))
     }
 
     // MARK: - agent write access

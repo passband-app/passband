@@ -105,6 +105,7 @@ backdrop bleeds through enough that light mode reads as a muddy dark one.
 | Toast stack + undo | **done** | 5s undo, click or `u` |
 | Unsubscribe-violation prompt | **done** | One at a time, session-level suppression |
 | Automatic unsubscribe tray | **done** (Mac only) | `u` asks the daemon to unsubscribe (`auto: true`); bottom-right of the sitrep shows running / done / needs-you with "Finish on their site". iOS has no unsubscribe action yet, so no tray |
+| Reading smart clear | **done** (Mac only) | A "smart clear" pill on the Reading zone: the daemon clears expired and never-opened Reading mail in one press, the tiles sweep off, and a bottom-right receipt lists what went and why with a 30 second Undo (`u`). "View full list" opens a full-window page of every cleared email (subject, sender, why) that pauses the undo clock while it is up. iOS has no smart clear |
 | Rule editor | **done** | tune / create / edit (create-then-delete so a failure can't lose the rule) |
 | Reveal panel | **done** | One-time, view-state only, never persisted |
 | Triage debug overlay (dev) | **done** | Full triage row |

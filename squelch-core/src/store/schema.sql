@@ -327,6 +327,27 @@ CREATE TABLE IF NOT EXISTS triage (
     -- product. Every consumer has to know that; see `Store::share_open_rate`,
     -- which is the only one, and which says so.
     opened_at       TEXT,
+    -- HOW LONG THIS MAIL WAS ON SCREEN, in milliseconds, summed over every
+    -- report the owner's client has sent (`POST
+    -- /client/v2/messages/{id}/attention`). A duration and nothing else: not
+    -- what was scrolled to, not when. Clamped per report and in total (see
+    -- `store::agent_triage::MAX_DWELL_TOTAL_MS`), so a reader left open over
+    -- lunch cannot make one newsletter look studied.
+    --
+    -- ZERO MEANS TWO DIFFERENT THINGS, and only `dwell_ledger_since` tells them
+    -- apart: a row opened before the client could report dwell has 0 for no
+    -- behavioural reason. Every statistic over this column therefore counts
+    -- only rows whose `opened_at` is at or after that floor; see
+    -- `migrate::stamp_dwell_ledger_start`.
+    --
+    -- NOT part of the agent's `user_state` fingerprint, on purpose: a dwell
+    -- report arrives while mail is being read, which is exactly when a triage
+    -- pass may be in flight, and it changes nothing that pass decided.
+    dwell_ms        INTEGER NOT NULL DEFAULT 0,
+    -- HOW MANY LINKS IN THIS MAIL THE OWNER FOLLOWED, summed the same way and
+    -- under the same floor. A COUNT ONLY: no URL, no host, no position is
+    -- ever stored, here or anywhere else.
+    link_clicks     INTEGER NOT NULL DEFAULT 0,
     -- MAY THIS MESSAGE EVER NOTIFY, and from when (RFC3339 UTC). NULL means
     -- never: a backfill row, the user's own sent copy, or mail that was already
     -- older than `notify.freshness_window_secs` the first time we saw it.
@@ -348,6 +369,30 @@ CREATE TABLE IF NOT EXISTS triage (
     status          TEXT NOT NULL DEFAULT 'new',
     surfaced_at     TEXT,
     resolved_at     TEXT,
+    -- WHO RESOLVED THIS ROW, when it was not a person. NULL means a human did,
+    -- or a path older than this column: the two are indistinguishable, which
+    -- is the gap this column closes going forward (docs/TRIAGE-OPERATIONS.md,
+    -- "Historical automatic `done` rows without reliable provenance cannot be
+    -- distinguished from a human dismissal").
+    --
+    -- The one writer today is smart clear, which stamps
+    -- `smart_clear:<smart_clear_batches.id>`. That stamp is what makes the batch
+    -- undoable.
+    --
+    -- IT DOES NOT, BY ITSELF, KEEP A SWEEP OUT OF ANYTHING. A reader that
+    -- takes `status = 'done'` to mean the owner decided has to check this
+    -- column too, and only two do: the fatigue score's `cleared_unopened`
+    -- (`reading_senders::SENDER_COUNTS_SQL`), which smart clear itself reads
+    -- and would otherwise feed, and the rule suggester's digest
+    -- (`rules::SENDER_RULE_DIGEST_SQL`). Everything else still sees a swept
+    -- row as plain done, the triage agent's context included (its
+    -- `user_state` fingerprint and its prompt treat any done as the owner's).
+    -- That one is deliberate for now; a new reader is not excused by it.
+    --
+    -- ANY LATER HUMAN STATUS WRITE CLEARS IT. A person who reopens or re-does
+    -- a row has taken it over, and an undo of the batch must then leave it
+    -- alone. Every statement that writes `status` therefore writes this too.
+    resolved_by     TEXT,
     created_at      TEXT NOT NULL
 );
 
@@ -661,6 +706,44 @@ CREATE TABLE IF NOT EXISTS unsubscribes (
 
 CREATE INDEX IF NOT EXISTS idx_unsubscribes_requested ON unsubscribes(account_id, requested_at);
 
+-- READING SENDER KEEPS. One row per (account, sender_addr): the owner looked at
+-- this sender in the Reading purge flow and chose to stay subscribed. The
+-- flow then leaves them alone for `KEEP_QUIET_DAYS`; after that the row no
+-- longer affects the score and is kept only as the date it happened.
+-- `sender_addr` is the lowercased bare address, as in `unsubscribes`. A second
+-- keep refreshes `kept_at`.
+--
+-- NOTHING DELETES A ROW. A later unsubscribe or squelch rule for the same
+-- sender simply outranks it at read time (the newer decision wins; see
+-- `reading_senders`), so no rule or unsubscribe writer has to know this table
+-- exists.
+CREATE TABLE IF NOT EXISTS reading_sender_keeps (
+    account_id  INTEGER NOT NULL,
+    sender_addr TEXT NOT NULL,
+    kept_at     TEXT NOT NULL,
+    PRIMARY KEY (account_id, sender_addr)
+);
+
+-- SMART CLEAR BATCHES. One row per press of "clean this out" that cleared
+-- anything. `triage.resolved_by = 'smart_clear:<id>'` on each row it took is
+-- the membership; `detail` is JSON carrying each cleared message with the
+-- reason it went and the status it had, so an undo restores exactly that.
+-- `undone_at` is stamped by the first undo and makes every later one a no-op.
+-- That undo also writes `reopened` into `detail`: the ids it gave back. Smart
+-- done reads those (for batches undone in the last 90 days) and never takes
+-- such a row again, because an undo is the owner saying "not those".
+CREATE TABLE IF NOT EXISTS smart_clear_batches (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL,
+    undone_at   TEXT,
+    cleared     INTEGER NOT NULL,
+    detail      TEXT NOT NULL
+);
+-- For the one read that is not by id: an account's recently undone batches.
+CREATE INDEX IF NOT EXISTS idx_smart_clear_batches_undone
+    ON smart_clear_batches(account_id, undone_at);
+
 -- AUTH-MAIL SHREDDER (retention). One row per message the retention pass moved
 -- to Gmail Trash, so the "N shredded" figure is a real ledger and a message can
 -- never be shredded twice.
@@ -925,8 +1008,15 @@ CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(account_id, me
 -- rebuilds any `messages_fts` whose stored definition differs from it at all.
 -- There is no second copy to update and no list of options to remember to
 -- extend, so an edit here cannot ship unmigrated.
+--
+-- `tsubject`/`tbody` are the ENGLISH TRANSLATION (docs/TRANSLATION.md), from
+-- `message_translations` while its status is `done` or `incomplete`, NULL
+-- otherwise. Columns are APPENDED so every positional reference to 0 (subject)
+-- and 1 (body) keeps its meaning; bm25 weighs them 4.0 and 1.0 like the
+-- originals. Every writer fills all four: the message upsert, the translate
+-- pass when a translation lands, a heal that drops one, and the rebuild.
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    subject, body, tokenize = 'porter unicode61', prefix = '2 3'
+    subject, body, tsubject, tbody, tokenize = 'porter unicode61', prefix = '2 3'
 );
 
 -- ON-BOX SEMANTIC RECALL. A sqlite-vec `vec0` table holding one embedding per
@@ -942,6 +1032,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 -- configured embedder matches at attach time. Changing it means editing this
 -- literal AND resetting the dev db — there are no migrations for a vec0 table.
 CREATE VIRTUAL TABLE IF NOT EXISTS message_vecs USING vec0(
+    message_id INTEGER PRIMARY KEY,
+    embedding  FLOAT[384],
+    account_id INTEGER
+);
+
+-- THE ENGLISH TRANSLATION'S VECTOR (docs/TRANSLATION.md), one per message whose
+-- `message_translations` row is `done` or `incomplete`, embedded the same way
+-- as the original (`message_embed_text(subject, body)`). The original's vector
+-- in `message_vecs` is untouched; the KNN legs take the nearer of the two per
+-- message. Same width, same metadata column, and the same rule that a vec0
+-- table has no foreign keys: whoever deletes a translation deletes this row.
+CREATE VIRTUAL TABLE IF NOT EXISTS message_translation_vecs USING vec0(
     message_id INTEGER PRIMARY KEY,
     embedding  FLOAT[384],
     account_id INTEGER
@@ -963,6 +1065,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_account_ts ON audit_log(account_id, ts);
+-- The Auth page asks whether the owner revealed a message (an explained
+-- sign-in alert needs the code it pairs with to have been used).
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(account_id, action, target);
 
 -- NOTIFICATION EVENT LOG. The source of truth for "something worth interrupting
 -- the user happened", written by the SYNC ENGINE at each triage verdict — never
@@ -1610,6 +1715,13 @@ CREATE TABLE IF NOT EXISTS agent_message_decisions (
     decided_at TEXT NOT NULL,
     PRIMARY KEY(account_id,message_id)
 );
+-- The few decisions that can hold FYE on their own (`auth_fye_threads_cte!`):
+-- a partial index on EXACTLY the expression that query filters by, so FYE
+-- membership never parses every decision in the mailbox. Guarded by
+-- `json_valid` inside a CASE (evaluated lazily, unlike AND): an index
+-- expression that raised on malformed JSON would make that row's INSERT fail.
+CREATE INDEX IF NOT EXISTS idx_decisions_critical ON agent_message_decisions(account_id, message_id)
+    WHERE CASE WHEN json_valid(decision_json) THEN json_extract(decision_json,'$.auth.critical') END = 1;
 CREATE TABLE IF NOT EXISTS agent_message_destinations (
     account_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
@@ -2065,3 +2177,71 @@ CREATE TABLE IF NOT EXISTS archive_walk (
     updated_at TEXT NOT NULL,
     covered_to TEXT
 );
+
+-- THE OWNER'S RULING ON AUTH MAIL ("That was me" / "Not me"), one row per
+-- message. Written only by the human door (`PUT /client/sealed/{id}/verdict`,
+-- audited) and served only there; no agent-door path returns a verdict. It
+-- moves FYE membership: `not_mine` puts the message there, and `mine` takes a
+-- critical account change back out (see `auth_fye_sql!`). The FYE list is
+-- shared with the agent door, so an UNRESTRICTED message's presence there can
+-- reflect a ruling; restricted mail never reaches the agent wherever it sits.
+-- It also keeps evidence from the shredder. No row is no ruling. It outlives
+-- re-triage on purpose: the owner ruled on the message, not on one model
+-- run's reading of it. A ruling on a legacy sealed row (no agent decision) is
+-- kept and served but never moves FYE.
+CREATE TABLE IF NOT EXISTS auth_verdicts (
+    account_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    verdict    TEXT NOT NULL CHECK(verdict IN ('mine','not_mine')),
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, message_id)
+);
+-- Auto-translate (docs/TRANSLATION.md): the English version of mail written in
+-- another language, BESIDE the message. `messages.subject`/`body`/`body_html`
+-- are never rewritten. A SERVED translation (`done`, `incomplete`) IS part of
+-- the agent's content snapshot, hashed in only when one exists. Ingest
+-- inserts `pending` (live) or `deferred` (archive tier, or a backfill over
+-- the day's translate budget) for a non-English message; spam, sent, own and
+-- sealed mail never get a row. Timestamps are
+-- unix seconds. `missing_facts` is a JSON array, set when `incomplete`.
+-- `not_needed` is terminal: the translator read the message as English, so
+-- the local detection was a false positive and nothing is served.
+-- `rejected` is terminal too: the engine refused its own output (a reverse or
+-- fact check it could not pass), so nothing is served and nothing is retried.
+--
+-- `lease` is the claim token: stamped by every claim, matched by every write
+-- of a result, cleared by every terminal write. A result whose lease is gone
+-- (a heal dropped and re-queued the row, or the lease expired and another
+-- pass took it) writes nothing. `triage_wait_until` is how long agent triage
+-- holds this message's job back while the row is `pending`, so foreign mail
+-- is normally triaged once, on the English (docs/TRANSLATION.md, Pipeline);
+-- set for newly arrived live mail only. `releases` counts consecutive claims
+-- handed back on a configuration or outage failure without spending an
+-- attempt; past two, the next message-shaped such failure (a timeout, a 400)
+-- is charged to the row, but only if the gateway has answered some other
+-- translation since `first_released_at` (unix MILLISECONDS, the first release
+-- of the run, or the last charge; NULL after any verdict). A total outage
+-- therefore never spends an attempt.
+CREATE TABLE IF NOT EXISTS message_translations (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL,
+    source_lang TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('deferred','pending','done','incomplete','failed','not_needed','rejected')),
+    subject TEXT,
+    body TEXT,
+    body_html TEXT,
+    snippet TEXT,
+    missing_facts TEXT,
+    model TEXT,
+    prompt_version INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease TEXT,
+    triage_wait_until INTEGER,
+    releases INTEGER NOT NULL DEFAULT 0,
+    first_released_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+-- The translate pass's claim: one account's rows by status.
+CREATE INDEX IF NOT EXISTS idx_message_translations_claim
+    ON message_translations(account_id, status, updated_at);

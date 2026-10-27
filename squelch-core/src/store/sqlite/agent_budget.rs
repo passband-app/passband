@@ -133,7 +133,14 @@ impl SqliteStore {
                          WHERE {HELD}"
                 ),
                 params![account, HELD_BY_BUDGET, now.to_rfc3339()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        count(row, 0)?,
+                        count(row, 1)?,
+                        count(row, 2)?,
+                        count(row, 3)?,
+                    ))
+                },
             )?;
         Ok(DailyBudgetStatus {
             held_arrival,

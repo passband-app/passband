@@ -4,7 +4,7 @@
 # Root user for the same reason as Dockerfile.prometheus: the Railway volume
 # at /var/lib/grafana mounts root-owned and Grafana's stock uid 472 cannot
 # write it.
-FROM grafana/grafana:12.2.0
+FROM grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
 USER root
 # How long Grafana remembers that it already sent a notification. It has to
 # outlast `repeat_interval` in provisioning/alerting/policies.yml, or a

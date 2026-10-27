@@ -124,6 +124,21 @@ fn client_router(state: ApiState) -> Router {
             "/client/v2/messages/{message_id}/opened",
             post(triage::opened),
         )
+        // "This is how long I looked, and how many links I followed." HUMAN
+        // DOOR ONLY for the reason `/opened` is: it is a statement about what
+        // a PERSON did, which an agent cannot make. Counts only, never a URL.
+        .route(
+            "/client/v2/messages/{message_id}/attention",
+            post(triage::attention),
+        )
+        // "Clean Reading out for me", and its exact undo. HUMAN DOOR ONLY,
+        // like every write and more than most: it resolves mail in bulk on
+        // the owner's say-so, which no agent may borrow.
+        .route("/client/v2/reading/smart_clear", post(triage::smart_clear))
+        .route(
+            "/client/v2/reading/smart_clear/{batch_id}/undo",
+            post(triage::smart_clear_undo),
+        )
         .route(
             "/client/v2/messages/{message_id}/corrections",
             post(triage::correct),
@@ -153,6 +168,18 @@ fn client_router(state: ApiState) -> Router {
         .route(
             "/client/thread/{thread_id}/opened",
             post(handlers::mark_thread_opened),
+        )
+        // "Translate what I am showing." The GET serves an archive thread's
+        // translations as `deferred` and buys nothing, for the same prefetch
+        // reason; the reader displaying the thread asks here. HUMAN DOOR ONLY.
+        .route(
+            "/client/thread/{thread_id}/translate",
+            post(handlers::translate_thread),
+        )
+        // "Languages I read": mail in them is never translated.
+        .route(
+            "/client/translate-config",
+            get(handlers::get_translate_config).post(handlers::set_translate_config),
         )
         .route("/client/attachments/{id}", get(handlers::get_attachment))
         // FILES ON THEIR WAY OUT (see the handlers' header). The upload carries
@@ -246,6 +273,12 @@ fn client_router(state: ApiState) -> Router {
         .route(
             "/client/sealed/{message_id}/reveal",
             post(handlers::reveal_sealed),
+        )
+        // The owner's "That was me / Not me" on one auth message. Human door
+        // only: the agent door never reads or writes a verdict.
+        .route(
+            "/client/sealed/{message_id}/verdict",
+            put(handlers::put_sealed_verdict),
         )
         .route(
             "/client/shredder",

@@ -4,7 +4,7 @@
 # The config is a TEMPLATE: entrypoint.sh renders the bifrost_llm canary's
 # virtual key into it from BLACKBOX_BIFROST_CANARY_KEY at boot, so the key
 # lives only in Railway service variables, never in this image or the repo.
-FROM prom/blackbox-exporter:v0.25.0
+FROM prom/blackbox-exporter:v0.29.1@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
 COPY deploy/monitoring/blackbox/blackbox.yml /etc/blackbox_exporter/config.template.yml
 COPY deploy/monitoring/blackbox/entrypoint.sh /entrypoint.sh
 EXPOSE 9115

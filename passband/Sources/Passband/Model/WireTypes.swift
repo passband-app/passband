@@ -27,6 +27,43 @@ extension LenientRawEnum {
     }
 }
 
+// MARK: - lenient optional field
+
+/// An OPTIONAL FIELD THAT CAN NEVER FAIL ITS PARENT: absent, null, or a value
+/// of the wrong shape all decode as nil. For a field the rest of the message
+/// does not need, on a type something else must not lose over it (the
+/// notification extension decodes `ClientMessage` too, and a message that
+/// fails to decode is a push that never shows). Encodes as an absent key when
+/// nil, so the round trip through a cache is the wire's own shape.
+@propertyWrapper
+struct LenientOptional<T: Codable & Sendable & Hashable>: Codable, Sendable, Hashable {
+    var wrappedValue: T?
+    init(wrappedValue: T?) { self.wrappedValue = wrappedValue }
+    init(from decoder: Decoder) throws {
+        wrappedValue = try? decoder.singleValueContainer().decode(T.self)
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        if let wrappedValue { try c.encode(wrappedValue) } else { try c.encodeNil() }
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// The synthesized decode asks for the wrapper with `decode`, which throws
+    /// on a missing key; this overload is what makes an absent key nil.
+    func decode<T>(_ type: LenientOptional<T>.Type, forKey key: Key) throws -> LenientOptional<T> {
+        (try? decodeIfPresent(LenientOptional<T>.self, forKey: key)) ?? LenientOptional(wrappedValue: nil)
+    }
+}
+
+extension KeyedEncodingContainer {
+    /// And nil is left OFF the wire rather than written as null.
+    mutating func encode<T>(_ value: LenientOptional<T>, forKey key: Key) throws {
+        guard let wrapped = value.wrappedValue else { return }
+        try encode(wrapped, forKey: key)
+    }
+}
+
 // MARK: - sender pair
 
 /// A wire type carrying the `from_name` / `from_addr` pair, so the one true
@@ -211,8 +248,17 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     /// what re-enters the standing band regardless of tier: a reminder is the
     /// user declaring the mail owed attention, and that outranks a verdict.
     var reminded_at: String?
+    /// The auth kinds triage gave this message (`decision.auth.kinds` on the v2
+    /// feed row, raw strings). Set only by the feed adapter (`AgentFeedItem.row`);
+    /// nil on every other listing. Non-empty means auth mail, which a For-your-
+    /// eyes row shows sealed and opens in the reveal (Lib/AuthPolicy.swift).
+    var auth_kinds: [String]? = nil
+    /// The decision's own `auth.critical`, beside `auth_kinds`.
+    var auth_critical: Bool? = nil
 
     var hasAttachments: Bool { has_attachments ?? false }
+    /// Auth mail by the row's own decision.
+    var isAuthRow: Bool { !(auth_kinds ?? []).isEmpty }
 
     /// The stamp a mail list dates and sorts this row by: arrival, or first
     /// listing when the daemon is too old to say when it arrived.
@@ -343,8 +389,49 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// daemon, which reads as unknown — the strict side. Governs the reader's
     /// tracker strip: see `allowsTrackers`.
     var sender_known: Bool?
+    /// THIS MESSAGE IN ENGLISH, when it was written in another language (see
+    /// docs/TRANSLATION.md). ABSENT on a daemon too old to translate, on mail
+    /// that is already English, and on a translation that failed, and all
+    /// three read the same way: the original, with nothing said about it.
+    /// LENIENT so the notification extension, which decodes this type too,
+    /// never fails a push over a field it does not draw: a value of the wrong
+    /// shape (a bare string, an array) reads as no translation at all, rather
+    /// than failing the whole message.
+    @LenientOptional var translation: ClientTranslation? = nil
 
     var attachmentList: [Attachment] { attachments ?? [] }
+
+    /// The translation the reader may show INSTEAD of the original: one that
+    /// has finished and actually carries a body. A pending or deferred one
+    /// shows the original under a "translating" note, so it is not this.
+    var readyTranslation: ClientTranslation? {
+        guard let translation, translation.ready else { return nil }
+        return translation
+    }
+
+    /// THE MESSAGE AS THE READER DRAWS IT. The translated subject and body
+    /// swapped in, or the message untouched when there is no ready translation
+    /// or the reader asked for the original. Everything that ACTS on mail
+    /// (reply, forward, quoting) keeps the original: this is for drawing, and
+    /// for sizing what is drawn.
+    ///
+    /// A translation without html is drawn as plain text even when the
+    /// original had html: the translated text is the thing to read, and
+    /// showing the untranslated document around it would be showing the
+    /// original.
+    func presented(original: Bool = false) -> ClientMessage {
+        guard !original, let t = readyTranslation else { return self }
+        var shown = self
+        if !t.subject.isEmpty { shown.subject = t.subject }
+        if let html = t.html, !html.isEmpty {
+            shown.html = html
+            if !t.content.isEmpty { shown.content = t.content }
+        } else {
+            shown.html = nil
+            shown.content = t.content
+        }
+        return shown
+    }
 
     /// The side of the conversation this message is on, for the chat style.
     /// `nil` (old daemon) is THEIRS: an unknown side drawn as the user's own
@@ -365,6 +452,88 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     }
 }
 
+/// core::types::ClientTranslation: one message's English rendering. Decoded
+/// LENIENTLY, field by field: a missing or mistyped field takes its empty
+/// value rather than failing the message it rides on, because a thread that
+/// will not decode is a thread that will not open, and the translation is the
+/// optional half of it. An unknown status reads as `done`, which shows only
+/// when it carries a body (`ready`).
+struct ClientTranslation: Codable, Sendable, Hashable {
+    enum Status: String, LenientRawEnum {
+        /// ARCHIVE MAIL: a translation is available and nothing has been
+        /// spent on it. Reading the thread does not buy it (the prefetch reads
+        /// threads nobody opened); the reader DISPLAYING the thread asks, over
+        /// `APIClient.translateThread`, and then it is `pending`.
+        case deferred
+        case pending, done, incomplete
+        static var unknownFallback: Status { .done }
+    }
+
+    /// ISO code, e.g. "fr".
+    var source_lang: String
+    /// English name, e.g. "French". What the reader says.
+    var source_language: String
+    var status: Status
+    var subject: String
+    var content: String
+    var html: String?
+    /// What the daemon's fact check found in the original and not in the
+    /// translation (numbers, codes, links). Only on `incomplete`.
+    var missing_facts: [String]?
+
+    init(
+        source_lang: String, source_language: String, status: Status, subject: String,
+        content: String, html: String? = nil, missing_facts: [String]? = nil
+    ) {
+        self.source_lang = source_lang
+        self.source_language = source_language
+        self.status = status
+        self.subject = subject
+        self.content = content
+        self.html = html
+        self.missing_facts = missing_facts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case source_lang, source_language, status, subject, content, html, missing_facts
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func text(_ key: CodingKeys) -> String {
+            ((try? c.decodeIfPresent(String.self, forKey: key)) ?? nil) ?? ""
+        }
+        source_lang = text(.source_lang)
+        source_language = text(.source_language)
+        status = ((try? c.decodeIfPresent(Status.self, forKey: .status)) ?? nil) ?? .done
+        subject = text(.subject)
+        content = text(.content)
+        html = (try? c.decodeIfPresent(String.self, forKey: .html)) ?? nil
+        missing_facts = (try? c.decodeIfPresent([String].self, forKey: .missing_facts)) ?? nil
+    }
+
+    /// The language as the reader names it: the English name, else the code,
+    /// else a phrase that is still a sentence.
+    var languageName: String {
+        let name = source_language.trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty { return name }
+        let code = source_lang.trimmingCharacters(in: .whitespaces)
+        return code.isEmpty ? "another language" : code.uppercased()
+    }
+
+    /// Finished, and with something to show. A `done` that arrived with no
+    /// body at all is treated as no translation rather than a blank message.
+    var ready: Bool {
+        (status == .done || status == .incomplete)
+            && (!(html ?? "").isEmpty || !content.isEmpty)
+    }
+
+    /// Not here yet, and coming: the reader shows the original and says it is
+    /// translating. A deferred one is drawn the same way, because the reader
+    /// that shows it is the one that asks for it.
+    var awaiting: Bool { status == .pending || status == .deferred }
+}
+
 /// core::types::ClientThreadView (GET /client/thread/{id}).
 struct ClientThreadView: Codable, Sendable, Hashable {
     /// Reusable body caches require an explicit current server assessment.
@@ -373,6 +542,40 @@ struct ClientThreadView: Codable, Sendable, Hashable {
     var thread_id: String
     var subject: String
     var messages: [ClientMessage]
+}
+
+extension ClientThreadView {
+    /// THIS THREAD WITH `fresh`'S TRANSLATIONS LAID OVER IT, and nothing else
+    /// changed: what the reader's translation poll adopts, so a refetch made
+    /// only to see whether the English has landed cannot move, re-order or
+    /// re-render anything else under somebody reading. A message `fresh` does
+    /// not carry keeps what it had; one `fresh` carries with NO translation
+    /// (it failed, and the daemon leaves failures off the wire) loses it.
+    /// nil when not one translation changed, so the caller can skip the write.
+    func mergingTranslations(from fresh: ClientThreadView) -> ClientThreadView? {
+        var incoming: [Int: ClientTranslation?] = [:]
+        for m in fresh.messages where incoming[m.id] == nil { incoming[m.id] = .some(m.translation) }
+        var merged = self
+        var changed = false
+        for i in merged.messages.indices {
+            guard let t = incoming[merged.messages[i].id], t != merged.messages[i].translation
+            else { continue }
+            merged.messages[i].translation = t
+            changed = true
+        }
+        return changed ? merged : nil
+    }
+
+    /// Same messages, same order: the only case the poll may merge into. Any
+    /// other difference is an arrival, which the in-place refresh owns.
+    func sameMessages(as other: ClientThreadView) -> Bool {
+        messages.map(\.id) == other.messages.map(\.id)
+    }
+
+    /// How many messages have a translation READY to show. Part of the
+    /// reader's measuring-pass identity: a translation landing is a new
+    /// document to size under a new key.
+    var readyTranslations: Int { messages.reduce(0) { $0 + ($1.readyTranslation == nil ? 0 : 1) } }
 }
 
 // MARK: - shipments
@@ -901,6 +1104,81 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     var id: String { sender }
 }
 
+// MARK: - reading smart clear
+
+/// `POST /client/v2/reading/smart_clear`: the daemon marked expired and plainly
+/// unwanted Reading mail done, and says what it took and why.
+struct SmartClearResult: Decodable, Sendable, Hashable {
+    /// The handle the undo takes. nil when nothing was cleared, or when this
+    /// daemon keeps no batch to undo.
+    var batch_id: String?
+    var cleared: Int
+    var senders: Int
+    /// Reason code to count. Codes this build has no line for are still
+    /// counted in `cleared`; `SmartClearCopy` folds them into one plain line.
+    var by_reason: [String: Int]
+    var message_ids: [Int]
+    /// Whether the model pass ran: `ok`, or one of the `skipped_` codes.
+    var model: String?
+    /// One per cleared message, for the full list. nil on a daemon that
+    /// does not send them: the list is then not offered, never faked.
+    var rows: [Row]?
+
+    /// One cleared message. Everything but the id and the sender is
+    /// optional, and `reason` stays a string: a code from a newer daemon
+    /// must cost a heading, not the decode.
+    struct Row: Decodable, Sendable, Hashable {
+        var message_id: Int
+        var reason: String?
+        var sender: String
+        var sender_name: String?
+        var subject: String?
+        var received_at: String?
+    }
+
+    /// A row that cannot be decoded is dropped by itself.
+    private struct RowSlot: Decodable {
+        var row: Row?
+        init(from decoder: Decoder) throws { row = try? Row(from: decoder) }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case batch_id, cleared, senders, by_reason, message_ids, model, rows
+    }
+
+    init(
+        batch_id: String?, cleared: Int, senders: Int, by_reason: [String: Int],
+        message_ids: [Int], model: String? = "ok", rows: [Row]? = nil
+    ) {
+        self.rows = rows
+        self.batch_id = batch_id
+        self.cleared = cleared
+        self.senders = senders
+        self.by_reason = by_reason
+        self.message_ids = message_ids
+        self.model = model
+    }
+
+    /// Lenient about everything but the count: a receipt can be drawn from
+    /// `cleared` alone, and a daemon a release ahead must not cost the whole
+    /// answer over a field this build does not read.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        batch_id = try c.decodeIfPresent(String.self, forKey: .batch_id)
+        cleared = try c.decode(Int.self, forKey: .cleared)
+        senders = try c.decodeIfPresent(Int.self, forKey: .senders) ?? 0
+        by_reason = try c.decodeIfPresent([String: Int].self, forKey: .by_reason) ?? [:]
+        message_ids = try c.decodeIfPresent([Int].self, forKey: .message_ids) ?? []
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        rows = (try? c.decodeIfPresent([RowSlot].self, forKey: .rows))?.compactMap(\.row)
+    }
+}
+
+/// `POST /client/v2/reading/smart_clear/{batch_id}/undo`.
+struct SmartClearUndone: Decodable, Sendable, Hashable {
+    var reopened: Int
+}
+
 // MARK: - search / audit / stats
 
 struct SearchHit: Codable, Sendable, Identifiable, Hashable {
@@ -908,7 +1186,7 @@ struct SearchHit: Codable, Sendable, Identifiable, Hashable {
     var displaySnippet: String? = nil
     enum CodingKeys: String, CodingKey {
         case is_done, subject_matches, snippet_matches, id, thread_id
-        case from_addr, from_name, subject, received_at, snippet, legs
+        case from_addr, from_name, subject, received_at, snippet, legs, from_me
     }
 
     // Optional for compatibility with older daemons: unknown is not unfinished.
@@ -928,6 +1206,9 @@ struct SearchHit: Codable, Sendable, Identifiable, Hashable {
     /// decode every hit from one — the whole search panel dark over a
     /// diagnostic.
     var legs: [String]?
+    /// The account wrote this message (its own sent mail). OPTIONAL because
+    /// an older daemon sends no such field.
+    var from_me: Bool? = nil
 }
 
 /// WHAT RETRIEVAL DID WITH THE READER'S WORDS, straight from the daemon: how
@@ -1763,6 +2044,15 @@ enum SealedKind: LenientRawEnum {
     case loginAlert
     case securityAlert
     case verification
+    /// A security setting on the owner's account changed (recovery phone, 2FA,
+    /// password, SSH key, a card added to a wallet...). The serious ones also
+    /// carry `SealedMeta.critical`.
+    case accountChange
+    /// A third-party app was granted access to the account.
+    case appGrant
+    /// Proof the owner used one account to sign in to another service ("You
+    /// shared some Google Account data with X"). Never asks a question.
+    case signinReceipt
     case unknown(String)
 
     var rawValue: String {
@@ -1773,6 +2063,9 @@ enum SealedKind: LenientRawEnum {
         case .loginAlert: "login_alert"
         case .securityAlert: "security_alert"
         case .verification: "verification"
+        case .accountChange: "account_change"
+        case .appGrant: "app_grant"
+        case .signinReceipt: "signin_receipt"
         case .unknown(let raw): raw
         }
     }
@@ -1787,6 +2080,9 @@ enum SealedKind: LenientRawEnum {
         case "login_alert": self = .loginAlert
         case "security_alert": self = .securityAlert
         case "verification": self = .verification
+        case "account_change": self = .accountChange
+        case "app_grant": self = .appGrant
+        case "signin_receipt": self = .signinReceipt
         default: self = .unknown(rawValue)
         }
     }
@@ -1807,6 +2103,39 @@ struct SealedMeta: Codable, Sendable, Identifiable, Hashable {
     var subject: String
     var kind: SealedKind?
     var received_at: String
+    /// A takeover-class account change (recovery phone moved, 2FA off, password
+    /// changed...). ABSENT from a daemon older than server-side verdicts, and
+    /// that absence is how the client tells the two apart: a daemon that
+    /// serves this key also serves `verdict` and the PUT that writes it (see
+    /// Lib/AuthPolicy.swift, `speaksVerdicts`).
+    var critical: Bool? = nil
+    /// The owner's ruling, "mine" or "not_mine", or null while unruled. Kept as
+    /// the raw string so a value this build has never heard of decodes as
+    /// "no verdict" instead of failing the whole list.
+    var verdict: String? = nil
+    /// The message id of the code, link or receipt that explains this alert
+    /// (the same service, within minutes). Never set on a critical change.
+    var explained_by: Int? = nil
+}
+
+/// POST /client/sealed/{id}/reveal's optional `?source=`: where the reveal came
+/// from. Absent means interactive (a page the human acted on).
+enum RevealSource {
+    static let notification = "notification"
+}
+
+/// PUT /client/sealed/{id}/verdict. `verdict` nil CLEARS the ruling, and the
+/// key must still be on the wire as an explicit null: the shared encoder drops
+/// nil optionals, so this one encodes by hand.
+struct SealedVerdictBody: Encodable, Sendable {
+    var verdict: String?
+
+    private enum CodingKeys: String, CodingKey { case verdict }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(verdict, forKey: .verdict)
+    }
 }
 
 /// POST /client/sealed/{id}/reveal. `body` is a sensitive one-time reveal:
@@ -1828,6 +2157,18 @@ struct RevealedSealed: Codable, Sendable {
 struct Page<T: Codable & Sendable>: Codable, Sendable {
     var items: [T]
     var next_cursor: String?
+}
+
+/// POST /client/v2/messages/{id}/attention: how long the message was at the
+/// reader's focus and how many links in its body were activated, since the
+/// last report. The daemon ADDS these to what it holds, so either may be 0 and
+/// a message read in three sittings is three bodies.
+///
+/// Two numbers and nothing else, on purpose: which link, where it went and
+/// what the mail said are not the daemon's to learn from this route.
+struct AttentionBody: Encodable, Sendable {
+    var dwell_ms: UInt64
+    var link_clicks: UInt32
 }
 
 struct ArchiveBody: Codable, Sendable {
@@ -1955,6 +2296,109 @@ struct TrackingConfig: Codable, Sendable, Hashable {
 /// POST /client/tracking-config. An omitted field leaves the stored value alone.
 struct TrackingConfigBody: Codable, Sendable {
     var default_enabled: Bool?
+}
+
+/// One language the daemon's detector knows, by ISO 639-1 code and English
+/// name ("fr", "French").
+struct TranslateLanguage: Codable, Sendable, Hashable, Identifiable {
+    var code: String
+    var name: String
+    var id: String { code }
+}
+
+/// GET/POST /client/translate-config (docs/TRANSLATION.md): the languages the
+/// owner reads, which the daemon leaves untranslated. `active` false means the
+/// daemon has no model to translate with, so the set changes nothing yet.
+///
+/// Decoded LENIENTLY, field by field, and a malformed `available` entry is
+/// dropped rather than failing the list: this is a settings card, and a card
+/// that will not decode is a setting nobody can reach.
+struct TranslateConfig: Codable, Sendable, Hashable {
+    var active: Bool
+    /// Lowercase ISO codes, as stored.
+    var read_languages: [String]
+    /// Every language the detector knows except English, sorted by name.
+    var available: [TranslateLanguage]
+
+    init(active: Bool, read_languages: [String], available: [TranslateLanguage]) {
+        self.active = active
+        self.read_languages = read_languages
+        self.available = available
+    }
+
+    private enum CodingKeys: String, CodingKey { case active, read_languages, available }
+
+    /// Decodes one array element as whatever it is, so a bad one can be
+    /// skipped without stopping the container.
+    private struct Skip: Decodable { init(from decoder: Decoder) throws {} }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        active = ((try? c.decodeIfPresent(Bool.self, forKey: .active)) ?? nil) ?? false
+        var codes: [String] = []
+        if var list = try? c.nestedUnkeyedContainer(forKey: .read_languages) {
+            while !list.isAtEnd {
+                if let code = try? list.decode(String.self) {
+                    let normal = code.lowercased()
+                    if !normal.isEmpty, !codes.contains(normal) { codes.append(normal) }
+                } else if (try? list.decode(Skip.self)) == nil {
+                    break
+                }
+            }
+        }
+        read_languages = codes
+        var langs: [TranslateLanguage] = []
+        if var list = try? c.nestedUnkeyedContainer(forKey: .available) {
+            while !list.isAtEnd {
+                if let lang = try? list.decode(TranslateLanguage.self), !lang.code.isEmpty {
+                    langs.append(TranslateLanguage(code: lang.code.lowercased(), name: lang.name))
+                } else if (try? list.decode(Skip.self)) == nil {
+                    break
+                }
+            }
+        }
+        available = langs
+    }
+
+    /// What a chip says: the detector's English name, or the bare code for a
+    /// stored language the detector no longer lists, so it can still be removed.
+    func name(of code: String) -> String {
+        available.first { $0.code == code }?.name ?? code.uppercased()
+    }
+
+    /// The add menu: everything known and not already chosen, in the daemon's
+    /// (alphabetical) order.
+    var addable: [TranslateLanguage] {
+        available.filter { !read_languages.contains($0.code) }
+    }
+}
+
+/// POST /client/translate-config. Replaces the whole set; the daemon drops
+/// unknown codes and "en".
+struct TranslateConfigBody: Codable, Sendable {
+    var read_languages: [String]
+}
+
+/// What the settings card knows about the translate config. Not a wire type,
+/// but kept beside it so the read's failure rule is testable without the app.
+enum TranslateConfigState: Sendable, Equatable {
+    /// Not asked yet, or asked and still waiting.
+    case unknown
+    /// The daemon predates the setting (404): every language is translated
+    /// and there is nothing to choose.
+    case notOffered
+    /// The read failed for any other reason. Must not look like `notOffered`.
+    case unreadable
+    case loaded(TranslateConfig)
+
+    /// What a failed read leaves showing. A 404 always wins (the daemon was
+    /// replaced by an older one); anything else keeps a set already shown,
+    /// because the stored set did not change when the network blinked.
+    func failed(notFound: Bool) -> TranslateConfigState {
+        if notFound { return .notOffered }
+        if case .loaded = self { return self }
+        return .unreadable
+    }
 }
 
 /// What an agent connected over Agent MCP may WRITE to this mailbox. The
@@ -2570,7 +3014,7 @@ struct AgentFeedItem: Codable, Sendable {
     /// Adapter for shared row/reader controls while those controls still use
     /// AttentionUpdate. The neutral legacy tier is never used for membership.
     var row: AttentionUpdate {
-        AttentionUpdate(
+        var row = AttentionUpdate(
             id: message_id, thread_id: thread_id, tier: .signal,
             importance: Int((attention.factors.importance * 100).rounded()),
             sender: from_addr,
@@ -2579,6 +3023,9 @@ struct AgentFeedItem: Codable, Sendable {
             deadline: attention.factors.attention_at?.value,
             from_name: from_name,
             subject: subject, status: .new, surfaced_at: received_at)
+        row.auth_kinds = decision.auth?.kinds
+        row.auth_critical = decision.auth?.critical
+        return row
     }
 
     var readingRow: AttentionUpdate {
@@ -2606,6 +3053,33 @@ struct AgentMessageDecision: Codable, Sendable {
     var summary: String
     var reason: String
     var records: [AgentRecordProposal]?
+    /// `auth`: which auth kinds triage found. Optional throughout so a
+    /// decision shaped any other way still decodes.
+    var auth: AgentAuthAssessment? = nil
+}
+
+/// core::triage::decision::AuthAssessment, the two fields a client reads.
+/// Kinds stay raw strings (`sign_in_link`, not the sealed `magic_link`).
+struct AgentAuthAssessment: Codable, Sendable {
+    var kinds: [String]?
+    var critical: Bool?
+
+    init(kinds: [String]? = nil, critical: Bool? = nil) {
+        self.kinds = kinds
+        self.critical = critical
+    }
+
+    /// Field by field and forgiving: a feed whose consumer cannot decode one
+    /// row loses the whole page, and this block is presentation, not membership.
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            kinds = nil
+            critical = nil
+            return
+        }
+        kinds = (try? c.decodeIfPresent([String].self, forKey: .kinds)) ?? nil
+        critical = (try? c.decodeIfPresent(Bool.self, forKey: .critical)) ?? nil
+    }
 }
 
 /// Presentation consumes explicit record facts; it never infers kinds from copy.

@@ -318,6 +318,143 @@ pub struct TriagedMessage {
     /// The first calendar invitation in the message that named a real zone,
     /// credited to its ORGANIZER (not the From). See [`crate::timezone`].
     pub invite_zone: Option<crate::timezone::InviteZone>,
+    /// The language ingest detected, when it is NOT English
+    /// ([`crate::translate::detect`]). `Some` queues a `message_translations`
+    /// row in the ingest transaction: `pending` for live mail, `deferred` for
+    /// the archive tier. Ingest leaves it `None` for spam and sent mail, and
+    /// the store refuses both again, plus the account's own and sealed mail.
+    pub translate_lang: Option<crate::translate::Lang>,
+    /// The translator has no budget left today (`translate.daily_budget_usd`
+    /// spent). Then live mail is queued without holding its triage, and a
+    /// backfilled message is queued `deferred` (translated when the reader
+    /// opens it) rather than `pending` for days.
+    pub translate_over_budget: bool,
+}
+
+/// Where a message's translation stands (`message_translations.status`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationStatus {
+    /// Archive tier: nothing is spent until the reader displaying the thread
+    /// asks (`POST /client/thread/{id}/translate`).
+    Deferred,
+    /// Waiting for (or claimed by) the translate pass.
+    Pending,
+    Done,
+    /// Translated, but the fact check still found source facts missing.
+    Incomplete,
+    /// Nothing usable came back; retried with backoff, a bounded number of
+    /// times.
+    Failed,
+    /// Terminal: the translator read the message as English. Served nowhere.
+    NotNeeded,
+    /// Terminal: the engine refused its own output (it could not verify the
+    /// translation carries the original). Served nowhere, never retried.
+    Rejected,
+}
+
+impl TranslationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deferred => "deferred",
+            Self::Pending => "pending",
+            Self::Done => "done",
+            Self::Incomplete => "incomplete",
+            Self::Failed => "failed",
+            Self::NotNeeded => "not_needed",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "deferred" => Self::Deferred,
+            "pending" => Self::Pending,
+            "done" => Self::Done,
+            "incomplete" => Self::Incomplete,
+            "failed" => Self::Failed,
+            "not_needed" => Self::NotNeeded,
+            "rejected" => Self::Rejected,
+            _ => return None,
+        })
+    }
+}
+
+/// One claimed translation: the message's ORIGINAL fields, as stored.
+#[derive(Debug, Clone)]
+pub struct TranslationJob {
+    pub message_id: i64,
+    pub account_id: AccountId,
+    /// ISO 639-1, as detection wrote it.
+    pub source_lang: String,
+    pub subject: String,
+    pub body: String,
+    pub body_html: Option<String>,
+    /// Attempts including this one.
+    pub attempts: i64,
+    /// THE CLAIM TOKEN. Every write of this job's result matches on it, so a
+    /// result for a row that a heal dropped and re-queued, or that another
+    /// pass took after the lease expired, writes nothing.
+    pub lease: String,
+    /// The status and `updated_at` the row had before this claim, which a
+    /// [`TranslationWrite::Released`] puts back, so a released `failed` row
+    /// keeps its backoff.
+    pub prev_status: TranslationStatus,
+    pub prev_updated_at: i64,
+    /// Consecutive releases before this claim. At
+    /// `MAX_CONSECUTIVE_RELEASES` a [`TranslationWrite::Released`] is charged
+    /// to the row instead, so the pass knows not to raise the alarm again.
+    pub releases: i64,
+}
+
+/// What the translate pass writes back for a claimed row.
+#[derive(Debug, Clone, Copy)]
+pub enum TranslationWrite<'a> {
+    /// `done`, or `incomplete` when `missing_facts` is not empty or only the
+    /// head of the message was translated (`truncated`).
+    Translated {
+        translated: &'a crate::translate::Translated,
+        model: &'a str,
+        prompt_version: i64,
+    },
+    /// `failed`: retried after a backoff until the attempts run out.
+    Failed { model: &'a str },
+    /// `not_needed`: the translator read the message as English. Terminal.
+    NotNeeded { model: &'a str, prompt_version: i64 },
+    /// `rejected`: the engine refused its own output. Terminal, never served.
+    Rejected { model: &'a str, prompt_version: i64 },
+    /// Hand the claim back WITHOUT spending its attempt: the call never
+    /// reached a verdict about this message (a rejected key, an exhausted
+    /// budget, a model the gateway will not serve, a provider outage or
+    /// timeout), so the row is exactly as translatable as it was, and goes
+    /// back to the status and backoff it had before the claim. The pass that
+    /// releases it stops and cools down. After `MAX_CONSECUTIVE_RELEASES`
+    /// in a row it is charged instead (`failed`, the attempt spent), but
+    /// only when `last_answer_ms` (when the gateway last answered any
+    /// translation call for the account, unix ms) is later than the row's
+    /// first release: a failure only this message keeps drawing while
+    /// others get answers is about the message. `None` (a capacity failure,
+    /// 429/5xx, or no answer seen) never charges, so a total outage keeps
+    /// every row pending with its attempts untouched.
+    Released { last_answer_ms: Option<i64> },
+    /// Hand the claim back untouched because the pass never tried it (no
+    /// room left in today's budget). Not counted as a release.
+    Returned,
+}
+
+/// A stored translation row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageTranslation {
+    pub message_id: i64,
+    pub source_lang: String,
+    pub status: TranslationStatus,
+    pub subject: Option<String>,
+    pub body: Option<String>,
+    pub body_html: Option<String>,
+    pub snippet: Option<String>,
+    pub missing_facts: Vec<String>,
+    pub model: Option<String>,
+    pub prompt_version: Option<i64>,
+    pub attempts: i64,
 }
 
 /// The full body of one sealed message. HUMAN-DOOR-ONLY: returned solely by
@@ -1271,7 +1408,22 @@ pub struct SealedMessage {
     pub from_addr: String,
     pub subject: String,
     pub received_at: DateTime<Utc>,
+    /// The one kind a client sees: [`AuthKind::priority_pick`] over the
+    /// decision's kinds, in wire spelling (`magic_link`). Legacy rows keep
+    /// their stored `triage.sealed_kind`.
+    ///
+    /// [`AuthKind::priority_pick`]: crate::triage::decision::AuthKind::priority_pick
     pub sealed_kind: Option<String>,
+    /// A takeover-class account change that holds FYE: `AuthAssessment::
+    /// is_critical`, unless the sender explicitly failed authentication
+    /// (`auth_pass = 0`). The value FYE uses (`auth_critical_sql!`).
+    pub critical: bool,
+    /// The owner's server-side ruling, if they made one.
+    pub verdict: Option<crate::types::AuthVerdict>,
+    /// The auth message that accounts for this alert (a code, link or
+    /// sign-in receipt from the same service within minutes), computed at
+    /// read time by [`crate::triage::auth_pairing`].
+    pub explained_by: Option<i64>,
 }
 
 /// One row of the user's OWN sent mail, for the human door's sent listing
@@ -2193,6 +2345,19 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// does not exist or is not sealed.
     fn sealed_body(&self, account_id: AccountId, message_id: i64) -> Result<SealedBody>;
 
+    /// HUMAN-DOOR-ONLY (`PUT /client/sealed/{id}/verdict`): record the owner's
+    /// ruling on one auth message, or clear it with `None`. `NotFound` when the
+    /// message does not exist or is not auth mail (the membership
+    /// [`Store::sealed_body`] uses). A legacy sealed row (no agent decision)
+    /// takes a ruling but never moves FYE. MUST NOT be reachable from MCP.
+    fn set_auth_verdict(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        verdict: Option<crate::types::AuthVerdict>,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
     /// HUMAN-DOOR-ONLY (`GET /client/sent`): the user's own sent mail, newest
     /// first (`received_at DESC, id DESC`), `limit`/`offset` paginating exactly
     /// as [`Store::search`] does. MUST NOT be reachable from MCP — the agent
@@ -2694,6 +2859,16 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// trailing-window Stage-1 averages on `/client/triage-config`.
     fn stage1_usage_since(&self, account_id: AccountId, since_day: &str) -> Result<Stage2Usage>;
 
+    /// Sum ONE usage-ledger category over every day `>= since_day`. The
+    /// translate pass reads today's `translate` line to settle its dollar
+    /// budget from what the provider actually billed.
+    fn category_usage_since(
+        &self,
+        account_id: AccountId,
+        since_day: &str,
+        category: &str,
+    ) -> Result<Stage2Usage>;
+
     /// Bump a SPECIALIST-EXTRACTOR usage line for `(account_id, day, category)`.
     /// `category` is the extractor's own ledger label (e.g. `extract_banking`),
     /// kept separate from `stage1`/`stage2` so per-specialist cost stays visible.
@@ -2883,4 +3058,98 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     fn embedder(&self) -> Option<std::sync::Arc<dyn crate::embed::Embedder>> {
         None
     }
+
+    // ---- auto-translate (docs/TRANSLATION.md) ------------------------------
+
+    /// Queue one message for translation from `source_lang` (ISO 639-1),
+    /// `deferred` for the archive tier. A row that exists is left alone. A
+    /// `pending` row holds its triage like newly arrived mail. Ingest queues
+    /// its own rows inside its transaction; this is for everything else.
+    fn queue_translation(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        source_lang: &str,
+        deferred: bool,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Claim up to `limit` rows due for translation, newest mail first:
+    /// `pending` ones, and `failed` ones whose backoff has passed. Each claim
+    /// counts an attempt and stamps a lease token, and a row out of attempts is
+    /// never claimed again. Spam, sealed and the account's own mail are never
+    /// claimed. The claim first settles rows nothing will ever finish: a lease
+    /// that expired on the last attempt is `failed`, and a row whose message
+    /// became spam, sealed or own mail is closed (its served text, index
+    /// columns and vector dropped).
+    fn claim_translations(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<TranslationJob>>;
+
+    /// Write a claimed row's result. Only over the job's own lease: a row a
+    /// heal dropped and re-queued meanwhile, or one another pass re-claimed,
+    /// is left as it is. `true` when it wrote, which is what lets the caller
+    /// embed the translation (a stale one must not get a vector).
+    fn record_translation(
+        &self,
+        job: &TranslationJob,
+        write: &TranslationWrite<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<bool>;
+
+    /// Promote a thread's `deferred` rows to `pending`, which is what the
+    /// reader DISPLAYING an archive thread asks for (`POST
+    /// /client/thread/{id}/translate`; a plain read never does, because the
+    /// client prefetches through it). Returns how many moved.
+    fn promote_deferred_translations(
+        &self,
+        account_id: AccountId,
+        thread_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<usize>;
+
+    /// The owner's "Languages I read" (ISO 639-1, sorted): mail detected in
+    /// one of them is shown as written and never translated.
+    fn read_languages(&self, account_id: AccountId) -> Result<Vec<String>>;
+
+    /// Replace the "Languages I read" set (unknown codes and English are
+    /// dropped) and bring the queue in line: unserved rows in an added
+    /// language close `not_needed`, rows closed for a removed one come back
+    /// `deferred` (translated when opened). Served translations stay. Returns
+    /// the set as stored.
+    fn set_read_languages(
+        &self,
+        account_id: AccountId,
+        codes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>>;
+
+    /// The translation rows for `message_ids`, in any status, ordered by id.
+    /// The caller decides what a status means to its door.
+    fn message_translations(
+        &self,
+        account_id: AccountId,
+        message_ids: &[i64],
+    ) -> Result<Vec<MessageTranslation>>;
+
+    /// Write the English translation's vector for one message
+    /// (`message_translation_vecs`), replacing any. A no-op (beyond removing a
+    /// stale vector) unless the translation is served (`done`/`incomplete`).
+    fn upsert_translation_vector(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        embedding: &[f32],
+    ) -> Result<()>;
+
+    /// Up to `limit` served translations still missing a vector, newest mail
+    /// first, carrying the TRANSLATED subject and body.
+    fn translations_missing_vectors(
+        &self,
+        account_id: AccountId,
+        limit: usize,
+    ) -> Result<Vec<MissingVector>>;
 }

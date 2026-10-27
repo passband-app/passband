@@ -94,6 +94,13 @@ struct FromOperatorTests {
         awaiting("after:2026-01-01", is: false)
         awaiting("", is: false)
         awaiting("   ", is: false)
+        // `to:` waits for a value like `from:`; `in:sent` is complete as typed.
+        awaiting("to:", is: true)
+        awaiting("in:sent", is: false)
+        awaiting("in:sent to:", is: false)
+        // A scope operator is said intent: no sender lookup for it.
+        senderFragment(of: "in:sent", is: nil)
+        senderFragment(of: "to:dan", is: nil)
     }
 
     static func plainWordsAskTheDirectory() {

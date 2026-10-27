@@ -623,8 +623,31 @@ pub async fn get_thread(
 ) -> Result<impl IntoResponse, ApiError> {
     // Sealed and nonexistent threads are the SAME NotFound. Each message carries
     // its server-sanitized `html`, null for plain-text-only mail.
+    //
+    // READING A THREAD BUYS NOTHING (docs/TRANSLATION.md): an archive thread's
+    // `deferred` translations are served AS `deferred`, with no text, and stay
+    // parked. The client prefetches threads through this very GET (search
+    // results, list hovers, the sitrep), so promoting here would spend on
+    // archive mail nobody opened. The reader that DISPLAYS the thread asks
+    // for them over `POST /client/thread/{id}/translate` instead.
+    //
+    // NO TRANSLATOR, NO PROMISE: without one (translation off, no LLM), a
+    // `pending` or `deferred` row would never finish, so it is not served and
+    // the reader shows the original alone. A finished translation still is.
+    let translate_active = state.translate_active;
     query(&state, move |store, account_id| {
-        let view = store.thread_view_with_html(account_id, &thread_id)?;
+        let mut view = store.thread_view_with_html(account_id, &thread_id)?;
+        if !translate_active {
+            for message in &mut view.messages {
+                if message
+                    .translation
+                    .as_ref()
+                    .is_some_and(|t| t.status == "pending" || t.status == "deferred")
+                {
+                    message.translation = None;
+                }
+            }
+        }
         // Memoized per distinct sender: a thread is usually two addresses
         // repeated, and each miss is a round trip to `contacts`. The store
         // compares under COLLATE NOCASE, so the memo key is lowercased to match.
@@ -692,6 +715,104 @@ pub async fn mark_thread_opened(
     })
     .await?;
     Ok(Json(json!({ "opened": opened })))
+}
+
+// --- POST /client/thread/{thread_id}/translate ------------------------------
+
+/// "I am showing this thread: translate it." Promotes the thread's `deferred`
+/// (archive-tier) translations to `pending` and wakes the refine lane, so the
+/// work starts now rather than at the lane's next interval.
+///
+/// A ROUTE OF ITS OWN for `mark_thread_opened`'s reason: the GET is also how
+/// the client warms threads it has not shown, and archive mail spends nothing
+/// unprompted (`messages.is_archive` in schema.sql). Only the reader
+/// displaying the thread knows a person is looking at it.
+///
+/// IDEMPOTENT: only `deferred` rows move, so a second call promotes nothing
+/// and pokes nothing. `promoted` says how many moved. Sealed mail may move
+/// too and is still never claimed by the pass, so this spends nothing on it.
+pub async fn translate_thread(
+    State(state): State<ApiState>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !state.translate_active {
+        // Nothing would ever work a promoted row.
+        return Ok(Json(json!({ "promoted": 0 })));
+    }
+    let poke = state.archive_surfacing.poke.clone();
+    let promoted = store_call(&state, move |store, account_id| {
+        store.promote_deferred_translations(account_id, &thread_id, Utc::now())
+    })
+    .await?;
+    if promoted > 0
+        && let Some(poke) = &poke
+    {
+        poke.poke();
+    }
+    Ok(Json(json!({ "promoted": promoted })))
+}
+
+// --- GET/POST /client/translate-config ---------------------------------------
+
+/// The "Languages I read" setting: the codes the owner reads, every code they
+/// could pick (with its English name), and whether a translator is configured
+/// at all, so the card can say so instead of offering a choice that does
+/// nothing.
+#[derive(Debug, Serialize)]
+pub struct TranslateConfigView {
+    active: bool,
+    read_languages: Vec<String>,
+    available: Vec<LanguageChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LanguageChoice {
+    code: &'static str,
+    name: &'static str,
+}
+
+fn translate_config_view(active: bool, read_languages: Vec<String>) -> TranslateConfigView {
+    TranslateConfigView {
+        active,
+        read_languages,
+        available: squelch_core::translate::Lang::readable_choices()
+            .into_iter()
+            .map(|l| LanguageChoice {
+                code: l.code(),
+                name: l.english_name(),
+            })
+            .collect(),
+    }
+}
+
+pub async fn get_translate_config(
+    State(state): State<ApiState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let active = state.translate_active;
+    let codes = store_call(&state, move |store, account_id| {
+        store.read_languages(account_id)
+    })
+    .await?;
+    Ok(Json(translate_config_view(active, codes)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TranslateConfigBody {
+    read_languages: Vec<String>,
+}
+
+/// Replaces the whole set. Unknown codes and English are dropped, and the
+/// response is the set as stored.
+pub async fn set_translate_config(
+    State(state): State<ApiState>,
+    Json(body): Json<TranslateConfigBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let active = state.translate_active;
+    let codes = store_call(&state, move |store, account_id| {
+        store.set_read_languages(account_id, &body.read_languages, Utc::now())
+    })
+    .await?;
+    Ok(Json(translate_config_view(active, codes)))
 }
 
 // --- GET /client/attachments/{id} -------------------------------------------
@@ -1660,7 +1781,7 @@ pub async fn search(
             account_id,
             &term,
             partial,
-            filter.include_sent,
+            filter.searches_sent(),
             counted_strict,
         )?;
         if queued_at.elapsed().as_millis() >= 250 {
@@ -3513,6 +3634,11 @@ pub async fn markdown_preview(
 // --- GET /client/sealed ------------------------------------------------------
 
 /// Sealed METADATA only. No bodies here, ever.
+///
+/// `kind` is the one kind a client sees, picked by priority across the
+/// decision's kinds. `critical`, `verdict` and `explained_by` are always
+/// present (`false` / `null` when there is nothing to say), so a client can
+/// tell this daemon from one without verdicts by the key alone.
 #[derive(Debug, Serialize)]
 struct SealedMeta {
     id: i64,
@@ -3521,6 +3647,9 @@ struct SealedMeta {
     subject: String,
     kind: Option<String>,
     received_at: DateTime<Utc>,
+    critical: bool,
+    verdict: Option<squelch_core::types::AuthVerdict>,
+    explained_by: Option<i64>,
 }
 
 pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
@@ -3537,9 +3666,65 @@ pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoRespo
             subject: m.subject,
             kind: m.sealed_kind,
             received_at: m.received_at,
+            critical: m.critical,
+            verdict: m.verdict,
+            explained_by: m.explained_by,
         })
         .collect();
     Ok(Json(items))
+}
+
+// --- PUT /client/sealed/{message_id}/verdict --------------------------------
+
+/// `{"verdict": "mine" | "not_mine" | null}`. The key is required: a body
+/// that forgot it must not read as "clear my ruling".
+#[derive(Debug, Deserialize)]
+pub struct AuthVerdictBody {
+    #[serde(deserialize_with = "required_nullable")]
+    verdict: Option<squelch_core::types::AuthVerdict>,
+}
+
+/// The owner's ruling on one auth message ("That was me" / "Not me"), kept
+/// on the server so every client sees it. `null` clears it. A `not_mine`
+/// puts the message in FYE; a `mine` takes a critical change back out.
+/// 404 for a message that is not auth mail. A legacy sealed row (sealed by
+/// the old pipeline, no agent decision) takes a ruling and serves it back,
+/// but it never moves FYE: it has no decision or attention to place.
+/// Every write is audited. HUMAN DOOR ONLY.
+pub async fn put_sealed_verdict(
+    State(state): State<ApiState>,
+    Path(message_id): Path<i64>,
+    Json(body): Json<AuthVerdictBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let verdict = body.verdict;
+    store_call(&state, move |store, account_id| {
+        store.set_auth_verdict(account_id, message_id, verdict, Utc::now())
+    })
+    .await?;
+    // A ruling moves FYE and the shredder, so it leaves a row like a reveal
+    // does: the message id and the ruling, nothing from the mail. The ruling
+    // has landed by now, so a failed audit is logged rather than failing a
+    // request whose effect a retry would only repeat.
+    let entry = NewAuditEntry {
+        actor: state.audit_actor.to_string(),
+        action: "auth_verdict".to_string(),
+        target: Some(message_id.to_string()),
+        detail: Some(
+            verdict
+                .map_or("cleared", |verdict| verdict.as_str())
+                .to_string(),
+        ),
+    };
+    if let Err(error) = store_call(&state, move |store, account_id| {
+        store.append_audit(account_id, &entry)
+    })
+    .await
+    {
+        eprintln!(
+            "squelch-api: auth verdict on {message_id} landed but its audit row did not ({error:?})"
+        );
+    }
+    Ok(Json(json!({ "id": message_id, "verdict": verdict })))
 }
 
 // --- POST /client/sealed/{message_id}/reveal --------------------------------
@@ -3560,23 +3745,52 @@ struct RevealedSealed {
     html: Option<String>,
 }
 
+/// `?source=notification` on a reveal opened by tapping a notification.
+/// Absent (every older client) or `interactive` is the owner choosing to
+/// reveal on the Auth page or FYE.
+#[derive(Debug, Default, Deserialize)]
+pub struct RevealQuery {
+    #[serde(default)]
+    source: Option<String>,
+}
+
 pub async fn reveal_sealed(
     State(state): State<ApiState>,
     Path(message_id): Path<i64>,
+    Query(query): Query<RevealQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The source rides on the audit row's detail. The Auth page's pairing
+    // reads a reveal as "the owner used this code", which a tap on an
+    // unsolicited code's banner is not, so notification reveals never
+    // explain an alert (`sealed_rows` skips them).
+    let detail = match query.source.as_deref() {
+        None | Some("interactive") => None,
+        Some("notification") => Some("notification".to_string()),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "source must be notification or interactive",
+            ));
+        }
+    };
     let sealed = store_call(&state, move |store, account_id| {
-        // Audit BEFORE returning the body, recording only the message id so the
-        // log itself never leaks a secret.
+        // Membership FIRST, then the audit, then the body leaves: a reveal
+        // row means a real reveal of auth mail. The Auth page's pairing
+        // reads these rows as "the owner used this code", so a refused
+        // reveal of some other id must leave none (it would read as used if
+        // that message were later classified auth). The audit still lands
+        // before anything is returned, and a failed audit returns nothing.
+        // Only the message id is recorded, so the log never leaks a secret.
+        let body = store.sealed_body(account_id, message_id)?;
         store.append_audit(
             account_id,
             &NewAuditEntry {
                 actor: AUDIT_ACTOR.to_string(),
                 action: "reveal_sealed".to_string(),
                 target: Some(message_id.to_string()),
-                detail: None,
+                detail,
             },
         )?;
-        store.sealed_body(account_id, message_id)
+        Ok(body)
     })
     .await?;
 
@@ -4072,7 +4286,8 @@ pub async fn get_usage(
         state.stage2_price_out_per_mtok,
     );
 
-    // One entry per ledger category, priced by THREE arms. Stage-2 runs the
+    // One entry per ledger category, priced by FOUR arms (the fourth, smart
+    // done's own model, is marked where it sits). Stage-2 runs the
     // capable model and its prices. `notify` runs the fast lane's own small
     // model and ITS prices (docs/NOTIFY.md §11.5): it is the one category that
     // is neither, and folding it into the arm below would bill a Haiku call at
@@ -4104,11 +4319,25 @@ pub async fn get_usage(
                 state.stage2_price_in_per_mtok,
                 state.stage2_price_out_per_mtok,
             )
+        } else if name == squelch_core::translate::USAGE_CATEGORY {
+            (
+                state.translate_model.as_ref(),
+                state.translate_price_in_per_mtok,
+                state.translate_price_out_per_mtok,
+            )
         } else if squelch_core::metrics::runs_notify_model(name) {
             (
                 state.notify_model.as_ref(),
                 state.notify_price_in_per_mtok,
                 state.notify_price_out_per_mtok,
+            )
+        } else if name == squelch_core::metrics::SMART_CLEAR_USAGE_CATEGORY {
+            // THE FOURTH ARM: smart clear's pass runs its own mid-sized model.
+            // Left to fall through it would be labelled and billed as Stage-1.
+            (
+                state.smart_clear_model.as_ref(),
+                state.smart_clear_price_in_per_mtok,
+                state.smart_clear_price_out_per_mtok,
             )
         } else {
             (

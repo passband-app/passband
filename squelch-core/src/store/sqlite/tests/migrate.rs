@@ -1016,6 +1016,102 @@ fn migrate_adds_reminder_columns_and_the_due_index_to_preexisting_triage() {
 }
 
 #[test]
+fn migrate_adds_attention_columns_and_dates_the_dwell_ledger_once() {
+    // A `triage` table that records opens but predates dwell and clicks, in a
+    // mailbox with two accounts. Both columns land at zero, and because that
+    // zero is not a measurement the dwell ledger is dated for EVERY existing
+    // account on this open, and never moved by a later one.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL,
+             created_at TEXT NOT NULL);
+         CREATE TABLE app_settings(account_id INTEGER NOT NULL, key TEXT NOT NULL,
+             value TEXT NOT NULL, PRIMARY KEY(account_id, key));
+         CREATE TABLE triage(
+             message_id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             model_used TEXT, status TEXT NOT NULL DEFAULT 'new', opened_at TEXT);
+         INSERT INTO accounts VALUES (1, 'a@example.com', '2020-01-01T00:00:00+00:00'),
+                                     (2, 'b@example.com', '2020-01-01T00:00:00+00:00');
+         INSERT INTO triage(message_id, account_id, opened_at)
+             VALUES (1, 1, '2026-01-01T00:00:00+00:00');",
+    )
+    .unwrap();
+    let before = Utc::now();
+    migrate(&conn).unwrap();
+
+    let (dwell, clicks): (i64, i64) = conn
+        .query_row(
+            "SELECT dwell_ms, link_clicks FROM triage WHERE message_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((dwell, clicks), (0, 0), "NOT NULL DEFAULT 0 on old rows");
+
+    let stamps = |conn: &Connection| -> Vec<(i64, String)> {
+        conn.prepare("SELECT account_id, value FROM app_settings WHERE key=?1 ORDER BY account_id")
+            .unwrap()
+            .query_map([DWELL_LEDGER_SINCE_KEY], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    let first = stamps(&conn);
+    assert_eq!(
+        first.iter().map(|s| s.0).collect::<Vec<_>>(),
+        [1, 2],
+        "one stamp per existing account"
+    );
+    for (_, value) in &first {
+        let at = DateTime::parse_from_rfc3339(value).unwrap();
+        assert!(at >= before && at <= Utc::now(), "stamped at this open");
+    }
+    // `opened_at` was already there, so the OPEN ledger is not restarted by
+    // an open that only adds dwell.
+    let open_stamps: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_settings WHERE key=?1",
+            [OPEN_LEDGER_SINCE_KEY],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(open_stamps, 0);
+
+    // Idempotent: a second open adds nothing and moves nothing.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    migrate(&conn).unwrap();
+    assert_eq!(stamps(&conn), first);
+}
+
+#[test]
+fn migrate_adds_resolved_by_null_to_a_preexisting_triage_table() {
+    // A `triage` table from before provenance, holding a row somebody (or
+    // something) resolved. The column lands NULL and is NOT backfilled: NULL
+    // means "a person, or a path older than this column", which is the only
+    // true thing to say about that row, and a guessed stamp would hand some
+    // batch's undo a row it never took.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE triage(
+             message_id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             model_used TEXT, status TEXT NOT NULL DEFAULT 'new', resolved_at TEXT);
+         INSERT INTO triage(message_id, account_id, status, resolved_at)
+             VALUES (1, 1, 'done', '2026-01-01T00:00:00+00:00');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let (status, by): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, resolved_by FROM triage WHERE message_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((status.as_str(), by), ("done", None));
+}
+
+#[test]
 fn migrate_adds_notify_eligible_at_null_to_a_preexisting_triage_table() {
     // A `triage` table predating the notify-eligibility stamp. The column has
     // to land through the migration seam rather than schema.sql, because
@@ -1754,6 +1850,75 @@ fn a_rebuild_that_cannot_run_leaves_the_old_index_serving() {
         )
         .unwrap();
     assert!(created.contains("porter"), "rebuilt on retry: {created}");
+}
+
+#[test]
+fn the_translation_columns_arrive_by_rebuild_and_carry_served_translations() {
+    // The definition every mailbox had before auto-translate: stemmed, prefix
+    // indexed, two columns. Adding `tsubject`/`tbody` to `schema.sql` is a
+    // column change, so the open rebuilds, and the refill must pick up the
+    // English of every SERVED translation (done, incomplete) and of no other.
+    let conn = fts_fixture(
+        "CREATE VIRTUAL TABLE messages_fts USING fts5(
+             subject, body, tokenize = 'porter unicode61', prefix = '2 3')",
+    );
+    conn.execute_batch(
+        "CREATE TABLE message_translations(
+             message_id INTEGER PRIMARY KEY, status TEXT NOT NULL,
+             subject TEXT, body TEXT);
+         INSERT INTO messages(id, account_id, gmail_msg_id, subject, body)
+             VALUES (2, 1, 'g2', 'Votre facture', 'votre facture est prête'),
+                    (3, 1, 'g3', 'Ihre Rechnung', 'Ihre Rechnung ist da'),
+                    (4, 1, 'g4', 'Tu factura', 'tu factura está lista');
+         INSERT INTO messages_fts(rowid, subject, body)
+             SELECT id, subject, body FROM messages WHERE id > 1;
+         INSERT INTO message_translations VALUES
+             (2, 'done', 'Your invoice', 'your invoice is ready'),
+             (3, 'incomplete', 'Your bill', 'your invoice is here'),
+             (4, 'failed', 'Your invoice', 'your invoice is ready');",
+    )
+    .unwrap();
+    let matching = |conn: &Connection, q: &str| -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1 ORDER BY rowid")
+            .unwrap();
+        stmt.query_map(params![q], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert!(matching(&conn, "invoice").is_empty());
+
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap();
+
+    let created = stored_fts_sql(&conn);
+    assert!(
+        created.contains("tsubject") && created.contains("tbody"),
+        "{created}"
+    );
+    assert_eq!(fts_rows(&conn), 4, "every message survived the rebuild");
+    assert_eq!(
+        matching(&conn, "invoice"),
+        vec![2, 3],
+        "failed rows serve nothing"
+    );
+    assert_eq!(matching(&conn, "tbody : invoice"), vec![2, 3]);
+    assert_eq!(
+        matching(&conn, "facture"),
+        vec![2],
+        "the original is still indexed"
+    );
+    // Positional readers keep their meaning: column 1 is still the body.
+    let body: String = conn
+        .query_row(
+            "SELECT snippet(messages_fts, 1, '', '', '…', 24) FROM messages_fts
+             WHERE messages_fts MATCH 'facture'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(body.contains("prête"), "{body}");
 }
 
 #[test]

@@ -340,6 +340,21 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     if add_column_if_missing(conn, "triage", "opened_at", "TEXT")? {
         stamp_open_ledger_start(conn)?;
     }
+    // HOW LONG IT WAS READ AND HOW MANY LINKS WERE FOLLOWED. Zero on every
+    // pre-existing row, and that zero is not a measurement: no client reported
+    // either before these columns existed. So the dwell ledger dates itself
+    // exactly as the open ledger above does, keyed off `dwell_ms` alone so the
+    // stamp is written once even if an open is interrupted between the two
+    // columns. The floor is compared against `opened_at`, not `received_at`:
+    // what matters is whether the OPEN happened where dwell could be reported.
+    if add_column_if_missing(conn, "triage", "dwell_ms", "INTEGER NOT NULL DEFAULT 0")? {
+        stamp_dwell_ledger_start(conn)?;
+    }
+    add_column_if_missing(conn, "triage", "link_clicks", "INTEGER NOT NULL DEFAULT 0")?;
+    // WHO RESOLVED A ROW, when it was not a person. NULL on every pre-existing
+    // row and NOT backfilled: nothing recorded it before, and guessing would
+    // hand an undo rows it never took.
+    add_column_if_missing(conn, "triage", "resolved_by", "TEXT")?;
 
     // AND THE SWEEP'S INDEX, HERE rather than in schema.sql, for the reason
     // spelled out at that file's `idx_triage_remind_at` note: it runs before this
@@ -1136,9 +1151,11 @@ pub(super) fn normalize_fts_sql(sql: &str) -> String {
 /// exists, so the old definition would live forever on every mailbox that
 /// predates those lines.
 ///
-/// Refilling from `messages(subject, body)` is exact, not approximate: the
-/// message upsert writes the FTS row from those same two columns, so this
-/// reproduces the index rather than reinterpreting it.
+/// Refilling from `messages(subject, body)` plus the served translation is
+/// exact, not approximate: every FTS writer goes through the same
+/// `translations::FTS_ROW_SELECT`, so this reproduces the index rather than
+/// reinterpreting it. The translation columns (`tsubject`, `tbody`) arrived
+/// this way: a column list that differs from `schema.sql`'s is a rebuild.
 ///
 /// THE TRIGGER IS ANY DIFFERENCE AT ALL between the CREATE text in
 /// `sqlite_master` — what SQLite itself stored when the table was made — and
@@ -1201,12 +1218,21 @@ pub(super) fn rebuild_fts_if_stale(conn: &Connection) -> Result<()> {
     // `IF NOT EXISTS` rides along in the canonical text and is a no-op one
     // statement after the DROP; stripping it would mean editing the string,
     // which is how the two copies started drifting in the first place.
+    // The refill is the store's own FTS row SELECT, translations included.
+    // A partial schema (the migration unit tests build them) may lack
+    // `message_translations`; its rows then refill with no translation, which
+    // is what such a mailbox has.
+    let refill = if tables_exist(conn, &["message_translations"])? {
+        super::translations::FTS_ROW_SELECT.to_string()
+    } else {
+        "SELECT id, subject, body, NULL, NULL FROM messages m".to_string()
+    };
     let batch = format!(
         "BEGIN IMMEDIATE;
          DROP TABLE messages_fts;
          {canonical};
-         INSERT INTO messages_fts(rowid, subject, body)
-             SELECT id, subject, body FROM messages;
+         INSERT INTO messages_fts(rowid, subject, body, tsubject, tbody)
+             {refill};
          COMMIT;"
     );
     if let Err(e) = conn.execute_batch(&batch) {
@@ -1247,6 +1273,26 @@ pub(super) fn rebuild_fts_if_stale(conn: &Connection) -> Result<()> {
 /// `INSERT OR IGNORE`, so a re-run cannot move a stamp that is already the
 /// truth - which would restart the clock and hide the number for another month.
 fn stamp_open_ledger_start(conn: &Connection) -> Result<()> {
+    stamp_ledger_start(conn, OPEN_LEDGER_SINCE_KEY)
+}
+
+/// Record, per existing account, the moment the DWELL ledger started running.
+///
+/// The same lie the open ledger guards against, one column over. A mailbox
+/// that has been recording opens for months has, the instant `dwell_ms` is
+/// added, a pile of opened mail with zero dwell and zero clicks. Read naively
+/// that says its owner glances at everything for no time at all and never
+/// follows a link, which would rank every newsletter they actually read as a
+/// purge candidate. So dwell and click statistics count only mail OPENED at or
+/// after this stamp (`attention::dwell_ledger_since`); an account created
+/// later has reported dwell since it existed and falls back to `created_at`.
+fn stamp_dwell_ledger_start(conn: &Connection) -> Result<()> {
+    stamp_ledger_start(conn, DWELL_LEDGER_SINCE_KEY)
+}
+
+/// The shared body of the two ledger stamps: one `app_settings` row per
+/// existing account, written once.
+fn stamp_ledger_start(conn: &Connection, key: &str) -> Result<()> {
     // BOTH TABLES OR NEITHER. In production this is never false: `schema.sql`
     // creates both and runs in full before this function does. It is false only
     // in the migration suite, which builds deliberately partial old schemas to
@@ -1258,7 +1304,7 @@ fn stamp_open_ledger_start(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(account_id, key, value)
          SELECT id, ?1, ?2 FROM accounts",
-        rusqlite::params![OPEN_LEDGER_SINCE_KEY, Utc::now().to_rfc3339()],
+        rusqlite::params![key, Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

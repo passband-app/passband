@@ -320,14 +320,20 @@ pub struct GoodNews {
 }
 
 impl HeadlineItem {
+    /// Whether the line may speak for this FYE row at all, and so whether it
+    /// counts toward `on_board`. Restricted mail (what the agent door may not
+    /// see) and auth mail on the board (pinned, ruled "Not me", or a
+    /// critical change awaiting a ruling) stay out: login codes and the like
+    /// are not good news, and the line should never be built from mail the
+    /// owner has marked as kept close.
+    pub fn speaks_for(item: &crate::store::agent_triage::AgentListItem) -> bool {
+        !item.decision.external_access.restricted && !item.decision.auth.is_auth()
+    }
+
     /// Off a ranked FYE row. `None` when there is no summary to say anything
     /// with, or when the row is restricted or auth mail.
     pub fn from_list_item(item: &crate::store::agent_triage::AgentListItem) -> Option<Self> {
-        // Restricted mail (what the agent door may not see) and auth mail
-        // pinned onto the board stay out: login codes and the like are not
-        // good news, and the line should never be built from mail the
-        // owner has marked as kept close.
-        if item.decision.external_access.restricted || item.decision.auth.is_auth() {
+        if !Self::speaks_for(item) {
             return None;
         }
         let summary = [&item.attention.summary, &item.decision.summary]
@@ -503,6 +509,8 @@ pub async fn headline_at(
         effort: client.effort.as_deref(),
         // One attempt: the client already has a line to show without us.
         max_tries: 1,
+        max_tokens: None,
+        disable_thinking: false,
     };
     llm::classify_into(
         &client.http,

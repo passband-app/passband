@@ -395,7 +395,20 @@ struct MainShell: View {
                     if store.daemonDown && store.activeView != .settings {
                         DaemonDownPane()
                     } else {
-                        routedBody
+                        // THE SMART CLEAR LIST IS AN OCCUPANT OF THIS PANE,
+                        // like any routed page: the same backdrop, the same
+                        // header on the dots' line, the rail's top edge cut
+                        // to it. The page it is over stays mounted and
+                        // undrawn (it keeps its scroll and state), as a page
+                        // under a settled reader does.
+                        let page = contentPage
+                        ZStack {
+                            routedBody
+                                .opacity(page == nil ? 1 : 0)
+                                .allowsHitTesting(page == nil)
+                                .accessibilityHidden(page != nil)
+                            if let page { page }
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -670,6 +683,15 @@ struct MainShell: View {
     }
 
     @ViewBuilder
+    /// A page that takes the content pane over whatever is routed there.
+    private var contentPage: AnyView? {
+        if store.smartClearListOpen, let receipt = store.smartClearReceipt {
+            return AnyView(SmartClearListPage(receipt: receipt))
+        }
+        return nil
+    }
+
+    @ViewBuilder
     private var routedBody: some View {
         switch store.activeView {
         case .sitrep: SitrepView()
@@ -780,6 +802,16 @@ struct MainShell: View {
         // for surface bindings (the thread viewer's `u` = unsubscribe).
         bindings.append(
             KeyBinding(declining: "u", "undo last action") {
+                // A smart clear receipt on screen is an undo too. Whichever
+                // of the two happened LAST is the one `u` takes back, which
+                // is what the key means everywhere else.
+                if store.smartClearUndoOffered,
+                    let receipt = store.smartClearReceipt,
+                    (store.undos.last?.createdAt ?? .distantPast) < receipt.createdAt
+                {
+                    Task { await store.undoSmartClear() }
+                    return true
+                }
                 guard !store.undos.isEmpty else { return false }
                 Task { await store.fireUndo() }
                 return true

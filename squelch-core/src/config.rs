@@ -491,6 +491,106 @@ impl Default for NotifyConfig {
     }
 }
 
+/// The model behind smart clear's one question (`[smart_clear]`): has what this
+/// Reading mail is about already expired? See [`crate::triage::smart_clear`].
+///
+/// ITS OWN MODEL AND ITS OWN PRICES, the fourth pair in the ledger. It is not
+/// the notify model (too small to do date arithmetic over sixty summaries
+/// reliably) and not Stage-1's (far more than the question needs), so both
+/// cost estimators price its category off the two numbers here. Change the
+/// model and these prices move with it, or the estimate drifts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmartClearConfig {
+    /// The model asked. Default `claude-sonnet-5`, which the hosted gateway's
+    /// allow-list carries in both spellings (verified 2026-10-05; it does NOT
+    /// carry `claude-sonnet-5-5`). Qualified with the gateway's provider
+    /// prefix at call time, like every other model here.
+    pub model: String,
+    /// Reasoning depth, sent as `output_config.effort`. Default `low`: the
+    /// question is date arithmetic, and the owner is waiting on the answer.
+    pub effort: Option<String>,
+    /// USD per million input tokens for `model`. Default 2.0, the list price
+    /// of `claude-sonnet-5` (Anthropic first-party API rates as of
+    /// 2026-09-25).
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, same source.
+    pub price_out_per_mtok: f64,
+}
+
+impl Default for SmartClearConfig {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-5".to_string(),
+            effort: Some("low".to_string()),
+            // claude-sonnet-5 per-MTok (input / output).
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+        }
+    }
+}
+
+/// Auto-translate (docs/TRANSLATION.md): mail in another language is
+/// translated to English in the refine lane. ON by default and file-only: the
+/// feature takes hold when the daemon version rolls, so there is deliberately
+/// no env var and no warden knob behind any of this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateConfig {
+    /// Whether the translate pass runs at all. Detection at ingest is local and
+    /// free, so this gates only the model spend. Default `true`.
+    pub enabled: bool,
+    /// The model that translates. Qualified with the gateway's provider prefix
+    /// at call time, never here (see
+    /// [`crate::triage::llm::qualify_gateway_model`]). Default
+    /// `claude-sonnet-5`, which every tenant's Bifrost allow-list already
+    /// carries.
+    pub model: String,
+    /// USD per million input tokens for `model`, for the usage estimators
+    /// (`metrics::estimate_cost_usd` and `/client/usage`), which price the
+    /// `translate` ledger category here rather than letting it fall through
+    /// to the Stage-1 arm. Default 2.0, Claude Sonnet 5's list price.
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, Claude
+    /// Sonnet 5's list price.
+    pub price_out_per_mtok: f64,
+    /// Per-account-per-day spend cap in US dollars, priced at
+    /// [`Self::price_in_per_mtok`] / [`Self::price_out_per_mtok`] from the
+    /// `translate` usage ledger: a runaway guard on the tenant's LLM key,
+    /// which translation shares with triage. Each message's cost is
+    /// ESTIMATED before its call to decide whether it fits what is left
+    /// today, and the day's spend is SETTLED from the usage the provider
+    /// actually reported. Over it, live rows stay `pending` until the next
+    /// UTC day (and triage does not wait for them), backfill rows are queued
+    /// `deferred`. No `app_settings` override. Default 0.50: at Sonnet 5's
+    /// prices, roughly a hundred short messages a day, or twenty of 5,000
+    /// characters.
+    pub daily_budget_usd: f64,
+}
+
+impl Default for TranslateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "claude-sonnet-5".to_string(),
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+            daily_budget_usd: 0.50,
+        }
+    }
+}
+
+impl Config {
+    /// Whether a translator will ever work a queued row: translation is on
+    /// and an LLM is configured. The same two facts
+    /// [`crate::translate::TranslateClient::from_config`] needs. The human
+    /// door asks it so it never tells the reader "Translating..." about a
+    /// row nothing will translate.
+    pub fn translation_active(&self) -> bool {
+        self.translate.enabled && self.stage2.resolve_llm().is_some()
+    }
+}
+
 /// Scheduled re-evaluation tunables for agent triage's revisit jobs, in plain
 /// numbers so they round-trip through TOML and env vars.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1874,6 +1974,8 @@ pub struct Config {
     /// first-sight freshness test, and the rescue ceiling a late verdict has to
     /// beat.
     pub notify: NotifyConfig,
+    /// Smart clear's model pass: which model, at what effort, at what price.
+    pub smart_clear: SmartClearConfig,
     /// Scheduled re-evaluation: how often triage looks at its own past verdicts.
     pub revisit: RevisitPassConfig,
     /// APNs pusher: the blind relay's URL + bearer. Absent `relay_url` means the
@@ -1890,6 +1992,8 @@ pub struct Config {
     /// BYOK carrier APIs. No credentials anywhere means no carrier is ever
     /// polled, which is the default.
     pub carriers: CarriersConfig,
+    /// Auto-translate. Defaults only; read from the `[translate]` table.
+    pub translate: TranslateConfig,
 }
 
 impl Default for Config {
@@ -1909,12 +2013,14 @@ impl Default for Config {
             sync: SyncConfig::default(),
             embed: EmbedConfig::default(),
             notify: NotifyConfig::default(),
+            smart_clear: SmartClearConfig::default(),
             revisit: RevisitPassConfig::default(),
             pusher: PusherConfig::default(),
             tracking: TrackingConfig::default(),
             metrics: MetricsConfig::default(),
             console: ConsoleConfig::default(),
             carriers: CarriersConfig::default(),
+            translate: TranslateConfig::default(),
         }
     }
 }
@@ -4018,6 +4124,31 @@ archive_access_daily_cap = 9
         // not the notify threshold; they must not alias.
         assert_eq!(c.default_min_importance, 0);
         unsafe { std::env::remove_var("SQUELCH_NOTIFY_MIN_IMPORTANCE") }
+    }
+
+    /// `[smart_clear]` reads from the file and from nowhere else: like
+    /// `[translate]`, it takes hold at the daemon roll, so no env var moves it.
+    #[test]
+    fn the_smart_clear_section_reads_from_toml_only() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // A config that predates the section has the defaults.
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.smart_clear.model, "claude-sonnet-5");
+        let c: Config =
+            toml::from_str("[smart_clear]\nmodel = \"from-the-file\"\nprice_in_per_mtok = 1.5\n")
+                .unwrap();
+        assert_eq!(c.smart_clear.model, "from-the-file");
+        assert_eq!(c.smart_clear.price_in_per_mtok, 1.5);
+        assert_eq!(
+            c.smart_clear.price_out_per_mtok, 10.0,
+            "unnamed keys default"
+        );
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_SMART_CLEAR_MODEL", "from-the-env") }
+        let mut env = c.clone();
+        env.apply_env_overrides();
+        unsafe { std::env::remove_var("SQUELCH_SMART_CLEAR_MODEL") }
+        assert_eq!(env.smart_clear.model, "from-the-file");
     }
 
     /// THE FAST LANE'S DEFAULTS, asserted one by one because two of them are

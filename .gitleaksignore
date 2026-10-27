@@ -1,0 +1,38 @@
+# gitleaks baseline. Every entry below was reviewed by hand on 2026-10-25 and
+# is not a live credential: test-fixture keys (marked TEST FIXTURE ONLY),
+# truncated PEM stubs, fake values in tests (re_test_…, sk-abc…, repeated
+# hex, example.com reset URLs, WorkOS-style ULIDs), GitHub's documented
+# example ghp_ token, the PostHog phc_ project key (public by design), and
+# two retired squelch-desktop placeholders.
+#
+# Prefer an inline `gitleaks:allow` comment on the line for new fixtures over
+# adding fingerprints here; fingerprints pin a commit hash.
+00f674b5d1ecbdad10158e8998f5393a48e93c0d:squelch-desktop/src/views/SettingsView.tsx:generic-api-key:447
+00f674b5d1ecbdad10158e8998f5393a48e93c0d:squelch-desktop/src/views/SettingsView.tsx:generic-api-key:454
+037f37107560179def29b0ef5a0a1a749042e432:squelch-api/tests/client_api.rs:private-key:11633
+278274711633f1bc267b9d28ac70af7e79bb690e:squelch-control/tests/features_flow.rs:generic-api-key:73
+2afa8d27aad0f6a8d710676d0973644c4803417b:squelch-core/src/triage/access.rs:generic-api-key:384
+2afa8d27aad0f6a8d710676d0973644c4803417b:squelch-core/src/triage/condense.rs:generic-api-key:629
+2afa8d27aad0f6a8d710676d0973644c4803417b:squelch-core/src/triage/condense.rs:generic-api-key:635
+3132d87744bf76310b782036f6db2e8dd9ce3392:squelch-control/tests/signup_flow.rs:generic-api-key:568
+3132d87744bf76310b782036f6db2e8dd9ce3392:squelch-control/tests/signup_flow.rs:generic-api-key:569
+489a997c545121c9664d2ccd074b64c74578e377:squelch-control/tests/share_flow.rs:generic-api-key:92
+498a28d1353992ed75be9d869d9ab7f77daa41d8:squelch-client-swift/Sources/Squelch/Lib/Analytics.swift:generic-api-key:17
+4c9e3415399dd1915279ecad18680a83b2dfd99b:squelch-mcp/tests/fixtures/test-key-small-1024.pem:private-key:1
+5c8f80cbcc2e0356f863f769815c8dcc051a2c9f:squelch-relay/tests/fixture_test_key.p8:private-key:6
+5c8f80cbcc2e0356f863f769815c8dcc051a2c9f:squelch-relay/tests/push.rs:generic-api-key:363
+609d5a9de0fb34350441bd99995abd3199a12939:squelch-api/tests/agent_write.rs:generic-api-key:572
+6287ac19fd6da6e1336da0b050794805bc4a86af:squelch-mcp/tests/fixtures/test-key-a.pem:private-key:1
+6287ac19fd6da6e1336da0b050794805bc4a86af:squelch-mcp/tests/fixtures/test-key-b.pem:private-key:1
+7d0f900d0d64e6a2e8295ae53d728013ef5d0dc2:squelch-api/tests/client_api.rs:private-key:9696
+972e4a6d6467e35e1224a33eb55ce90c8656a72b:squelch-api/tests/client_api.rs:private-key:13099
+abb85a9334c6d8560ffa04b2bc9ee8ddbc73fe15:squelch-api/tests/client_api.rs:private-key:6387
+aed6e31c041163a6bd6b63fc31a007097e75f251:squelch-control/src/sessions.rs:generic-api-key:617
+b22648df3baf19cc349725c4d618802d68fab617:squelch-control/src/sessions.rs:generic-api-key:474
+b22648df3baf19cc349725c4d618802d68fab617:squelch-control/src/sessions.rs:generic-api-key:486
+f001e2080a5052eb05374e287d730ce2d781d85f:squelch-core/src/push.rs:generic-api-key:663
+f1f732790e2b0c3306e96a491025700a310c6554:squelch-api/src/guard.rs:generic-api-key:182
+f1f732790e2b0c3306e96a491025700a310c6554:squelch-api/src/guard.rs:generic-api-key:189
+f1f732790e2b0c3306e96a491025700a310c6554:squelch-api/src/guard.rs:github-pat:151
+f505076ffb5e502e482294f08175f81ba884e271:squelch-control/src/sessions.rs:generic-api-key:395
+f505076ffb5e502e482294f08175f81ba884e271:squelch-control/src/sessions.rs:generic-api-key:477

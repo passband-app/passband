@@ -80,7 +80,7 @@ enum SearchIntent {
     /// STRUCTURED INTENT: the reader is already speaking the index's language,
     /// so the lane never second-guesses them, whatever the rest of the words
     /// look like.
-    private static let operatorPrefixes = ["from:", "after:", "before:"]
+    private static let operatorPrefixes = ["from:", "to:", "in:sent", "after:", "before:"]
 
     /// Enough words to be a sentence rather than a name. Four is a phrase
     /// somebody might file mail under; five is somebody talking.

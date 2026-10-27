@@ -1,4 +1,6 @@
-// Auth mail: login codes, password resets, sign-in alerts, verifications.
+// Auth mail: login codes, password resets, sign-in alerts, account changes, app
+// grants, sign-in receipts, verifications. Which of them ask the owner a
+// question, for how long, and how they group is Lib/AuthPolicy.swift.
 // Metadata only — a body is never fetched to render the list. Reveal is always a
 // human action and writes a server-side audit row, so this page never reveals on
 // load; digits appear immediately only for codes the arrival flow already
@@ -37,6 +39,9 @@ struct AuthView: View {
     @State private var codes: [Int: String?] = [:]
     /// Ids archived from this page, hidden optimistically (the list is a poll).
     @State private var archived: Set<Int> = []
+    /// Member ids of bursts the owner asked to "Review each": keyed by member,
+    /// so a burst stays laid out as its members are answered or age out.
+    @State private var expandedBursts: Set<Int> = []
 
     private var decisions = AuthDecisions.shared
 
@@ -50,6 +55,11 @@ struct AuthView: View {
     private var openDecisions: [SealedMeta] {
         visible.filter { decisions.isOpen($0) }
     }
+    /// Counted COLLAPSED, the rule the rail's badge uses too: a burst is one
+    /// decision ("All me") whether or not it is laid out for review.
+    private var decisionCards: [AuthPolicy.Card] {
+        AuthPolicy.cards(openDecisions)
+    }
 
     /// Seconds since an ISO stamp; huge when missing/invalid (=> treated old).
     private func age(_ iso: String?) -> TimeInterval {
@@ -62,7 +72,7 @@ struct AuthView: View {
         case .live: age(m.received_at) <= Self.liveWindow
         case .codes: AuthCode.isCodeKind(m.kind)
         // The ones that mean someone may be trying to get in.
-        case .risk: AuthDecisions.needsDecision(m.kind)
+        case .risk: AuthPolicy.asksQuestion(m)
         case .all: true
         }
     }
@@ -73,7 +83,7 @@ struct AuthView: View {
                 HStack(spacing: Space.s12) {
                     StatusDot(
                         color: Palette.lock,
-                        label: "\(live.count) live · \(openDecisions.count) awaiting you",
+                        label: "\(live.count) live · \(decisionCards.count) awaiting you",
                         tone: Palette.inkFaint, size: 5)
                     HStack(spacing: Space.scaled(3)) {
                         Kbd("j")
@@ -106,6 +116,15 @@ struct AuthView: View {
             index = max(0, min(index, max(0, count - 1)))
         }
         .onChange(of: focus?.id) { _, _ in copied = false }
+        // A page kept across an account switch must not carry the old
+        // mailbox's state: a reveal open over the switch would reveal the same
+        // int on the NEW daemon.
+        .onChange(of: store.epoch) { _, _ in
+            revealing = nil
+            expandedBursts = []
+            archived = []
+            codes = [:]
+        }
     }
 
     // MARK: - main column
@@ -188,6 +207,9 @@ struct AuthView: View {
                 let i = shown.firstIndex(of: m) ?? 0
                 AuthRow(
                     meta: m, selected: i == index, code: codes[m.id] ?? nil,
+                    explained: explainedNote(m),
+                    answered: answeredLine(m),
+                    onUndo: { decisions.set(m, nil) },
                     onSelect: {
                         index = i
                         revealing = m
@@ -195,6 +217,22 @@ struct AuthView: View {
                 .id(m.id)
             }
         }
+    }
+
+    /// "You said: That was me", on a row that asked and was answered, beside
+    /// its Undo.
+    private func answeredLine(_ m: SealedMeta) -> String? {
+        guard AuthPolicy.offersAnswer(m), let v = decisions.decision(m) else { return nil }
+        return AuthPolicy.answeredLine(m, v)
+    }
+
+    /// The quiet line on a row an earlier code, link or receipt explains.
+    private func explainedNote(_ m: SealedMeta) -> String? {
+        guard AuthPolicy.isExplained(m), let by = m.explained_by else { return nil }
+        let explainer = store.sitrep.sealed.first { $0.id == by }
+        return AuthPolicy.explainedNote(
+            explainer: explainer,
+            service: explainer.map { SenderCache.resolved($0.sender).displayName })
     }
 
     // MARK: - rail
@@ -207,25 +245,18 @@ struct AuthView: View {
                         .font(Typo.zoneTitle)
                         .foregroundStyle(Palette.ink)
                     Spacer()
-                    Text("\(openDecisions.count) open")
+                    Text("\(decisionCards.count) open")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
                 }
                 if openDecisions.isEmpty {
                     EmptyNote(
-                        "nothing to rule on. sign-in alerts and reset requests show up here.")
+                        "nothing to rule on. sign-in alerts, account changes and reset requests show up here.")
                 } else {
-                    ForEach(openDecisions.prefix(Self.maxDecisionCards)) { m in
-                        DecisionCard(
-                            meta: m,
-                            onMine: { decisions.set(m.id, .mine) },
-                            onNotMine: {
-                                // Not a dismissal: record the verdict, then open
-                                // the message so the human can act on it.
-                                decisions.set(m.id, .notMine)
-                                revealing = m
-                            })
-                    }
+                    AuthDecisionStack(
+                        open: openDecisions, limit: Self.maxDecisionCards,
+                        expanded: $expandedBursts,
+                        onNotMine: { m in revealing = m })
                 }
             }
             .zonePadding()
@@ -468,6 +499,11 @@ private struct AuthRow: View {
     let meta: SealedMeta
     let selected: Bool
     let code: String?
+    /// "explained by your GitHub sign-in", on an alert that needs no ruling.
+    let explained: String?
+    /// "You said: That was me", with its Undo, once the row's question is answered.
+    let answered: String?
+    let onUndo: () -> Void
     /// Focus the row AND open the mail. One click, because the mail is what a
     /// row on this page is FOR — a click that only moved a cursor left the page
     /// looking inert, and the second click that used to open it was undiscoverable.
@@ -491,17 +527,42 @@ private struct AuthRow: View {
                     .lineLimit(1)
                     .frame(width: Typo.measure(150), alignment: .leading)
                     .help(meta.sender)
-                Text(meta.subject)
-                    .font(Typo.rowSub)
-                    .foregroundStyle(Palette.inkDim)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(meta.subject)
+                HStack(spacing: Space.s6) {
+                    Text(meta.subject)
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkDim)
+                        .lineLimit(1)
+                        .help(meta.subject)
+                    if let explained {
+                        Label(explained, systemImage: "checkmark.circle")
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
+                    if let answered {
+                        Text(answered)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                        Button("Undo", action: onUndo)
+                            .buttonStyle(.glass)
+                            .controlSize(.mini)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkDim)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if let code, !code.isEmpty {
                     // Already revealed this session — no reason to ask twice.
                     Text(code)
                         .font(Typo.mono(12, weight: .semibold))
                         .foregroundStyle(Palette.lock)
+                } else if meta.isCritical {
+                    Chip(
+                        text: AuthCopy.label(meta.kind), tone: Palette.danger,
+                        symbol: "exclamationmark.triangle.fill")
                 } else {
                     Chip(
                         text: AuthCopy.label(meta.kind), tone: Palette.inkFaint,
@@ -513,54 +574,6 @@ private struct AuthRow: View {
                     .frame(width: Space.scaled(30), alignment: .trailing)
             }
         }
-    }
-}
-
-/// A sign-in alert / reset request awaiting the human's verdict.
-private struct DecisionCard: View {
-    let meta: SealedMeta
-    let onMine: () -> Void
-    let onNotMine: () -> Void
-
-    private var isReset: Bool { meta.kind == .passwordReset }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Space.s8) {
-            HStack(spacing: Space.scaled(7)) {
-                Avatar(sender: meta.sender, size: 18)
-                Text(SenderCache.resolved(meta.sender).displayName)
-                    .font(Typo.ui(11, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                Spacer(minLength: Space.s4)
-                Text(Fmt.relAge(meta.received_at))
-                    .font(Typo.num(10))
-                    .foregroundStyle(Palette.inkFaintest)
-            }
-            // Subject only — the body is sealed and this card never fetches it.
-            Text(meta.subject)
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkDim)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: Space.scaled(7)) {
-                Button(isReset ? "I asked" : "That was me", action: onMine)
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.accent)
-                    .font(Typo.micro)
-                Button(isReset ? "I did not" : "Not me", action: onNotMine)
-                    .buttonStyle(.glass)
-                    .foregroundStyle(Palette.danger)
-                    .font(Typo.micro)
-            }
-            .controlSize(.small)
-        }
-        .padding(Space.s10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Palette.hairline.opacity(0.5))
-        )
     }
 }
 

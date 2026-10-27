@@ -335,7 +335,7 @@ fn psl_registrable_domain(address: &str) -> Option<String> {
 /// this: a ref is something the sender must know. Matching by thread and the
 /// invitation binding (`zones::invitation_is_bound`) require the identical
 /// address instead.
-fn organisation_domain(address: &str) -> Option<String> {
+pub(crate) fn organisation_domain(address: &str) -> Option<String> {
     if super::receipt_match::is_freemail_host(address) {
         return None;
     }

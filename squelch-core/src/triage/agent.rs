@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v10";
+pub const PROMPT_VERSION: &str = "agent-triage-v14";
 /// The prompt text, with one figure to fill in: the `read_message` page
 /// size, defined beside the request it answers
 /// ([`super::context::READ_MESSAGE_PAGE_CHARS`]) and shared with the
@@ -196,6 +196,8 @@ async fn run_bounded(
             schema: schema.clone(),
             effort: connection.effort,
             max_tries: 1,
+            max_tokens: None,
+            disable_thinking: false,
         };
         // Retain provider usage before decoding either JSON syntax or step
         // structure. A malformed paid answer still belongs in the spend ledger.
@@ -258,12 +260,7 @@ async fn run_bounded(
                 {
                     Ok(()) => {
                         let mut decision = *decision;
-                        // reading_kind only means something on Reading mail; a
-                        // stale one would colour the card if Reading is added
-                        // by a correction later.
-                        if !decision.destinations.contains(&MessageDestination::Reading) {
-                            decision.reading_kind = None;
-                        }
+                        normalize_decision(&mut decision);
                         return Ok(AgentRun {
                             decision,
                             source_message_ids: sources.into_iter().collect(),
@@ -369,6 +366,11 @@ fn condense_initial_context(
             condense_message_body(fields, config.full_body_chars, &mut stored);
             continue;
         }
+        // A machine translation (docs/TRANSLATION.md) shrinks with the body
+        // it translates, so neither outweighs the other in the budget.
+        if let Some(Value::String(translated)) = fields.get_mut("translated_body") {
+            *translated = super::condense::excerpt(translated, config.sibling_excerpt_chars).0;
+        }
         let Some(Value::String(body)) = fields.get_mut("body") else {
             continue;
         };
@@ -408,6 +410,21 @@ fn condense_message_body(
     let whole = super::condense::StoredBody::new(std::mem::take(body));
     let (kept, resume) = whole.condense_within(cap);
     *body = kept;
+    // The machine translation (docs/TRANSLATION.md) is condensed and capped
+    // like the body. It has no pager: `read_message` pages the ORIGINAL,
+    // which stays the source of truth, so a cut translation only says so.
+    if let Some(Value::String(translated)) = message.get_mut("translated_body") {
+        let condensed = super::condense::condense_body(translated);
+        let cut = condensed.chars().count() > cap;
+        *translated = if cut {
+            crate::text::truncate_ellipsis(&condensed, cap)
+        } else {
+            condensed
+        };
+        if cut {
+            message.insert("translated_body_truncated".into(), Value::Bool(true));
+        }
+    }
     if let Some(next) = resume {
         message.insert("next_offset".into(), json!(next));
         message.insert("body_truncated".into(), Value::Bool(true));
@@ -551,8 +568,10 @@ fn bound_evidence_text(value: &mut Value, budget: usize, stored: &StoredBodies) 
                     if key == "source" || (key == "body" && value.is_string()) {
                         continue;
                     }
-                    if matches!(key.as_str(), "content" | "text" | "snippet")
-                        && let Value::String(text) = value
+                    if matches!(
+                        key.as_str(),
+                        "translated_body" | "content" | "text" | "snippet"
+                    ) && let Value::String(text) = value
                     {
                         if text.len() > limit {
                             text.truncate(text.floor_char_boundary(limit));
@@ -738,6 +757,22 @@ impl ObservedDecisionContext {
     }
 }
 
+/// Clears fields that only mean something beside another one. These are
+/// normalized rather than failed: the rest of the decision is sound, and a
+/// repair turn would cost a model call to drop a flag.
+pub fn normalize_decision(decision: &mut MessageDecision) {
+    // reading_kind only means something on Reading mail; a stale one would
+    // colour the card if Reading is added by a correction later.
+    if !decision.destinations.contains(&MessageDestination::Reading) {
+        decision.reading_kind = None;
+    }
+    // `critical` grades an account change; on anything else it would put
+    // a sign-in alert or a code in FYE with no question to answer.
+    if !decision.auth.kinds.contains(&AuthKind::AccountChange) {
+        decision.auth.critical = false;
+    }
+}
+
 pub fn validate_decision(
     decision: &MessageDecision,
     sources: &BTreeSet<i64>,
@@ -809,6 +844,19 @@ pub fn validate_decision(
     };
     if !attention(&decision.attention) {
         return fail("invalid_attention_evidence_or_factors");
+    }
+    // `ends` is read by ONE consumer (smart clear), through the one parser
+    // it uses, so it is validated with that parser and not the stricter
+    // closure above: the agent writes a stated time as a local time with no
+    // offset, and refusing that would cost a turn for a value the reader
+    // understands. (The closure stays as it is for `due` and `attention_at`,
+    // whose other readers parse only what it accepts.)
+    if !decision
+        .ends
+        .as_ref()
+        .is_none_or(|time| sources.contains(&time.source_message_id) && time.stated().is_some())
+    {
+        return fail("invalid_ends_time");
     }
     for update in &decision.related_updates {
         if revisions.get(&update.thread_id) != Some(&update.expected_revision)
@@ -1070,6 +1118,7 @@ fn decision_schema_body() -> Value {
             "reading_kind",
             nullable(enumeration(&["content", "promotion"])),
         ),
+        ("ends", nullable(reference("time"))),
         ("summary", text()),
         ("reason", text()),
         (
@@ -1083,9 +1132,12 @@ fn decision_schema_body() -> Value {
                         "sign_in_link",
                         "verification",
                         "login_alert",
-                        "security_alert",
+                        "account_change",
+                        "app_grant",
+                        "signin_receipt",
                     ])),
                 ),
+                ("critical", boolean()),
                 ("evidence", reference("evidence")),
             ]),
         ),
@@ -1663,7 +1715,7 @@ mod tests {
                 super::super::context::READ_MESSAGE_PAGE_CHARS,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v10")
+            (2_000, "agent-triage-v14")
         );
     }
     #[test]
@@ -1672,6 +1724,7 @@ mod tests {
         decision.auth = AuthAssessment {
             kinds: vec![AuthKind::LoginAlert],
             evidence: decision.attention.evidence.clone(),
+            critical: false,
         };
         assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
         assert!(!decision.external_access.restricted);
@@ -1766,6 +1819,79 @@ mod tests {
             );
         }
     }
+    /// The v12 auth kinds: the set the model is offered, `security_alert`
+    /// withdrawn, and `critical` required beside them like every field.
+    #[test]
+    fn auth_kinds_and_critical_are_offered() {
+        let schema = decision_schema();
+        let auth = &schema["properties"]["auth"];
+        assert_eq!(
+            auth["properties"]["kinds"],
+            array(enumeration(&[
+                "otp",
+                "password_reset",
+                "sign_in_link",
+                "verification",
+                "login_alert",
+                "account_change",
+                "app_grant",
+                "signin_receipt",
+            ]))
+        );
+        assert_eq!(auth["properties"]["critical"], boolean());
+        assert!(
+            auth["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("critical"))
+        );
+        // Every offered kind is one the decision decodes.
+        for kind in auth["properties"]["kinds"]["items"]["enum"]
+            .as_array()
+            .unwrap()
+        {
+            assert!(
+                serde_json::from_value::<AuthKind>(kind.clone()).is_ok(),
+                "{kind}"
+            );
+        }
+        // The prompt defines each new kind and the flag, and re-routes the
+        // security-flavoured mail that is not authentication.
+        for phrase in [
+            "account_change, a security setting",
+            "app_grant, a third-party app was granted access",
+            "signin_receipt, a notice that the recipient used one account",
+            "Set auth.critical true only with account_change",
+            "a look-alike or unrelated domain claiming such a change is phishing",
+            "it is not itself an equivalent access grant",
+            "a fraud or transaction confirmation",
+            "an app's request for new or updated permissions",
+            "a privacy reminder, such as location sharing",
+            "A security incident is not authentication mail",
+        ] {
+            assert!(SYSTEM.contains(phrase), "{phrase}");
+        }
+        assert!(!SYSTEM.contains("security_alert"));
+    }
+    /// `critical` grades an account change and nothing else: on any other
+    /// kind it is cleared, not failed (the rest of the decision is sound).
+    #[test]
+    fn critical_is_normalized_away_without_an_account_change() {
+        let mut decision = valid();
+        decision.auth = AuthAssessment {
+            kinds: vec![AuthKind::LoginAlert],
+            evidence: decision.attention.evidence.clone(),
+            critical: true,
+        };
+        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
+        normalize_decision(&mut decision);
+        assert!(!decision.auth.critical);
+        decision.auth.kinds = vec![AuthKind::LoginAlert, AuthKind::AccountChange];
+        decision.auth.critical = true;
+        normalize_decision(&mut decision);
+        assert!(decision.auth.critical);
+        assert!(decision.auth.is_critical());
+    }
     #[test]
     fn reading_kind_is_offered_and_defaults_on_stored_rows() {
         // Product updates read like articles; the prompt must say they are not.
@@ -1784,6 +1910,51 @@ mod tests {
         assert_eq!(
             fresh.reading_kind,
             Some(crate::triage::decision::ReadingKind::Content)
+        );
+    }
+    #[test]
+    fn ends_is_offered_validated_and_defaults_on_stored_rows() {
+        assert!(SYSTEM.contains("set ends to the date or time the offer, sale, or event"));
+        let schema = decision_schema();
+        assert_eq!(schema["properties"]["ends"], nullable(reference("time")));
+        // A decision stored before the field existed still reads.
+        let mut decision = serde_json::to_value(valid()).unwrap();
+        decision.as_object_mut().unwrap().remove("ends");
+        let stored: MessageDecision = serde_json::from_value(decision.clone()).unwrap();
+        assert_eq!(stored.ends, None);
+        // A date-only value from a message the run read is accepted.
+        let source = stored.attention.relevant_message_ids[0];
+        decision["ends"] = json!({"value": "2026-10-31", "timezone": null,
+            "source_message_id": source, "interpreted_relative": false});
+        let dated: MessageDecision = serde_json::from_value(decision.clone()).unwrap();
+        assert_eq!(dated.ends.as_ref().unwrap().value, "2026-10-31");
+        let sources = BTreeSet::from([source]);
+        let none = BTreeMap::new();
+        let rules: [i64; 0] = [];
+        assert_eq!(validate_decision(&dated, &sources, &none, &rules), Ok(()));
+        // The agent writes a stated time as a LOCAL time with no offset, the
+        // way it writes event starts. That is a valid `ends`.
+        for naive in ["2026-10-31T23:59:00", "2026-10-31T23:59"] {
+            let mut timed = dated.clone();
+            timed.ends.as_mut().unwrap().value = naive.into();
+            assert_eq!(
+                validate_decision(&timed, &sources, &none, &rules),
+                Ok(()),
+                "{naive}"
+            );
+        }
+        // One that is not a date, or cites a message nobody read, is not.
+        let mut vague = dated.clone();
+        vague.ends.as_mut().unwrap().value = "end of the month".into();
+        assert_eq!(
+            validate_decision(&vague, &sources, &none, &rules),
+            Err("invalid_ends_time".to_string())
+        );
+        let mut unsourced = dated;
+        unsourced.ends.as_mut().unwrap().source_message_id = source + 999;
+        assert_eq!(
+            validate_decision(&unsourced, &sources, &none, &rules),
+            Err("invalid_ends_time".to_string())
         );
     }
     #[test]

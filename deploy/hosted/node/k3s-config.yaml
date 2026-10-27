@@ -12,6 +12,14 @@
 # EDIT ME: the storage path below is the block-volume mount. If you never
 # repointed local-path, delete the line rather than guessing at it.
 
+# Secrets encrypted at rest (SETUP.md §2). The install already passes
+# --secrets-encryption on the command line; it is repeated here because the
+# command line lives in the systemd unit, which a reinstall rewrites, and this
+# flag is the one that keeps every tenant's age identity out of the datastore
+# in plaintext. Setting it in both places is the same setting, not a change.
+# Check after any reinstall: `k3s secrets-encrypt status` says Enabled.
+secrets-encryption: true
+
 # Where the local-path provisioner carves tenant PVCs. See SETUP.md, "Tenant
 # data on a block volume". Only affects NEW claims.
 default-local-storage-path: /mnt/tenant-data

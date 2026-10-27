@@ -76,7 +76,8 @@ enum ProductGuide {
                     + "Google Calendar, new, edited and deleted events, guests"
             case .readingMail:
                 "an open email: moving between messages and emails, done, skip, unsubscribe, "
-                    + "attachments, images, chat or email style, the contact card"
+                    + "attachments, images, chat or email style, the contact card, translated "
+                    + "mail, show original, languages you read"
             case .writingMail:
                 "reply, reply all, forward, new message, Cc and Bcc, send, undo send, send "
                     + "later, drafts, attachments, groups, signature, read tracking"
@@ -280,6 +281,10 @@ enum ProductGuide {
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".
         - Hover a Reading card and press e to mark everything from that sender done. That one cannot be undone.
 
+        Clearing out Reading (a pill at the top right of the Reading card, on the Mac):
+        - "smart clear" clears what has plainly run its course in one press: events that already happened, offers that ended, mail that is no longer current, and promotions and senders the user never opens. It can take up to about 20 seconds. A receipt card at the bottom right then says how many emails were cleared and why, with an Undo button. Undo, or the u key, puts all of it back, and stays for 30 seconds.
+        - "View full list" on that receipt opens a page listing every email that was cleared: its subject, its sender and why. The undo timer is paused while that page is open. On it, u undoes everything, and Return or Esc confirms and goes back with the timer carrying on from where it stopped.
+
         Other things on the page:
         - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (or the first part of the address when that is not available) and is changed in Settings > General > You.
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.
@@ -365,6 +370,13 @@ enum ProductGuide {
         - Quoted history is folded behind "show quoted history".
         - Each message shows its To line; a caret reveals Cc and Bcc.
         - Clicking the subject copies it.
+
+        Mail in other languages:
+        - An email written in another language opens in English. A line above the message says "translated from French" (or whichever language it was), and "show original" beside it switches that one message to what the sender wrote. "show translation" switches it back. The subject at the top follows the message it came from.
+        - While the translation is still being written, the original shows with "translating from French…" above it, and the English takes its place when it is ready. If it has not arrived after about ten minutes, the line says "translation not ready yet · showing the original", and opening the thread again checks again.
+        - If Passband could not confirm that every detail carried over, the line also says the translation may be incomplete. Check the original for numbers, codes and links before acting on it.
+        - Search finds the email by the words of either version. A reply or a forward uses the original.
+        - Settings > Mail > Translation lists the languages you read. Mail in those is shown as written and not translated. Adding a language leaves mail already translated as it is, with "show original" still there; removing one means mail in it is translated when it is opened. With no languages listed, everything not in English is translated.
 
         Attachments and images:
         - Clicking an attachment card or an inline image previews it in Quick Look, where the arrow keys move between that message's attachments. The download arrow on a card saves the file.
@@ -545,6 +557,7 @@ enum ProductGuide {
         Operators:
         - from: narrows to a sender. Typing from: opens a menu of the people who write to the user; the arrows pick and Enter or Tab accepts.
         - after: and before: narrow by date.
+        - in:sent (or from:me) narrows to mail the user wrote, and to: narrows to mail addressed to someone, by name or address. "in:sent to:dan" is everything the user sent Dan.
 
         Order:
         - A switch in the panel, also at Settings > Mail > Search. "Relevance + recency" ranks newer mail higher when matches are close. "Best match" ranks on the words alone.
@@ -561,7 +574,7 @@ enum ProductGuide {
         """
 
     private static let loginCodes = """
-        Login codes, password resets, sign-in links and security alerts are kept \
+        Login codes, password resets, sign-in links, account changes, app access grants, sign-in receipts and security alerts are kept \
         apart from the rest of the mail, on the Auth page (key {key:auth}, or g on the Emails \
         page).
 
@@ -573,8 +586,18 @@ enum ProductGuide {
         - j / k move through the list. Filters: Everything, Last hour, Codes only, Risk.
         - r or Enter reveals. A login code shows its digits right there, and c copies it. Other kinds open a one-time reveal panel that is cleared when it closes.
         - Clicking a row opens the whole message in that reveal panel.
-        - Sign-in alerts and resets from the last week ask for a decision: "That was me" or "Not me".
         - The auto-shredder card can move old auth mail to Gmail's trash after a set number of days.
+
+        Needs a decision (the right of the Auth page; the top of the phone's login-codes page):
+        - Sign-in alerts, account changes (a new recovery phone, 2FA changed, a new SSH key or access token, a card added to a wallet), app access grants, password resets and sign-in links ask whether it was the user. Resets and sign-in links answer "I asked" or "I did not", app access "I allowed it" or "I didn't", and the rest "That was me" or "Not me".
+        - A question stays open for 7 days, or 14 for account changes, app access and security alerts.
+        - A critical change (recovery email or phone changed or removed, 2FA turned off or moved to a new device, password or account email changed, a phone number or SIM moved) is marked Critical, sorts first and stays open until it is answered or marked done. It asks even when the same email also holds a login code. Once the user's Passband server is updated, it also sits in For your eyes until it is answered or marked done.
+        - Once the user's Passband server is updated, a sign-in alert can be explained, and then asks nothing: by a login code or sign-in link from the same service that the user revealed in Passband just before it, or by Google's own "You shared some Google Account data with" receipt naming that service. Its row then says so. Account changes, app access, security alerts and critical changes are never explained away, and on an older server nothing is.
+        - When three or more services see a new sign-in within three days, they share one "New device?" card with "All me" and "Review each". Only sign-ins group this way: account changes and app access always get a card of their own.
+        - "Not me" opens the message. Once the user's Passband server is updated, it also puts the message in For your eyes, and an answer given on one device shows on the others; until then, answers stay on the device where they were given.
+        - An answer can be taken back: the answered row on the Auth page, and the reveal panel, say what was answered and offer Undo. The reveal panel also asks the question itself, so an alert opened from For your eyes can be answered right there.
+        - Login codes, verifications and sign-in receipts ("you shared Google Account data with X") do not ask, unless the same email is also a critical change: they are proof of something the user just did.
+        - Auth mail in For your eyes shows its summary and a lock. Opening it reveals it once in the same panel, with the same audit entry.
 
         Arrival:
         - Auth mail shows up within seconds, without waiting for triage. The Auth icon on the rail shows live codes counting down.

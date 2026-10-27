@@ -21,9 +21,14 @@ private let eyesVisible = BoardFold.forYourEyes
 ///
 /// Computed at KEY-PRESS AND CLICK TIME ONLY. It re-ranks the standing list,
 /// which is the cost `SitrepCursor` exists to keep out of the render path.
+///
+/// AUTH MAIL IS NOT ON THE WALK. It sits in this band when it needs a ruling
+/// (critical, or "Not me"), and from here it opens in the audited one-time
+/// reveal, not the reader, so a walk that stepped onto it would leave the walk.
+/// Detected by the row's own decision first (`AppStore.authMeta(for:)`).
 @MainActor
 private func eyesWalk(_ store: AppStore) -> [AttentionUpdate] {
-    store.sitrep.standing
+    store.sitrep.standing.filter { store.authMeta(for: $0) == nil }
 }
 
 /// The sitrep's hover + keyboard cursor, in an `@Observable` box rather than
@@ -490,7 +495,9 @@ struct SitrepView: View {
                     // No closures passed down: a stored closure is never equal to
                     // last render's, so handing rows their actions that way meant
                     // SwiftUI could not skip a single one when the parent redrew.
-                    if RehearsalMode.isEnabled && u.id == 1 {
+                    if let meta = store.authMeta(for: u) {
+                        AuthEyesRow(update: u, meta: meta, index: i, cursor: cursor)
+                    } else if RehearsalMode.isEnabled && u.id == 1 {
                         ObligationRow(update: u, index: i, cursor: cursor)
                             .tourTarget(.maya)
                     } else if RehearsalMode.isEnabled && u.id == 11 {
@@ -576,6 +583,11 @@ struct SitrepView: View {
             },
             KeyBinding("Enter", "open email") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Auth mail opens in the audited one-time reveal.
+                if let meta = store.authMeta(for: u) {
+                    store.requestReveal(meta)
+                    return
+                }
                 store.openThread(u.thread_id, queue: eyesWalk(store), from: .sitrep)
             },
             // Space STARTS the walk: no highlight needed, so it is the one key
@@ -586,6 +598,11 @@ struct SitrepView: View {
                 let walk = eyesWalk(store)
                 let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
                 guard let u else { return false }
+                // A highlighted auth row opens the reveal, not a walk.
+                if let meta = store.authMeta(for: u) {
+                    store.requestReveal(meta)
+                    return true
+                }
                 store.startWalk(u.thread_id, queue: walk)
                 return true
             },
@@ -595,10 +612,16 @@ struct SitrepView: View {
             // inside the reader once the reply is away.
             KeyBinding("r", "reply") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Replying opens the reader on the sealed body; from here, an
+                // auth row only ever opens the reveal.
+                guard store.authMeta(for: u) == nil else { return }
                 Actions.reply(u, queue: eyesWalk(store))
             },
             KeyBinding("v", "fix triage") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 store.openTriageFix(
                     TriageFixTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line))
@@ -608,10 +631,16 @@ struct SitrepView: View {
             // the list's `t` is never consulted from this page.
             KeyBinding("t", "tune sender") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 Actions.tune(sender: u.sender)
             },
             KeyBinding("h", "remind me later") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                // Inert on an auth row: it opens only in the reveal and leaves
+                // only by an answer or Done (remind would park it).
+                guard store.authMeta(for: u) == nil else { return }
                 store.openRemind(
                     RemindTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line,
@@ -1000,6 +1029,71 @@ private struct BoardWarmKeeper: View {
             .onChange(of: store.lastRefresh) { _, _ in
                 SitrepView.warmBoard(Array(threadIds.prefix(eyesVisible)))
             }
+    }
+}
+
+// MARK: - auth row
+
+/// Auth mail in For your eyes: a critical account change nobody has ruled on,
+/// or one the owner said was not them. Its body is sealed, so this row shows
+/// the model's one-line summary and a lock, never prefetches the thread
+/// (`ThreadPrefetch.refuses`), and opens the audited one-time reveal. The
+/// human thread view would serve it; this row simply never asks.
+private struct AuthEyesRow: View {
+    @Environment(AppStore.self) private var store
+    let update: AttentionUpdate
+    let meta: SealedMeta
+    let index: Int
+    let cursor: SitrepCursor
+
+    @State private var hover = RowHover()
+
+    private var tone: Color { meta.isCritical ? Palette.danger : Palette.lock }
+
+    var body: some View {
+        Button {
+            cursor.index = index
+            store.requestReveal(meta)
+        } label: {
+            HStack(spacing: Space.scaled(9)) {
+                Avatar(sender: update.senderString, size: 22)
+                Text(SenderCache.resolved(update.senderString).displayName)
+                    .font(Typo.ui(12, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(1)
+                    .layoutPriority(2)
+                Image(systemName: "lock.fill")
+                    .font(Typo.ui(10))
+                    .foregroundStyle(tone)
+                    .help("Sealed. Opening it reveals it once and writes an audit entry.")
+                Text(update.one_line.isEmpty ? AuthCopy.label(meta.kind) : update.one_line)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkDim)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Chip(
+                    text: meta.isCritical ? "Critical" : AuthCopy.label(meta.kind),
+                    tone: tone,
+                    symbol: meta.isCritical ? "exclamationmark.triangle.fill" : AuthCopy.symbol(meta.kind),
+                    filled: meta.isCritical
+                )
+                .layoutPriority(3)
+            }
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.scaled(7))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background {
+            ObligationWash(index: index, cursor: cursor, hover: hover, tint: tone)
+        }
+        .onHover { over in
+            hover.on = over
+            if over { cursor.hover(index) }
+        }
+        .accessibilityLabel(
+            "\(AuthCopy.label(meta.kind)) from \(SenderCache.resolved(update.senderString).displayName), sealed")
     }
 }
 
@@ -1496,24 +1590,41 @@ struct FlowLayout: Layout {
     }
 #endif
 
-// MARK: - flow mode
+// MARK: - zone pills
 
-/// `space` flow mode: the Space walk, as a button in For-your-eyes' corner.
-/// It is how the key gets found: the reader who clicks it learns, from the
-/// keycap on the button they just pressed, that Space was the way all along.
-private struct FlowModeButton: View {
+/// A ZONE'S DOOR, as a pill in its header's corner: flow mode on For your
+/// eyes, smart clear on Reading. It is how a key gets found: the reader who
+/// clicks one learns, from the keycap on the button they just pressed, that
+/// the key was the way all along.
+struct ZonePill: View {
+    let symbol: String
+    let label: String
+    /// The key that does the same thing, shown on hover. nil for a door with
+    /// no key of its own.
+    var key: String?
+    let help: String
+    let accessibilityName: String
+    /// The thing the pill starts is under way and can take a while: the label
+    /// changes, a glint drifts round the border, and a press does nothing.
+    var working = false
+    var workingLabel: String?
     let action: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
+
+    private var lit: Bool { hovering && !working }
+    private var strong: Bool { lit || working }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: Space.scaled(5)) {
                 // THE KEY ONLY ON HOVER. At rest the corner says what the
                 // button is; reaching for it is when the shortcut is worth
-                // teaching, so the spacebar slides in then and the pill grows
+                // teaching, so the keycap slides in then and the pill grows
                 // out to the left (it is pinned to the card's right edge).
-                if hovering {
-                    Text("space")
+                if lit, let key {
+                    Text(key)
                         .font(Typo.mono(9.5, weight: .semibold))
                         .foregroundStyle(Palette.accent)
                         .padding(.horizontal, Space.scaled(9))
@@ -1530,26 +1641,48 @@ private struct FlowModeButton: View {
                         // the left edge moving out.
                         .transition(.opacity)
                 }
-                Image(systemName: "wind")
+                Image(systemName: symbol)
                     .font(Typo.ui(9.5, weight: .semibold))
                     .foregroundStyle(Palette.accent)
-                Text("flow mode")
+                Text(working ? (workingLabel ?? label) : label)
                     .font(Typo.micro)
-                    .foregroundStyle(hovering ? Palette.ink : Palette.inkDim)
+                    .foregroundStyle(lit ? Palette.ink : Palette.inkDim)
+                    .contentTransition(.opacity)
             }
-            .padding(.leading, hovering ? 3 : 8)
+            .padding(.leading, lit && key != nil ? 3 : 8)
             .padding(.trailing, Space.scaled(9))
             .padding(.vertical, Space.scaled(3))
             .background(
                 Capsule(style: .continuous)
-                    .fill(Palette.accentSoft.opacity(hovering ? 0.9 : 0.35))
+                    .fill(Palette.accentSoft.opacity(strong ? 0.9 : 0.35))
             )
+            #if os(macOS)
+                // Alive without a spinner: the flow hint's glint, all the way
+                // round the capsule, for as long as the wait lasts.
+                .overlay {
+                    if working { FlowBorder(radius: 99, moving: !reduceMotion) }
+                }
+            #endif
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .disabled(working)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.18), value: hovering)
-        .help("Walk through For your eyes one email at a time (Space)")
-        .accessibilityLabel("Flow mode")
+        .animation(.easeOut(duration: 0.25), value: working)
+        .help(help)
+        .accessibilityLabel(working ? (workingLabel ?? accessibilityName) : accessibilityName)
+    }
+}
+
+/// `space` flow mode: the Space walk, as a button in For-your-eyes' corner.
+private struct FlowModeButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        ZonePill(
+            symbol: "wind", label: "flow mode", key: "space",
+            help: "Walk through For your eyes one email at a time (Space)",
+            accessibilityName: "Flow mode", action: action)
     }
 }

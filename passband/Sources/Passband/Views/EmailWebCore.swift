@@ -19,6 +19,41 @@ import WebKit
     import UIKit
 #endif
 
+/// WHAT THE READER OPENED UP IN A MESSAGE'S BODY: the remote images they let
+/// in, the quoted history they unfolded. Held per reader and keyed by message
+/// id, so a body view that is REBUILT for the same message (the reader's "show
+/// original" flip swaps one document for the other, and a fresh frame is the
+/// only way to load a different document) comes back the way the reader left
+/// it rather than shut again. Not observed: nothing redraws when it changes,
+/// it is only read when a body is built.
+@MainActor
+final class BodyDisclosures {
+    private var images: Set<Int> = []
+    private var quotes: Set<Int> = []
+
+    func imagesLoaded(_ id: Int?) -> Bool { id.map { images.contains($0) } ?? false }
+    func quotesOpen(_ id: Int?) -> Bool { id.map { quotes.contains($0) } ?? false }
+    func setImagesLoaded(_ id: Int?) {
+        if let id { images.insert(id) }
+    }
+    func setQuotesOpen(_ open: Bool, _ id: Int?) {
+        guard let id else { return }
+        if open { quotes.insert(id) } else { quotes.remove(id) }
+    }
+}
+
+private struct BodyDisclosuresKey: EnvironmentKey {
+    static let defaultValue: BodyDisclosures? = nil
+}
+
+extension EnvironmentValues {
+    /// The open reader's `BodyDisclosures`, nil anywhere else.
+    var bodyDisclosures: BodyDisclosures? {
+        get { self[BodyDisclosuresKey.self] }
+        set { self[BodyDisclosuresKey.self] = newValue }
+    }
+}
+
 struct EmailWebView: View {
     let html: String
     /// Stable id (message id) for the height memory.
@@ -53,6 +88,18 @@ struct EmailWebView: View {
     /// The message this body is, for the reader's find (ReaderFind). nil for a
     /// body no find reaches: a preview, a reveal, the forward composer.
     let findID: Int?
+    /// The received message whose link clicks are counted (AttentionClock),
+    /// or nil for a body whose clicks mean nothing about a sender: the
+    /// settings preview, a scheduled send, the forward composer, a reveal,
+    /// the user's own sent mail. OPT-IN for that reason; only the reader's
+    /// received-mail card passes it. The count is all that is kept: the link
+    /// itself goes to `Opener` and nowhere else.
+    let attentionMessageId: Int?
+    /// What the reader already opened up in this message (its remote images,
+    /// its quoted history), kept by message id across a rebuild of this view.
+    /// Keyed by `findID`, which is the message id in the reader and nil
+    /// everywhere a body has no message to remember for. nil outside a reader.
+    let disclosures: BodyDisclosures?
 
     @Environment(Prefs.self) private var prefs
     @Environment(AppStore.self) private var store
@@ -120,7 +167,9 @@ struct EmailWebView: View {
     init(
         html: String, cacheKey: String? = nil, allowTrackers: Bool = false,
         attachments: [Attachment] = [], textHeight: CGFloat = 0,
-        bubble: Bool = false, mine: Bool = false, findID: Int? = nil
+        bubble: Bool = false, mine: Bool = false, findID: Int? = nil,
+        attentionMessageId: Int? = nil,
+        disclosures: BodyDisclosures? = nil
     ) {
         self.html = html
         self.cacheKey = cacheKey
@@ -130,6 +179,17 @@ struct EmailWebView: View {
         self.bubble = bubble
         self.mine = mine
         self.findID = findID
+        self.attentionMessageId = attentionMessageId
+        self.disclosures = disclosures
+        // Seeded HERE, not on appear: a frame that mounted collapsed and then
+        // unfolded would be a visible second layout of the same message.
+        let imagesIn = disclosures?.imagesLoaded(findID) ?? false
+        let quotesOpen = disclosures?.quotesOpen(findID) ?? false
+        _optedIn = State(initialValue: imagesIn)
+        _quotedHidden = State(initialValue: !quotesOpen)
+        // And sized as the reader's own document, not the measured default:
+        // the pass measured it shut and without the images (see `apply`).
+        _sizingIsUserDriven = State(initialValue: imagesIn || quotesOpen)
         _prepared = State(
             initialValue: PreparedBodies.shared.get(
                 PreparedKeyMemo.shared.key(
@@ -305,7 +365,19 @@ struct EmailWebView: View {
                     if sizing == .waiting { sizing = .settling }
                 },
                 onQuotedFound: { hasQuoted = $0 },
-                onLink: { Opener.open($0) }
+                onLink: {
+                    // Counted only when it is a link `Opener` will actually
+                    // open: a mailto: or an in-page anchor reaches here too
+                    // and goes nowhere, and "clicked" should mean they went.
+                    // And not the footer's unsubscribe link, which is the
+                    // reader leaving, not engaging.
+                    if let attentionMessageId, Opener.isHTTP($0),
+                        AttentionClock.isEngagement(link: $0)
+                    {
+                        store.attentionClick(attentionMessageId)
+                    }
+                    Opener.open($0)
+                }
             )
             // `maxWidth`, not `width`: a hugging bubble is capped at what the
             // document reported, and the column caps that in turn, so a
@@ -399,7 +471,10 @@ struct EmailWebView: View {
         // remote images in are the two things that legitimately change what
         // this message is; everything else that reaches the frame is the frame
         // talking to itself.
-        .onChange(of: quotedHidden) { _, _ in restartSizing(userDriven: true) }
+        .onChange(of: quotedHidden) { _, hidden in
+            disclosures?.setQuotesOpen(!hidden, findID)
+            restartSizing(userDriven: true)
+        }
         .onChange(of: allowRemote) { _, _ in restartSizing(userDriven: true) }
         // And a different BODY in the same frame, which is not a user action
         // but is still a new document to size: the cold path finishing its
@@ -639,6 +714,7 @@ struct EmailWebView: View {
         if !allowRemote && prepared.hasRemoteCandidates {
             Button {
                 optedIn = true
+                disclosures?.setImagesLoaded(findID)
             } label: {
                 Label("remote images blocked — load for this email", systemImage: "photo")
                     .font(Typo.micro)
@@ -1221,6 +1297,22 @@ final class EmailFrameCoordinator: NSObject {
     /// covers the bubble flag, so what it turns away is the same document.
     private var documentBubble = false
 
+    /// The last document a host ASKED for, kept so a frame whose content
+    /// process WebKit killed can be given it again. Nothing else would: the
+    /// host's next update is turned away by a load guard that still believes
+    /// the dead document is there.
+    private var lastLoad: (html: String, source: Int, allowRemote: Bool, bubble: Bool, poolKey: String?)?
+    /// The document a failed navigation has already been retried for. ONE
+    /// retry, because the retry is the next update and every failure writes
+    /// @State through `onLoaded`: a document that always fails would otherwise
+    /// reload itself forever.
+    private var retriedSignature: String?
+    /// The document a dead content process was last reloaded for, cleared the
+    /// moment that reload finishes. A process that dies AGAIN before it does is
+    /// one this document kills, and reloading it would be a crash loop: the
+    /// frame is left blank instead, and a reopen builds a fresh one.
+    private var reloadedAfterTermination: String?
+
     init(
         onHeight: @escaping (FrameMeasurement) -> Void, onLoaded: @escaping () -> Void,
         onQuotedFound: @escaping (Bool) -> Void, onLink: @escaping (String) -> Void
@@ -1263,6 +1355,7 @@ final class EmailFrameCoordinator: NSObject {
         // a blank document lands the real one as a SECOND navigation — which
         // is what makes the load race reachable at all.
         guard !html.isEmpty else { return }
+        lastLoad = (html, source, allowRemote, bubble, poolKey)
         // THE DENSITY IS NOT PART OF THE SIGNATURE, on purpose: a flip is a
         // restyle of the document already here, not a new document to load.
         // Reloading every open message to change its padding would throw away
@@ -1427,6 +1520,7 @@ final class EmailFrameCoordinator: NSObject {
     /// point: a pushed height says nothing about which state of the document
     /// produced it, while an answer belongs to the question.
     func documentDidLoad(_ webView: WKWebView) {
+        reloadedAfterTermination = nil
         appliedCollapse = true
         documentLive = true
         // The density FIRST, and without a settle of its own: script calls run
@@ -1444,8 +1538,55 @@ final class EmailFrameCoordinator: NSObject {
     /// waiting for it would refuse every later height this frame ever offers —
     /// including the ones a retry or a resize produces. Releasing the wait
     /// costs nothing when there is genuinely nothing more to come.
-    func documentDidFail() {
+    ///
+    /// And the load guard forgets the document, once, so the update that
+    /// releasing the wait provokes loads it again instead of leaving the frame
+    /// empty for as long as the view lives. NOT for a cancellation: that is a
+    /// load superseded by a newer one (or one layer 4 turned away), and the
+    /// document the guard names is on its way, so forgetting it would only
+    /// load it twice.
+    func documentDidFail(_ error: Error) {
+        let e = error as NSError
+        let cancelled =
+            (e.domain == NSURLErrorDomain && e.code == NSURLErrorCancelled)
+            || (e.domain == WKError.errorDomain && e.code == 102)  // interrupted by policy
+        if !cancelled, loadedSignature != retriedSignature {
+            retriedSignature = loadedSignature
+            loadedSignature = nil
+        }
         onLoaded()
+    }
+
+    /// WEBKIT KILLED THIS FRAME'S CONTENT PROCESS — which iOS does freely to a
+    /// backgrounded app or one short of memory. The view survives, blank, and
+    /// nothing about it says so: the load guard still names the old document,
+    /// so no update would ever reload it. Load it again now.
+    func documentDidTerminate(_ webView: WKWebView) {
+        documentLive = false
+        // A load the process died holding may never reach the policy gate, and
+        // a permission left over from it would wave through the next
+        // navigation nobody started.
+        pendingOwnLoads = 0
+        guard let last = lastLoad else {
+            loadedSignature = nil
+            return
+        }
+        let signature = Self.signature(
+            allowRemote: last.allowRemote,
+            document: Self.documentHash(source: last.source, bubble: last.bubble))
+        // Died again before the last reload ever finished: give up. The guard
+        // keeps naming the document so no update retries it either, `loaded`
+        // is false so `release` throws the frame away, and the host is told
+        // there is nothing more to wait for.
+        guard reloadedAfterTermination != signature else {
+            onLoaded()
+            return
+        }
+        reloadedAfterTermination = signature
+        loadedSignature = nil
+        load(
+            webView, html: last.html, source: last.source, allowRemote: last.allowRemote,
+            bubble: last.bubble, poolKey: last.poolKey)
     }
 
     /// TELL THE HOST TO TAKE ONE LAST MEASUREMENT, and hand it the number.
@@ -1886,7 +2027,7 @@ final class FrameRelay: NSObject, WKScriptMessageHandler, WKNavigationDelegate,
         _ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error
     ) {
         loaded = false
-        owner?.documentDidFail()
+        owner?.documentDidFail(error)
     }
 
     func webView(
@@ -1894,7 +2035,21 @@ final class FrameRelay: NSObject, WKScriptMessageHandler, WKNavigationDelegate,
         withError error: Error
     ) {
         loaded = false
-        owner?.documentDidFail()
+        owner?.documentDidFail(error)
+    }
+
+    /// The content process is gone, so the document is too, whatever `loaded`
+    /// said. Owned, the frame reloads; parked, it is thrown out — a pool hit is
+    /// adopted WITHOUT a load, so a dead parked frame is a blank message on
+    /// every reopen until the app is quit.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        loaded = false
+        lastMeasurement = nil
+        if let owner {
+            owner.documentDidTerminate(webView)
+        } else {
+            WebFramePool.shared.discardParked(self)
+        }
     }
 
     /// No popups, ever.
@@ -2116,6 +2271,17 @@ final class WebFramePool {
             prerendered.remove(oldest)
             if let evicted = frames.removeValue(forKey: oldest) { Self.discard(evicted) }
         }
+    }
+
+    /// Drop the parked frame this relay belongs to, if one is: its content
+    /// process died while it sat here.
+    func discardParked(_ relay: FrameRelay) {
+        guard let key = frames.first(where: { $0.value.relay === relay })?.key,
+            let entry = frames.removeValue(forKey: key)
+        else { return }
+        order.removeAll { $0 == key }
+        prerendered.remove(key)
+        Self.discard(entry)
     }
 
     /// Drop every parked frame. An account switch: the key's `message` is a
@@ -2444,7 +2610,7 @@ final class FramePrewarmer {
         guard !ThreadPrefetch.shared.isWithheld(threadId) else { return }
         guard let view = try? await ThreadPrefetch.shared.fetch(threadId),
             gen == generation, view.cache_allowed == true,
-            let message = view.messages.last, let html = message.html, !html.isEmpty
+            let message = view.messages.last, let html = message.presented().html, !html.isEmpty
         else { return }
         let style = ThreadViewer.resolveStyle(
             threadId: threadId, messages: view.messages,
@@ -2458,7 +2624,9 @@ final class FramePrewarmer {
     private func render(
         _ message: ClientMessage, style: ThreadStyle, width: CGFloat, prerendered: Bool, gen: Int
     ) async {
-        guard let html = message.html, !html.isEmpty else { return }
+        // The document the card will draw (the translation, when there is one)
+        // under the key the card will ask for it by.
+        guard let html = message.presented().html, !html.isEmpty else { return }
         let bubble = style == .bubbles
         let allowRemote = Prefs.shared.loadRemoteImages
 
@@ -2478,7 +2646,7 @@ final class FramePrewarmer {
         }
         guard gen == generation, !prepared.html.isEmpty else { return }
 
-        let poolKey = style.frameKey(message.id)
+        let poolKey = style.frameKey(for: message)
         guard
             let renderKey = EmailFrame.renderKey(
                 poolKey: poolKey, html: prepared.html, source: prepared.sourceHash,

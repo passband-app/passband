@@ -66,6 +66,12 @@ final class ThreadPrefetch {
     private let inflight = AsyncMemo<String, Result<ClientThreadView, Error>>(
         limit: 1, keep: { _ in false })
     private let loader: @MainActor (String) async throws -> ClientThreadView
+    /// Thread ids this cache must never fetch or hold: threads holding auth
+    /// mail, whose body is meant to arrive through the audited reveal (or a
+    /// reader the human opened on purpose, which fetches for itself), never a
+    /// hover or a warm. Injected by the store (`AppStore.authThreadIds`), so
+    /// this file still builds without it.
+    var refuses: @MainActor (String) -> Bool = { _ in false }
     /// Bumped by `wipe()`. Every fetch this class starts captures it and files
     /// nothing once it no longer matches: a thread fetched for the old account
     /// must not land in the new account's cache, and the trickle of a batch
@@ -185,7 +191,7 @@ final class ThreadPrefetch {
     /// (warmed and right-rail threads outlive the 60s default), and a repeat
     /// prefetch may EXTEND a TTL, never shorten it.
     func prefetch(_ threadId: String, fresh: TimeInterval? = nil) {
-        guard !threadId.isEmpty else { return }
+        guard !threadId.isEmpty, !refuses(threadId) else { return }
         let ttl = fresh ?? Self.freshDefault
         if !settled(threadId, ttl: ttl) { start(threadId, ttl: ttl) }
     }
@@ -245,6 +251,7 @@ final class ThreadPrefetch {
     func fetch(_ threadId: String, fresh: TimeInterval? = nil) async throws -> ClientThreadView {
         let ttl = fresh ?? Self.freshDefault
         try Task.checkCancellation()
+        if refuses(threadId) { throw CancellationError() }
         if let hit = cache.get(threadId), live(hit, asking: ttl) {
             extend(threadId, hit, to: ttl)
             return hit.view
@@ -297,6 +304,7 @@ final class ThreadPrefetch {
     /// reopen is instant too. Synchronous, so the live generation is by
     /// definition the one this view was fetched under.
     func note(_ threadId: String, _ view: ClientThreadView) {
+        guard !refuses(threadId) else { return }
         put(threadId, view, newest: Self.newest(view), fresh: Self.freshDefault, gen: generation)
     }
 
@@ -311,7 +319,9 @@ final class ThreadPrefetch {
     /// ImageRepeats are pure, so only the hand-back needs the main actor.
     private func warmBodies(_ view: ClientThreadView) {
         Task.detached(priority: .utility) {
-            for message in view.messages {
+            // THE VERSION THE READER WILL DRAW, which for mail in another
+            // language is the translation (ClientMessage.presented).
+            for message in view.messages.map({ $0.presented() }) {
                 guard let html = message.html, !html.isEmpty else { continue }
                 // The tracker policy is part of the prepared identity, so the
                 // warmer must key on the SAME one the card will render under or
@@ -531,13 +541,16 @@ final class FrameHeights {
     /// nothing on screen is using. The loop lives here so no caller has to know
     /// there are two.
     func clear(messageId: Int) {
+        // And in both versions of the document, original and translated.
         for style in ThreadStyle.allCases {
-            let key = style.frameKey(messageId)
-            if let cell = cells[key] {
-                if cell.known != nil { cell.known = nil }
-                if cell.hugWidth != nil { cell.hugWidth = nil }
+            for translated in [false, true] {
+                let key = style.frameKey(messageId, translated: translated)
+                if let cell = cells[key] {
+                    if cell.known != nil { cell.known = nil }
+                    if cell.hugWidth != nil { cell.hugWidth = nil }
+                }
+                guesses.removeValue(forKey: key)
             }
-            guesses.removeValue(forKey: key)
         }
     }
 

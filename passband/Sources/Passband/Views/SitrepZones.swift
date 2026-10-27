@@ -679,16 +679,12 @@ struct ReadingZone: View {
         }
     }
 
-    /// The zone's door, smart clear. Mac only for now, and gone with the
-    /// mail: on an empty zone there is nothing for it to do. Not in the
-    /// practice inbox, whose senders are fixtures.
+    /// The zone's door, smart clear, on both platforms. Gone with the mail:
+    /// on an empty zone there is nothing for it to do. Not in the practice
+    /// inbox, whose senders are fixtures.
     private var actions: AnyView? {
-        #if os(macOS)
-            guard !senders.isEmpty, !RehearsalMode.isEnabled else { return nil }
-            return AnyView(ReadingActions())
-        #else
-            return nil
-        #endif
+        guard !senders.isEmpty, !RehearsalMode.isEnabled else { return nil }
+        return AnyView(ReadingActions())
     }
 
     /// NON-LAZY on purpose: a LazyVGrid rebuilds cards as they cross the
@@ -726,27 +722,28 @@ struct ReadingZone: View {
     }
 }
 
-#if os(macOS)
-    /// SMART CLEAR, in Reading's corner. A leaf of its own so the zone above
-    /// stays free of closures and of the store's working flags:
-    /// a smart clear starting must not re-measure every card in the grid.
-    private struct ReadingActions: View {
-        @Environment(AppStore.self) private var store
+/// SMART CLEAR, in Reading's corner. A leaf of its own so the zone above
+/// stays free of closures and of the store's working flags:
+/// a smart clear starting must not re-measure every card in the grid.
+private struct ReadingActions: View {
+    @Environment(AppStore.self) private var store
 
-        var body: some View {
-            HStack(spacing: Space.s6) {
-                ZonePill(
-                    symbol: "checkmark.rectangle.stack", label: "smart clear",
-                    help: "Clear what has expired and what you never open. You can undo it.",
-                    accessibilityName: "Smart clear",
-                    working: store.smartClearWorking, workingLabel: "tidying up"
-                ) {
-                    Task { await store.runSmartClear() }
-                }
+    var body: some View {
+        HStack(spacing: Space.s6) {
+            ZonePill(
+                symbol: "checkmark.rectangle.stack", label: "smart clear",
+                help: "Clear what has expired and what you never open. You can undo it.",
+                accessibilityName: "Smart clear",
+                working: store.smartClearWorking, workingLabel: "tidying up"
+            ) {
+                #if os(iOS)
+                    Haptics.tick()
+                #endif
+                Task { await store.runSmartClear() }
             }
         }
     }
-#endif
+}
 
 /// Fetch + derive for the reading zone. Free-standing so the always-mounted
 /// SitrepView can own it.

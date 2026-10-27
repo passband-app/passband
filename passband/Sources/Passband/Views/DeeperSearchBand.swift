@@ -22,6 +22,13 @@ struct DeeperSearchBand: View {
     /// identical, which is the point of one view rather than two.
     let expanded: Bool
 
+    /// Where "continue in chat" goes, for a shell whose chat is not the Mac's
+    /// ⌘K bar. nil is the Mac: `openSearchLaneInChat` opens the bar, and the bar
+    /// takes a still-running lane over when it finishes. The phone has no bar
+    /// to watch the lane from, so it passes its own push here and the button
+    /// only offers itself once the lane is idle and the chat can adopt it.
+    var openInChat: (() -> Void)? = nil
+
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
     private var session: AssistantSession { store.searchLane }
@@ -95,8 +102,8 @@ struct DeeperSearchBand: View {
             // THE WAY OUT OF THE ONE-LINE ANSWER. The band is kept thin on
             // purpose; somebody who wants the whole answer, or to ask a
             // follow-up, takes the conversation to ⌘K, where it has room.
-            if search.laneStarted && !session.transcript.isEmpty {
-                Button { store.openSearchLaneInChat() } label: {
+            if search.laneStarted && !session.transcript.isEmpty && (openInChat == nil || hostedChatOffered) {
+                Button { (openInChat ?? store.openSearchLaneInChat)() } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(Typo.ui(10, weight: .semibold))
                         .foregroundStyle(Palette.inkFaint)
@@ -104,15 +111,33 @@ struct DeeperSearchBand: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(!store.canOpenSearchLaneInChat)
+                .disabled(openInChat == nil ? !store.canOpenSearchLaneInChat : !hostedChatReady)
                 .help(expandHelp)
+                .accessibilityLabel("Continue in chat")
             }
         }
     }
 
     private var expandHelp: String {
+        if openInChat != nil {
+            return hostedChatReady
+                ? "Continue in chat: the full answer, and room for follow-ups."
+                : "The chat is busy answering something else."
+        }
         if !store.canOpenSearchLaneInChat { return "The chat is busy answering something else." }
         return "Continue in chat: the full answer, and room for follow-ups. ⌘Return"
+    }
+
+    /// A caller-owned chat is offered once the lane has stopped talking: there
+    /// is no bar to hand a running lane to, and `adopt` refuses a live one.
+    private var hostedChatOffered: Bool {
+        !session.running && !store.preparingSearchEvidence
+    }
+
+    /// And it can take the conversation right now: it already holds this one,
+    /// or it is not busy with another.
+    private var hostedChatReady: Bool {
+        store.chatHoldsSearchLane || store.canExpandSearchLane
     }
 
     // MARK: - the lane's own rows

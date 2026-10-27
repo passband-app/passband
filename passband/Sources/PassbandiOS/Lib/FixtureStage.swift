@@ -135,6 +135,14 @@
                 }
             case "compose":
                 store.openComposeNew()
+            // THE DEEPER-SEARCH BAND on the phone's search tab (launch with
+            // `--fixture-tab search`). "thursday?" is question-shaped by its
+            // "?" and is also a literal substring of Alex's "Dinner on
+            // Thursday?", which is all the practice search matches on, so the
+            // band sits over one real hit. The practice API sends no
+            // diagnostics, so the no-strict-hits trigger cannot be staged here.
+            case "search-lane":
+                store.search.query = "thursday?"
             case "accounts":
                 AccountDoor.shared.pane = .picker
             // THE SENT PAGE, which the practice mailbox leaves empty: nothing
@@ -170,6 +178,22 @@
                         smart_block: SmartBlockProposal(
                             rule: "Only show receipts and account notices.",
                             keeps: "receipts", drops: "promotions")))
+            // SMART CLEAR'S RECEIPT over the sitrep, and its full list as the
+            // sheet the receipt's link raises. Staged straight onto the store:
+            // the press itself refuses the practice inbox. The clock is an
+            // hour long so a screenshot never races it.
+            case "smart-clear", "smart-clear-list":
+                store.smartClearReceipt = FixtureSmartClear.receipt()
+                if scene == "smart-clear-list" { store.openSmartClearList() }
+            // THE COMPOSER'S TRASH, asked: a message with words in it (an
+            // empty one closes without asking), then the confirm.
+            case "compose-discard":
+                store.openComposeNew()
+                store.compose?.subject = "Lunch on Thursday"
+                Task {
+                    try? await Task.sleep(for: .milliseconds(900))
+                    store.askDiscardCompose()
+                }
             case "clear":
                 SitrepPoller.shared.stop()
                 store.sitrep.standing = []
@@ -557,5 +581,45 @@
                     sent_at: ago(20), mode: .bcc, reached: 3, group_size: 3, failed: 0, opens: 2),
             ],
         ]
+    }
+#endif
+
+#if DEBUG
+    /// The receipt `smart-clear` stages: a batch with an undo, across the
+    /// reasons the copy has words for, with rows for the full list.
+    enum FixtureSmartClear {
+        @MainActor
+        static func receipt() -> AppStore.SmartClearReceipt {
+            let now = Date()
+            func ago(_ days: Double) -> String {
+                ISO8601DateFormatter().string(from: now.addingTimeInterval(-days * 86400))
+            }
+            let items = [
+                SmartClearItem(
+                    id: 91001, reason: "event_passed", sender: "events@citylights.example",
+                    senderName: "City Lights", subject: "Last call: rooftop film night", receivedAt: ago(9)),
+                SmartClearItem(
+                    id: 91002, reason: "offer_ended", sender: "deals@brightly.example",
+                    senderName: "Brightly", subject: "48 hours only: 30% off everything", receivedAt: ago(12)),
+                SmartClearItem(
+                    id: 91003, reason: "offer_ended", sender: "hello@northwind.example",
+                    senderName: "Northwind", subject: "Your weekend code expires Sunday", receivedAt: ago(16)),
+                SmartClearItem(
+                    id: 91004, reason: "stale_promo", sender: "news@paperco.example",
+                    senderName: "PaperCo", subject: "New arrivals for fall", receivedAt: ago(21)),
+                SmartClearItem(
+                    id: 91005, reason: "stale_promo", sender: "news@paperco.example",
+                    senderName: "PaperCo", subject: "The notebook edit", receivedAt: ago(28)),
+                SmartClearItem(
+                    id: 91006, reason: "ignored_sender", sender: "digest@forum.example",
+                    senderName: "", subject: "Your weekly forum digest", receivedAt: ago(5)),
+            ]
+            var byReason: [String: Int] = [:]
+            for item in items { byReason[item.reason, default: 0] += 1 }
+            return AppStore.SmartClearReceipt(
+                batchId: "fixture", cleared: items.count, senders: 5, byReason: byReason,
+                messageIds: items.map(\.id), modelMissed: false, createdAt: now,
+                clock: SmartClearClock(startedAt: now, lasting: 3600), items: items)
+        }
     }
 #endif

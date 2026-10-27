@@ -9,18 +9,25 @@
 // AND IT IS ALSO THE AGENT'S FIELD. A phone has one text field per screen, so
 // the field a person reaches for when they want to know something is this one,
 // whether what they type is "delta receipt" or "when does my flight leave".
-// COUNTING SPACES IS THE WHOLE CLASSIFIER: four of them (five words) and the
-// surface says it is asking the agent, and return sends it. Nothing about that
-// is clever, and that is the point — a model deciding which door you meant cost
-// a round trip, spent the user's own key on a keystroke, and was wrong in a way
-// nobody could predict. This rule is wrong in a way anybody can see and fix by
-// deleting a word. Worst case the search is agentic: a five-word lookup lands
-// on an agent that can search mail itself, which is a slower right answer rather
-// than a wrong one.
 //
-// UNDER FOUR SPACES IT IS PLAIN SEARCH, with the agent kept one tap away: the
-// first row above the hits offers the typed words to the agent. That row is a
-// deliberate tap, so unlike everything else here it DOES send.
+// THE DEEPER-SEARCH LANE, THE MAC'S RULE (docs/SEARCH.md §5, §6). Every settled
+// query is judged by `SearchIntent.classify` with the daemon's diagnostics for
+// exactly those words, and `DeeperSearchPolicy.settled` decides what that
+// verdict may do, the same two calls and the same order as `SidePanel.judge`.
+// A question-shaped query (five words, a trailing "?", a question word, "my"),
+// or three-plus words no one message carries, mounts `DeeperSearchBand` above
+// the hits: under Automatic the lane starts by itself, under On request the
+// band offers a button. While the band is up it IS the agent's door for these
+// words, so the "Ask the agent" row steps aside: one query, one agent.
+//
+// WITH DEEPER SEARCH OFF, the older phone rule comes back: four spaces (five
+// words) and the surface says it is asking the agent, and return sends it. It
+// exists only there because five words is exactly where the classifier calls a
+// query a question, so with the lane on, the space count would have kept the
+// lane from ever seeing its most common input.
+//
+// THE "ASK THE AGENT" ROW stays above the hits for every query the band does
+// not claim: a deliberate tap, so unlike the lane it pushes the full chat.
 //
 // WHAT IT SHARES WITH THE MAC'S PANEL, and does not re-implement: the fetch
 // itself (`SearchFetch`: partial matching, the unfinished-first order and the
@@ -42,12 +49,18 @@ import SwiftUI
 struct MobileSearchView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
+    /// This tab's stack, as the shell knows it: `active` is whether the search
+    /// tab is the one on screen, which is this shell's "panel open".
+    @Environment(ReaderTab.self) private var readerTab
 
     /// ALWAYS HYBRID HERE, unlike the Mac. The Mac panel types in keyword
     /// mode (`prefs.searchIncludeRelated`, off by default) because it keeps
     /// embedding off the first-result path and gets meaning back from its
-    /// deeper-search lane (docs/SEARCH.md). The phone has no such lane, so
-    /// keyword-only would simply lose every related hit it has always had.
+    /// deeper-search lane (docs/SEARCH.md). The phone runs that lane too now,
+    /// but only on queries the classifier calls deeper, and with it off or on
+    /// request keyword-only would lose every related hit the phone has always
+    /// had. The classifier does not mind: the daemon counts `strict_hits` for
+    /// every mode, so the no-strict-hits signal arrives either way.
     private static let related = true
 
     @State private var loading = false
@@ -114,14 +127,48 @@ struct MobileSearchView: View {
     /// Long enough to be a sentence, so this is a question. Trimmed first: the
     /// space a person leaves before their next word must not flip the surface
     /// one keystroke early.
+    ///
+    /// ONLY WITH DEEPER SEARCH OFF. Otherwise a sentence is the lane's, which
+    /// the classifier hands it at the same five words (see the file header).
     private var agentMode: Bool {
-        term.count(where: { $0 == " " }) >= Self.questionSpaces
+        prefs.deeperSearch == .off && term.count(where: { $0 == " " }) >= Self.questionSpaces
+    }
+
+    /// The Mac panel's own test (`SidePanel.bandMounted`): once a query has
+    /// been judged deeper, or a lane is going, and never under `off`.
+    private var bandMounted: Bool {
+        guard prefs.deeperSearch != .off, !term.isEmpty else { return false }
+        return store.search.laneStarted || store.search.lastVerdict?.isDeeper == true
+    }
+
+    /// The tallest the band may get above the hits. A phone with the keyboard
+    /// up has roughly 400pt between the field and the keys, and one answer is
+    /// eight cards; capped here, the band scrolls inside itself and the first
+    /// hits stay on screen under it. Scrolling the hits drops the keyboard,
+    /// which gives them the rest.
+    private static let bandCeiling: CGFloat = 230
+
+    /// What the explainer promises about questions, which the setting decides.
+    private var questionLine: String {
+        switch prefs.deeperSearch {
+        case .off: "A few words find a message. Five or more and the agent takes it as a question."
+        case .automatic: "A few words find a message. Ask a question and the agent reads your mail to answer it."
+        case .onRequest: "A few words find a message. Ask a question and the agent offers to answer it."
+        }
     }
 
     var body: some View {
         @Bindable var store = store
 
-        content
+        VStack(spacing: 0) {
+            // ABOVE whichever shape is below, the hits or "No matches": a
+            // three-word query no one message carries is exactly the one that
+            // comes back empty, and that is when the lane is worth most.
+            if bandMounted && !agentMode {
+                band
+            }
+            content
+        }
             .background(Palette.canvas)
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.inline)
@@ -159,6 +206,46 @@ struct MobileSearchView: View {
             .navigationDestination(item: $ask) { ask in
                 MobileAgentView(initialQuestion: ask.text)
             }
+            // CLEARING THE FIELD ENDS THE CONVERSATION, as it does in the Mac
+            // panel: empty words are not a narrowing of anything.
+            .onChange(of: store.search.query) { _, query in
+                if query.trimmed.isEmpty { store.resetSearchLane() }
+            }
+            // LEAVING THE TAB IS CLOSING THE PANEL (`AppStore.closeSide`):
+            // the lane is HELD, not torn down, and coming back picks it up
+            // where it stopped (`openSearch`'s resume). Keyed on the tab rather
+            // than on this view's appearance, because opening a hit or pushing
+            // the chat also takes this view off screen, and neither is the
+            // reader walking away from the search.
+            .onChange(of: readerTab.active) { _, active in
+                if active {
+                    store.searchLane.resume()
+                } else {
+                    if store.preparingSearchEvidence { store.resetSearchLane(keepingVerdict: true) }
+                    store.searchLane.pause()
+                }
+            }
+            // OFF STOPS A RUNNING LANE, the moment it is picked (the Mac's
+            // ShellWatchers). Watched here because the picker is on the
+            // Account page, over this tab, which stays mounted under it.
+            .onChange(of: prefs.deeperSearch) { _, choice in
+                let move = DeeperSearchPolicy.preferenceChanged(
+                    to: choice, laneStarted: store.search.laneStarted)
+                if move == .stop { store.resetSearchLane(keepingVerdict: true) }
+            }
+    }
+
+    /// The lane's answer, drawn by the Mac's own band, in a bounded scroller so
+    /// it can never take the hits off screen (`SidePanel.strippedBand`, sized
+    /// for a phone). `fixedSize` keeps a two-line band two lines tall.
+    private var band: some View {
+        ScrollView {
+            DeeperSearchBand(expanded: false, openInChat: continueInChat)
+                .padding(.top, 8)
+        }
+        .frame(maxHeight: Self.bandCeiling)
+        .fixedSize(horizontal: false, vertical: true)
+        .scrollDismissesKeyboard(.immediately)
     }
 
     // MARK: - the three shapes
@@ -174,7 +261,7 @@ struct MobileSearchView: View {
             // above "No matches" — that is the exact moment the words are worth
             // handing to something that can go look.
             VStack(spacing: 0) {
-                if !term.isEmpty {
+                if !term.isEmpty && !bandMounted {
                     askRow.padding(.horizontal, 16)
                     Divider().overlay(Palette.hairline)
                 }
@@ -198,7 +285,10 @@ struct MobileSearchView: View {
             // Guarded on the term rather than assumed from the hits: clearing
             // the field empties them one render later, and an "Ask the agent"
             // row quoting nothing at all is a row in that gap.
-            if !term.isEmpty {
+            //
+            // And not while the band is up: it is already the agent on these
+            // words, and a second door would run a second agent on them.
+            if !term.isEmpty && !bandMounted {
                 askRow.plainRow()
             }
             ForEach(senders) { sender in
@@ -296,7 +386,7 @@ struct MobileSearchView: View {
                 RecentRow(query: query) { store.search.query = query }
                     .plainRow()
             }
-            Text("A few words find a message. Five or more and the agent takes it as a question.")
+            Text(questionLine)
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaintest)
                 .fixedSize(horizontal: false, vertical: true)
@@ -400,9 +490,7 @@ struct MobileSearchView: View {
                 // Says the second thing this field does, once, where a first
                 // visit will read it. Nobody discovers a field with two jobs by
                 // accident, and the rule is small enough to state outright.
-                Text(
-                    "A few words find a message. Five or more and the agent takes it as a question."
-                )
+                Text(questionLine)
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaint)
                     .multilineTextAlignment(.center)
@@ -436,6 +524,43 @@ struct MobileSearchView: View {
         guard !question.isEmpty else { return }
         ask = AgentAsk(text: question)
         if clearingField { store.search.query = "" }
+    }
+
+    /// THE BAND'S "CONTINUE IN CHAT", on a shell with no ⌘K bar: the chat
+    /// takes a copy of the lane's conversation (`AssistantSession.adopt`, the
+    /// Mac's `expandSearchLaneToChat` without the bar it opens) and is pushed
+    /// with nothing to send, so a follow-up there is a real follow-up. Already
+    /// holding this search, the chat is just shown, follow-ups and all.
+    private func continueInChat() {
+        if !store.chatHoldsSearchLane {
+            guard store.canExpandSearchLane else { return }
+            store.assistant.adopt(store.searchLane)
+        }
+        ask = AgentAsk(text: nil)
+    }
+
+    /// Keyword or question, for the query whose hits are now on screen: the
+    /// Mac panel's `judge`, line for line, because the rule about spending is
+    /// `DeeperSearchPolicy`'s and a rule spelled twice will disagree with
+    /// itself. Only for words still in the field: a lane started for words the
+    /// reader deleted would take the live ones as a "refinement".
+    private func judge(_ query: String) {
+        guard query == term else { return }
+        let verdict = SearchIntent.classify(query: query, diagnostics: store.search.diagnostics)
+        store.search.lastVerdict = verdict
+        switch DeeperSearchPolicy.settled(
+            verdict: verdict, choice: prefs.deeperSearch,
+            laneStarted: store.search.laneStarted)
+        {
+        case .nothing:
+            break
+        case .stop:
+            store.resetSearchLane(keepingVerdict: true)
+        case .refine:
+            store.refineDeeperSearch()
+        case .start(let trigger):
+            store.startDeeperSearch(trigger: trigger)
+        }
     }
 
     // MARK: - fetching
@@ -509,6 +634,9 @@ struct MobileSearchView: View {
             for hit in page.items.prefix(Self.warmCount) {
                 ThreadPrefetch.shared.prefetch(hit.thread_id)
             }
+            // After the fetch, never mid-keystroke: past the debounce, with
+            // the daemon's diagnostics for exactly these words in hand.
+            judge(query)
         } catch {
             // Cancellation surfaces here too (URLError.cancelled mid-request):
             // that is a superseded task, not a failure, and writing an error
@@ -575,7 +703,9 @@ struct MobileSearchView: View {
 /// again" as a new destination — two identical questions are two questions.
 private struct AgentAsk: Hashable, Identifiable {
     let id = UUID()
-    let text: String
+    /// nil is the band handing over a conversation already adopted: the push
+    /// shows it and sends nothing.
+    let text: String?
 }
 
 // MARK: - one hit

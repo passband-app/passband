@@ -289,7 +289,8 @@ struct SearchView: View {
         // screen until the reader edits their query. An array because tuples do
         // not conform to Equatable and `task(id:)` needs one value.
         .task(id: [store.search.query, prefs.searchSort.rawValue,
-                   String(prefs.searchIncludeRelated), String(store.search.revision)]) {
+                   String(prefs.searchIncludeRelated), String(store.search.revision),
+                   String(store.searchPlainOrder)]) {
             await runSearch()
         }
         .task(id: store.search.query) {

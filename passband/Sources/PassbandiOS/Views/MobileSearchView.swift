@@ -149,7 +149,8 @@ struct MobileSearchView: View {
             // for the next keystroke. An array because `task(id:)` needs one
             // Equatable value.
             .task(id: [store.search.query, prefs.searchSort.rawValue,
-                       String(prefs.searchIncludeRelated), String(store.search.revision)]) {
+                       String(prefs.searchIncludeRelated), String(store.search.revision),
+                       String(store.searchPlainOrder)]) {
                 await runSearch()
             }
             #if DEBUG

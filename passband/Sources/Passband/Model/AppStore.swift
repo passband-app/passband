@@ -4319,9 +4319,12 @@ final class AppStore {
     /// If the chat was already the conversation behind this same question
     /// before adopting, its follow-ups are what history saved for it, and the
     /// lane's copy (the lane narrowed on underneath since) is not written over
-    /// them. The chat now holds the lane's conversation and its next run end
-    /// saves that, which is the reader choosing it; until then, tapping the
-    /// question in history still opens the chat with its follow-ups.
+    /// them ON DISK. The LIVE chat does hold the lane's copy now (`adopt`
+    /// replaces it, as it always has), so tapping the question in history this
+    /// session opens that, and the chat's next run end saves it over the old
+    /// follow-ups: asking "continue in chat" again is the reader choosing the
+    /// newer conversation. What this rule spares is only the saved copy, in
+    /// case nothing more is asked.
     func adoptSearchLaneIntoChat() {
         let heldSameQuestion = chatQuestionKey != nil && chatQuestionKey == laneQuestionKey
         let before = assistant.conversationId

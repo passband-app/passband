@@ -29,7 +29,9 @@ final class RecentSearchStore {
     /// while it is still the live account: an account switch commits the new
     /// id before this store reloads, and a record in between would otherwise
     /// write this account's ring under the next one's key.
-    private var loadedFor: UUID?
+    /// Read by QuestionChats, which takes its account from here rather than
+    /// from the live id: the two must always describe the same mailbox.
+    private(set) var loadedFor: UUID?
 
     /// The key to write under now, or nil when there is none: no live
     /// account, or the ring in memory belongs to one that is no longer live.

@@ -73,7 +73,7 @@ final class QuestionChats {
                 forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil,
                 queue: .main
             ) { _ in
-                MainActor.assumeIsolated { QuestionChats.shared.retryIfUnreadable() }
+                MainActor.assumeIsolated { QuestionChats.shared.retryIfUnreadable(force: true) }
             }
         #endif
     }
@@ -148,6 +148,7 @@ final class QuestionChats {
     /// also the way out of a file that will never read.
     func clear() {
         guard let id = liveLoadedAccount else { return }
+        reportedCorrupt = nil
         chats = [:]
         encoded = [:]
         unreadable = false
@@ -155,12 +156,18 @@ final class QuestionChats {
         Self.writer.async { Self.remove(url) }
     }
 
-    /// Re-read for whatever account is live NOW, beside the ring's own reload.
+    /// Re-read beside the ring's own reload, FOR THE RING'S ACCOUNT, not the
+    /// live id. During an account removal the live id moves to the survivor
+    /// before the ring reloads; a first use of this store in that window, read
+    /// for the live id, would load the survivor's file and prune it against
+    /// the removed account's questions. Taken from the ring, the two always
+    /// describe one mailbox, and `liveLoadedAccount` refuses every write until
+    /// the live id agrees.
     func reload() {
         chats = [:]
         encoded = [:]
         unreadable = false
-        loadedFor = AccountManager.shared.activeId
+        loadedFor = RecentSearchStore.shared.loadedFor
         load()
         // A line can leave the ring while this file could not be written (or
         // under a build that kept no chats), so the file may name one.
@@ -218,9 +225,13 @@ final class QuestionChats {
     }
 
     /// Try the load again if the last one could not read the file. Cheap when
-    /// it could: one flag.
-    private func retryIfUnreadable() {
-        guard unreadable, liveLoadedAccount != nil else { return }
+    /// it could: one flag. A file already reported CORRUPT is not re-read on
+    /// every run end and history tap (it would decode the whole file on the
+    /// main thread each time to the same answer); only the unlock notice
+    /// (`force`) or a Clear tries it again.
+    private func retryIfUnreadable(force: Bool = false) {
+        guard unreadable, let id = liveLoadedAccount else { return }
+        if !force, reportedCorrupt == id { return }
         load()
         if !unreadable, dropDead() { write() }
     }

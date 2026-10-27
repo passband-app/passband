@@ -2297,7 +2297,12 @@ impl SqliteStore {
         cc_addrs: &str,
         bcc_addrs: &str,
     ) -> Result<bool> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
+        // ONE TRANSACTION for the columns and the index rows derived from them.
+        // In autocommit, a process killed partway left new columns over old or
+        // partial index rows, which the open-time backfill cannot see: it
+        // heals a sent row with NO index rows, never one with some.
+        let tx = conn.transaction()?;
         // BCC IS DROPPED FOR ANYTHING NOT SENT, here in SQL rather than only in
         // the caller: a `Bcc:` header on received mail is the sender's leak or a
         // forgery, and this is the one writer a network sweep drives. To and Cc
@@ -2306,7 +2311,7 @@ impl SqliteStore {
         //
         // Writing "" is meaningful: it takes the row out of the backfill queue
         // as "looked, and the headers named nobody".
-        let n = conn.execute(
+        let n = tx.execute(
             "UPDATE messages
                 SET to_addrs = ?3,
                     cc_addrs = ?4,
@@ -2322,7 +2327,7 @@ impl SqliteStore {
         // group history joins against, and an inbound row in it would credit a
         // group with mail it never received. Re-read from the row rather than
         // trusted from the caller, for the same reason the Bcc gate is in SQL.
-        let is_sent: bool = conn.query_row(
+        let is_sent: bool = tx.query_row(
             "SELECT is_sent = 1 FROM messages WHERE account_id = ?1 AND id = ?2",
             params![account_id, message_id],
             |r| r.get(0),
@@ -2335,8 +2340,9 @@ impl SqliteStore {
             let joined =
                 crate::sync::ingest::join_recipient_lists(&[to_addrs, cc_addrs, bcc_addrs]);
             let addrs = crate::sync::ingest::parse_stored_recipients(&joined);
-            Self::sync_message_recipients_conn(&conn, account_id, message_id, &addrs)?;
+            Self::sync_message_recipients_conn(&tx, account_id, message_id, &addrs)?;
         }
+        tx.commit()?;
         Ok(true)
     }
 }

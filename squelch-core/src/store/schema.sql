@@ -2192,20 +2192,32 @@ CREATE INDEX IF NOT EXISTS idx_agent_decision_source_reverse ON agent_decision_s
 
 -- Repair beta related-thread projections without losing their evidence guard.
 -- Classification belongs to the target; the updating decision is provenance.
+--
+-- ON EVERY OPEN, not behind a done-flag: the message upsert takes Gmail's
+-- thread id as it stands, so a message Gmail re-threads can leave an
+-- attention row whose decision message is no longer in its thread, the shape
+-- the beta wrote.
+--
+-- THE PROBE IS PINNED to `idx_messages_thread`, which holds (account, thread,
+-- id) and so answers it from the index alone. By rowid the planner reads each
+-- decision message's row, three times over every thread with attention: 111 ms
+-- of every open at 50k messages, and a read of thousands of scattered pages
+-- on a cold file. Pinned, it is 17 ms. The index is created above, in this
+-- same batch.
 INSERT OR IGNORE INTO agent_attention_sources(account_id,thread_id,source_message_id,source_revision)
 SELECT a.account_id,a.thread_id,d.source_message_id,d.source_revision
 FROM agent_thread_attention a JOIN agent_decision_sources d
   ON d.account_id=a.account_id AND d.message_id=a.decision_message_id
-WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.account_id=a.account_id
+WHERE NOT EXISTS (SELECT 1 FROM messages m INDEXED BY idx_messages_thread WHERE m.account_id=a.account_id
                   AND m.id=a.decision_message_id AND m.thread_id=a.thread_id);
 INSERT OR IGNORE INTO agent_attention_sources(account_id,thread_id,source_message_id,source_revision)
 SELECT a.account_id,a.thread_id,a.decision_message_id,COALESCE(s.revision,0)
 FROM agent_thread_attention a
 LEFT JOIN agent_message_state s ON s.account_id=a.account_id AND s.message_id=a.decision_message_id
-WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.account_id=a.account_id
+WHERE NOT EXISTS (SELECT 1 FROM messages m INDEXED BY idx_messages_thread WHERE m.account_id=a.account_id
                   AND m.id=a.decision_message_id AND m.thread_id=a.thread_id);
 UPDATE agent_thread_attention SET decision_message_id=message_id
-WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.account_id=agent_thread_attention.account_id
+WHERE NOT EXISTS (SELECT 1 FROM messages m INDEXED BY idx_messages_thread WHERE m.account_id=agent_thread_attention.account_id
                   AND m.id=agent_thread_attention.decision_message_id AND m.thread_id=agent_thread_attention.thread_id);
 
 -- THE ARCHIVE WALK'S CURSOR, one row per account. `walked_to` is the oldest

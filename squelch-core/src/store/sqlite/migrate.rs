@@ -760,7 +760,7 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
-    // ---- ONE-SHOT: the normalized sent-recipient index ---------------------
+    // ---- EVERY OPEN: the normalized sent-recipient index -------------------
     //
     // `message_recipients` arrives empty on an existing DB while `to_addrs` has
     // been filling for months, so without this a send group opens on a mailbox
@@ -771,8 +771,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // Self-triggering and idempotent: the candidate predicate is "sent, has
     // recipients, has no index rows", so a completed pass matches nothing. It
     // runs under one commit, so an interrupted one starts over on the next
-    // open rather than resuming. No done-flag and no `added_*` gate — a plain
-    // re-run is free.
+    // open rather than resuming. No done-flag, no watermark and no `added_*`
+    // gate, on purpose: a re-ingest whose raw does not parse clears a stored
+    // message's index rows while its columns keep their text, and only a pass
+    // over every sent row puts them back. The candidates come from two indexes,
+    // so that pass is close to free (see the function).
     backfill_message_recipients(conn)?;
 
     // ---- THE FTS INDEX'S OPTIONS CHANGED ----------------------------------
@@ -1450,9 +1453,35 @@ fn clear_stale_no_extractor_markers(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// ONE-SHOT (and re-runnable): fill `message_recipients` from the recipient
-/// display strings already on disk, under one commit, so an open that dies
-/// halfway leaves nothing and the next one does it all again.
+/// Sent mail by account, which [`backfill_message_recipients`] reads its
+/// candidates from: the account and the row id are all it needs, so nothing
+/// else is carried.
+const SENT_INDEX_SQL: &str = "CREATE INDEX IF NOT EXISTS idx_messages_sent
+     ON messages(account_id) WHERE is_sent = 1";
+
+/// [`backfill_message_recipients`]' candidates: sent mail with recipients
+/// stored and no index rows. The sent rows lacking index rows are found from
+/// `idx_messages_sent` and `message_recipients`' key alone, and only they are
+/// fetched from the table. Pinned both ways: without the `INDEXED BY` a store
+/// with no `sqlite_stat1` is free to walk the table for `is_sent` again, and
+/// the `CROSS JOIN` keeps the fetch a rowid lookup per candidate whatever the
+/// statistics say.
+pub(super) const RECIPIENTS_CANDIDATES_SQL: &str = "SELECT m.id, m.account_id,
+        COALESCE(m.to_addrs, ''), COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
+     FROM messages s INDEXED BY idx_messages_sent
+     CROSS JOIN messages m ON m.id = s.id
+     WHERE s.is_sent = 1
+       AND NOT EXISTS (
+           SELECT 1 FROM message_recipients r
+           WHERE r.account_id = s.account_id AND r.message_id = s.id)
+       AND (m.to_addrs IS NOT NULL OR m.cc_addrs IS NOT NULL)
+       AND (COALESCE(m.to_addrs, '') != ''
+            OR COALESCE(m.cc_addrs, '') != ''
+            OR COALESCE(m.bcc_addrs, '') != '')";
+
+/// EVERY OPEN: fill `message_recipients` from the recipient display strings
+/// already on disk for any sent row that has none, under one commit, so an
+/// open that dies halfway leaves nothing and the next one does it all again.
 ///
 /// Local and parse-only — no network, unlike the recipients sweep in the sync
 /// engine that produced those strings in the first place. Rows with no
@@ -1464,34 +1493,38 @@ fn clear_stale_no_extractor_markers(conn: &Connection) -> Result<()> {
 /// one. Pre-split rows carry all three in `to_addrs` already (it held To+Cc+Bcc
 /// mashed together), and the concatenation below is a no-op on them.
 ///
-/// EMPTY strings ("looked, and the headers named nobody") yield no rows and
-/// therefore stay candidates forever. That is a handful of rows parsing to
-/// nothing on each open, which is cheaper than a done-flag per account for a
-/// table this seam scans once.
+/// EMPTY strings ("looked, and the headers named nobody") are not candidates.
+/// A stored string that parses to no address yields no rows and so stays one,
+/// read again on each open: a handful of rows at most.
+///
+/// THE CANDIDATES COME FROM TWO INDEXES, never the table. `is_sent` and the
+/// recipient columns sit after the bodies, so a predicate on them reads past
+/// every row's overflow chain: 38-50 ms of every open at 50k messages, and a
+/// read of the whole table on a cold file, to find nothing. The sent mail
+/// lacking index rows is read from `idx_messages_sent` and the recipient
+/// index's own key, and only those rows are fetched.
+///
+/// THE INDEX IS BUILT HERE, beside its one reader, the first time an open
+/// finds it missing. That one build reads the table, as every open used to,
+/// and holds the write lock while it does. NEVER A REASON NOT TO START: a
+/// build that fails (a sibling process holding the lock past the busy
+/// timeout) skips the heal for this open, and the next open builds it.
 fn backfill_message_recipients(conn: &Connection) -> Result<()> {
     if !tables_exist(conn, &["messages", "message_recipients"])?
         || !has_columns(
             conn,
             "messages",
-            &["to_addrs", "cc_addrs", "bcc_addrs", "is_sent"],
+            &["account_id", "to_addrs", "cc_addrs", "bcc_addrs", "is_sent"],
         )?
     {
         return Ok(());
     }
+    if let Err(error) = conn.execute(SENT_INDEX_SQL, []) {
+        eprintln!("squelch: sent index not built, recipients backfill skipped: {error}");
+        return Ok(());
+    }
     let rows: Vec<(i64, i64, String, String, String)> = conn
-        .prepare(
-            "SELECT m.id, m.account_id, COALESCE(m.to_addrs, ''),
-                    COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
-             FROM messages m
-             WHERE m.is_sent = 1
-               AND (m.to_addrs IS NOT NULL OR m.cc_addrs IS NOT NULL)
-               AND (COALESCE(m.to_addrs, '') != ''
-                    OR COALESCE(m.cc_addrs, '') != ''
-                    OR COALESCE(m.bcc_addrs, '') != '')
-               AND NOT EXISTS (
-                   SELECT 1 FROM message_recipients r
-                   WHERE r.account_id = m.account_id AND r.message_id = m.id)",
-        )?
+        .prepare(RECIPIENTS_CANDIDATES_SQL)?
         .query_map([], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?

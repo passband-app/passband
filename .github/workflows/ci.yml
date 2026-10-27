@@ -236,6 +236,9 @@ jobs:
   # The required check. Always runs, and fails if any job it depends on
   # failed or was cancelled; skipped counts as a pass.
   gate:
+    # Unique check name: rulesets match the bare job name, and ci-passband
+    # also has a gate job.
+    name: ci-gate
     if: always()
     needs: [changes, rust, deny]
     runs-on: ubuntu-latest

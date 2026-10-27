@@ -82,6 +82,9 @@ jobs:
 
   # The required check. Always runs; skipped counts as a pass.
   gate:
+    # Unique check name: rulesets match the bare job name, and ci also has
+    # a gate job.
+    name: ci-passband-gate
     if: always()
     needs: [changes, test]
     runs-on: ubuntu-latest

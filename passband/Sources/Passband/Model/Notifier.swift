@@ -486,6 +486,32 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let route = notification.request.content.userInfo[EventBanner.routeKey] as? String
         let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
         nonisolated(unsafe) let done = completionHandler
+        #if os(iOS)
+            // ONE BANNER PER EVENT. The phone hears new mail twice while it is
+            // open: the daemon pushes every event, and the app's own feed
+            // posts a banner for it too, under a different identifier, so the
+            // system would show both. Whichever arrives SECOND finds the first
+            // already in Notification Center and is shown as nothing.
+            if let identity = EventBanner.eventIdentity(notification.request.content.userInfo) {
+                let own = notification.request.identifier
+                center.getDeliveredNotifications { delivered in
+                    let told = delivered.contains {
+                        $0.request.identifier != own
+                            && EventBanner.eventIdentity($0.request.content.userInfo) == identity
+                    }
+                    if told {
+                        done([])
+                        return
+                    }
+                    // The phone's own rule, as below: no foreground check yet.
+                    done(
+                        Notifier.presentation(
+                            appActive: false, windowVisible: false,
+                            isTest: route == EventBanner.testRoute, isAuth: isAuth))
+                }
+                return
+            }
+        #endif
         onMain {
             #if os(macOS)
                 let (active, visible) = (NSApp.isActive, MainWindow.find()?.isVisible == true)

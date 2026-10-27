@@ -127,6 +127,24 @@ enum EventBanner {
         return .authSignal(kind)
     }
 
+    /// WHICH EVENT A NOTIFICATION IS ABOUT, as "<account>:<event id>", from
+    /// either shape the phone sees: a banner the app posted, or a push the
+    /// service extension enriched (both carry `accountKey` + `eventKey`), or
+    /// a push it could not enrich (the relay's raw `event_id`). nil for
+    /// anything about no single event (auth, tests, updates). Two
+    /// notifications with one identity are the same mail told twice.
+    static func eventIdentity(_ userInfo: [AnyHashable: Any]) -> String? {
+        if let account = userInfo[accountKey] as? String,
+            let event = (userInfo[eventKey] as? Int) ?? (userInfo[eventKey] as? NSNumber)?.intValue
+        {
+            return "\(account.lowercased()):\(event)"
+        }
+        if let push = unresolvedPush(userInfo["event_id"] as? String) {
+            return "\(push.accountId.uuidString.lowercased()):\(push.eventId)"
+        }
+        return nil
+    }
+
     /// BACKLOG: an event that happened before the feed connected, replayed
     /// from the cursor the app last saved. On the phone a push already put it
     /// on the lock screen while the app was closed, so bannering it again the

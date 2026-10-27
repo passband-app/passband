@@ -37,6 +37,7 @@ struct SealedEventTests {
         expect(auth.isAuth && EventBanner.copy(for: auth).sound, "Login alerts carry explicit auth and sound even at low importance")
         aLoginCodeIsReadOutOfTheDaemonsSentenceAndNothingElse()
         theReplayAfterAnOpenIsBacklog()
+        aPushAndALocalBannerForOneEventShareAnIdentity()
         aFocusHoldsThePanelBackOnlyWhenAskedTo()
         anOrdinaryEventDecodesWithNoSealedKey()
         aSealedEventCarriesItsKind()
@@ -348,6 +349,35 @@ struct SealedEventTests {
         expect(
             !EventBanner.isBacklog(createdAt: "not a date", connectedAt: connected),
             "an unreadable stamp is bannered rather than lost")
+    }
+
+    /// The dedupe's key: the app's banner, an enriched push and a raw push for
+    /// one event must agree (case of the UUID included), different events or
+    /// accounts must not, and an auth banner (no event key) has none.
+    static func aPushAndALocalBannerForOneEventShareAnIdentity() {
+        let account = "6F9619FF-8B86-D011-B42D-00C04FC964FF"
+        let local: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.eventKey: 41,
+            EventBanner.threadKey: "t1",
+        ]
+        let enriched: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.eventKey: NSNumber(value: 41),
+        ]
+        let raw: [AnyHashable: Any] = ["event_id": "\(account.lowercased()):41"]
+        let other: [AnyHashable: Any] = [EventBanner.accountKey: account, EventBanner.eventKey: 42]
+        let elsewhere: [AnyHashable: Any] = [
+            EventBanner.accountKey: "11111111-2222-3333-4444-555555555555", EventBanner.eventKey: 41,
+        ]
+        let auth: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.routeKey: EventBanner.authRoute,
+        ]
+        let id = EventBanner.eventIdentity(local)
+        expect(id != nil, "a local banner has an identity")
+        expect(EventBanner.eventIdentity(enriched) == id, "an enriched push matches its local banner")
+        expect(EventBanner.eventIdentity(raw) == id, "an unenriched push matches it too")
+        expect(EventBanner.eventIdentity(other) != id, "another event does not")
+        expect(EventBanner.eventIdentity(elsewhere) != id, "the same id in another account does not")
+        expect(EventBanner.eventIdentity(auth) == nil, "an auth banner is about no single event")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

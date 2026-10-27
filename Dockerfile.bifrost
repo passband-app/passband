@@ -11,6 +11,6 @@
 # or baked config has an obvious place to land if the OSS admin plane ever
 # needs fronting. Root user for the same reason as Dockerfile.prometheus:
 # the Railway volume at /app/data mounts root-owned.
-FROM maximhq/bifrost:v1.6.9@sha256:fafe3d2029af07c889404f561839f3ac6ff95c1848f679679d219c0dc7f72de8
+FROM maximhq/bifrost:v2.3.2@sha256:f5b18826349fe9e1c402c10d19f1cbb5567a3c800ad928580d07f72e69106ec7
 USER root
 EXPOSE 8080

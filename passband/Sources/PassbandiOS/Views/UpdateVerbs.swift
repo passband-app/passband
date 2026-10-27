@@ -235,10 +235,14 @@ extension View {
     /// A `List` row wearing the app's skin rather than the system's: no
     /// separator, no grey selection slab, no inset chrome — the row's own glass
     /// and padding are the whole visual.
-    func plainRow() -> some View {
-        listRowBackground(Color.clear)
+    /// `bleed` is for a row drawn with `PhoneRow.hPadding` inside it (an
+    /// `UpdateRow`, a `SentRow`): its words land on the screen's gutter, the
+    /// same line the headings above it sit on, instead of a padding further in.
+    func plainRow(bleed: Bool = false) -> some View {
+        let side = bleed ? PhoneRow.bleed : 14
+        return listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
-            .listRowInsets(EdgeInsets(top: 1, leading: 14, bottom: 1, trailing: 14))
+            .listRowInsets(EdgeInsets(top: 1, leading: side, bottom: 1, trailing: side))
     }
 
     /// The native rails, built from the SAME verb arrays the hand-rolled

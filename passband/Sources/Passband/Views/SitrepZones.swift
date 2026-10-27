@@ -60,7 +60,7 @@ struct CalendarZone: View {
                                         .font(Typo.num(10))
                                         .foregroundStyle(Palette.inkFaintest)
                                 }
-                                .padding(.horizontal, Space.scaled(7))
+                                .padding(.horizontal, RecordRowStyle.hPadding)
                                 .padding(.vertical, Space.scaled(5))
                                 .contentShape(Rectangle())
                             }
@@ -525,7 +525,7 @@ struct BankingZone: View {
                                         .fixedSize()
                                 }
                             }
-                            .padding(.horizontal, Space.scaled(7))
+                            .padding(.horizontal, RecordRowStyle.hPadding)
                             .padding(.vertical, Space.scaled(5))
                             .contentShape(Rectangle())
                         }
@@ -609,7 +609,7 @@ struct ReceiptsZone: View {
                                         .foregroundStyle(Palette.positive)
                                 }
                             }
-                            .padding(.horizontal, Space.scaled(7))
+                            .padding(.horizontal, RecordRowStyle.hPadding)
                             .padding(.vertical, Space.scaled(5))
                             .contentShape(Rectangle())
                         }
@@ -1099,6 +1099,17 @@ struct EmptyNote: View {
 /// A record row: no chrome at rest, a soft wash on hover.
 struct RecordRowStyle: ButtonStyle {
     @State private var hovering = false
+
+    /// Room for the hover wash, which only a pointer raises. A phone has no
+    /// hover, so there it was pure inset, drawing every record a step inside
+    /// its zone's title: on iOS the words sit on the title's line.
+    static var hPadding: CGFloat {
+        #if os(macOS)
+            Space.scaled(7)
+        #else
+            0
+        #endif
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label

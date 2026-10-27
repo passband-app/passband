@@ -317,6 +317,7 @@ struct MobileSitrepView: View {
                         SwipeRow(leading: [], trailing: verbs.doneVerbs) {
                             MobileAuthEyesRow(update: u, meta: meta) { store.requestReveal(meta) }
                         }
+                        .padding(.horizontal, -PhoneRow.hPadding)
                     } else {
                         SwipeRow(leading: verbs.leadingVerbs, trailing: verbs.trailingVerbs) {
                             UpdateRow(
@@ -325,6 +326,9 @@ struct MobileSitrepView: View {
                                 onHover: {},
                                 onOpen: verbs.open)
                         }
+                        // The row's words on the zone title's line; its press
+                        // wash and swipe rails bleed into the card's padding.
+                        .padding(.horizontal, -PhoneRow.hPadding)
                         .updateContextMenu(verbs)
                     }
                 }
@@ -412,7 +416,7 @@ struct MobileAuthEyesRow: View {
 
     var body: some View {
         ListRow(
-            selected: false, cornerRadius: 10, tint: tone, hPadding: 10, vPadding: 8,
+            selected: false, cornerRadius: 10, tint: tone, hPadding: PhoneRow.hPadding, vPadding: 8,
             hoverFill: false, action: onOpen
         ) { _, _ in
             HStack(alignment: .top, spacing: 10) {

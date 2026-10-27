@@ -72,16 +72,23 @@ enum Typo {
 
     /// Interface text at a compact size. The general form: the named roles
     /// below are for the shapes that recur, this is for everything else.
+    ///
+    /// `fixed` as in `hero`: type inside a fixed composition (the ad cards),
+    /// set at exactly `size` whatever the density.
     static func ui(
-        _ size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default
+        _ size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default,
+        fixed: Bool = false
     ) -> Font {
-        .system(size: Typo.size(size), weight: weight, design: design)
+        .system(size: fixed ? size : Typo.size(size), weight: weight, design: design)
     }
 
     /// Engraved uppercase section label ("CONNECTION", "For your eyes").
     static var sectionLabel: Font { ui(11, weight: .semibold).width(.expanded) }
     /// Zone heading.
     static var zoneTitle: Font { ui(13, weight: .semibold) }
+    /// A utility dialog's title (a confirm, the re-triage counter, the share
+    /// ask). Editorial cards keep their serif; see `ModalCard`.
+    static var modalTitle: Font { ui(14, weight: .semibold) }
     /// Dense row text.
     static var row: Font { ui(13) }
     /// A row's secondary line.

@@ -207,18 +207,17 @@ struct SharePanel: View {
     }
 
     private var sendRow: some View {
-        HStack(spacing: Space.s10) {
+        ModalButtons {
             if recipients.count > Self.maxRecipients {
                 Text("\(Self.maxRecipients) at a time")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.warn)
             }
-            Spacer()
+        } buttons: {
             Button(sending ? "sending" : sendLabel) {
                 Task { await send() }
             }
             .buttonStyle(.glassProminent)
-            .font(Typo.ui(12, weight: .semibold))
             .disabled(!canSend)
         }
     }

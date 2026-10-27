@@ -65,10 +65,7 @@ private struct UnsubscribeCard: View {
             #endif
             trailing
         }
-        .padding(.vertical, Space.scaled(9))
-        .padding(.leading, Space.s10)
-        .padding(.trailing, Space.s12)
-        .passbandGlass(.pane, cornerRadius: Radius.toast, tint: tint)
+        .toastSurface(tint: tint)
         .accessibilityElement(children: .combine)
     }
 

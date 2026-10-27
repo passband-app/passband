@@ -488,3 +488,66 @@ extension View {
         #endif
     }
 }
+
+// MARK: - toasts
+
+/// THE TOAST VOCABULARY: one inset, one corner, one material and one shadow for
+/// everything that floats in a corner of the window (the toast and undo stack,
+/// the unsubscribe tray, the violation notice, the smart clear receipt, the
+/// update card). They stack beside each other, so a card that padded or lifted
+/// itself differently read as a different kind of thing in the same pile.
+///
+/// Computed, not stored: the insets follow the density setting.
+@MainActor
+enum ToastMetrics {
+    static var hPadding: CGFloat { Space.s12 }
+    static var vPadding: CGFloat { Space.s10 }
+    static let cornerRadius: CGFloat = Radius.toast
+}
+
+extension View {
+    /// A corner toast's inset and glass. `interactive` for a toast that is
+    /// itself the button (the toast and undo pills). Padding is applied here,
+    /// so call it on the bare content.
+    func toastSurface(tint: Color? = Palette.glassTintStrong, interactive: Bool = false) -> some View {
+        self
+            .padding(.horizontal, ToastMetrics.hPadding)
+            .padding(.vertical, ToastMetrics.vPadding)
+            .toastGlass(tint: tint, interactive: interactive)
+    }
+
+    /// The glass and shadow alone, for a toast whose padding has to sit inside
+    /// a button label or before a frame (the toast stack's pills, the update
+    /// card's max width). Pair it with `ToastMetrics`' insets.
+    func toastGlass(tint: Color? = Palette.glassTintStrong, interactive: Bool = false) -> some View {
+        self
+            .passbandGlass(
+                .pane, cornerRadius: ToastMetrics.cornerRadius, tint: tint, interactive: interactive)
+            .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
+    }
+}
+
+// MARK: - hero pill
+
+/// The pill set on a phosphor hero, naming what is new: What's New's strip and
+/// the ad cards wear the same one. White on a dark capsule with the brand's
+/// blue edge, so it survives both the scene's night and its paper.
+///
+/// `fixed` for a fixed composition (the ad cards), where nothing follows the
+/// density; otherwise the type and padding scale with it. The caller places
+/// it (its inset from the hero's corner).
+struct HeroPill: View {
+    let text: String
+    var fixed = false
+
+    var body: some View {
+        Text(text)
+            .font(Typo.ui(9, weight: .bold, fixed: fixed).width(.expanded))
+            .tracking(0.6)
+            .foregroundStyle(.white.opacity(0.92))
+            .padding(.horizontal, fixed ? 9 : Space.scaled(9))
+            .padding(.vertical, fixed ? 5 : Space.scaled(5))
+            .background(.black.opacity(0.32), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color(hex: 0x82BAF5).opacity(0.45), lineWidth: 0.5))
+    }
+}

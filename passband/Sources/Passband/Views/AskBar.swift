@@ -60,6 +60,10 @@ struct AskBar: View {
     private static let bottomAnchor = "askbar.bottom"
 
     var body: some View {
+        // NOT ON `PaletteShell`, though it shares its edge, glass and shadow:
+        // this is a chat that grows a transcript out of its own bottom edge,
+        // with the field moving under it, not a filtered list with a footer.
+        // Higher than the palettes' inset because the tray grows to 440.
         OverlayScrim(alignment: .top, topInset: 96, onDismiss: onClose) {
             GlassEffectContainer(spacing: 10) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -75,7 +79,7 @@ struct AskBar: View {
                 .passbandGlass(
                     .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                     id: "askbar", in: askGlass)
-                .shadow(color: .black.opacity(0.34), radius: 50, y: 22)
+                .overlayShadow()
             }
         }
         .keyContext(.modal)
@@ -142,8 +146,8 @@ struct AskBar: View {
             }
             Kbd("esc")
         }
-        .padding(.horizontal, Space.s16)
-        .padding(.top, Space.scaled(13))
+        .padding(.horizontal, PaletteMetrics.edge)
+        .padding(.top, Space.s14)
         .padding(.bottom, Space.s8)
     }
 
@@ -167,11 +171,11 @@ struct AskBar: View {
                 .font(Typo.ui(11, weight: .semibold))
                 .foregroundStyle(canSubmit ? Palette.accent : Palette.inkFaintest)
         }
-        .padding(.horizontal, Space.s16)
+        .padding(.horizontal, PaletteMetrics.edge)
         // With a log above, the divider replaces the header as the top
         // neighbor and the row needs its own breathing room.
         .padding(.top, session.transcript.isEmpty ? 0 : Space.s12)
-        .padding(.bottom, Space.scaled(13))
+        .padding(.bottom, Space.s14)
     }
 
     private func submit() {
@@ -202,7 +206,7 @@ struct AskBar: View {
                     }
                     Color.clear.frame(height: 1).id(Self.bottomAnchor)
                 }
-                .padding(.horizontal, Space.s16)
+                .padding(.horizontal, PaletteMetrics.edge)
                 .padding(.vertical, Space.s12)
             }
             .frame(maxHeight: 440)

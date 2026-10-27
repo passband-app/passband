@@ -36,8 +36,7 @@ struct TestFlightNudgeModal: View {
                 nudge.showingNudge = false
                 Analytics.capture("ios_nudge_closed", ["copied": copied])
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            .adCardPlacement()
         }
     }
 }
@@ -80,18 +79,18 @@ private struct TestFlightAdCard: View {
     // MARK: - the words
 
     private var words: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: AdCard.wordsGap) {
+            VStack(alignment: .leading, spacing: AdCard.headlineGap) {
                 Text("Passband, in your pocket.")
                     .font(Typo.hero(25, fixed: true))
                     .foregroundStyle(Palette.ink)
                 Text("Your phone buzzes for the mail that needs you and stays quiet for everything else.")
-                    .font(.system(size: 12))
+                    .font(Typo.ui(12, fixed: true))
                     .foregroundStyle(Palette.inkDim)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack(spacing: 14) {
+            HStack(spacing: AdCard.wordsGap) {
                 if let qr = Self.qrCode {
                     Image(nsImage: qr)
                         .interpolation(.none)
@@ -105,15 +104,15 @@ private struct TestFlightAdCard: View {
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Scan with your iPhone")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(Typo.ui(13, weight: .semibold, fixed: true))
                         .foregroundStyle(Palette.ink)
                     Text("Join the alpha on TestFlight.")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(Typo.ui(10, weight: .medium, fixed: true))
                         .foregroundStyle(Palette.inkFaint)
                         .fixedSize(horizontal: false, vertical: true)
                     Button(action: copyLink) {
                         Label(copied ? "Link copied" : "Copy link", systemImage: copied ? "checkmark" : "link")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(Typo.ui(11, weight: .semibold, fixed: true))
                             .foregroundStyle(Palette.accent)
                             .contentTransition(.symbolEffect(.replace))
                     }
@@ -122,9 +121,7 @@ private struct TestFlightAdCard: View {
                 }
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 16)
-        .padding(.bottom, 18)
+        .adWordsPadding()
     }
 
     // MARK: - verbs

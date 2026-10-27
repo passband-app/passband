@@ -186,18 +186,15 @@ struct ActionLayer: View {
                         Text(toast.text)
                             .font(Typo.rowSub)
                             .foregroundStyle(tone(toast.tone))
-                            .padding(.horizontal, Space.s12)
-                            .padding(.vertical, Space.scaled(7))
+                            .padding(.horizontal, ToastMetrics.hPadding)
+                            .padding(.vertical, ToastMetrics.vPadding)
                     }
                     .buttonStyle(.plain)
                     .background(
-                        RoundedRectangle(cornerRadius: Radius.toast, style: .continuous)
+                        RoundedRectangle(cornerRadius: ToastMetrics.cornerRadius, style: .continuous)
                             .fill(.clear)
                     )
-                    .glassEffect(
-                        .regular.tint(tone(toast.tone).opacity(0.16)).interactive(),
-                        in: .rect(cornerRadius: Radius.toast, style: .continuous)
-                    )
+                    .toastGlass(tint: tone(toast.tone).opacity(0.16), interactive: true)
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 ForEach(store.undos) { undo in
@@ -222,14 +219,11 @@ struct ActionLayer: View {
                                     .foregroundStyle(Palette.inkFaintest)
                             }
                         }
-                        .padding(.horizontal, Space.s12)
-                        .padding(.vertical, Space.scaled(7))
+                        .padding(.horizontal, ToastMetrics.hPadding)
+                        .padding(.vertical, ToastMetrics.vPadding)
                     }
                     .buttonStyle(.plain)
-                    .glassEffect(
-                        .regular.tint(Palette.warn.opacity(0.18)).interactive(),
-                        in: .rect(cornerRadius: Radius.toast, style: .continuous)
-                    )
+                    .toastGlass(tint: Palette.warn.opacity(0.18), interactive: true)
                     .transition(.move(edge: .leading).combined(with: .opacity))
                     .tourTarget(.undoToast)
                 }

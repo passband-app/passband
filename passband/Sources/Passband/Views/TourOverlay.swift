@@ -99,7 +99,6 @@ private struct PracticeBoundaryModal: View {
                     }
                     .disabled(store.tour.veil != nil)
                 }
-                .padding(Space.s14)
             }
         }
         .keyContext(.modal)

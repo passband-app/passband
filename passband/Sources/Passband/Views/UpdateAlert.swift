@@ -13,11 +13,10 @@ import SwiftUI
 struct UpdateAlert: View {
     @ObservedObject private var updater = Updater.shared
 
-    /// ONE card across every phase. The offer and the narration that follows
-    /// it share a corner and an inset, so pressing Update changes the words in
-    /// the card rather than swapping it for a smaller one mid-download.
-    private static var hPadding: CGFloat { Space.scaled(15) }
-    private static var vPadding: CGFloat { Space.s12 }
+    // ONE card across every phase. The offer and the narration that follows
+    // it share a corner, an inset and a material (`ToastMetrics`), so pressing
+    // Update changes the words in the card rather than swapping it for a
+    // smaller, clearer one mid-download.
 
     var body: some View {
         Group {
@@ -81,10 +80,10 @@ struct UpdateAlert: View {
                 .buttonStyle(.glassProminent)
                 .font(Typo.ui(12, weight: .semibold))
         }
-        .padding(.horizontal, Self.hPadding)
-        .padding(.vertical, Self.vPadding)
+        .padding(.horizontal, ToastMetrics.hPadding)
+        .padding(.vertical, ToastMetrics.vPadding)
         .frame(maxWidth: 520)
-        .passbandGlass(.pane, cornerRadius: Radius.toast, tint: Palette.glassTintStrong)
+        .toastGlass()
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
@@ -124,9 +123,7 @@ struct UpdateAlert: View {
                     .frame(width: Space.scaled(32), alignment: .trailing)
             }
         }
-        .padding(.horizontal, Self.hPadding)
-        .padding(.vertical, Self.vPadding)
-        .passbandGlass(.chrome, cornerRadius: Radius.toast, tint: Palette.glassTint)
+        .toastSurface()
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)

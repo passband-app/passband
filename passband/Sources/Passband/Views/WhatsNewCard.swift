@@ -388,15 +388,12 @@ struct WhatsNewCard: View {
             LinearGradient(colors: [.clear, .black.opacity(0.28)], startPoint: .center, endPoint: .bottom)
                 .allowsHitTesting(false)
 
-            Text("NEW IN PASSBAND \(note.version)")
-                .font(Typo.ui(9, weight: .bold).width(.expanded))
-                .tracking(0.6)
-                .foregroundStyle(.white.opacity(0.92))
-                .padding(.horizontal, Space.scaled(9))
-                .padding(.vertical, Space.scaled(5))
-                .background(.black.opacity(0.32), in: Capsule())
-                .overlay(Capsule().strokeBorder(Color(hex: 0x82BAF5).opacity(0.45), lineWidth: 0.5))
-                .padding(Space.s14)
+            // The capsule's edge on the text column (28) below it, so the
+            // pill and the title start on one line; the bottom inset is the
+            // strip's own.
+            HeroPill(text: "NEW IN PASSBAND \(note.version)")
+                .padding(.leading, Space.scaled(28))
+                .padding(.bottom, Space.s14)
         }
         .frame(height: 112)
         .frame(maxWidth: .infinity)

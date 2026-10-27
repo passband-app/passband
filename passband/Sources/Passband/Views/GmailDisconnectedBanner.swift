@@ -119,7 +119,7 @@ struct ReconnectAccountPrompt: View {
         OverlayScrim(onDismiss: { store.cancelReconnectAsk() }) {
             ModalCard(width: 400) {
                 Text("Be sure to select this email address")
-                    .font(Typo.ui(14, weight: .semibold))
+                    .font(Typo.modalTitle)
                     .foregroundStyle(Palette.ink)
                 // Email-derived, so plain Text and never markup.
                 Text(verbatim: ask.email)
@@ -135,8 +135,7 @@ struct ReconnectAccountPrompt: View {
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: Space.s8) {
-                    Spacer(minLength: 0)
+                ModalButtons {
                     Button("Cancel") { store.cancelReconnectAsk() }
                         .buttonStyle(.glass)
                     Button("Continue to Google") { store.confirmReconnect() }

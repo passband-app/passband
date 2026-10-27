@@ -49,6 +49,13 @@ enum Space {
     /// on this line and lets the fill reach out to the left of it.
     static var page: CGFloat { s24 }
 
+    /// THE MODAL INSET: the room between a floating card's glass edge and its
+    /// words, on every side. `ModalCard` pads by it, and the cards that draw a
+    /// full-bleed band of their own (the reveal panel's banner, the login
+    /// code's countdown) inset their words by it, so every modal's text sits
+    /// the same distance in from its corner.
+    static var modal: CGFloat { scaled(18) }
+
     /// An off-ladder compact value on the same curve. For the tuned numbers
     /// the ladder would shift by a point; not a way around choosing a step.
     static func scaled(_ compact: CGFloat) -> CGFloat {

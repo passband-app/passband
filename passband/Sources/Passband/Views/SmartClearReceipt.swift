@@ -85,17 +85,15 @@ struct SmartClearReceiptCard: View {
                     .padding(.top, Space.s10)
             }
         }
-        .padding(.horizontal, Space.s14)
-        .padding(.top, Space.s12)
-        .padding(.bottom, Space.s12)
+        .padding(.horizontal, ToastMetrics.hPadding)
+        .padding(.vertical, ToastMetrics.vPadding)
         #if os(macOS)
             .frame(width: Typo.measure(286), alignment: .leading)
         #else
             // The host gives it the screen's width; it fills that.
             .frame(maxWidth: .infinity, alignment: .leading)
         #endif
-        .passbandGlass(.pane, cornerRadius: Radius.toast, tint: Palette.glassTintStrong)
-        .shadow(color: .black.opacity(0.28), radius: 24, y: 12)
+        .toastGlass()
         // In from the corner it lives in: the right on the Mac, the
         // bottom (the tab bar's edge) on a phone.
         #if os(macOS)

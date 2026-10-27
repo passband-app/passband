@@ -21,7 +21,7 @@ struct AuthCodeModal: View {
     var body: some View {
         if let entry {
             OverlayScrim(onDismiss: { store.dismissAuthCode() }) {
-                VStack(alignment: .leading, spacing: 0) {
+                ModalCard(width: 420, tint: Palette.lockSoft.opacity(0.9)) {
                     header(entry)
 
                     if let code, !code.isEmpty {
@@ -30,7 +30,7 @@ struct AuthCodeModal: View {
                             .foregroundStyle(Palette.ink)
                             .tracking(6)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, Space.scaled(22))
+                            .padding(.vertical, Space.s10)
                             .accessibilityLabel("login code")
                     } else {
                         Text(
@@ -40,7 +40,7 @@ struct AuthCodeModal: View {
                         .foregroundStyle(Palette.inkFaint)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, Space.s20)
+                        .padding(.vertical, Space.s8)
                     }
 
                     actions
@@ -57,10 +57,9 @@ struct AuthCodeModal: View {
                         }
                         Spacer()
                     }
-                    .padding(.horizontal, Space.scaled(18))
-                    .padding(.bottom, Space.s10)
-
-                    // Draining countdown bar; freezes green once copied.
+                } bottomEdge: {
+                    // Draining countdown bar; freezes green once copied. Edge
+                    // to edge under the padded body.
                     GeometryReader { geo in
                         Rectangle()
                             .fill(paused ? Palette.positive : Palette.lock)
@@ -72,16 +71,6 @@ struct AuthCodeModal: View {
                     }
                     .frame(height: 2)
                 }
-                // A ceiling on the phone, not a measure: 420 is wider than the
-                // screen it would have to fit on. See ModalCard's note.
-                #if os(macOS)
-                    .frame(width: Typo.measure(420))
-                #else
-                    .frame(maxWidth: Typo.measure(420))
-                    .padding(.horizontal, Space.s14)
-                #endif
-                .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.lockSoft.opacity(0.9))
-                .shadow(color: .black.opacity(0.34), radius: 50, y: 22)
             }
             .keyContext(.modal)
             .keyBindings(.modal, [
@@ -119,12 +108,23 @@ struct AuthCodeModal: View {
                     .help("more codes waiting")
             }
         }
-        .padding(.horizontal, Space.scaled(18))
-        .padding(.top, Space.s16)
     }
 
+    /// Trailing, secondary first (see `ModalButtons`). Return and Esc both
+    /// dismiss through the keymap, so neither button is a default action.
     private var actions: some View {
-        HStack(spacing: Space.s8) {
+        ModalButtons {
+            Button {
+                store.dismissAuthCode()
+            } label: {
+                HStack(spacing: Space.s6) {
+                    Text("dismiss")
+                    #if os(macOS)
+                        Kbd("esc")
+                    #endif
+                }
+            }
+            .buttonStyle(.glass)
             if let code, !code.isEmpty {
                 Button(action: copy) {
                     HStack(spacing: Space.s6) {
@@ -137,8 +137,6 @@ struct AuthCodeModal: View {
                             Kbd("c")
                         #endif
                     }
-                    .font(Typo.ui(12, weight: .medium))
-                    .padding(.horizontal, Space.s12).padding(.vertical, Space.scaled(5))
                 }
                 .buttonStyle(.glassProminent)
                 .tint(Palette.lock)
@@ -148,30 +146,11 @@ struct AuthCodeModal: View {
                     store.setView(.auth)
                 } label: {
                     Label("open Auth", systemImage: "key.fill")
-                        .font(Typo.ui(12, weight: .medium))
-                        .padding(.horizontal, Space.s12).padding(.vertical, Space.scaled(5))
                 }
                 .buttonStyle(.glassProminent)
                 .tint(Palette.lock)
             }
-            Button {
-                store.dismissAuthCode()
-            } label: {
-                HStack(spacing: Space.s6) {
-                    Text("dismiss")
-                    #if os(macOS)
-                        Kbd("esc")
-                    #endif
-                }
-                .font(Typo.ui(12))
-                .padding(.horizontal, Space.s10).padding(.vertical, Space.scaled(5))
-            }
-            .buttonStyle(.glass)
-            .foregroundStyle(Palette.inkDim)
-            Spacer()
         }
-        .padding(.horizontal, Space.scaled(18))
-        .padding(.bottom, Space.s12)
     }
 
     private func copy() {

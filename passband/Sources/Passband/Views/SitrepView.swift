@@ -1378,7 +1378,9 @@ struct FlowLayout: Layout {
 
         /// The brand's phosphor blue, the P7 trace's own colour.
         private static let phosphor = Color(hex: 0x82BAF5)
-        private static let width: CGFloat = 360
+        /// A measure: the card holds a headline and three stats, so it widens
+        /// with its type.
+        private static var width: CGFloat { Typo.measure(360) }
 
         private var tally: String {
             var parts: [String] = []
@@ -1430,9 +1432,11 @@ struct FlowLayout: Layout {
                         .frame(maxWidth: .infinity)
                     }
                 }
-                .padding(.horizontal, Space.scaled(22))
+                // On the ladder (it was an off-ladder 22): the page gutter's
+                // step, sides and foot alike.
+                .padding(.horizontal, Space.s24)
                 .padding(.top, Space.scaled(18))
-                .padding(.bottom, Space.scaled(22))
+                .padding(.bottom, Space.s24)
             }
             .frame(width: Self.width)
             // The strong tint: the stats sit over a busy board, and the

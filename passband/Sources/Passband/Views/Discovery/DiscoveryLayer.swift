@@ -130,7 +130,7 @@ struct DiscoveryLayer: View {
                 momentCard(set)
             }
         }
-        .padding(20)
+        .padding(Space.s20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.5, dampingFraction: 0.84), value: presenter.moment)
         // THE MOMENT IS THE BOARD'S. It only arrives on the sitrep, and a

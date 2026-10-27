@@ -159,6 +159,13 @@ fn each_stored_reason_clears_its_own_row_with_provenance() {
             title: "Webinar".into(),
             start: time(now - Duration::days(5)),
             location: None,
+            end: None,
+            duration_estimate: None,
+            event_kind: Default::default(),
+            commitment: Default::default(),
+            change: Default::default(),
+            identity_refs: vec![],
+            likelihood: None,
             evidence: vec![],
         }];
         // An offer that has ended too: the event is first in the order.

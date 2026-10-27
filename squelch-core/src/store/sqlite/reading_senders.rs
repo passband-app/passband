@@ -100,7 +100,7 @@ macro_rules! sender_mail_sql {
                 AND m.from_addr = ?2 COLLATE NOCASE
                 AND NOT ",
             own_mail_sql!(),
-            " AND m.is_spam = 0
+            " AND m.is_spam = 0 AND m.is_archive = 0
                 AND m.auth_pass IS NOT 0
                 AND NOT ",
             sealed_mail_sql!(),

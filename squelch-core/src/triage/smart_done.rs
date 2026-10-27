@@ -287,7 +287,9 @@ impl StoredDates {
             .records
             .iter()
             .filter_map(|record| match record {
-                RecordProposal::Event { start, .. } => start.as_ref(),
+                // Over when it ENDS, where the mail says: a conference that
+                // opened yesterday and runs all week has not passed.
+                RecordProposal::Event { start, end, .. } => end.as_ref().or(start.as_ref()),
                 _ => None,
             })
             .filter_map(&mut read)
@@ -1034,8 +1036,23 @@ mod tests {
             title: "Launch webinar".into(),
             start: Some(time(start)),
             location: None,
+            end: None,
+            duration_estimate: None,
+            event_kind: Default::default(),
+            commitment: Default::default(),
+            change: Default::default(),
+            identity_refs: vec![],
+            likelihood: None,
             evidence: vec![],
         }
+    }
+
+    fn event_until(start: &str, until: &str) -> RecordProposal {
+        let mut record = event(start);
+        if let RecordProposal::Event { end, .. } = &mut record {
+            *end = Some(time(until));
+        }
+        record
     }
 
     /// An unopened, unprotected row that arrived `days` ago.
@@ -1118,6 +1135,19 @@ mod tests {
         // And a row with a date of its own is never put to the model.
         assert!(has_stored_date(&row(&d, 3)));
         assert_eq!(model_question(&row(&d, 3), now()), None);
+    }
+
+    #[test]
+    fn an_event_that_started_but_has_not_ended_has_not_passed() {
+        let mut d = promo();
+        d.records = vec![event_until("2026-09-28", "2026-10-12")];
+        assert_eq!(stored_reason(&row(&d, 20), now()), None);
+        let mut d = promo();
+        d.records = vec![event_until("2026-09-20", "2026-09-25")];
+        assert_eq!(
+            stored_reason(&row(&d, 20), now()),
+            Some(ClearReason::EventPassed)
+        );
     }
 
     // ---- review fixes: live dates, several events, opened, bad dates -----

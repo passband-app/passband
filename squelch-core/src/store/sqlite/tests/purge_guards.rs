@@ -315,6 +315,39 @@ fn mail_that_failed_authentication_is_not_the_senders() {
     );
 }
 
+#[test]
+fn archive_mail_is_not_counted_for_its_sender() {
+    // Old mail the archive tier stored to be found was never in front of the
+    // owner, so it never went unopened: counting it would make every sender
+    // with a long history look ignored.
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    for i in 0..4 {
+        let id = mail(&store, acct, &format!("n{i}"), NEWS, i + 1);
+        if i == 0 {
+            into_reading(&store, acct, id);
+        }
+    }
+    for i in 0..5 {
+        let id = mail(&store, acct, &format!("arch{i}"), NEWS, i + 2);
+        store
+            .set_attention_status(acct, id, AttentionStatus::Done)
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET is_archive = 1 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+    }
+    let read = senders(&store, acct);
+    let s = sender(&read, NEWS).signals;
+    assert_eq!(s.received, 4, "archive rows are not the sender's recent mail");
+    assert_eq!(s.cleared_unopened, 0);
+}
+
 // ---- 8. a sweep is not the owner -----------------------------------------
 
 #[test]
@@ -692,6 +725,13 @@ fn gala(start: impl Into<String>, timezone: Option<&str>) -> RecordProposal {
         title: "Gala".into(),
         start: stated(start, timezone),
         location: None,
+        end: None,
+        duration_estimate: None,
+        event_kind: Default::default(),
+        commitment: Default::default(),
+        change: Default::default(),
+        identity_refs: vec![],
+        likelihood: None,
         evidence: vec![],
     }
 }

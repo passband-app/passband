@@ -1121,6 +1121,46 @@ fn retire_inbound_verdict(conn: &Connection, account: AccountId, message: i64) -
     Ok(())
 }
 
+/// What [`queue_dependent_refreshes`] refreshes when message `?2` of account
+/// `?1` takes a new revision: every message whose decision cites it, the
+/// message behind every thread attention that cites it, and theirs in turn,
+/// since each refreshed consumer gets a new verdict of its own. Never the
+/// source itself, and never archive mail, though the walk passes through
+/// archive mail to what cites it.
+///
+/// SEEDED FROM THE SOURCE, one hop at a time down the reverse indexes. The
+/// statement this replaces built the account's whole edge set (every decision
+/// source and every attention source) and then walked it: 235 ms per changed
+/// ingest at 50k messages, inside the ingest transaction, however few
+/// dependents the message had. Walking from the source costs what its
+/// dependents cost: 0.06 ms for a fresh arrival nothing cites yet.
+///
+/// PINNED, both the join order and the indexes. Without `sqlite_stat1` (see
+/// `rules::SENDER_RULE_DIGEST_SQL`) the planner puts the recursive row INSIDE
+/// each step's join; given the order, it still prefers the covering primary
+/// keys on `account_id` alone. Either way every step walks every source row in
+/// the account: 2.4 s for a message with 129 dependents, ten times what this
+/// replaced. `CROSS JOIN` keeps the step's one row outermost, and `INDEXED BY`
+/// keeps the seek and turns a missing index into a prepare error rather than
+/// a walk. `tests::dependent_refreshes_walk_from_the_source` pins the plan.
+const DEPENDENT_REFRESHES_SQL: &str = concat!(
+    "WITH RECURSIVE affected(message_id) AS (
+        SELECT ?2
+        UNION SELECT d.message_id FROM affected a
+            CROSS JOIN agent_decision_sources d INDEXED BY idx_agent_decision_source_reverse
+                ON d.account_id=?1 AND d.source_message_id=a.message_id
+        UNION SELECT t.message_id FROM affected a
+            CROSS JOIN agent_attention_sources s INDEXED BY idx_agent_attention_source_reverse
+                ON s.account_id=?1 AND s.source_message_id=a.message_id
+            CROSS JOIN agent_thread_attention t ON t.account_id=s.account_id AND t.thread_id=s.thread_id
+     ) SELECT m.id,st.revision,CASE WHEN ",
+    own_mail_sql!(),
+    " OR m.is_spam=1 THEN 'access' ELSE 'triage' END
+       FROM affected dep CROSS JOIN messages m ON m.account_id=?1 AND m.id=dep.message_id
+       JOIN agent_message_state st ON st.account_id=m.account_id AND st.message_id=m.id
+       WHERE m.id!=?2 AND m.is_archive=0 ORDER BY m.id",
+);
+
 /// A source revision invalidates its consumers' model results, never their
 /// human corrections. The existing per-message queue absorbs overlapping waves.
 /// Never an archive dependent: a changed source must not buy a model call on
@@ -1132,21 +1172,7 @@ fn queue_dependent_refreshes(
     revision: i64,
 ) -> Result<()> {
     let targets = {
-        let mut statement = conn.prepare(concat!(
-            "WITH RECURSIVE edges(dependent,source) AS (
-                SELECT message_id,source_message_id FROM agent_decision_sources WHERE account_id=?1
-                UNION SELECT a.message_id,s.source_message_id FROM agent_attention_sources s
-                    JOIN agent_thread_attention a ON a.account_id=s.account_id AND a.thread_id=s.thread_id WHERE s.account_id=?1
-             ), affected(message_id) AS (
-                SELECT dependent FROM edges WHERE source=?2
-                UNION SELECT e.dependent FROM edges e JOIN affected a ON e.source=a.message_id
-             ) SELECT m.id,a.revision,CASE WHEN ",
-            own_mail_sql!(),
-            " OR m.is_spam=1 THEN 'access' ELSE 'triage' END
-               FROM affected d JOIN messages m ON m.account_id=?1 AND m.id=d.message_id
-               JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
-               WHERE m.id!=?2 AND m.is_archive=0 ORDER BY m.id",
-        ))?;
+        let mut statement = conn.prepare_cached(DEPENDENT_REFRESHES_SQL)?;
         statement
             .query_map(params![account, source], |row| {
                 Ok((
@@ -1157,6 +1183,7 @@ fn queue_dependent_refreshes(
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
     };
+    let trigger = format!("source_changed:{source}:{revision}");
     for (message, input_revision, kind) in targets {
         queue_investigation(
             conn,
@@ -1164,7 +1191,7 @@ fn queue_dependent_refreshes(
             message,
             input_revision,
             &kind,
-            &format!("source_changed:{source}:{revision}"),
+            &trigger,
             false,
             false,
             false,
@@ -3356,6 +3383,217 @@ mod tests {
             conn.prepare(NEXT_JOBS_DUE_SQL).is_err(),
             "the statement is pinned to the index it was measured on"
         );
+    }
+
+    /// The dependent walk SEEKS each hop from the row it is on, on a store
+    /// with no `sqlite_stat1`, which is the store the pin is for: the step's
+    /// row is outermost and each edge table is reached by its reverse index on
+    /// both columns, never walked on `account_id`. THE CANARY: with either
+    /// index gone the statement no longer prepares.
+    #[test]
+    fn dependent_refreshes_walk_from_the_source() {
+        let store = fixture();
+        let plan = store
+            .lock()
+            .unwrap()
+            .prepare(&format!("EXPLAIN QUERY PLAN {DEPENDENT_REFRESHES_SQL}"))
+            .unwrap()
+            .query_map(params![1, 1], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        for edge in [
+            "SEARCH d USING INDEX idx_agent_decision_source_reverse (account_id=? AND source_message_id=?)",
+            "SEARCH s USING INDEX idx_agent_attention_source_reverse (account_id=? AND source_message_id=?)",
+        ] {
+            let at = plan.iter().position(|line| line == edge);
+            assert!(
+                at.is_some_and(|at| at > 0 && plan[at - 1] == "SCAN a"),
+                "{edge} is not a seek from the step's row:\n{plan:#?}"
+            );
+        }
+        assert!(
+            plan.iter().any(|line| line
+                == "SEARCH t USING INDEX sqlite_autoindex_agent_thread_attention_1 (account_id=? AND thread_id=?)"),
+            "{plan:#?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|line| line == "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)"),
+            "each dependent is a rowid lookup:\n{plan:#?}"
+        );
+        // `a` is the step's row and `dep` the walk's result; every table is
+        // reached by a SEARCH.
+        assert!(
+            plan.iter()
+                .filter(|line| line.starts_with("SCAN"))
+                .all(|line| ["SCAN CONSTANT ROW", "SCAN a", "SCAN dep"].contains(&line.as_str())),
+            "only the walk itself is scanned:\n{plan:#?}"
+        );
+        for index in [
+            "idx_agent_decision_source_reverse",
+            "idx_agent_attention_source_reverse",
+        ] {
+            let store = fixture();
+            let conn = store.lock().unwrap();
+            conn.execute_batch(&format!("DROP INDEX {index}")).unwrap();
+            assert!(
+                conn.prepare(DEPENDENT_REFRESHES_SQL).is_err(),
+                "the statement is pinned to {index}"
+            );
+        }
+    }
+
+    /// THE WALK QUEUES WHAT THE WHOLE-EDGE WALK QUEUED. The statement
+    /// [`DEPENDENT_REFRESHES_SQL`] replaced is kept here as the oracle, and
+    /// both are asked about every message of seeded random citation graphs:
+    /// decision and attention edges, cycles and self-citations, archive mail
+    /// partway along a chain, own and spam mail (refreshed as access reviews),
+    /// messages with no agent state, and a second account whose edges name
+    /// the first account's ids.
+    #[test]
+    fn dependent_refreshes_match_the_whole_edge_walk() {
+        const WHOLE_EDGE_WALK_SQL: &str = concat!(
+            "WITH RECURSIVE edges(dependent,source) AS (
+                SELECT message_id,source_message_id FROM agent_decision_sources WHERE account_id=?1
+                UNION SELECT a.message_id,s.source_message_id FROM agent_attention_sources s
+                    JOIN agent_thread_attention a ON a.account_id=s.account_id AND a.thread_id=s.thread_id WHERE s.account_id=?1
+             ), affected(message_id) AS (
+                SELECT dependent FROM edges WHERE source=?2
+                UNION SELECT e.dependent FROM edges e JOIN affected a ON e.source=a.message_id
+             ) SELECT m.id,a.revision,CASE WHEN ",
+            own_mail_sql!(),
+            " OR m.is_spam=1 THEN 'access' ELSE 'triage' END
+               FROM affected d JOIN messages m ON m.account_id=?1 AND m.id=d.message_id
+               JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
+               WHERE m.id!=?2 AND m.is_archive=0 ORDER BY m.id",
+        );
+        // One hop and no filters: what cites the source directly.
+        const CITES_DIRECTLY_SQL: &str = "SELECT message_id FROM agent_decision_sources
+                 WHERE account_id=?1 AND source_message_id=?2
+             UNION SELECT t.message_id FROM agent_attention_sources s
+                 JOIN agent_thread_attention t ON t.account_id=s.account_id AND t.thread_id=s.thread_id
+                 WHERE s.account_id=?1 AND s.source_message_id=?2";
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n) as i64
+        };
+        let store = SqliteStore::open_in_memory().unwrap();
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "INSERT INTO accounts(id,email,created_at) VALUES(1,'a@test','2026-01-01'),(2,'b@test','2026-01-01')",
+            [],
+        )
+        .unwrap();
+        let rows = |sql: &str, account: i64, source: i64| {
+            conn.prepare_cached(sql)
+                .unwrap()
+                .query_map(params![account, source], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let direct = |account: i64, source: i64| {
+            conn.prepare_cached(CITES_DIRECTLY_SQL)
+                .unwrap()
+                .query_map(params![account, source], |r| r.get::<_, i64>(0))
+                .unwrap()
+                .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()
+                .unwrap()
+        };
+        let (mut compared, mut deeper, mut kinds) = (0, 0, std::collections::BTreeSet::new());
+        for graph in 0..24 {
+            conn.execute_batch(
+                "DELETE FROM agent_attention_sources; DELETE FROM agent_thread_attention;
+                 DELETE FROM agent_decision_sources; DELETE FROM agent_message_state;
+                 DELETE FROM messages;",
+            )
+            .unwrap();
+            for id in 1..=50 {
+                let account = if id <= 40 { 1 } else { 2 };
+                let from = ["a@test", "b@test", "sender@test", "sender@test"][next(4) as usize];
+                conn.execute(
+                    "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,
+                         snippet,body,is_sent,is_spam,is_archive)
+                     VALUES(?1,?2,?3,?4,?5,'subject','2026-01-01T00:00:00+00:00','','',?6,?7,?8)",
+                    params![
+                        id,
+                        account,
+                        id.to_string(),
+                        format!("t{}", next(8)),
+                        from,
+                        next(10) == 0,
+                        next(10) == 0,
+                        next(5) == 0
+                    ],
+                )
+                .unwrap();
+                if next(8) != 0 {
+                    conn.execute(
+                        "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,revision)
+                         VALUES(?1,?2,'{}',?3)",
+                        params![account, id, 1 + next(3)],
+                    )
+                    .unwrap();
+                }
+            }
+            let account = |roll: i64| if roll == 0 { 2 } else { 1 };
+            for _ in 0..60 {
+                conn.execute(
+                    "INSERT OR IGNORE INTO agent_decision_sources(account_id,message_id,source_message_id,source_revision)
+                     VALUES(?1,?2,?3,1)",
+                    params![account(next(5)), 1 + next(50), 1 + next(50)],
+                )
+                .unwrap();
+            }
+            for thread in 0..8 {
+                if next(4) != 0 {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO agent_thread_attention(decision_message_id,account_id,thread_id,
+                             message_id,show_in_fye,attention_json,relevant_activity)
+                         VALUES(?1,?2,?3,?1,0,'{}','2026-01-01T00:00:00+00:00')",
+                        params![1 + next(50), account(next(5)), format!("t{thread}")],
+                    )
+                    .unwrap();
+                }
+            }
+            for _ in 0..30 {
+                conn.execute(
+                    "INSERT OR IGNORE INTO agent_attention_sources(account_id,thread_id,source_message_id,source_revision)
+                     VALUES(?1,?2,?3,1)",
+                    params![account(next(5)), format!("t{}", next(8)), 1 + next(50)],
+                )
+                .unwrap();
+            }
+            for account in [1, 2] {
+                for source in 1..=50 {
+                    let walked = rows(DEPENDENT_REFRESHES_SQL, account, source);
+                    assert_eq!(
+                        walked,
+                        rows(WHOLE_EDGE_WALK_SQL, account, source),
+                        "graph {graph}, account {account}, source {source}"
+                    );
+                    let cites = direct(account, source);
+                    compared += usize::from(!walked.is_empty());
+                    deeper += usize::from(walked.iter().any(|(id, _, _)| !cites.contains(id)));
+                    kinds.extend(walked.into_iter().map(|(_, _, kind)| kind));
+                }
+            }
+        }
+        // Not vacuous: plenty of sources had dependents, plenty of them past
+        // the first hop, and both kinds of refresh were compared.
+        assert!(compared > 400, "{compared}");
+        assert!(deeper > 300, "{deeper}");
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
     }
 
     #[test]

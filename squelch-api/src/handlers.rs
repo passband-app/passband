@@ -4268,13 +4268,13 @@ pub async fn get_usage(
                 state.notify_price_in_per_mtok,
                 state.notify_price_out_per_mtok,
             )
-        } else if name == squelch_core::metrics::SMART_DONE_USAGE_CATEGORY {
-            // THE FOURTH ARM: smart done's pass runs its own mid-sized model.
+        } else if name == squelch_core::metrics::SMART_CLEAR_USAGE_CATEGORY {
+            // THE FOURTH ARM: smart clear's pass runs its own mid-sized model.
             // Left to fall through it would be labelled and billed as Stage-1.
             (
-                state.smart_done_model.as_ref(),
-                state.smart_done_price_in_per_mtok,
-                state.smart_done_price_out_per_mtok,
+                state.smart_clear_model.as_ref(),
+                state.smart_clear_price_in_per_mtok,
+                state.smart_clear_price_out_per_mtok,
             )
         } else {
             (

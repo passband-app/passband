@@ -545,7 +545,7 @@ pub struct KeepSender {
 
 /// POST /client/v2/reading/senders/keep: the owner looked at this sender in
 /// the purge flow and chose to stay subscribed. The sender then scores zero
-/// (`kept_recently`) and is never swept by smart done for
+/// (`kept_recently`) and is never swept by smart clear for
 /// [`squelch_core::triage::sender_fatigue::KEEP_QUIET_DAYS`], unless a later
 /// unsubscribe or squelch rule says otherwise.
 ///
@@ -584,10 +584,10 @@ pub async fn keep_reading_sender(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// POST /client/v2/reading/smart_done: "I trust you to clean this out". Marks
+/// POST /client/v2/reading/smart_clear: "I trust you to clean this out". Marks
 /// done, as one undoable batch, the open Reading mail that has expired or
 /// that the owner plainly does not want. What qualifies, and what is never
-/// touched, is [`squelch_core::triage::smart_done`]; this is the order it
+/// touched, is [`squelch_core::triage::smart_clear`]; this is the order it
 /// happens in, which is about the store mutex:
 ///
 /// 1. One locked read finds the rows worth asking the model about.
@@ -616,9 +616,9 @@ pub async fn keep_reading_sender(
 /// that loops on the button would otherwise queue those back to back and
 /// starve sync. A press that arrives while another is running answers 429
 /// before it touches the store.
-pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
-    use squelch_core::metrics::SMART_DONE_USAGE_CATEGORY;
-    use squelch_core::triage::smart_done::{self as sd, ClearReason};
+pub async fn smart_clear(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
+    use squelch_core::metrics::SMART_CLEAR_USAGE_CATEGORY;
+    use squelch_core::triage::smart_clear::{self as sd, ClearReason};
     use std::sync::atomic::Ordering;
 
     /// Clears the in-flight mark however the press ends, an error or a
@@ -629,13 +629,13 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
             self.0.store(false, Ordering::Release);
         }
     }
-    if state.smart_done_running.swap(true, Ordering::AcqRel) {
+    if state.smart_clear_running.swap(true, Ordering::AcqRel) {
         return Err(ApiError::new(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "a smart done is already running",
+            "a smart clear is already running",
         ));
     }
-    let _running = Running(state.smart_done_running.clone());
+    let _running = Running(state.smart_clear_running.clone());
 
     let limit = feed_limit(None);
     let now = Utc::now();
@@ -647,12 +647,12 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
     let scan_inventory = inventory.clone();
     let scan_day = day.clone();
     let (scan, spent) = store_call(&state, move |store, account| {
-        let scan = store.smart_done_scan(account, now, &scan_inventory, limit)?;
+        let scan = store.smart_clear_scan(account, now, &scan_inventory, limit)?;
         // The runaway guard, read from the same ledger the passes bill into.
         let spent: u64 = store
             .list_usage_by_category(account, 1)?
             .into_iter()
-            .filter(|(c, _)| c == SMART_DONE_USAGE_CATEGORY)
+            .filter(|(c, _)| c == SMART_CLEAR_USAGE_CATEGORY)
             .flat_map(|(_, days)| days)
             .filter(|d| d.day == scan_day)
             .map(|d| d.calls)
@@ -664,11 +664,11 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
     let mut verdicts = std::collections::HashMap::new();
     let model = if scan.asks.is_empty() {
         "skipped_nothing_to_ask"
-    } else if let Some(client) = state.smart_done.clone() {
+    } else if let Some(client) = state.smart_clear.clone() {
         // RESERVE before calling, as the headline does and for its reasons:
         // the ledger only learns of calls the provider reported usage for,
         // and two presses at once would both read the same total.
-        let reserved = state.smart_done_attempts.lock().is_ok_and(|mut t| {
+        let reserved = state.smart_clear_attempts.lock().is_ok_and(|mut t| {
             if t.0 != day {
                 *t = (day.clone(), 0);
             }
@@ -690,10 +690,10 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
                     if let Err(e) = store.extract_bump_usage(
                         account,
                         &bill_day,
-                        SMART_DONE_USAGE_CATEGORY,
+                        SMART_CLEAR_USAGE_CATEGORY,
                         u.into(),
                     ) {
-                        eprintln!("squelch: smart done usage ledger bump failed ({e})");
+                        eprintln!("squelch: smart clear usage ledger bump failed ({e})");
                     }
                     Ok(())
                 })
@@ -713,7 +713,7 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
     // A FRESH CLOCK for the write: the 24-hour floor and every "has passed"
     // are judged as of the moment the rows are taken, not of the press.
     let outcome = store_call(&state, move |store, account| {
-        store.smart_done_apply(account, Utc::now(), &inventory, limit, &scan, &verdicts)
+        store.smart_clear_apply(account, Utc::now(), &inventory, limit, &scan, &verdicts)
     })
     .await?;
 
@@ -744,7 +744,7 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
     if let Some(batch) = outcome.batch_id {
         crate::handlers::audit_action(
             &state,
-            "reading.smart_done",
+            "reading.smart_clear",
             Some(batch.to_string()),
             &outcome.cleared.len().to_string(),
         )
@@ -764,12 +764,12 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
     ))
 }
 
-/// POST /client/v2/reading/smart_done/{batch_id}/undo: give a batch back.
+/// POST /client/v2/reading/smart_clear/{batch_id}/undo: give a batch back.
 /// Reopens exactly the rows that batch took and that nobody has touched
 /// since, each to the status it had. A second undo reopens nothing and says
 /// `0`; a batch this account does not have is 404, whether it is unknown or
 /// somebody else's.
-pub async fn smart_done_undo(
+pub async fn smart_clear_undo(
     State(state): State<ApiState>,
     Path(batch_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -779,13 +779,13 @@ pub async fn smart_done_undo(
         return Err(ApiError::not_found());
     };
     let reopened = store_call(&state, move |store, account| {
-        store.smart_done_undo(account, batch, Utc::now())
+        store.smart_clear_undo(account, batch, Utc::now())
     })
     .await?
     .ok_or_else(ApiError::not_found)?;
     crate::handlers::audit_action(
         &state,
-        "reading.smart_done_undo",
+        "reading.smart_clear_undo",
         Some(batch.to_string()),
         &reopened.to_string(),
     )

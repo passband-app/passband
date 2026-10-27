@@ -835,7 +835,7 @@ pub fn validate_decision(
     if !attention(&decision.attention) {
         return fail("invalid_attention_evidence_or_factors");
     }
-    // `ends` is read by ONE consumer (smart done), through the one parser
+    // `ends` is read by ONE consumer (smart clear), through the one parser
     // it uses, so it is validated with that parser and not the stricter
     // closure above: the agent writes a stated time as a local time with no
     // offset, and refusing that would cost a turn for a value the reader

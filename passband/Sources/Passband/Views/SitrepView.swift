@@ -1513,7 +1513,7 @@ struct FlowLayout: Layout {
 // MARK: - zone pills
 
 /// A ZONE'S DOOR, as a pill in its header's corner: flow mode on For your
-/// eyes, smart done and purge on Reading. It is how a key gets found: the
+/// eyes, smart clear and purge on Reading. It is how a key gets found: the
 /// reader who clicks one learns, from the keycap on the button they just
 /// pressed, that the key was the way all along.
 struct ZonePill: View {

@@ -144,10 +144,10 @@ fn client_router(state: ApiState) -> Router {
         // "Clean Reading out for me", and its exact undo. HUMAN DOOR ONLY,
         // like every write and more than most: it resolves mail in bulk on
         // the owner's say-so, which no agent may borrow.
-        .route("/client/v2/reading/smart_done", post(triage::smart_done))
+        .route("/client/v2/reading/smart_clear", post(triage::smart_clear))
         .route(
-            "/client/v2/reading/smart_done/{batch_id}/undo",
-            post(triage::smart_done_undo),
+            "/client/v2/reading/smart_clear/{batch_id}/undo",
+            post(triage::smart_clear_undo),
         )
         .route(
             "/client/v2/messages/{message_id}/corrections",

@@ -1,17 +1,17 @@
-//! What the Reading purge and smart done must never count, never take, and
+//! What the Reading purge and smart clear must never count, never take, and
 //! never mistake for the owner. Each test here reproduces a review finding.
 
 use super::super::*;
 use super::reading_senders::{
     NEWS, into_reading, into_reading_with, mail, old_ledgers, sender, senders,
 };
-use super::smart_done::{apply, content, promo, row, time};
+use super::smart_clear::{apply, content, promo, row, time};
 use super::support::*;
 use crate::store::agent_triage::AgentTriageStore;
 use crate::triage::decision::{
     AuthKind, EvidenceRef, MessageDecision, RecordProposal, ThreadAttentionDecision,
 };
-use crate::triage::smart_done::ClearReason;
+use crate::triage::smart_clear::ClearReason;
 use chrono::Duration;
 
 /// The two ways the agent pipeline marks mail as kept close. Neither touches
@@ -344,7 +344,10 @@ fn archive_mail_is_not_counted_for_its_sender() {
     }
     let read = senders(&store, acct);
     let s = sender(&read, NEWS).signals;
-    assert_eq!(s.received, 4, "archive rows are not the sender's recent mail");
+    assert_eq!(
+        s.received, 4,
+        "archive rows are not the sender's recent mail"
+    );
     assert_eq!(s.cleared_unopened, 0);
 }
 
@@ -374,7 +377,7 @@ fn the_rule_digest_does_not_call_a_sweep_a_dismissal() {
 }
 
 #[test]
-fn an_owner_sweep_by_sender_takes_over_rows_smart_done_took() {
+fn an_owner_sweep_by_sender_takes_over_rows_smart_clear_took() {
     let (store, acct) = store();
     old_ledgers(&store, acct);
     let taken = promo(&store, acct, "taken", 20);
@@ -385,7 +388,7 @@ fn an_owner_sweep_by_sender_takes_over_rows_smart_done_took() {
     store.resolve_sender(acct, "taken@shop.example").unwrap();
     assert_eq!(row(&store, taken), ("done".into(), true, None));
     assert_eq!(
-        store.smart_done_undo(acct, batch, Utc::now()).unwrap(),
+        store.smart_clear_undo(acct, batch, Utc::now()).unwrap(),
         Some(1)
     );
     assert_eq!(row(&store, taken).0, "done", "the owner's sweep stands");
@@ -436,13 +439,13 @@ fn undo_reaches_only_the_rows_the_batch_recorded() {
              WHERE message_id = ?3",
             params![
                 Utc::now().to_rfc3339(),
-                format!("smart_done:{batch}"),
+                format!("smart_clear:{batch}"),
                 stray
             ],
         )
         .unwrap();
     assert_eq!(
-        store.smart_done_undo(acct, batch, Utc::now()).unwrap(),
+        store.smart_clear_undo(acct, batch, Utc::now()).unwrap(),
         Some(1)
     );
     assert_eq!(row(&store, taken).0, "new");
@@ -462,7 +465,7 @@ fn a_verdict_for_a_summary_that_has_since_changed_is_dropped() {
     let changed = promo(&store, acct, "changed", 5);
     let inventory = crate::store::agent_triage::AgentListQuery::default();
     let scan = store
-        .smart_done_scan(acct, Utc::now(), &inventory, 200)
+        .smart_clear_scan(acct, Utc::now(), &inventory, 200)
         .unwrap();
     assert_eq!(scan.asks.len(), 2);
     store
@@ -476,18 +479,18 @@ fn a_verdict_for_a_summary_that_has_since_changed_is_dropped() {
         )
         .unwrap();
     // The model answers about what it was sent.
-    let verdicts: std::collections::HashMap<i64, crate::triage::smart_done::Verdict> = scan
+    let verdicts: std::collections::HashMap<i64, crate::triage::smart_clear::Verdict> = scan
         .asks
         .iter()
         .map(|a| {
             (
                 a.message_id,
-                crate::triage::smart_done::Verdict::about(ClearReason::Expired, &a.summary),
+                crate::triage::smart_clear::Verdict::about(ClearReason::Expired, &a.summary),
             )
         })
         .collect();
     let outcome = store
-        .smart_done_apply(acct, Utc::now(), &inventory, 200, &scan, &verdicts)
+        .smart_clear_apply(acct, Utc::now(), &inventory, 200, &scan, &verdicts)
         .unwrap();
     assert_eq!(outcome.cleared, [(same, ClearReason::Expired)]);
     assert_eq!(row(&store, changed).0, "new");
@@ -531,7 +534,7 @@ fn a_score_from_the_scan_does_not_outrank_what_the_owner_did_since() {
         let (store, acct) = store();
         let [first, second] = ignored_sender(&store, acct);
         let scan = store
-            .smart_done_scan(acct, Utc::now(), &inventory, 200)
+            .smart_clear_scan(acct, Utc::now(), &inventory, 200)
             .unwrap();
         assert_eq!(scan.sender_scores.get(NEWS), Some(&Some(77)));
         store
@@ -541,7 +544,7 @@ fn a_score_from_the_scan_does_not_outrank_what_the_owner_did_since() {
         // opening mail is exactly what lowers it. The sender is treated as
         // unscored for this press: neither of the two goes.
         let outcome = store
-            .smart_done_apply(acct, Utc::now(), &inventory, 200, &scan, &none)
+            .smart_clear_apply(acct, Utc::now(), &inventory, 200, &scan, &none)
             .unwrap();
         assert!(outcome.cleared.is_empty(), "{:?}", outcome.cleared);
         assert_eq!(row(&store, second).0, "new");
@@ -552,11 +555,11 @@ fn a_score_from_the_scan_does_not_outrank_what_the_owner_did_since() {
         let (store, acct) = store();
         let [first, second] = ignored_sender(&store, acct);
         let scan = store
-            .smart_done_scan(acct, Utc::now(), &inventory, 200)
+            .smart_clear_scan(acct, Utc::now(), &inventory, 200)
             .unwrap();
         store.keep_reading_sender(acct, NEWS, Utc::now()).unwrap();
         let outcome = store
-            .smart_done_apply(acct, Utc::now(), &inventory, 200, &scan, &none)
+            .smart_clear_apply(acct, Utc::now(), &inventory, 200, &scan, &none)
             .unwrap();
         assert!(outcome.cleared.is_empty(), "{:?}", outcome.cleared);
         assert_eq!(row(&store, first).0, "new");
@@ -566,7 +569,7 @@ fn a_score_from_the_scan_does_not_outrank_what_the_owner_did_since() {
     let (store, acct) = store();
     let [first, _] = ignored_sender(&store, acct);
     let outcome = store
-        .smart_done_apply(
+        .smart_clear_apply(
             acct,
             Utc::now(),
             &inventory,
@@ -778,7 +781,7 @@ fn an_upcoming_event_protects_however_its_time_is_written() {
         kept.push(essay);
     }
     let scan = store
-        .smart_done_scan(
+        .smart_clear_scan(
             acct,
             Utc::now(),
             &crate::store::agent_triage::AgentListQuery::default(),
@@ -919,7 +922,7 @@ fn rows_an_undo_gave_back_are_not_taken_again() {
         .set_attention_status(acct, b, AttentionStatus::Done)
         .unwrap();
     assert_eq!(
-        store.smart_done_undo(acct, batch, Utc::now()).unwrap(),
+        store.smart_clear_undo(acct, batch, Utc::now()).unwrap(),
         Some(1)
     );
     let later = promo(&store, acct, "later", 20);
@@ -935,13 +938,13 @@ fn a_batch_whose_detail_cannot_be_read_is_not_marked_undone() {
     old_ledgers(&store, acct);
     let id = promo(&store, acct, "a", 20);
     let batch = apply(&store, acct, &[]).batch_id.unwrap();
-    let tag = Some(format!("smart_done:{batch}"));
+    let tag = Some(format!("smart_clear:{batch}"));
     let undone_at = |store: &SqliteStore| -> Option<String> {
         store
             .lock()
             .unwrap()
             .query_row(
-                "SELECT undone_at FROM smart_done_batches WHERE id = ?1",
+                "SELECT undone_at FROM smart_clear_batches WHERE id = ?1",
                 [batch],
                 |r| r.get(0),
             )
@@ -952,12 +955,12 @@ fn a_batch_whose_detail_cannot_be_read_is_not_marked_undone() {
             .lock()
             .unwrap()
             .execute(
-                "UPDATE smart_done_batches SET detail = ?1 WHERE id = ?2",
+                "UPDATE smart_clear_batches SET detail = ?1 WHERE id = ?2",
                 params![broken, batch],
             )
             .unwrap();
         assert!(
-            store.smart_done_undo(acct, batch, Utc::now()).is_err(),
+            store.smart_clear_undo(acct, batch, Utc::now()).is_err(),
             "{broken}"
         );
         assert_eq!(undone_at(&store), None, "{broken}");
@@ -968,7 +971,7 @@ fn a_batch_whose_detail_cannot_be_read_is_not_marked_undone() {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE smart_done_batches SET detail = ?1 WHERE id = ?2",
+            "UPDATE smart_clear_batches SET detail = ?1 WHERE id = ?2",
             params![
                 serde_json::json!({"rows": [{"id": id, "reason": "stale_promo", "was": "new"}]})
                     .to_string(),
@@ -977,7 +980,7 @@ fn a_batch_whose_detail_cannot_be_read_is_not_marked_undone() {
         )
         .unwrap();
     assert_eq!(
-        store.smart_done_undo(acct, batch, Utc::now()).unwrap(),
+        store.smart_clear_undo(acct, batch, Utc::now()).unwrap(),
         Some(1)
     );
 }
@@ -1083,7 +1086,7 @@ fn a_restricting_correction_seals_on_its_own() {
 /// in front of it concluded.
 #[test]
 fn the_done_statement_alone_refuses_kept_close_mail() {
-    use super::super::smart_done::MARK_DONE_SQL;
+    use super::super::smart_clear::MARK_DONE_SQL;
     let (store, acct) = store();
     let plain = mail(&store, acct, "plain", NEWS, 20);
     into_reading(&store, acct, plain);
@@ -1093,7 +1096,7 @@ fn the_done_statement_alone_refuses_kept_close_mail() {
     let mark = |id: i64| {
         conn.execute(
             MARK_DONE_SQL,
-            params![Utc::now().to_rfc3339(), "smart_done:1", acct, id],
+            params![Utc::now().to_rfc3339(), "smart_clear:1", acct, id],
         )
         .unwrap()
     };

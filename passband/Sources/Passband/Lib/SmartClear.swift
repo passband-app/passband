@@ -1,4 +1,4 @@
-// SMART DONE, IN WORDS. One press on the Reading zone and the daemon marks
+// SMART CLEAR, IN WORDS. One press on the Reading zone and the daemon marks
 // expired and plainly unwanted mail done; this is what the receipt says came
 // of it. Every line is something that went away, put the way a person would
 // say it, and the reasons are kept apart because "5 offers that ended" is a
@@ -9,7 +9,7 @@
 
 import Foundation
 
-enum SmartDoneCopy {
+enum SmartClearCopy {
     /// The daemon's reason codes, in the order the receipt lists them: the
     /// ones nobody could argue with first.
     static let order = ["event_passed", "offer_ended", "expired", "ignored_sender", "stale_promo"]
@@ -78,12 +78,12 @@ enum SmartDoneCopy {
             ? "Nothing obvious to clear. \(modelMissedNote)" : "Reading is already current."
     }
 
-    /// This daemon has no smart done route.
-    static let unavailable = "Smart done needs a server update."
-    static let failed = "Smart done did not finish. Try again."
+    /// This daemon has no smart clear route.
+    static let unavailable = "Smart clear needs a server update."
+    static let failed = "Smart clear did not finish. Try again."
     /// Another of the owner's devices pressed it first; the daemon runs one
     /// press at a time. Not an error, and nothing to retry.
-    static let alreadyRunning = "Smart done is already running."
+    static let alreadyRunning = "Smart clear is already running."
 
     /// After an undo. `reopened` is the daemon's count of what came back.
     static func undone(reopened: Int) -> String {
@@ -93,9 +93,9 @@ enum SmartDoneCopy {
 
 // MARK: - the full list
 
-/// One email a smart done cleared, as the full list shows it. The subject is
+/// One email a smart clear cleared, as the full list shows it. The subject is
 /// mail content: it lives with the receipt and nowhere else.
-struct SmartDoneItem: Identifiable, Hashable, Sendable {
+struct SmartClearItem: Identifiable, Hashable, Sendable {
     var id: Int
     /// The daemon's reason code, kept as sent: a code from a newer daemon
     /// still has a row, under a neutral heading.
@@ -118,28 +118,28 @@ struct SmartDoneItem: Identifiable, Hashable, Sendable {
 /// The full list's shape: a list to AUDIT, so it is grouped by why (the same
 /// order the receipt's lines use), each sender's emails together inside a
 /// reason, newest first.
-enum SmartDoneList {
+enum SmartClearList {
     struct Group: Identifiable, Hashable, Sendable {
         /// A known reason code, or `other` for every code this build has no
         /// words for.
         var reason: String
         var heading: String
-        var items: [SmartDoneItem]
+        var items: [SmartClearItem]
         var id: String { reason }
     }
 
     static let other = "other"
 
-    static func groups(_ items: [SmartDoneItem]) -> [Group] {
-        var by: [String: [SmartDoneItem]] = [:]
+    static func groups(_ items: [SmartClearItem]) -> [Group] {
+        var by: [String: [SmartClearItem]] = [:]
         for item in items {
-            let key = SmartDoneCopy.order.contains(item.reason) ? item.reason : other
+            let key = SmartClearCopy.order.contains(item.reason) ? item.reason : other
             by[key, default: []].append(item)
         }
-        return (SmartDoneCopy.order + [other]).compactMap { reason in
+        return (SmartClearCopy.order + [other]).compactMap { reason in
             guard let rows = by[reason], !rows.isEmpty else { return nil }
             return Group(
-                reason: reason, heading: SmartDoneCopy.heading(reason, count: rows.count),
+                reason: reason, heading: SmartClearCopy.heading(reason, count: rows.count),
                 items: sorted(rows))
         }
     }
@@ -147,7 +147,7 @@ enum SmartDoneList {
     /// Senders together, the sender with the newest email first, and each
     /// sender's own emails newest first. Ties fall back to the address and
     /// the id so the order never shuffles between two draws.
-    static func sorted(_ items: [SmartDoneItem]) -> [SmartDoneItem] {
+    static func sorted(_ items: [SmartClearItem]) -> [SmartClearItem] {
         var newest: [String: Date] = [:]
         for item in items {
             let at = date(item.receivedAt)
@@ -181,7 +181,7 @@ enum SmartDoneList {
     }
 }
 
-extension SmartDoneCopy {
+extension SmartClearCopy {
     /// A group's heading on the full list: the receipt's own line for that
     /// reason, count first, so the page and the card say one thing.
     static func heading(_ reason: String, count: Int) -> String {
@@ -205,7 +205,7 @@ extension SmartDoneCopy {
     }
 
     static let viewList = "View full list"
-    static let listTitle = "What smart done cleared"
+    static let listTitle = "Everything that was cleared"
     static let listPaused = "The undo timer is paused while you look."
     static let noSubject = "(no subject)"
 }
@@ -214,7 +214,7 @@ extension SmartDoneCopy {
 /// not cost any of the time there is to undo, so the pause is real: the
 /// deadline moves by exactly the time spent paused, and the ring is drawn
 /// from this, never the other way round.
-struct SmartDoneClock: Hashable, Sendable {
+struct SmartClearClock: Hashable, Sendable {
     /// Moves with the deadline on resume, so elapsed over total stays what
     /// it was at the pause.
     private(set) var startedAt: Date

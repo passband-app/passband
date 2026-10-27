@@ -1,11 +1,11 @@
-// The smart done receipt's words. Every line is a claim about what was taken
+// The smart clear receipt's words. Every line is a claim about what was taken
 // off somebody's board, so the plurals, the order and the accounting are
 // pinned rather than read.
 
 import Foundation
 
 @main
-struct SmartDoneTests {
+struct SmartClearTests {
     static func main() {
         theHeadlineCountsEmails()
         sendersAreNamedOnlyWhenKnown()
@@ -25,22 +25,22 @@ struct SmartDoneTests {
         pausingTwiceKeepsTheFirstPause()
         pausingAfterExpiryDoesNothing()
         theRingHoldsStillWhilePaused()
-        print("smart-done: ok")
+        print("smart-clear: ok")
     }
 
     static func theHeadlineCountsEmails() {
-        precondition(SmartDoneCopy.headline(cleared: 43) == "43 emails cleared")
-        precondition(SmartDoneCopy.headline(cleared: 1) == "1 email cleared")
+        precondition(SmartClearCopy.headline(cleared: 43) == "43 emails cleared")
+        precondition(SmartClearCopy.headline(cleared: 1) == "1 email cleared")
     }
 
     static func sendersAreNamedOnlyWhenKnown() {
-        precondition(SmartDoneCopy.senders(17) == "from 17 senders")
-        precondition(SmartDoneCopy.senders(1) == "from 1 sender")
-        precondition(SmartDoneCopy.senders(0) == nil)
+        precondition(SmartClearCopy.senders(17) == "from 17 senders")
+        precondition(SmartClearCopy.senders(1) == "from 1 sender")
+        precondition(SmartClearCopy.senders(0) == nil)
     }
 
     static func everyReasonHasALineInOrder() {
-        let lines = SmartDoneCopy.lines(byReason: [
+        let lines = SmartClearCopy.lines(byReason: [
             "stale_promo": 11, "ignored_sender": 20, "expired": 4, "offer_ended": 5,
             "event_passed": 3,
         ])
@@ -52,7 +52,7 @@ struct SmartDoneTests {
     }
 
     static func aSingleOfEachReadsAsOne() {
-        let lines = SmartDoneCopy.lines(byReason: [
+        let lines = SmartClearCopy.lines(byReason: [
             "stale_promo": 1, "ignored_sender": 1, "expired": 1, "offer_ended": 1,
             "event_passed": 1,
         ])
@@ -64,48 +64,48 @@ struct SmartDoneTests {
     }
 
     static func zeroReasonsAreLeftOut() {
-        let lines = SmartDoneCopy.lines(byReason: ["offer_ended": 2, "event_passed": 0])
+        let lines = SmartClearCopy.lines(byReason: ["offer_ended": 2, "event_passed": 0])
         precondition(lines.map(\.spoken) == ["2 offers that ended"])
-        precondition(SmartDoneCopy.lines(byReason: [:]).isEmpty)
+        precondition(SmartClearCopy.lines(byReason: [:]).isEmpty)
     }
 
     static func anUnknownReasonIsStillAccountedFor() {
-        let lines = SmartDoneCopy.lines(byReason: ["offer_ended": 2, "from_the_future": 3, "x": 1])
+        let lines = SmartClearCopy.lines(byReason: ["offer_ended": 2, "from_the_future": 3, "x": 1])
         precondition(lines.map(\.spoken) == ["2 offers that ended", "4 others"], "\(lines)")
         precondition(lines.map(\.count).reduce(0, +) == 6, "the lines add up to what was cleared")
-        precondition(SmartDoneCopy.lines(byReason: ["x": 1]).map(\.spoken) == ["1 other"])
+        precondition(SmartClearCopy.lines(byReason: ["x": 1]).map(\.spoken) == ["1 other"])
     }
 
     static func nothingClearedSaysWhy() {
-        precondition(SmartDoneCopy.nothing(model: "ok") == "Reading is already current.")
-        precondition(SmartDoneCopy.nothing(model: nil) == "Reading is already current.")
+        precondition(SmartClearCopy.nothing(model: "ok") == "Reading is already current.")
+        precondition(SmartClearCopy.nothing(model: nil) == "Reading is already current.")
         precondition(
-            SmartDoneCopy.nothing(model: "skipped_unconfigured") == "Reading is already current.")
+            SmartClearCopy.nothing(model: "skipped_unconfigured") == "Reading is already current.")
         precondition(
-            SmartDoneCopy.nothing(model: "skipped_nothing_to_ask") == "Reading is already current.")
-        precondition(SmartDoneCopy.modelMissed("skipped_failed"))
-        precondition(SmartDoneCopy.modelMissed("skipped_cap"))
-        precondition(!SmartDoneCopy.modelMissed("ok"))
+            SmartClearCopy.nothing(model: "skipped_nothing_to_ask") == "Reading is already current.")
+        precondition(SmartClearCopy.modelMissed("skipped_failed"))
+        precondition(SmartClearCopy.modelMissed("skipped_cap"))
+        precondition(!SmartClearCopy.modelMissed("ok"))
         precondition(
-            SmartDoneCopy.nothing(model: "skipped_failed")
+            SmartClearCopy.nothing(model: "skipped_failed")
                 == "Nothing obvious to clear. The closer look did not run this time.")
     }
 
     static func undoneSaysWhatCameBack() {
-        precondition(SmartDoneCopy.undone(reopened: 43) == "43 emails are back in Reading.")
-        precondition(SmartDoneCopy.undone(reopened: 1) == "1 email is back in Reading.")
+        precondition(SmartClearCopy.undone(reopened: 43) == "43 emails are back in Reading.")
+        precondition(SmartClearCopy.undone(reopened: 1) == "1 email is back in Reading.")
     }
 
     static func noLineCarriesADash() {
         var all = [
-            SmartDoneCopy.headline(cleared: 2), SmartDoneCopy.senders(2) ?? "",
-            SmartDoneCopy.nothing(model: "ok"), SmartDoneCopy.nothing(model: "skipped_cap"),
-            SmartDoneCopy.unavailable, SmartDoneCopy.failed, SmartDoneCopy.undone(reopened: 2),
+            SmartClearCopy.headline(cleared: 2), SmartClearCopy.senders(2) ?? "",
+            SmartClearCopy.nothing(model: "ok"), SmartClearCopy.nothing(model: "skipped_cap"),
+            SmartClearCopy.unavailable, SmartClearCopy.failed, SmartClearCopy.undone(reopened: 2),
         ]
         for n in [1, 2] {
-            all += SmartDoneCopy.lines(
+            all += SmartClearCopy.lines(
                 byReason: Dictionary(
-                    uniqueKeysWithValues: (SmartDoneCopy.order + ["zz"]).map { ($0, n) })
+                    uniqueKeysWithValues: (SmartClearCopy.order + ["zz"]).map { ($0, n) })
             ).map(\.spoken)
         }
         for line in all {
@@ -118,33 +118,33 @@ struct SmartDoneTests {
 
     static func item(
         _ id: Int, _ reason: String, _ sender: String, at: String? = nil, name: String? = nil
-    ) -> SmartDoneItem {
-        SmartDoneItem(
+    ) -> SmartClearItem {
+        SmartClearItem(
             id: id, reason: reason, sender: sender, senderName: name, subject: "s\(id)", receivedAt: at)
     }
 
     static func everyRowSaysWhy() {
-        precondition(SmartDoneCopy.why("event_passed") == "The event already happened")
-        precondition(SmartDoneCopy.why("offer_ended") == "The offer ended")
-        precondition(SmartDoneCopy.why("expired") == "No longer current")
-        precondition(SmartDoneCopy.why("ignored_sender") == "From a sender you never open")
-        precondition(SmartDoneCopy.why("stale_promo") == "A promotion you never opened")
-        precondition(SmartDoneCopy.why("from_the_future") == "Cleared", "neutral, never a guess")
-        precondition(SmartDoneCopy.why("") == "Cleared")
-        for code in SmartDoneCopy.order + ["zz"] {
-            let line = SmartDoneCopy.why(code)
+        precondition(SmartClearCopy.why("event_passed") == "The event already happened")
+        precondition(SmartClearCopy.why("offer_ended") == "The offer ended")
+        precondition(SmartClearCopy.why("expired") == "No longer current")
+        precondition(SmartClearCopy.why("ignored_sender") == "From a sender you never open")
+        precondition(SmartClearCopy.why("stale_promo") == "A promotion you never opened")
+        precondition(SmartClearCopy.why("from_the_future") == "Cleared", "neutral, never a guess")
+        precondition(SmartClearCopy.why("") == "Cleared")
+        for code in SmartClearCopy.order + ["zz"] {
+            let line = SmartClearCopy.why(code)
             precondition(!line.contains("\u{2014}") && !line.contains("\u{2013}") && !line.contains(" - "))
         }
     }
 
     static func theListIsGroupedByWhyInTheReceiptsOrder() {
-        let groups = SmartDoneList.groups([
+        let groups = SmartClearList.groups([
             item(1, "stale_promo", "a@x.com"), item(2, "from_the_future", "b@x.com"),
             item(3, "event_passed", "c@x.com"), item(4, "offer_ended", "d@x.com"),
             item(5, "offer_ended", "e@x.com"), item(6, "", "f@x.com"),
         ])
         precondition(
-            groups.map(\.reason) == ["event_passed", "offer_ended", "stale_promo", SmartDoneList.other],
+            groups.map(\.reason) == ["event_passed", "offer_ended", "stale_promo", SmartClearList.other],
             "\(groups.map(\.reason))")
         precondition(
             groups.map(\.heading) == [
@@ -153,8 +153,8 @@ struct SmartDoneTests {
             ], "the page says what the receipt says: \(groups.map(\.heading))")
         precondition(groups.map(\.items.count).reduce(0, +) == 6, "every row is somewhere")
         precondition(
-            SmartDoneList.groups([item(9, "from_the_future", "z@x.com")]).map(\.heading) == ["1 other"])
-        precondition(SmartDoneList.groups([]).isEmpty)
+            SmartClearList.groups([item(9, "from_the_future", "z@x.com")]).map(\.heading) == ["1 other"])
+        precondition(SmartClearList.groups([]).isEmpty)
     }
 
     static func sendersStayTogetherNewestFirst() {
@@ -166,23 +166,23 @@ struct SmartDoneTests {
             item(5, "offer_ended", "undated@x.com"),
             item(6, "offer_ended", "busy@x.com", at: "2026-09-15T10:00:00Z"),
         ]
-        let got = SmartDoneList.groups(rows)[0].items.map(\.id)
+        let got = SmartClearList.groups(rows)[0].items.map(\.id)
         // busy's newest (the 28th) puts all three of busy's first, newest
         // first among themselves; then mid, old, and the undated one last.
         precondition(got == [4, 6, 2, 3, 1, 5], "\(got)")
-        precondition(SmartDoneList.sorted(rows.reversed()).map(\.id) == got, "whatever order they came in")
+        precondition(SmartClearList.sorted(rows.reversed()).map(\.id) == got, "whatever order they came in")
     }
 
     static func theDaemonsTimestampShapeSorts() {
         // Exactly what the daemon stores: sub-second digits, numeric offset.
-        let a = SmartDoneList.date("2026-09-28T03:09:44.036873+00:00")
-        let b = SmartDoneList.date("2026-09-28T03:09:45.000001+00:00")
+        let a = SmartClearList.date("2026-09-28T03:09:44.036873+00:00")
+        let b = SmartClearList.date("2026-09-28T03:09:45.000001+00:00")
         precondition(a != .distantPast && b != .distantPast, "the shape must parse")
         precondition(b.timeIntervalSince(a) == 1)
-        precondition(a == SmartDoneList.date("2026-09-28T03:09:44Z"))
-        precondition(SmartDoneList.date("2026-09-28T05:09:44.5+02:00") == a, "offsets are honoured")
-        precondition(SmartDoneList.date(nil) == .distantPast && SmartDoneList.date("soon") == .distantPast)
-        let got = SmartDoneList.sorted([
+        precondition(a == SmartClearList.date("2026-09-28T03:09:44Z"))
+        precondition(SmartClearList.date("2026-09-28T05:09:44.5+02:00") == a, "offsets are honoured")
+        precondition(SmartClearList.date(nil) == .distantPast && SmartClearList.date("soon") == .distantPast)
+        let got = SmartClearList.sorted([
             item(1, "expired", "a@x.com", at: "2026-09-27T03:09:44.036873+00:00"),
             item(2, "expired", "b@x.com", at: "2026-09-28T03:09:44.036873+00:00"),
         ]).map(\.id)
@@ -202,7 +202,7 @@ struct SmartDoneTests {
     static func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
 
     static func aPauseMovesTheDeadlineByExactlyTheTimePaused() {
-        var clock = SmartDoneClock(startedAt: t0, lasting: 30)
+        var clock = SmartClearClock(startedAt: t0, lasting: 30)
         precondition(clock.remaining(at: at(10)) == 20 && !clock.isPaused)
         precondition(clock.pause(at: at(10)))
         precondition(clock.remaining(at: at(500)) == 20, "no time is lost while paused")
@@ -216,7 +216,7 @@ struct SmartDoneTests {
     }
 
     static func pausingTwiceKeepsTheFirstPause() {
-        var clock = SmartDoneClock(startedAt: t0, lasting: 30)
+        var clock = SmartClearClock(startedAt: t0, lasting: 30)
         precondition(clock.pause(at: at(5)))
         precondition(!clock.pause(at: at(9)), "already stopped")
         precondition(clock.pausedAt == at(5))
@@ -229,7 +229,7 @@ struct SmartDoneTests {
     }
 
     static func pausingAfterExpiryDoesNothing() {
-        var clock = SmartDoneClock(startedAt: t0, lasting: 30)
+        var clock = SmartClearClock(startedAt: t0, lasting: 30)
         precondition(!clock.pause(at: at(30)), "at the deadline there is nothing left to protect")
         precondition(!clock.pause(at: at(31)))
         precondition(!clock.isPaused && clock.expiresAt == at(30) && clock.isExpired(at: at(31)))
@@ -237,7 +237,7 @@ struct SmartDoneTests {
     }
 
     static func theRingHoldsStillWhilePaused() {
-        var clock = SmartDoneClock(startedAt: t0, lasting: 30)
+        var clock = SmartClearClock(startedAt: t0, lasting: 30)
         precondition(clock.fraction(at: t0) == 1 && clock.fraction(at: at(15)) == 0.5)
         clock.pause(at: at(15))
         precondition(clock.fraction(at: at(900)) == 0.5)

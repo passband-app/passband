@@ -145,7 +145,7 @@ enum PurgeReconcile: Equatable, Sendable {
     /// now would quietly replace the block somebody chose since. A keep is
     /// only a note and always goes.
     ///
-    /// Mail that smart done has since cleared changes nothing: the decision
+    /// Mail that smart clear has since cleared changes nothing: the decision
     /// was about the sender, not about what was on the board.
     ///
     /// `wasBlocked`: the sender was ALREADY muted when the deck was built

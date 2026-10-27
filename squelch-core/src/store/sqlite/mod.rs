@@ -277,7 +277,7 @@ mod rules;
 mod scheduled;
 mod search;
 mod senders;
-pub mod smart_done;
+pub mod smart_clear;
 mod specialists;
 #[cfg(test)]
 mod tests;

@@ -32,7 +32,7 @@ pub const MIN_SAMPLE: u32 = 4;
 /// day the ledger starts, so on a ledger a day old EVERYTHING is unopened and
 /// a handful of mails cleared in one sitting reads as months of indifference.
 /// Under two weeks there is no pattern, only a first impression: no score,
-/// for anyone, and so nothing for smart done to sweep a sender on.
+/// for anyone, and so nothing for smart clear to sweep a sender on.
 pub const MIN_COVERED_DAYS: f32 = 14.0;
 
 /// How many days of ledger a monthly rate needs. Four mails in three hours is

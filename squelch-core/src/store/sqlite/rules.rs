@@ -16,7 +16,7 @@ use super::*;
 ///
 /// `status` IS THE OWNER'S, NOT A SWEEP'S. The rule suggester reads `done` and
 /// unopened as "cleared without opening" and tells its model so in trusted
-/// context. A row smart done resolved (`resolved_by` set) was not cleared by
+/// context. A row smart clear resolved (`resolved_by` set) was not cleared by
 /// anybody, so it is reported as the open row it was until the owner says
 /// otherwise.
 ///

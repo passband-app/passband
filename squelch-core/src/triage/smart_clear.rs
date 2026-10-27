@@ -1,10 +1,10 @@
-//! SMART DONE: one press in Reading that means "I trust you to clean this
+//! SMART CLEAR: one press in Reading that means "I trust you to clean this
 //! out". It marks done the open Reading mail that has expired or that the
 //! owner plainly does not want, in one batch that can be undone exactly.
 //!
 //! This module is the JUDGEMENT, with no store in it: which rows may never be
 //! taken, which stored facts take a row, and the one small-model question for
-//! rows whose stored decision carries no date. `store::sqlite::smart_done`
+//! rows whose stored decision carries no date. `store::sqlite::smart_clear`
 //! gathers the facts and writes the batch.
 //!
 //! WHAT IT WILL NOT TOUCH comes first and outranks every reason
@@ -33,7 +33,7 @@
 //!    and is a day past.
 //! 2. `offer_ended`: the stored decision says when the offer ends, and it has.
 //! 3. `ignored_sender`: the sender's fatigue score, from the very function the
-//!    purge list scores with, is at or over [`SMART_DONE_SENDER_SCORE`], and
+//!    purge list scores with, is at or over [`SMART_CLEAR_SENDER_SCORE`], and
 //!    the owner never opened this message, which arrived after opens began
 //!    to be recorded.
 //! 4. `stale_promo`: a promotion, two weeks old, never opened, that arrived
@@ -84,7 +84,7 @@ use std::collections::HashMap;
 /// looking at each message. High on purpose: 75 needs mail that is almost
 /// never opened AND a second signal (cleared unopened, skimmed, heavy volume),
 /// so a newsletter that is merely behind does not qualify.
-pub const SMART_DONE_SENDER_SCORE: u8 = 75;
+pub const SMART_CLEAR_SENDER_SCORE: u8 = 75;
 
 /// How old an unopened promotion has to be before it is stale. Two weeks
 /// outlasts nearly every sale, and is long enough that "has not opened it" is
@@ -93,12 +93,12 @@ pub const STALE_PROMO_DAYS: i64 = 14;
 
 /// Mail younger than this is never cleared, by any reason. Mail that arrived
 /// today has not had its chance to be read, whatever its sender's record.
-pub const SMART_DONE_MIN_AGE_HOURS: i64 = 24;
+pub const SMART_CLEAR_MIN_AGE_HOURS: i64 = 24;
 
 /// The most rows one press asks the model about, newest first. Bounds the
 /// prompt, the wait and the bill; older undecided rows wait for the next press
 /// or for `stale_promo`.
-pub const SMART_DONE_MODEL_ROWS: usize = 60;
+pub const SMART_CLEAR_MODEL_ROWS: usize = 60;
 
 /// Model passes per account per day. A press is a deliberate act, so twenty is
 /// far past honest use; the cap is the runaway guard for a client bug.
@@ -205,7 +205,7 @@ pub struct RowFacts<'a> {
     pub reminder: bool,
     /// The message's thread is showing in FYE, by FYE's own listing.
     pub in_fye: bool,
-    /// An earlier smart done took this row and the owner undid it.
+    /// An earlier smart clear took this row and the owner undid it.
     pub given_back: bool,
     /// The mail arrived before opens were recorded at all, so "never opened"
     /// is not something anybody could know about it.
@@ -220,7 +220,7 @@ pub struct RowFacts<'a> {
 /// update? Reading and those inventories overlap, and `done` is one status
 /// for all of them, so clearing the row out of Reading would take the bill
 /// off the Billing page too. An event is the one record that does not
-/// protect: an event that has passed is exactly what smart done is for.
+/// protect: an event that has passed is exactly what smart clear is for.
 fn carries_a_record(decision: &MessageDecision) -> bool {
     decision
         .records
@@ -230,7 +230,7 @@ fn carries_a_record(decision: &MessageDecision) -> bool {
 
 /// May this row never be cleared, whatever else is true of it?
 ///
-/// Two of the guards are about WHERE ELSE the mail is. Smart done is asked
+/// Two of the guards are about WHERE ELSE the mail is. Smart clear is asked
 /// to clean out Reading; a row that is also on the FYE board, or also a
 /// record, would vanish from there on the same status write, and nobody
 /// pressed a button about that.
@@ -245,7 +245,7 @@ pub fn is_protected(row: &RowFacts<'_>, now: DateTime<Utc>) -> bool {
         || row.in_fye
         || row.given_back
         || carries_a_record(row.decision)
-        || row.received_at > now - Duration::hours(SMART_DONE_MIN_AGE_HOURS)
+        || row.received_at > now - Duration::hours(SMART_CLEAR_MIN_AGE_HOURS)
 }
 
 /// The dates a row carries, as the instants they are over ([`over_at`]).
@@ -326,7 +326,7 @@ impl StoredDates {
         }
     }
 
-    /// Is there a date of the mail's OWN that smart done can check, or could
+    /// Is there a date of the mail's OWN that smart clear can check, or could
     /// not read? Then the model is not asked: it has no better information.
     fn has_evidence(&self) -> bool {
         !self.events.is_empty() || self.ends.is_some() || self.unreadable
@@ -355,7 +355,7 @@ fn over(at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     at + Duration::hours(PASSED_GRACE_HOURS) <= now
 }
 
-/// Does the row carry a date of its own that smart done can check for itself
+/// Does the row carry a date of its own that smart clear can check for itself
 /// (or one it could not read)? A row that does is never put to the model. A
 /// date that is not evidence ([`StoredDates`]) does not count.
 pub fn has_stored_date(row: &RowFacts<'_>) -> bool {
@@ -364,7 +364,7 @@ pub fn has_stored_date(row: &RowFacts<'_>) -> bool {
 
 /// Where the stored facts leave a row.
 enum Judged {
-    /// Never smart done's to take.
+    /// Never smart clear's to take.
     Protected,
     /// Not finished: a date still ahead, or one that cannot be read.
     Live,
@@ -406,7 +406,7 @@ fn weigh(row: &RowFacts<'_>, now: DateTime<Utc>) -> Judged {
         && !row.before_open_ledger
         && row
             .sender_score
-            .is_some_and(|score| score >= SMART_DONE_SENDER_SCORE)
+            .is_some_and(|score| score >= SMART_CLEAR_SENDER_SCORE)
     {
         return Judged::Clear(ClearReason::IgnoredSender);
     }
@@ -800,7 +800,7 @@ pub const UNGROUNDED_YES_MIN_YESES: usize = 5;
 /// word list was widened to the ways an expiry is really written, and more
 /// pass now. So a pass steered carefully enough to say yes only to rows that
 /// mention a day can still take a good share of what was asked. What actually bounds the damage is not this function. It is that a
-/// press is ONE batch of at most [`SMART_DONE_MODEL_ROWS`] model-judged rows,
+/// press is ONE batch of at most [`SMART_CLEAR_MODEL_ROWS`] model-judged rows,
 /// that the batch is undone exactly with one call, and that an undo is
 /// remembered so the same rows are never taken again.
 ///
@@ -866,10 +866,10 @@ pub fn read_verdicts(
 }
 
 /// The model client: the same key/provider resolution as the triage stages,
-/// on its OWN model (`[smart_done]`), which is neither the notify model nor
+/// on its OWN model (`[smart_clear]`), which is neither the notify model nor
 /// Stage-1's and is priced as itself.
 #[derive(Clone)]
-pub struct SmartDoneClient {
+pub struct SmartClearClient {
     http: reqwest::Client,
     url: String,
     api_key: String,
@@ -878,9 +878,9 @@ pub struct SmartDoneClient {
     effort: Option<String>,
 }
 
-impl std::fmt::Debug for SmartDoneClient {
+impl std::fmt::Debug for SmartClearClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SmartDoneClient")
+        f.debug_struct("SmartClearClient")
             .field("url", &self.url)
             .field("provider", &self.provider.as_str())
             .field("model", &self.model)
@@ -888,7 +888,7 @@ impl std::fmt::Debug for SmartDoneClient {
     }
 }
 
-impl SmartDoneClient {
+impl SmartClearClient {
     pub fn new(
         http: reqwest::Client,
         url: impl Into<String>,
@@ -916,7 +916,7 @@ impl SmartDoneClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .ok()?;
-        let mut model = cfg.smart_done.model.clone();
+        let mut model = cfg.smart_clear.model.clone();
         if resolved.provider == Stage2Provider::Anthropic
             && llm::is_gateway_url(&resolved.url)
             && let Some(q) = llm::qualify_gateway_model(&model)
@@ -929,7 +929,7 @@ impl SmartDoneClient {
             resolved.api_key,
             resolved.provider,
             model,
-            cfg.smart_done.effort.clone(),
+            cfg.smart_clear.effort.clone(),
         ))
     }
 }
@@ -948,7 +948,7 @@ pub struct ModelPass {
 
 /// The raw call, distinguishing refusal from failure for tests.
 pub async fn judge_at(
-    client: &SmartDoneClient,
+    client: &SmartClearClient,
     now: DateTime<Utc>,
     rows: &[ModelRow],
 ) -> std::result::Result<LlmOutcome<HashMap<i64, Verdict>>, ClassifyError> {
@@ -977,7 +977,7 @@ pub async fn judge_at(
 
 /// Ask which rows have expired. INFALLIBLE and BOUNDED: every non-answer is an
 /// empty set within [`MODEL_BUDGET`], with whatever usage was reported.
-pub async fn judge(client: &SmartDoneClient, now: DateTime<Utc>, rows: &[ModelRow]) -> ModelPass {
+pub async fn judge(client: &SmartClearClient, now: DateTime<Utc>, rows: &[ModelRow]) -> ModelPass {
     let failed = |usage| ModelPass {
         verdicts: HashMap::new(),
         usage,
@@ -991,16 +991,16 @@ pub async fn judge(client: &SmartDoneClient, now: DateTime<Utc>, rows: &[ModelRo
         },
         Ok(Ok(LlmOutcome::Refused(usage))) => failed(usage),
         Ok(Ok(LlmOutcome::Failed(kind, usage))) => {
-            eprintln!("squelch: smart done model pass failed ({kind})");
+            eprintln!("squelch: smart clear model pass failed ({kind})");
             failed(usage)
         }
         Ok(Err(e)) => {
-            eprintln!("squelch: smart done model pass errored ({e})");
+            eprintln!("squelch: smart clear model pass errored ({e})");
             failed(None)
         }
         Err(_) => {
             let secs = MODEL_BUDGET.as_secs();
-            eprintln!("squelch: smart done model pass exceeded its {secs}s budget");
+            eprintln!("squelch: smart clear model pass exceeded its {secs}s budget");
             failed(None)
         }
     }

@@ -37,10 +37,10 @@ struct ActionLayer: View {
             // Sitrep only, with no reader or composer over it: `u` leaves the
             // reader on purpose, and this is where the user lands.
             //
-            // THE SMART DONE RECEIPT SHARES THE CORNER, under the tray: one
+            // THE SMART CLEAR RECEIPT SHARES THE CORNER, under the tray: one
             // column pinned to the bottom edge, so a job starting while a
             // receipt is up pushes nothing sideways and covers nothing.
-            if showsUnsubscribeTray || showsSmartDoneReceipt {
+            if showsUnsubscribeTray || showsSmartClearReceipt {
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
                     HStack(spacing: 0) {
@@ -50,8 +50,8 @@ struct ActionLayer: View {
                                 UnsubscribeTray().fixedSize()
                                     .transition(.opacity)
                             }
-                            if showsSmartDoneReceipt, let receipt = store.smartDoneReceipt {
-                                SmartDoneReceiptCard(receipt: receipt)
+                            if showsSmartClearReceipt, let receipt = store.smartClearReceipt {
+                                SmartClearReceiptCard(receipt: receipt)
                                     .id(receipt.id)
                                     .transition(
                                         .move(edge: .trailing).combined(with: .opacity))
@@ -62,7 +62,7 @@ struct ActionLayer: View {
                 .padding(.trailing, Space.scaled(18))
                 .padding(.bottom, Space.scaled(18))
                 .transition(.opacity)
-                .animation(.smooth(duration: 0.3), value: store.smartDoneReceipt?.id)
+                .animation(.smooth(duration: 0.3), value: store.smartClearReceipt?.id)
                 .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)
             }
 
@@ -155,12 +155,12 @@ struct ActionLayer: View {
         store.showsSitrepCorner && !purgeUp && !UnsubscribeJobs.shared.items.isEmpty
     }
 
-    private var showsSmartDoneReceipt: Bool {
-        store.showsSitrepCorner && !purgeUp && store.smartDoneReceipt != nil
+    private var showsSmartClearReceipt: Bool {
+        store.showsSitrepCorner && !purgeUp && store.smartClearReceipt != nil
     }
 
     private var purgeUp: Bool {
-        store.purgeShown != nil || store.purgeFinished != nil || store.smartDoneListOpen
+        store.purgeShown != nil || store.purgeFinished != nil || store.smartClearListOpen
     }
 
     // MARK: - toasts

@@ -1500,10 +1500,10 @@ pub const RULE_SUGGEST_USAGE_CATEGORY: &str = "rule_suggest";
 /// The sitrep headline. Runs the notify model, so it is priced at notify rates.
 pub const FYE_HEADLINE_USAGE_CATEGORY: &str = "fye_headline";
 
-/// Smart done's model pass. Runs ITS OWN model
-/// ([`crate::config::SmartDoneConfig::model`]), so it is priced at neither the
+/// Smart clear's model pass. Runs ITS OWN model
+/// ([`crate::config::SmartClearConfig::model`]), so it is priced at neither the
 /// notify rates nor Stage-1's: the fourth arm of both cost estimators.
-pub const SMART_DONE_USAGE_CATEGORY: &str = "smart_done";
+pub const SMART_CLEAR_USAGE_CATEGORY: &str = "smart_clear";
 
 /// Does this ledger category run [`crate::config::NotifyConfig::model`]? The
 /// ONE list both cost estimators consult, so a small-model category cannot be
@@ -1519,8 +1519,8 @@ pub fn runs_notify_model(category: &str) -> bool {
 
 /// Estimated spend for a ledger rollup, costed exactly as `/client/usage` does.
 /// FIVE arms: [`crate::translate::USAGE_CATEGORY`] runs the translate model at
-/// `translate.price_*`, [`SMART_DONE_USAGE_CATEGORY`] runs its own model at
-/// `smart_done.price_*`, and then the three below.
+/// `translate.price_*`, [`SMART_CLEAR_USAGE_CATEGORY`] runs its own model at
+/// `smart_clear.price_*`, and then the three below.
 /// The three: `stage2` runs the capable model and its prices,
 /// [`NOTIFY_USAGE_CATEGORY`] runs the small notify model and ITS prices, and
 /// everything else — Stage-1, every extractor, revisits — shares the stage-1
@@ -1553,10 +1553,10 @@ pub fn estimate_cost_usd(usage: &[LlmCategoryUsage], config: &Config) -> f64 {
                     config.notify.price_in_per_mtok,
                     config.notify.price_out_per_mtok,
                 )
-            } else if u.category == SMART_DONE_USAGE_CATEGORY {
+            } else if u.category == SMART_CLEAR_USAGE_CATEGORY {
                 (
-                    config.smart_done.price_in_per_mtok,
-                    config.smart_done.price_out_per_mtok,
+                    config.smart_clear.price_in_per_mtok,
+                    config.smart_clear.price_out_per_mtok,
                 )
             } else {
                 (
@@ -2738,15 +2738,15 @@ mod tests {
         );
     }
 
-    /// THE FOURTH ARM. `smart_done` runs its own model and is priced off
-    /// `smart_done.price_*`: not the notify model's rates and not Stage-1's,
+    /// THE FOURTH ARM. `smart_clear` runs its own model and is priced off
+    /// `smart_clear.price_*`: not the notify model's rates and not Stage-1's,
     /// which is where it would land by falling through.
     #[test]
-    fn cost_prices_the_smart_done_category_off_its_own_model() {
+    fn cost_prices_the_smart_clear_category_off_its_own_model() {
         let mut config = Config::default();
         // A pair unlike every other arm's, so no coincidence can pass this.
-        config.smart_done.price_in_per_mtok = 0.03;
-        config.smart_done.price_out_per_mtok = 0.07;
+        config.smart_clear.price_in_per_mtok = 0.03;
+        config.smart_clear.price_out_per_mtok = 0.07;
         let one_mtok = |category: &str| {
             vec![LlmCategoryUsage {
                 category: category.to_string(),
@@ -2757,16 +2757,16 @@ mod tests {
                 cache_read_tokens: 0,
             }]
         };
-        let cost = estimate_cost_usd(&one_mtok(SMART_DONE_USAGE_CATEGORY), &config);
+        let cost = estimate_cost_usd(&one_mtok(SMART_CLEAR_USAGE_CATEGORY), &config);
         assert!((cost - 0.10).abs() < 1e-9, "{cost}");
-        assert!(!runs_notify_model(SMART_DONE_USAGE_CATEGORY));
+        assert!(!runs_notify_model(SMART_CLEAR_USAGE_CATEGORY));
         assert!(
             (cost - estimate_cost_usd(&one_mtok("stage1"), &config)).abs() > 1e-6
                 && (cost - estimate_cost_usd(&one_mtok(NOTIFY_USAGE_CATEGORY), &config)).abs()
                     > 1e-6
         );
         // The defaults are the configured model's list prices.
-        let defaults = Config::default().smart_done;
+        let defaults = Config::default().smart_clear;
         assert_eq!(defaults.model, "claude-sonnet-5");
         assert_eq!(defaults.effort.as_deref(), Some("low"));
         assert_eq!(

@@ -1,4 +1,4 @@
-// CANNED SENDERS FOR LOOKING AT THE PURGE AND SMART DONE WITHOUT A MAILBOX.
+// CANNED SENDERS FOR LOOKING AT THE PURGE AND SMART CLEAR WITHOUT A MAILBOX.
 //
 // `PASSBAND_PURGE_FIXTURE=<pill|few|parked|expired|deck|deck:N|confirm|
 // applying|finish|finish_running|finish_needs>` opens the app straight into that state over
@@ -8,12 +8,12 @@
 // other>` brings the sender page up with "Create rule" already pressed;
 // `PASSBAND_PURGE_BODY=<loading|failed>` and `PASSBAND_PURGE_SELECT=N` set
 // the rendered email's state and which one in the strip is selected.
-// `PASSBAND_SMART_DONE_FIXTURE=<working|receipt|list>` does the same for
-// smart done. Same posture as `PASSBAND_FORCE_TESTFLIGHT_NUDGE`: a launch
+// `PASSBAND_SMART_CLEAR_FIXTURE=<working|receipt|list>` does the same for
+// smart clear. Same posture as `PASSBAND_FORCE_TESTFLIGHT_NUDGE`: a launch
 // environment nobody sets by accident, and never a pref.
 //
 // WHILE EITHER IS SET, NOTHING HERE REACHES A DAEMON. `AppStore` checks
-// `active` at the top of every purge and smart done entry point and simulates
+// `active` at the top of every purge and smart clear entry point and simulates
 // the answer instead: an unsubscribe is a real request to a real company, and
 // a build launched to take a screenshot must not be able to send one.
 
@@ -33,7 +33,7 @@ enum PurgeFixture {
         case finishNeeds
     }
 
-    enum SmartDone: Equatable {
+    enum SmartClear: Equatable {
         case working
         case receipt
         case list
@@ -59,8 +59,8 @@ enum PurgeFixture {
         }
     }()
 
-    static let smartDone: SmartDone? = {
-        switch ProcessInfo.processInfo.environment["PASSBAND_SMART_DONE_FIXTURE"] {
+    static let smartClear: SmartClear? = {
+        switch ProcessInfo.processInfo.environment["PASSBAND_SMART_CLEAR_FIXTURE"] {
         case "working": return .working
         case "receipt": return .receipt
         case "list": return .list
@@ -186,7 +186,7 @@ enum PurgeFixture {
     }
 
     /// True for the whole life of a process launched with either variable.
-    static var active: Bool { purge != nil || smartDone != nil }
+    static var active: Bool { purge != nil || smartClear != nil }
 
     static let ledgerDays = 34
 
@@ -389,17 +389,17 @@ enum PurgeFixture {
         ]
     }
 
-    // MARK: smart done
+    // MARK: smart clear
 
-    static var smartDoneResult: SmartDoneResult {
+    static var smartClearResult: SmartClearResult {
         func row(_ id: Int, _ reason: String, _ sender: String, _ name: String, _ subject: String, _ hours: Double)
-            -> SmartDoneResult.Row
+            -> SmartClearResult.Row
         {
             .init(
                 message_id: id, reason: reason, sender: sender, sender_name: name,
                 subject: subject, received_at: ago(hours))
         }
-        let rows: [SmartDoneResult.Row] = [
+        let rows: [SmartClearResult.Row] = [
             row(1, "event_passed", "events@cityhall.example", "City Hall Events", "Tonight: the harbor concert series", 80),
             row(2, "event_passed", "events@cityhall.example", "City Hall Events", "Saturday farmers market, new hours", 130),
             row(3, "event_passed", "hello@webinars.example", "Launch Webinars", "Starting in one hour: scaling your pipeline", 52),
@@ -425,7 +425,7 @@ enum PurgeFixture {
             row(23, "stale_promo", "eat@supperclub.example", "Supper Club", "This week's menu is live", 280),
             row(24, "from_a_newer_daemon", "hello@ox.example", "Ox", "New in the shop this week", 310),
         ]
-        return SmartDoneResult(
+        return SmartClearResult(
             batch_id: "fixture", cleared: 43, senders: 17,
             by_reason: [
                 "event_passed": 3, "offer_ended": 5, "expired": 4, "ignored_sender": 20,

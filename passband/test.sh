@@ -727,7 +727,7 @@ run_suite purge \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Lib/Purge.swift \
-  Sources/Passband/Lib/SmartDone.swift \
+  Sources/Passband/Lib/SmartClear.swift \
   Sources/Passband/Lib/PurgeFixture.swift \
   Tests/PurgeTests.swift
 
@@ -747,12 +747,12 @@ fi
   || { echo "purge preview must render with inertLinks: true, once" >&2; exit 1; }
 echo "ok: the purge preview stamps, times and opens nothing"
 
-# The smart done receipt: the headline, one line per reason in good-news
+# The smart clear receipt: the headline, one line per reason in good-news
 # terms, the plurals, and that the lines account for everything cleared even
 # when a newer daemon names a reason this build has no words for.
-run_suite smart-done \
-  Sources/Passband/Lib/SmartDone.swift \
-  Tests/SmartDoneTests.swift
+run_suite smart-clear \
+  Sources/Passband/Lib/SmartClear.swift \
+  Tests/SmartClearTests.swift
 
 # An agent's draft asked onto the screen: the passband://draft link (untrusted,
 # from whatever opened the URL) and the event-stream frame that carries

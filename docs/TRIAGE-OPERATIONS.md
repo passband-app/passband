@@ -124,20 +124,19 @@ importance_weight = 2.0
 recency_half_life_hours = 24.0
 waiting_saturation_days = 7.0
 
-[smart_done]
+[smart_clear]
 model = "claude-sonnet-5"
 effort = "low"
 price_in_per_mtok = 2.0
 price_out_per_mtok = 10.0
 ```
 
-`[smart_done]` is the model behind smart done's one question (see "Smart done"
+`[smart_clear]` is the model behind smart clear's one question (see "Smart clear"
 below). It resolves its key, provider and URL from `[stage2]` like every other
 model here and is prefixed for a gateway at call time. The prices are the
 configured model's own and are what both cost estimators charge the
-`smart_done` ledger category; move the model and move them with it. Overrides:
-`SQUELCH_SMART_DONE_MODEL`, `SQUELCH_SMART_DONE_EFFORT` (`none` clears it),
-`SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK`, `SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK`.
+`smart_clear` ledger category; move the model and move them with it. File
+only: there is deliberately no env var, so a change takes hold at the daemon roll.
 
 Environment overrides: `SQUELCH_TRIAGE_MODEL`, `SQUELCH_TRIAGE_REVIEW_MODEL`,
 `SQUELCH_TRIAGE_MAX_TURNS`, `SQUELCH_TRIAGE_MAX_TOOL_CALLS`,
@@ -371,7 +370,7 @@ timestamp of a report is kept, and only the owner's own client can write them.
   sealed. Nothing in the agent pipeline writes that column any more, so a guard
   on the column alone protects nothing that arrives today. `sealed_mail_sql!`
   is that plus mail whose access assessment is still pending. Readers (these
-  counts, the unsubscribe candidates, smart done's scan and write) use the
+  counts, the unsubscribe candidates, smart clear's scan and write) use the
   strict one: unassessed mail does not count for its sender and is not swept,
   which corrects itself when triage commits. The attention write alone uses the
   looser one.
@@ -383,7 +382,7 @@ timestamp of a report is kept, and only the owner's own client can write them.
   days it is `null`, with no volume term in the score and no `high_volume`
   reason.
 - `cleared_unopened` counts mail the OWNER cleared: done, never opened, not
-  resolved by smart done (`resolved_by IS NULL`), and with no reminder pending
+  resolved by smart clear (`resolved_by IS NULL`), and with no reminder pending
   (a snooze is interest, not dismissal).
 - The dwell sample is mail opened at or after the dwell ledger started
   (`dwell_ledger_since`, stamped on the open that added the column) for which a
@@ -413,7 +412,7 @@ timestamp of a report is kept, and only the owner's own client can write them.
   `browser` for a row with no job status.
 - Opens, dwell and clicks are recorded by Passband clients only. Mail read
   elsewhere looks ignored here, so the scores lean high. This list only
-  suggests. Smart done (below) does act on the score: a sender at 75 or more
+  suggests. Smart clear (below) does act on the score: a sender at 75 or more
   has their unopened open Reading mail marked done. That is why 75 needs a
   second signal on top of "never opened", why the sweep is undoable, and why
   someone who reads a newsletter in another client should keep that sender.
@@ -427,7 +426,7 @@ The read writes nothing: it does not stamp `surfaced_at` or `opened_at`.
 `POST /client/v2/reading/senders/keep` with `{"sender": "<address>"}` answers
 `204` and records, in `reading_sender_keeps`, that the owner looked at this
 sender in the purge flow and chose to stay subscribed. For 60 days the sender
-scores 0 with the single reason `kept_recently` and smart done never takes
+scores 0 with the single reason `kept_recently` and smart clear never takes
 their mail. After 60 days the keep stops affecting anything; `kept_at` is still
 returned. A second keep moves the date. The write is audited as
 `reading.keep_sender` with the address as its target. The sender must be one
@@ -480,11 +479,11 @@ saves one itself.
 
 `triage.resolved_by` is `NULL` when a person resolved the row, or when a path
 older than the column did (the two cannot be told apart for old rows, and old
-rows are not backfilled). Smart done writes `smart_done:<batch id>`.
+rows are not backfilled). Smart clear writes `smart_clear:<batch id>`.
 
 Anything that reads `status = 'done'` as the owner deciding must also require
 `resolved_by IS NULL`. The column does not do that for a reader by itself. Two
-readers check it today: the fatigue score's `cleared_unopened` (smart done reads
+readers check it today: the fatigue score's `cleared_unopened` (smart clear reads
 that score to choose senders and would otherwise raise it with each sweep), and
 the rule suggester's sender digest, which reports a swept row as open so its
 "cleared without opening" count is the owner's. The triage agent does not: its
@@ -499,9 +498,9 @@ by a sweep, so undoing the sweep later does not reopen mail the owner has since
 dealt with by sender. A person who reopens or re-does a row has taken it over, and
 the batch's undo then leaves it alone.
 
-### Smart done
+### Smart clear
 
-`POST /client/v2/reading/smart_done` (no body) marks done, as one batch, the
+`POST /client/v2/reading/smart_clear` (no body) marks done, as one batch, the
 open Reading mail that has expired or that the owner plainly does not want:
 
 ```
@@ -545,7 +544,7 @@ Never cleared, whatever else is true:
 - mail whose decision carries a bill, receipt, delivery or financial update:
   `done` is one status for every inventory, so clearing it from Reading would
   take it off Billing or Shipping too. An event record does not protect;
-- a row an earlier smart done took and the owner undid. An undo records the
+- a row an earlier smart clear took and the owner undid. An undo records the
   ids it gave back on the batch, and for 90 days no press takes them again;
 - mail received in the last 24 hours.
 
@@ -598,7 +597,7 @@ thread. It stamps `resolved_at` and `resolved_by`. Like any done it changes the
 agent's `user_state` fingerprint, so a triage pass in flight on one of those
 threads commits `Stale` and retries with its usual backoff.
 
-The model pass (`[smart_done]`, default `claude-sonnet-5` at low effort):
+The model pass (`[smart_clear]`, default `claude-sonnet-5` at low effort):
 
 - It is sent, per row, a row number, the day the mail arrived, and the summary
   triage already wrote, inside the untrusted fence, plus the current time. The
@@ -632,8 +631,8 @@ The model pass (`[smart_done]`, default `claude-sonnet-5` at low effort):
 - `model` reports it: `ok`, or `skipped_nothing_to_ask`, `skipped_unconfigured`
   (no LLM key), `skipped_cap`, `skipped_failed` (refusal, timeout, error). Every
   `skipped_*` press still clears on stored facts.
-- Usage is billed to the `smart_done` ledger category, which both cost
-  estimators price from `[smart_done]`.
+- Usage is billed to the `smart_clear` ledger category, which both cost
+  estimators price from `[smart_clear]`.
 
 The store mutex is not held during the model call. Rows are read under the
 lock, the model is asked with it released, and the write re-reads and re-judges
@@ -647,19 +646,19 @@ for that press, since an open is what lowers a score.
 One press at a time per account: a press that arrives while another is running
 answers `429` without touching the store.
 
-One audit row per batch: `reading.smart_done`, target the batch id, detail the
+One audit row per batch: `reading.smart_clear`, target the batch id, detail the
 count.
 
-`POST /client/v2/reading/smart_done/{batch_id}/undo` answers
+`POST /client/v2/reading/smart_clear/{batch_id}/undo` answers
 `{"reopened": n}`. It walks the batch's recorded list by primary key and
 reopens the rows that are still done and still stamped with that batch, each to
 the status it had (`new` or `open`), clearing their `resolved_at` and
 `resolved_by`. Rows a person has touched since are left as
-they are. The ids it reopened are recorded on the batch, and smart done does not
+they are. The ids it reopened are recorded on the batch, and smart clear does not
 take those rows again. A second undo answers `0`. An unknown batch, or another
 account's, is `404`. A batch whose record cannot be read answers `500` and is
 left as it was, not marked undone, so it can still be undone once repaired.
-Audited as `reading.smart_done_undo`.
+Audited as `reading.smart_clear_undo`.
 
 Known limits:
 
@@ -677,7 +676,7 @@ Known limits:
 
 The triage decision carries an optional `ends` for Reading mail (prompt version
 `agent-triage-v12`): when the offer, sale or event the message is about ends,
-only when the message states it. It is validated with the same parser smart done
+only when the message states it. It is validated with the same parser smart clear
 reads it with, so a local time with no offset is accepted. Decisions stored before it read as `null`. The
 prompt version is a label in each run's metadata; changing it re-triages
 nothing.

@@ -1,4 +1,4 @@
-// THE SMART DONE RECEIPT. One press cleared a batch of Reading mail nobody
+// THE SMART CLEAR RECEIPT. One press cleared a batch of Reading mail nobody
 // looked at one by one, so what it took is put on the table: the count, a
 // line per reason in terms a person can agree with, and an Undo that says how
 // long it lasts by draining.
@@ -14,26 +14,26 @@
 #if os(macOS)
     import SwiftUI
 
-    struct SmartDoneReceiptCard: View {
+    struct SmartClearReceiptCard: View {
         @Environment(AppStore.self) private var store
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
-        let receipt: AppStore.SmartDoneReceipt
+        let receipt: AppStore.SmartClearReceipt
 
         @State private var arrived = false
         @State private var counted = false
 
-        private var lines: [SmartDoneCopy.Line] { SmartDoneCopy.lines(byReason: receipt.byReason) }
+        private var lines: [SmartClearCopy.Line] { SmartClearCopy.lines(byReason: receipt.byReason) }
 
         var body: some View {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 VStack(alignment: .leading, spacing: Space.s2) {
-                    Text(SmartDoneCopy.headline(cleared: counted ? receipt.cleared : 0))
+                    Text(SmartClearCopy.headline(cleared: counted ? receipt.cleared : 0))
                         .font(Typo.serif(23, weight: .medium))
                         .foregroundStyle(Palette.ink)
                         .monospacedDigit()
                         .contentTransition(.numericText(value: Double(counted ? receipt.cleared : 0)))
-                    if let from = SmartDoneCopy.senders(receipt.senders) {
+                    if let from = SmartClearCopy.senders(receipt.senders) {
                         Text(from)
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaint)
@@ -46,17 +46,17 @@
                         .padding(.top, Space.s12)
                 }
                 if receipt.modelMissed {
-                    Text(SmartDoneCopy.modelMissedNote)
+                    Text(SmartClearCopy.modelMissedNote)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaint)
                         .padding(.top, Space.s8)
                 }
                 if receipt.items?.isEmpty == false {
                     Button {
-                        store.openSmartDoneList()
+                        store.openSmartClearList()
                     } label: {
                         HStack(spacing: Space.s4) {
-                            Text(SmartDoneCopy.viewList)
+                            Text(SmartClearCopy.viewList)
                                 .font(Typo.ui(11.5, weight: .semibold))
                             Image(systemName: "chevron.right")
                                 .font(Typo.ui(8.5, weight: .bold))
@@ -102,8 +102,8 @@
         }
 
         private var spoken: String {
-            var parts = [SmartDoneCopy.headline(cleared: receipt.cleared)]
-            if let from = SmartDoneCopy.senders(receipt.senders) { parts.append(from) }
+            var parts = [SmartClearCopy.headline(cleared: receipt.cleared)]
+            if let from = SmartClearCopy.senders(receipt.senders) { parts.append(from) }
             parts += lines.map(\.spoken)
             if receipt.batchId != nil { parts.append("Press U to undo") }
             return parts.joined(separator: ". ")
@@ -113,12 +113,12 @@
             HStack(spacing: Space.scaled(5)) {
                 Image(systemName: "checkmark.rectangle.stack")
                     .font(Typo.ui(9, weight: .semibold))
-                Text("SMART DONE")
+                Text("SMART CLEAR")
                     .font(Typo.ui(8.5, weight: .bold).width(.expanded))
                     .tracking(0.6)
                 Spacer(minLength: Space.s8)
                 Button {
-                    store.dismissSmartDoneReceipt()
+                    store.dismissSmartClearReceipt()
                 } label: {
                     Image(systemName: "xmark")
                         .font(Typo.ui(9, weight: .semibold))
@@ -158,7 +158,7 @@
         private var undo: some View {
             HStack(spacing: Space.s8) {
                 Button {
-                    Task { await store.undoSmartDone() }
+                    Task { await store.undoSmartClear() }
                 } label: {
                     HStack(spacing: Space.s6) {
                         Kbd("u")
@@ -166,7 +166,7 @@
                             .font(Typo.ui(12, weight: .semibold))
                             .foregroundStyle(Palette.ink)
                         if !receipt.undoing {
-                            SmartDoneRing(clock: receipt.clock)
+                            SmartClearRing(clock: receipt.clock)
                         }
                     }
                     .padding(.horizontal, Space.s10)
@@ -191,8 +191,8 @@
 
     /// The undo window as a ring, drawn FROM THE CLOCK: it drains with it
     /// and holds still exactly while the clock is stopped.
-    struct SmartDoneRing: View {
-        let clock: SmartDoneClock
+    struct SmartClearRing: View {
+        let clock: SmartClearClock
         private static let size: CGFloat = 11
 
         var body: some View {
@@ -213,7 +213,7 @@
 
     // MARK: - the full list
 
-    /// EVERYTHING ONE SMART DONE CLEARED, to audit: subject, sender and why,
+    /// EVERYTHING ONE SMART CLEAR CLEARED, to audit: subject, sender and why,
     /// grouped by why. A full-window page in the purge's family. Not a
     /// reader: nothing here opens.
     ///
@@ -223,21 +223,21 @@
     /// receipt's does. Confirm, and Esc, go back to the board with the
     /// receipt still up and its countdown carrying on from where it stopped:
     /// leaving must never undo, and must never cost the window either.
-    struct SmartDoneListPage: View {
+    struct SmartClearListPage: View {
         @Environment(AppStore.self) private var store
-        let receipt: AppStore.SmartDoneReceipt
+        let receipt: AppStore.SmartClearReceipt
 
-        private var groups: [SmartDoneList.Group] { SmartDoneList.groups(receipt.items ?? []) }
+        private var groups: [SmartClearList.Group] { SmartClearList.groups(receipt.items ?? []) }
 
         var body: some View {
-            FullPage(title: "Smart done", subtitle: "what it cleared") {
-                Text(SmartDoneCopy.headline(cleared: receipt.cleared))
+            FullPage(title: "Smart clear", subtitle: "what it cleared") {
+                Text(SmartClearCopy.headline(cleared: receipt.cleared))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
             } content: {
                 ScrollView {
                     VStack(alignment: .leading, spacing: Space.s24) {
-                        Text(SmartDoneCopy.listTitle)
+                        Text(SmartClearCopy.listTitle)
                             .font(Typo.serif(30, weight: .medium))
                             .foregroundStyle(Palette.ink)
                         ForEach(groups) { group in
@@ -252,8 +252,8 @@
             } bottom: {
                 HStack(spacing: Space.s12) {
                     if receipt.batchId != nil {
-                        SmartDoneRing(clock: receipt.clock)
-                        Text(SmartDoneCopy.listPaused)
+                        SmartClearRing(clock: receipt.clock)
+                        Text(SmartClearCopy.listPaused)
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaint)
                     }
@@ -265,28 +265,28 @@
                         .disabled(receipt.undoing)
                     }
                     PageButton(key: "return", label: "Confirm", role: .primary) {
-                        store.closeSmartDoneList()
+                        store.closeSmartClearList()
                     }
                 }
             }
             .keyContext(.modal)
             .keyBindings(.modal, [
                 KeyBinding("u", "undo all of it") { undo() },
-                KeyBinding("Enter", "confirm") { store.closeSmartDoneList() },
-                KeyBinding("Escape", "confirm") { store.closeSmartDoneList() },
+                KeyBinding("Enter", "confirm") { store.closeSmartClearList() },
+                KeyBinding("Escape", "confirm") { store.closeSmartClearList() },
                 KeyBinding("/", "nothing") {},
             ])
             // Left by a route nobody named: the clock still starts again.
-            .onDisappear { store.closeSmartDoneList() }
+            .onDisappear { store.closeSmartClearList() }
             .transition(.opacity)
         }
 
         private func undo() {
             guard receipt.batchId != nil, !receipt.undoing else { return }
-            Task { await store.undoSmartDone() }
+            Task { await store.undoSmartClear() }
         }
 
-        private func section(_ group: SmartDoneList.Group) -> some View {
+        private func section(_ group: SmartClearList.Group) -> some View {
             VStack(alignment: .leading, spacing: Space.s8) {
                 Text(group.heading)
                     .font(Typo.ui(13, weight: .semibold))
@@ -306,12 +306,12 @@
         }
 
         /// Subject and sender are email-derived: Text only, never markup.
-        private func row(_ item: SmartDoneItem) -> some View {
+        private func row(_ item: SmartClearItem) -> some View {
             let subject = item.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return HStack(alignment: .center, spacing: Space.s10) {
                 Avatar(sender: "\(item.displayName) <\(item.sender)>", size: Space.scaled(24))
                 VStack(alignment: .leading, spacing: Space.s2) {
-                    Text(verbatim: subject.isEmpty ? SmartDoneCopy.noSubject : subject)
+                    Text(verbatim: subject.isEmpty ? SmartClearCopy.noSubject : subject)
                         .font(Typo.row)
                         .foregroundStyle(Palette.ink)
                         .lineLimit(1)
@@ -334,7 +334,7 @@
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .trailing, spacing: Space.s2) {
-                    Text(SmartDoneCopy.why(item.reason))
+                    Text(SmartClearCopy.why(item.reason))
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkDim)
                     if item.receivedAt != nil {

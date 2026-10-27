@@ -35,7 +35,7 @@
 
     /// A page in the CONTENT PANE: the app's page header, the content, a bar
     /// across the bottom. The same chrome as every routed page, because it
-    /// is mounted where they are. Shared with the smart done list, so the
+    /// is mounted where they are. Shared with the smart clear list, so the
     /// two read as one family.
     struct FullPage<Top: View, Content: View, Bottom: View>: View {
         let title: String

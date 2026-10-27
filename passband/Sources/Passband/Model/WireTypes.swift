@@ -1098,18 +1098,18 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     var id: String { sender }
 }
 
-// MARK: - reading smart done
+// MARK: - reading smart clear
 
-/// `POST /client/v2/reading/smart_done`: the daemon marked expired and plainly
+/// `POST /client/v2/reading/smart_clear`: the daemon marked expired and plainly
 /// unwanted Reading mail done, and says what it took and why.
-struct SmartDoneResult: Decodable, Sendable, Hashable {
+struct SmartClearResult: Decodable, Sendable, Hashable {
     /// The handle the undo takes. nil when nothing was cleared, or when this
     /// daemon keeps no batch to undo.
     var batch_id: String?
     var cleared: Int
     var senders: Int
     /// Reason code to count. Codes this build has no line for are still
-    /// counted in `cleared`; `SmartDoneCopy` folds them into one plain line.
+    /// counted in `cleared`; `SmartClearCopy` folds them into one plain line.
     var by_reason: [String: Int]
     var message_ids: [Int]
     /// Whether the model pass ran: `ok`, or one of the `skipped_` codes.
@@ -1168,8 +1168,8 @@ struct SmartDoneResult: Decodable, Sendable, Hashable {
     }
 }
 
-/// `POST /client/v2/reading/smart_done/{batch_id}/undo`.
-struct SmartDoneUndone: Decodable, Sendable, Hashable {
+/// `POST /client/v2/reading/smart_clear/{batch_id}/undo`.
+struct SmartClearUndone: Decodable, Sendable, Hashable {
     var reopened: Int
 }
 

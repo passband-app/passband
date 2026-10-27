@@ -97,7 +97,7 @@ pub enum StatedTime {
 
 impl SupportedTime {
     /// Read `value`. THE ONE PARSER for a stated time: `ends` is validated
-    /// with it and smart done reads every stored date with it, so the two
+    /// with it and smart clear reads every stored date with it, so the two
     /// cannot disagree about what counts as a time. `None` for anything else
     /// ("next Friday evening"), which a caller must treat as a time it cannot
     /// read, never as no time at all.
@@ -326,7 +326,7 @@ pub struct MessageDecision {
     #[serde(default)]
     pub reading_kind: Option<ReadingKind>,
     /// When the offer, sale or event a Reading message is about ENDS, and only
-    /// when the message itself says so. What lets smart done clear an expired
+    /// when the message itself says so. What lets smart clear clear an expired
     /// promotion from a stored fact instead of a second model call. Defaults
     /// for the reason `reading_kind` does: stored decisions predate it.
     #[serde(default)]

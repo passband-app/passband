@@ -375,14 +375,14 @@ CREATE TABLE IF NOT EXISTS triage (
     -- "Historical automatic `done` rows without reliable provenance cannot be
     -- distinguished from a human dismissal").
     --
-    -- The one writer today is smart done, which stamps
-    -- `smart_done:<smart_done_batches.id>`. That stamp is what makes the batch
+    -- The one writer today is smart clear, which stamps
+    -- `smart_clear:<smart_clear_batches.id>`. That stamp is what makes the batch
     -- undoable.
     --
     -- IT DOES NOT, BY ITSELF, KEEP A SWEEP OUT OF ANYTHING. A reader that
     -- takes `status = 'done'` to mean the owner decided has to check this
     -- column too, and only two do: the fatigue score's `cleared_unopened`
-    -- (`reading_senders::SENDER_COUNTS_SQL`), which smart done itself reads
+    -- (`reading_senders::SENDER_COUNTS_SQL`), which smart clear itself reads
     -- and would otherwise feed, and the rule suggester's digest
     -- (`rules::SENDER_RULE_DIGEST_SQL`). Everything else still sees a swept
     -- row as plain done, the triage agent's context included (its
@@ -724,15 +724,15 @@ CREATE TABLE IF NOT EXISTS reading_sender_keeps (
     PRIMARY KEY (account_id, sender_addr)
 );
 
--- SMART DONE BATCHES. One row per press of "clean this out" that cleared
--- anything. `triage.resolved_by = 'smart_done:<id>'` on each row it took is
+-- SMART CLEAR BATCHES. One row per press of "clean this out" that cleared
+-- anything. `triage.resolved_by = 'smart_clear:<id>'` on each row it took is
 -- the membership; `detail` is JSON carrying each cleared message with the
 -- reason it went and the status it had, so an undo restores exactly that.
 -- `undone_at` is stamped by the first undo and makes every later one a no-op.
 -- That undo also writes `reopened` into `detail`: the ids it gave back. Smart
 -- done reads those (for batches undone in the last 90 days) and never takes
 -- such a row again, because an undo is the owner saying "not those".
-CREATE TABLE IF NOT EXISTS smart_done_batches (
+CREATE TABLE IF NOT EXISTS smart_clear_batches (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id  INTEGER NOT NULL,
     created_at  TEXT NOT NULL,
@@ -741,8 +741,8 @@ CREATE TABLE IF NOT EXISTS smart_done_batches (
     detail      TEXT NOT NULL
 );
 -- For the one read that is not by id: an account's recently undone batches.
-CREATE INDEX IF NOT EXISTS idx_smart_done_batches_undone
-    ON smart_done_batches(account_id, undone_at);
+CREATE INDEX IF NOT EXISTS idx_smart_clear_batches_undone
+    ON smart_clear_batches(account_id, undone_at);
 
 -- AUTH-MAIL SHREDDER (retention). One row per message the retention pass moved
 -- to Gmail Trash, so the "N shredded" figure is a real ledger and a message can

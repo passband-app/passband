@@ -679,7 +679,7 @@ struct ReadingZone: View {
         }
     }
 
-    /// The zone's two doors, smart done and purge. Mac only for now, and
+    /// The zone's two doors, smart clear and purge. Mac only for now, and
     /// gone with the mail: on an empty zone there is nothing for either to
     /// do. Not in the practice inbox, whose senders are fixtures.
     private var actions: AnyView? {
@@ -727,21 +727,21 @@ struct ReadingZone: View {
 }
 
 #if os(macOS)
-    /// SMART DONE AND PURGE, in Reading's corner. A leaf of its own so the
+    /// SMART CLEAR AND PURGE, in Reading's corner. A leaf of its own so the
     /// zone above stays free of closures and of the store's working flags:
-    /// a smart done starting must not re-measure every card in the grid.
+    /// a smart clear starting must not re-measure every card in the grid.
     private struct ReadingActions: View {
         @Environment(AppStore.self) private var store
 
         var body: some View {
             HStack(spacing: Space.s6) {
                 ZonePill(
-                    symbol: "checkmark.rectangle.stack", label: "smart done",
+                    symbol: "checkmark.rectangle.stack", label: "smart clear",
                     help: "Clear what has expired and what you never open. You can undo it.",
-                    accessibilityName: "Smart done",
-                    working: store.smartDoneWorking, workingLabel: "tidying up"
+                    accessibilityName: "Smart clear",
+                    working: store.smartClearWorking, workingLabel: "tidying up"
                 ) {
-                    Task { await store.runSmartDone() }
+                    Task { await store.runSmartClear() }
                 }
                 // A PARKED PURGE turns the pill into the way back: choices
                 // made (a count that is good news), and `p` resumes.
@@ -874,7 +874,7 @@ private struct ReadingCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // Only seen when a removal is ANIMATED, which is the smart done
+        // Only seen when a removal is ANIMATED, which is the smart clear
         // sweep: the tile slides a little way off and fades instead of
         // blinking out. An ordinary `e` is not animated and is unchanged.
         .transition(

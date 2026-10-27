@@ -1,6 +1,6 @@
-//! Smart done's store half, the keep record, and `triage.resolved_by`.
+//! Smart clear's store half, the keep record, and `triage.resolved_by`.
 
-use super::super::smart_done::SmartDoneOutcome;
+use super::super::smart_clear::SmartClearOutcome;
 use super::super::*;
 use super::reading_senders::{
     NEWS, into_reading, into_reading_with, mail, old_ledgers, sender, senders,
@@ -11,7 +11,7 @@ use crate::triage::decision::{
     EmailKind, MessageDecision, ReadingKind, RecordProposal, SupportedTime,
 };
 use crate::triage::sender_fatigue::Reason;
-use crate::triage::smart_done::{ClearReason, SMART_DONE_MODEL_ROWS, Verdict};
+use crate::triage::smart_clear::{ClearReason, SMART_CLEAR_MODEL_ROWS, Verdict};
 use chrono::Duration;
 use std::collections::HashMap;
 
@@ -33,7 +33,7 @@ pub(super) fn apply(
     store: &SqliteStore,
     acct: AccountId,
     verdicts: &[(i64, ClearReason)],
-) -> SmartDoneOutcome {
+) -> SmartClearOutcome {
     press(store, acct, verdicts, 200)
 }
 
@@ -42,10 +42,10 @@ pub(super) fn press(
     acct: AccountId,
     verdicts: &[(i64, ClearReason)],
     feed_limit: usize,
-) -> SmartDoneOutcome {
+) -> SmartClearOutcome {
     let inventory = AgentListQuery::default();
     let scan = store
-        .smart_done_scan(acct, Utc::now(), &inventory, feed_limit)
+        .smart_clear_scan(acct, Utc::now(), &inventory, feed_limit)
         .unwrap();
     let verdicts: HashMap<i64, Verdict> = verdicts
         .iter()
@@ -59,7 +59,7 @@ pub(super) fn press(
         })
         .collect();
     store
-        .smart_done_apply(acct, Utc::now(), &inventory, feed_limit, &scan, &verdicts)
+        .smart_clear_apply(acct, Utc::now(), &inventory, feed_limit, &scan, &verdicts)
         .unwrap()
 }
 
@@ -138,7 +138,7 @@ fn the_receipt_rows_are_the_rows_written_and_their_text_is_not_stored() {
     let detail: String = store
         .lock()
         .unwrap()
-        .query_row("SELECT detail FROM smart_done_batches", [], |r| r.get(0))
+        .query_row("SELECT detail FROM smart_clear_batches", [], |r| r.get(0))
         .unwrap();
     for text in ["RECEIPT-SUBJECT", "RECEIPT-NAME", "shop.example"] {
         assert!(!detail.contains(text), "{text} in {detail}");
@@ -201,7 +201,7 @@ fn each_stored_reason_clears_its_own_row_with_provenance() {
     for id in [event, offer, stale] {
         assert_eq!(
             row(&store, id),
-            ("done".into(), true, Some(format!("smart_done:{batch}")))
+            ("done".into(), true, Some(format!("smart_clear:{batch}")))
         );
     }
     for id in [running, essay, young] {
@@ -212,7 +212,7 @@ fn each_stored_reason_clears_its_own_row_with_provenance() {
         .lock()
         .unwrap()
         .query_row(
-            "SELECT cleared, detail FROM smart_done_batches WHERE id = ?1 AND account_id = ?2
+            "SELECT cleared, detail FROM smart_clear_batches WHERE id = ?1 AND account_id = ?2
                AND undone_at IS NULL",
             params![batch, acct],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -234,12 +234,12 @@ fn each_stored_reason_clears_its_own_row_with_provenance() {
     let batches: i64 = store
         .lock()
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM smart_done_batches", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM smart_clear_batches", [], |r| r.get(0))
         .unwrap();
     assert_eq!(batches, 1);
 }
 
-/// A human done resolves the whole thread. Smart done takes the one message
+/// A human done resolves the whole thread. Smart clear takes the one message
 /// it judged, so the sibling it never looked at stays where it was.
 #[test]
 fn only_the_message_is_resolved_never_its_thread() {
@@ -431,7 +431,7 @@ fn the_scan_offers_only_undecided_rows_that_have_a_summary() {
     into_reading_with(&store, acct, blank, |d| d.summary = String::new());
 
     let asks = store
-        .smart_done_scan(acct, now, &AgentListQuery::default(), 200)
+        .smart_clear_scan(acct, now, &AgentListQuery::default(), 200)
         .unwrap()
         .asks;
     assert_eq!(asks.len(), 1, "{asks:?}");
@@ -446,7 +446,7 @@ fn the_scan_is_capped_newest_first() {
     let (store, acct) = store();
     old_ledgers(&store, acct);
     let mut ids = Vec::new();
-    for i in 0..(SMART_DONE_MODEL_ROWS as i64 + 5) {
+    for i in 0..(SMART_CLEAR_MODEL_ROWS as i64 + 5) {
         let id = triaged(acct, &format!("m{i}"), &format!("m{i}"))
             .from(&format!("s{i}@many.example"))
             .received_at(Utc::now() - Duration::days(2) - Duration::minutes(i))
@@ -455,12 +455,12 @@ fn the_scan_is_capped_newest_first() {
         ids.push(id);
     }
     let asks = store
-        .smart_done_scan(acct, Utc::now(), &AgentListQuery::default(), 200)
+        .smart_clear_scan(acct, Utc::now(), &AgentListQuery::default(), 200)
         .unwrap()
         .asks;
     assert_eq!(
         asks.iter().map(|a| a.message_id).collect::<Vec<_>>(),
-        ids[..SMART_DONE_MODEL_ROWS]
+        ids[..SMART_CLEAR_MODEL_ROWS]
     );
 }
 
@@ -528,7 +528,7 @@ fn undo_restores_exactly_the_rows_nobody_has_touched_since() {
         .unwrap();
 
     let batch = apply(&store, acct, &[]).batch_id.unwrap();
-    let tag = Some(format!("smart_done:{batch}"));
+    let tag = Some(format!("smart_clear:{batch}"));
     for id in [
         untouched_new,
         untouched_open,
@@ -557,11 +557,13 @@ fn undo_restores_exactly_the_rows_nobody_has_touched_since() {
     // Somebody else's account cannot undo it, and an unknown batch is nothing.
     let other = store.ensure_account("other@example.com").unwrap();
     assert_eq!(
-        store.smart_done_undo(other, batch, Utc::now()).unwrap(),
+        store.smart_clear_undo(other, batch, Utc::now()).unwrap(),
         None
     );
     assert_eq!(
-        store.smart_done_undo(acct, batch + 99, Utc::now()).unwrap(),
+        store
+            .smart_clear_undo(acct, batch + 99, Utc::now())
+            .unwrap(),
         None
     );
     assert_eq!(
@@ -571,7 +573,7 @@ fn undo_restores_exactly_the_rows_nobody_has_touched_since() {
     );
 
     assert_eq!(
-        store.smart_done_undo(acct, batch, Utc::now()).unwrap(),
+        store.smart_clear_undo(acct, batch, Utc::now()).unwrap(),
         Some(2)
     );
     // Each back to the status it had, with no trace of the sweep.
@@ -590,7 +592,7 @@ fn undo_restores_exactly_the_rows_nobody_has_touched_since() {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT undone_at FROM smart_done_batches WHERE id = ?1",
+                "SELECT undone_at FROM smart_clear_batches WHERE id = ?1",
                 [batch],
                 |r| r.get(0),
             )
@@ -602,7 +604,7 @@ fn undo_restores_exactly_the_rows_nobody_has_touched_since() {
         .unwrap();
     assert_eq!(
         store
-            .smart_done_undo(acct, batch, Utc::now() + Duration::hours(1))
+            .smart_clear_undo(acct, batch, Utc::now() + Duration::hours(1))
             .unwrap(),
         Some(0)
     );
@@ -631,7 +633,7 @@ fn a_fired_reminder_clears_the_provenance_of_the_row_it_reopens() {
     assert_eq!(store.fire_due_reminders(acct, Utc::now()).unwrap(), [id]);
     assert_eq!(row(&store, id), ("open".into(), false, None));
     assert_eq!(
-        store.smart_done_undo(acct, batch, Utc::now()).unwrap(),
+        store.smart_clear_undo(acct, batch, Utc::now()).unwrap(),
         Some(0)
     );
 }
@@ -736,7 +738,7 @@ fn not_spam_clears_the_provenance_of_the_row_it_resets() {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE triage SET status = 'done', resolved_at = ?1, resolved_by = 'smart_done:7'
+            "UPDATE triage SET status = 'done', resolved_at = ?1, resolved_by = 'smart_clear:7'
              WHERE message_id = ?2",
             params![Utc::now().to_rfc3339(), id],
         )

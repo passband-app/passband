@@ -1,6 +1,6 @@
 //! Contract tests for the Reading keep record (`POST
-//! /client/v2/reading/senders/keep`), smart done (`POST
-//! /client/v2/reading/smart_done`) and its undo.
+//! /client/v2/reading/senders/keep`), smart clear (`POST
+//! /client/v2/reading/smart_clear`) and its undo.
 mod common;
 use axum::http::StatusCode;
 use chrono::{Duration, Utc};
@@ -203,12 +203,12 @@ async fn model_mock_after(
     (format!("http://{addr}"), seen)
 }
 
-/// A harness with smart done's model pointed at `url`.
+/// A harness with smart clear's model pointed at `url`.
 fn with_model(url: String) -> Harness {
     use squelch_core::config::Stage2Provider;
-    use squelch_core::triage::smart_done::SmartDoneClient;
+    use squelch_core::triage::smart_clear::SmartClearClient;
     let (state, store, acct) = state_with(|_, _| {});
-    let app = squelch_api::router(state.with_smart_done(Some(SmartDoneClient::new(
+    let app = squelch_api::router(state.with_smart_clear(Some(SmartClearClient::new(
         reqwest::Client::new(),
         url,
         "sk-test",
@@ -223,7 +223,7 @@ async fn press(h: &Harness) -> Value {
     let response = h
         .app
         .clone()
-        .oneshot(authed("POST", "/client/v2/reading/smart_done"))
+        .oneshot(authed("POST", "/client/v2/reading/smart_clear"))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -236,7 +236,7 @@ async fn undo(h: &Harness, batch: &str) -> (StatusCode, Value) {
         .clone()
         .oneshot(authed(
             "POST",
-            &format!("/client/v2/reading/smart_done/{batch}/undo"),
+            &format!("/client/v2/reading/smart_clear/{batch}/undo"),
         ))
         .await
         .unwrap();
@@ -273,7 +273,7 @@ fn audits(h: &Harness, action: &str) -> Vec<(Option<String>, Option<String>)> {
 }
 
 #[tokio::test]
-async fn smart_done_clears_a_batch_reports_it_and_undo_gives_it_back() {
+async fn smart_clear_clears_a_batch_reports_it_and_undo_gives_it_back() {
     let h = harness(|_, _| {});
     let stale_a = reading(&h.store, h.acct, "a", 20, "Autumn sale", |_| {});
     let stale_b = reading(&h.store, h.acct, "b", 21, "Winter sale", |_| {});
@@ -334,7 +334,7 @@ async fn smart_done_clears_a_batch_reports_it_and_undo_gives_it_back() {
     assert_ne!(updates.status, "done");
     // ONE audit row for the batch, carrying the count.
     assert_eq!(
-        audits(&h, "reading.smart_done"),
+        audits(&h, "reading.smart_clear"),
         [(Some(batch.clone()), Some("3".to_string()))]
     );
 
@@ -343,7 +343,7 @@ async fn smart_done_clears_a_batch_reports_it_and_undo_gives_it_back() {
     assert_eq!(again["batch_id"], Value::Null);
     assert_eq!(again["cleared"], 0);
     assert_eq!(again["message_ids"], json!([]));
-    assert_eq!(audits(&h, "reading.smart_done").len(), 1);
+    assert_eq!(audits(&h, "reading.smart_clear").len(), 1);
 
     // A person re-does one of them, and then the batch is undone.
     h.store
@@ -362,7 +362,7 @@ async fn smart_done_clears_a_batch_reports_it_and_undo_gives_it_back() {
         (StatusCode::OK, json!({"reopened": 0}))
     );
     assert_eq!(
-        audits(&h, "reading.smart_done_undo"),
+        audits(&h, "reading.smart_clear_undo"),
         [
             (Some(batch.clone()), Some("0".to_string())),
             (Some(batch.clone()), Some("2".to_string()))
@@ -450,7 +450,7 @@ async fn the_receipt_lists_each_cleared_message_with_its_sender_subject_and_reas
     let response = h
         .app
         .clone()
-        .oneshot(authed("POST", "/client/v2/reading/smart_done"))
+        .oneshot(authed("POST", "/client/v2/reading/smart_clear"))
         .await
         .unwrap();
     let raw = String::from_utf8(
@@ -514,11 +514,11 @@ async fn another_accounts_batch_cannot_be_undone() {
     let inventory = squelch_core::store::agent_triage::AgentListQuery::default();
     let scan = h
         .store
-        .smart_done_scan(other, Utc::now(), &inventory, 200)
+        .smart_clear_scan(other, Utc::now(), &inventory, 200)
         .unwrap();
     let batch = h
         .store
-        .smart_done_apply(
+        .smart_clear_apply(
             other,
             Utc::now(),
             &inventory,
@@ -532,7 +532,7 @@ async fn another_accounts_batch_cannot_be_undone() {
     assert_eq!(undo(&h, &batch.to_string()).await.0, StatusCode::NOT_FOUND);
     // And it is still theirs to undo.
     assert_eq!(
-        h.store.smart_done_undo(other, batch, Utc::now()).unwrap(),
+        h.store.smart_clear_undo(other, batch, Utc::now()).unwrap(),
         Some(1)
     );
     let _ = theirs;
@@ -607,7 +607,7 @@ async fn the_model_sees_summaries_and_dates_only_and_its_stray_answers_are_ignor
     // Billed to its own category, once.
     let usage = h.store.list_usage_by_category(h.acct, 1).unwrap();
     let (category, days) = &usage[0];
-    assert_eq!((usage.len(), category.as_str()), (1, "smart_done"));
+    assert_eq!((usage.len(), category.as_str()), (1, "smart_clear"));
     assert_eq!((days[0].calls, days[0].input_tokens), (1, 900));
 }
 
@@ -638,7 +638,7 @@ async fn the_daily_cap_skips_the_model_and_still_clears() {
     let today = Utc::now().format("%Y-%m-%d").to_string();
     for _ in 0..20 {
         h.store
-            .extract_bump_usage(h.acct, &today, "smart_done", UsageTokens::default())
+            .extract_bump_usage(h.acct, &today, "smart_clear", UsageTokens::default())
             .unwrap();
     }
     let body = press(&h).await;
@@ -753,7 +753,7 @@ async fn keeping_a_sender_zeroes_its_score_and_is_audited() {
         audits(&h, "reading.keep_sender"),
         [(Some(ADDRESS.to_string()), Some("kept".to_string()))]
     );
-    // And smart done leaves a kept sender's mail where it is, though every
+    // And smart clear leaves a kept sender's mail where it is, though every
     // one of the eight is a stale promotion it would otherwise take.
     assert_eq!(press(&h).await["cleared"], 0);
 
@@ -770,8 +770,8 @@ async fn the_three_writes_are_behind_the_bearer() {
     let h = harness(|_, _| {});
     for uri in [
         "/client/v2/reading/senders/keep",
-        "/client/v2/reading/smart_done",
-        "/client/v2/reading/smart_done/1/undo",
+        "/client/v2/reading/smart_clear",
+        "/client/v2/reading/smart_clear/1/undo",
     ] {
         let response = h
             .app
@@ -846,7 +846,7 @@ async fn a_pass_that_calls_nearly_everything_expired_is_discarded() {
     assert_eq!(open_in_reading(&h).await, ids);
     // The call still happened and is still billed.
     let usage = h.store.list_usage_by_category(h.acct, 1).unwrap();
-    assert_eq!(usage[0].0, "smart_done");
+    assert_eq!(usage[0].0, "smart_clear");
 }
 
 /// One press at a time. A second one while the first is still waiting on the
@@ -865,7 +865,7 @@ async fn a_second_press_while_one_is_running_is_refused() {
     let post = || {
         let app = h.app.clone();
         async move {
-            app.oneshot(authed("POST", "/client/v2/reading/smart_done"))
+            app.oneshot(authed("POST", "/client/v2/reading/smart_clear"))
                 .await
                 .unwrap()
         }
@@ -879,7 +879,7 @@ async fn a_second_press_while_one_is_running_is_refused() {
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body_json(first).await["message_ids"], json!([stale]));
     assert_eq!(seen.lock().unwrap().bodies.len(), 1, "one model call");
-    assert_eq!(audits(&h, "reading.smart_done").len(), 1);
+    assert_eq!(audits(&h, "reading.smart_clear").len(), 1);
     // And the next press, once it is over, is served.
     assert_eq!(post().await.status(), StatusCode::OK);
 }

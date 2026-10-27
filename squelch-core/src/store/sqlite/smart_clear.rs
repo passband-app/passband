@@ -1,5 +1,5 @@
-//! The store half of smart done (`POST /client/v2/reading/smart_done`): gather
-//! what the judgement in [`crate::triage::smart_done`] reads, write the batch
+//! The store half of smart clear (`POST /client/v2/reading/smart_clear`): gather
+//! what the judgement in [`crate::triage::smart_clear`] reads, write the batch
 //! with its provenance, and undo it exactly.
 //!
 //! HUMAN-DOOR ONLY. It resolves mail on the owner's say-so, which no agent
@@ -7,10 +7,10 @@
 //!
 //! THREE STEPS, AND THE LOCK IS HELD FOR NONE OF THE MODEL CALL:
 //!
-//! 1. [`SqliteStore::smart_done_scan`], one lock: which open Reading rows
+//! 1. [`SqliteStore::smart_clear_scan`], one lock: which open Reading rows
 //!    have nothing stored that decides them, so the model can be asked.
 //! 2. The model pass, in the caller, with no lock held.
-//! 3. [`SqliteStore::smart_done_apply`], one lock and one transaction: SCAN
+//! 3. [`SqliteStore::smart_clear_apply`], one lock and one transaction: SCAN
 //!    AGAIN and write. Nothing step 1 saw about a ROW is trusted here (only
 //!    its sender scores are carried over; see that function). Seconds have
 //!    passed and the owner has been using the app: a row may have been opened,
@@ -20,7 +20,7 @@
 //!
 //! WHICH ROWS are the Reading feed's own (`agent_triage::reading_items`) and
 //! which senders are scored is the purge list's own (`reading_senders`'s
-//! measurer and its cap), so smart done can never sweep a row the feed does
+//! measurer and its cap), so smart clear can never sweep a row the feed does
 //! not show or a sender for a score the list does not show. That also sets
 //! its reach: open Reading mail from the feed's thirty-day window. Older mail
 //! is never swept, on purpose; the owner cannot see it there to check.
@@ -35,15 +35,15 @@ use super::attention::open_ledger_since;
 use super::reading_senders::{SenderMeasurer, busiest_senders, sender_key};
 use super::*;
 use crate::store::agent_triage::AgentListQuery;
-use crate::triage::smart_done::{
-    ClearReason, ModelRow, RowFacts, SMART_DONE_MODEL_ROWS, Verdict, model_question, stored_reason,
-    summary_fingerprint,
+use crate::triage::smart_clear::{
+    ClearReason, ModelRow, RowFacts, SMART_CLEAR_MODEL_ROWS, Verdict, model_question,
+    stored_reason, summary_fingerprint,
 };
 use std::collections::{HashMap, HashSet};
 
 /// `triage.resolved_by` for the rows of one batch.
 fn batch_tag(batch_id: i64) -> String {
-    format!("smart_done:{batch_id}")
+    format!("smart_clear:{batch_id}")
 }
 
 /// Each measured sender's fatigue score, by lowercased address.
@@ -51,11 +51,11 @@ pub type SenderScores = HashMap<String, Option<u8>>;
 
 /// What step 1 hands to step 3 across the model call.
 #[derive(Debug, Clone, Default)]
-pub struct SmartDoneScan {
+pub struct SmartClearScan {
     /// The rows worth asking the model about, newest first, capped.
     pub asks: Vec<ModelRow>,
     /// The sender scores step 1 measured, reused by step 3. See
-    /// [`SqliteStore::smart_done_apply`] for why that is safe.
+    /// [`SqliteStore::smart_clear_apply`] for why that is safe.
     pub sender_scores: SenderScores,
     /// When step 1 read the store. A sender whose mail was OPENED after this
     /// has a score that is out of date in the one direction that matters.
@@ -82,7 +82,7 @@ fn given_back(
     since: DateTime<Utc>,
 ) -> Result<HashSet<i64>> {
     let mut stmt = conn.prepare(
-        "SELECT detail FROM smart_done_batches
+        "SELECT detail FROM smart_clear_batches
          WHERE account_id = ?1 AND undone_at IS NOT NULL AND undone_at >= ?2",
     )?;
     let details = stmt
@@ -126,7 +126,7 @@ struct Scanned {
 /// wrote. A sealed row cannot be one of these because [`MARK_DONE_SQL`]
 /// cannot write one.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SmartDoneRow {
+pub struct SmartClearRow {
     pub message_id: i64,
     pub reason: ClearReason,
     /// The bare address as stored.
@@ -144,14 +144,14 @@ const RECEIPT_ROW_SQL: &str = "SELECT from_addr, COALESCE(from_name, ''), subjec
 
 /// What one press cleared.
 #[derive(Debug, Clone, Default)]
-pub struct SmartDoneOutcome {
+pub struct SmartClearOutcome {
     /// `None` when nothing was cleared: no batch is recorded for an empty one.
     pub batch_id: Option<i64>,
     /// Each message taken and why, newest first.
     pub cleared: Vec<(i64, ClearReason)>,
     /// The same messages in the same order, with what the receipt's full
     /// list shows of each.
-    pub rows: Vec<SmartDoneRow>,
+    pub rows: Vec<SmartClearRow>,
     /// How many distinct senders that mail came from.
     pub senders: usize,
 }
@@ -197,7 +197,7 @@ fn scan(
     now: DateTime<Utc>,
     inventory: &AgentListQuery,
     feed_limit: usize,
-    earlier: Option<&SmartDoneScan>,
+    earlier: Option<&SmartClearScan>,
 ) -> Result<(Vec<Scanned>, SenderScores)> {
     let items = reading_items(conn, account_id, feed_limit, inventory, now)?;
     let mut measurer = SenderMeasurer::new(conn, account_id, now)?;
@@ -219,7 +219,7 @@ fn scan(
     // WHAT IS ON THE FYE BOARD, by the FYE listing's own function: the
     // decision's attention, the owner's per-thread override, auth and own
     // mail left out, reminders in. Asked once; a row whose thread is here is
-    // not smart done's to take.
+    // not smart clear's to take.
     let fye_threads: HashSet<String> = list_items(conn, account_id, "fye", now)?
         .into_iter()
         .map(|item| item.thread_id)
@@ -234,7 +234,7 @@ fn scan(
     if let Some(scanned_at) = earlier.and_then(|scan| scan.scanned_at) {
         let mut last_open = conn.prepare(SENDER_LAST_OPEN_SQL)?;
         for (sender, score) in scores.iter_mut() {
-            if score.is_none_or(|s| s < crate::triage::smart_done::SMART_DONE_SENDER_SCORE) {
+            if score.is_none_or(|s| s < crate::triage::smart_clear::SMART_CLEAR_SENDER_SCORE) {
                 continue;
             }
             let opened: Option<String> =
@@ -328,18 +328,18 @@ fn scan(
 
 impl SqliteStore {
     /// Step 1: the rows worth asking the model about, newest first, at most
-    /// [`SMART_DONE_MODEL_ROWS`], and the sender scores measured on the way.
+    /// [`SMART_CLEAR_MODEL_ROWS`], and the sender scores measured on the way.
     /// Read-only.
-    pub fn smart_done_scan(
+    pub fn smart_clear_scan(
         &self,
         account_id: AccountId,
         now: DateTime<Utc>,
         inventory: &AgentListQuery,
         feed_limit: usize,
-    ) -> Result<SmartDoneScan> {
+    ) -> Result<SmartClearScan> {
         let conn = self.lock()?;
         let (rows, sender_scores) = scan(&conn, account_id, now, inventory, feed_limit, None)?;
-        Ok(SmartDoneScan {
+        Ok(SmartClearScan {
             scanned_at: Some(now),
             asks: rows
                 .into_iter()
@@ -350,7 +350,7 @@ impl SqliteStore {
                         received_at: row.received_at,
                     })
                 })
-                .take(SMART_DONE_MODEL_ROWS)
+                .take(SMART_CLEAR_MODEL_ROWS)
                 .collect(),
             sender_scores,
         })
@@ -378,15 +378,15 @@ impl SqliteStore {
     /// not score has no score and is not swept. Measuring twice bought
     /// none of that and held the store mutex for a second sweep of up to a
     /// hundred senders' mail.
-    pub fn smart_done_apply(
+    pub fn smart_clear_apply(
         &self,
         account_id: AccountId,
         now: DateTime<Utc>,
         inventory: &AgentListQuery,
         feed_limit: usize,
-        scan_result: &SmartDoneScan,
+        scan_result: &SmartClearScan,
         verdicts: &HashMap<i64, Verdict>,
-    ) -> Result<SmartDoneOutcome> {
+    ) -> Result<SmartClearOutcome> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let (rows, _) = scan(
@@ -411,12 +411,12 @@ impl SqliteStore {
             })
             .collect();
         if picks.is_empty() {
-            return Ok(SmartDoneOutcome::default());
+            return Ok(SmartClearOutcome::default());
         }
 
         let stamp = now.to_rfc3339();
         tx.execute(
-            "INSERT INTO smart_done_batches(account_id, created_at, cleared, detail)
+            "INSERT INTO smart_clear_batches(account_id, created_at, cleared, detail)
              VALUES(?1, ?2, 0, '{}')",
             params![account_id, stamp],
         )?;
@@ -439,7 +439,7 @@ impl SqliteStore {
                 // shown can never name a message this press did not take or
                 // miss one it did. A later pass over the ids could do both.
                 receipt.push(shown.query_row(params![account_id, row.message_id], |r| {
-                    Ok(SmartDoneRow {
+                    Ok(SmartClearRow {
                         message_id: row.message_id,
                         reason,
                         sender: r.get(0)?,
@@ -459,10 +459,10 @@ impl SqliteStore {
         }
         if cleared.is_empty() {
             // Dropping the transaction takes the empty batch row with it.
-            return Ok(SmartDoneOutcome::default());
+            return Ok(SmartClearOutcome::default());
         }
         tx.execute(
-            "UPDATE smart_done_batches SET cleared = ?1, detail = ?2 WHERE id = ?3",
+            "UPDATE smart_clear_batches SET cleared = ?1, detail = ?2 WHERE id = ?3",
             params![
                 cleared.len() as i64,
                 serde_json::json!({ "rows": rows }).to_string(),
@@ -470,7 +470,7 @@ impl SqliteStore {
             ],
         )?;
         tx.commit()?;
-        Ok(SmartDoneOutcome {
+        Ok(SmartClearOutcome {
             batch_id: Some(batch_id),
             cleared,
             rows: receipt,
@@ -486,7 +486,7 @@ impl SqliteStore {
     /// `None` for a batch this account does not have (unknown and another
     /// account's are the same answer). `Some(0)` for one already undone. An
     /// error, with nothing changed, for a batch whose record cannot be read.
-    pub fn smart_done_undo(
+    pub fn smart_clear_undo(
         &self,
         account_id: AccountId,
         batch_id: i64,
@@ -496,7 +496,7 @@ impl SqliteStore {
         let tx = conn.transaction()?;
         let Some((undone_at, detail)) = tx
             .query_row(
-                "SELECT undone_at, detail FROM smart_done_batches
+                "SELECT undone_at, detail FROM smart_clear_batches
                  WHERE account_id = ?1 AND id = ?2",
                 params![account_id, batch_id],
                 |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
@@ -516,7 +516,7 @@ impl SqliteStore {
         // with nothing reopened would strand those rows as done for good.
         let unreadable = || {
             CoreError::Other(anyhow::anyhow!(
-                "smart done batch {batch_id} has no readable record of what it took"
+                "smart clear batch {batch_id} has no readable record of what it took"
             ))
         };
         let mut detail: serde_json::Value =
@@ -558,7 +558,7 @@ impl SqliteStore {
         // that one themselves.
         detail["reopened"] = serde_json::json!(given_back);
         tx.execute(
-            "UPDATE smart_done_batches SET undone_at = ?1, detail = ?2 WHERE id = ?3",
+            "UPDATE smart_clear_batches SET undone_at = ?1, detail = ?2 WHERE id = ?3",
             params![now.to_rfc3339(), detail.to_string(), batch_id],
         )?;
         tx.commit()?;

@@ -115,7 +115,7 @@ struct RootView: View {
         // connected to. Hung on the daemon's answer for the same reason as the
         // share ask: it arrives with the first stats and not before.
         .overlay { TestFlightNudgeModal() }
-        // Screenshots of the purge and smart done over canned senders. A
+        // Screenshots of the purge and smart clear over canned senders. A
         // beat after launch so the first connect's wipe cannot clear it; a
         // no-op unless the launch environment asked (Lib/PurgeFixture.swift).
         .task {
@@ -403,7 +403,7 @@ struct MainShell: View {
                     if store.daemonDown && store.activeView != .settings {
                         DaemonDownPane()
                     } else {
-                        // THE PURGE, ITS END PAGE AND THE SMART DONE LIST ARE
+                        // THE PURGE, ITS END PAGE AND THE SMART CLEAR LIST ARE
                         // OCCUPANTS OF THIS PANE, like any routed page: the
                         // same backdrop, the same header on the dots' line,
                         // the rail's top edge cut to it. The page they are
@@ -702,8 +702,8 @@ struct MainShell: View {
                 }
                 .id(finish.id))
         }
-        if store.smartDoneListOpen, let receipt = store.smartDoneReceipt {
-            return AnyView(SmartDoneListPage(receipt: receipt))
+        if store.smartClearListOpen, let receipt = store.smartClearReceipt {
+            return AnyView(SmartClearListPage(receipt: receipt))
         }
         return nil
     }
@@ -819,14 +819,14 @@ struct MainShell: View {
         // for surface bindings (the thread viewer's `u` = unsubscribe).
         bindings.append(
             KeyBinding(declining: "u", "undo last action") {
-                // A smart done receipt on screen is an undo too. Whichever
+                // A smart clear receipt on screen is an undo too. Whichever
                 // of the two happened LAST is the one `u` takes back, which
                 // is what the key means everywhere else.
-                if store.smartDoneUndoOffered,
-                    let receipt = store.smartDoneReceipt,
+                if store.smartClearUndoOffered,
+                    let receipt = store.smartClearReceipt,
                     (store.undos.last?.createdAt ?? .distantPast) < receipt.createdAt
                 {
-                    Task { await store.undoSmartDone() }
+                    Task { await store.undoSmartClear() }
                     return true
                 }
                 guard !store.undos.isEmpty else { return false }

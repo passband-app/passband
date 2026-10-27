@@ -1050,7 +1050,7 @@ final class AppStore {
     /// 5. LEAVING WITH NOTHING STAGED, which is not really a deletion: there
     ///    was nothing in it.
     ///
-    /// What does NOT end it: a smart done, a zone refresh or poll, opening
+    /// What does NOT end it: a smart clear, a zone refresh or poll, opening
     /// and closing threads, Settings, the window closing while the app runs
     /// (this store outlives its windows), and the candidate list refreshing
     /// behind it (a session keeps ITS deck).
@@ -1181,7 +1181,7 @@ final class AppStore {
     /// The route holds the daemon's one store lock for about 130 ms on a big
     /// mailbox, so it is NOT asked on every zone pass: at most this often
     /// while the sitrep is up, and at once after something that changes the
-    /// answer (a purge, a smart done).
+    /// answer (a purge, a smart clear).
     private static let purgeCandidatesEvery: TimeInterval = 600
     private static let purgeFreshFor: TimeInterval = 60
 
@@ -1506,7 +1506,7 @@ final class AppStore {
     /// WHAT THE RAIL (AND EVERY OTHER ROUTE AWAY) DOES WHILE ONE OF THE
     /// CONTENT-AREA PAGES IS UP. True when the navigation may go ahead.
     ///
-    /// The purge, its end page and the smart done list fill the content area
+    /// The purge, its end page and the smart clear list fill the content area
     /// beside the real rail, so a click on the rail (a page key, an email
     /// opening) is a request to leave. Leaving never silently discards
     /// staged decisions (`PurgeLeave`): with something staged the session is
@@ -1531,7 +1531,7 @@ final class AppStore {
             }
         }
         if purgeFinished != nil { dismissPurgeFinished() }
-        if smartDoneListOpen { closeSmartDoneList() }
+        if smartClearListOpen { closeSmartClearList() }
         return true
     }
 
@@ -1895,7 +1895,7 @@ final class AppStore {
         purgeFinished = nil
     }
 
-    // MARK: purge and smart done fixtures (see Lib/PurgeFixture.swift)
+    // MARK: purge and smart clear fixtures (see Lib/PurgeFixture.swift)
 
     /// Simulated unsubscribe jobs, by sender, while a fixture is active.
     var purgeFixtureJobs: [String: PurgeJob] = [:]
@@ -1956,13 +1956,13 @@ final class AppStore {
                 purgeFinished = finish
             }
         }
-        if let mode = PurgeFixture.smartDone {
+        if let mode = PurgeFixture.smartClear {
             switch mode {
-            case .working: smartDoneWorking = true
-            case .receipt: showSmartDoneReceipt(PurgeFixture.smartDoneResult)
+            case .working: smartClearWorking = true
+            case .receipt: showSmartClearReceipt(PurgeFixture.smartClearResult)
             case .list:
-                showSmartDoneReceipt(PurgeFixture.smartDoneResult)
-                openSmartDoneList()
+                showSmartClearReceipt(PurgeFixture.smartClearResult)
+                openSmartClearList()
             }
         }
     }
@@ -2019,12 +2019,12 @@ final class AppStore {
         }
     }
 
-    // MARK: smart done
+    // MARK: smart clear
 
-    /// SMART DONE: one press on the Reading zone and the daemon marks expired
+    /// SMART CLEAR: one press on the Reading zone and the daemon marks expired
     /// and plainly unwanted mail done. What it took is shown as a receipt
     /// with an undo that reopens exactly that batch.
-    struct SmartDoneReceipt: Equatable, Identifiable {
+    struct SmartClearReceipt: Equatable, Identifiable {
         let id = UUID()
         /// nil when this daemon kept no batch: a receipt with no undo.
         var batchId: String?
@@ -2037,54 +2037,54 @@ final class AppStore {
         var createdAt = Date()
         /// When the receipt, and the undo on it, leave. A clock that can be
         /// stopped: looking at the full list costs none of the window.
-        var clock: SmartDoneClock
+        var clock: SmartClearClock
         /// Every email cleared, for the full list. nil when the daemon did
         /// not send them. Mail content: it lives here and nowhere else.
-        var items: [SmartDoneItem]?
+        var items: [SmartClearItem]?
         /// The undo request is out.
         var undoing = false
     }
     /// The receipt's full list is up. While it is, the undo clock is stopped.
-    private(set) var smartDoneListOpen = false
+    private(set) var smartClearListOpen = false
 
     /// Open the full list of what the receipt on screen cleared, and stop
     /// the undo clock for as long as it is up.
-    func openSmartDoneList() {
-        guard smartDoneReceipt?.items?.isEmpty == false, !smartDoneListOpen else { return }
-        smartDoneReceipt?.clock.pause(at: Date())
-        smartDoneListOpen = true
+    func openSmartClearList() {
+        guard smartClearReceipt?.items?.isEmpty == false, !smartClearListOpen else { return }
+        smartClearReceipt?.clock.pause(at: Date())
+        smartClearListOpen = true
     }
 
     /// Leave the full list BY ANY ROUTE: the clock starts again from where
     /// it stopped. Safe to call twice, and with no list up.
-    func closeSmartDoneList() {
-        smartDoneListOpen = false
-        smartDoneReceipt?.clock.resume(at: Date())
+    func closeSmartClearList() {
+        smartClearListOpen = false
+        smartClearReceipt?.clock.resume(at: Date())
     }
     /// The daemon is working on it: up to about twenty seconds.
-    var smartDoneWorking = false
-    var smartDoneReceipt: SmartDoneReceipt? {
+    var smartClearWorking = false
+    var smartClearReceipt: SmartClearReceipt? {
         // The list is the receipt's: it cannot outlive it by any route.
-        didSet { if smartDoneReceipt == nil, smartDoneListOpen { smartDoneListOpen = false } }
+        didSet { if smartClearReceipt == nil, smartClearListOpen { smartClearListOpen = false } }
     }
 
     /// How long a receipt and its undo stay. Six times an ordinary undo chip:
     /// this one took a batch of mail nobody looked at one by one, and reading
     /// what it took is the point of showing it.
-    static let smartDoneUndoTTL: TimeInterval = 30
+    static let smartClearUndoTTL: TimeInterval = 30
     /// A receipt with nothing to undo is only news.
-    private static let smartDoneNewsTTL: TimeInterval = 9
+    private static let smartClearNewsTTL: TimeInterval = 9
 
     /// The receipt is on screen with a live undo, so `u` means that. Only
     /// where the receipt is drawn (the bare sitrep): a key must not undo
     /// something the person cannot see.
-    var smartDoneUndoOffered: Bool {
-        guard let receipt = smartDoneReceipt else { return false }
+    var smartClearUndoOffered: Bool {
+        guard let receipt = smartClearReceipt else { return false }
         return receipt.batchId != nil && !receipt.undoing && showsSitrepCorner
     }
 
     /// The sitrep with nothing over it: where the bottom-right corner's cards
-    /// (the unsubscribe tray, the smart done receipt) are drawn.
+    /// (the unsubscribe tray, the smart clear receipt) are drawn.
     var showsSitrepCorner: Bool {
         activeView == .sitrep && threadId == nil && !composeOpen
     }
@@ -2094,39 +2094,39 @@ final class AppStore {
     ///
     /// NEVER FROM THE PRACTICE INBOX: its mail is fixtures, and the real
     /// daemon would be asked to clean a mailbox the person is not looking at.
-    func runSmartDone() async {
-        guard !smartDoneWorking else { return }
+    func runSmartClear() async {
+        guard !smartClearWorking else { return }
         if PurgeFixture.active {
-            smartDoneWorking = true
+            smartClearWorking = true
             try? await Task.sleep(for: .seconds(3))
-            smartDoneWorking = false
-            showSmartDoneReceipt(PurgeFixture.smartDoneResult)
+            smartClearWorking = false
+            showSmartClearReceipt(PurgeFixture.smartClearResult)
             return
         }
         guard !RehearsalMode.isEnabled else {
-            pushToast(SmartDoneCopy.unavailable, .info)
+            pushToast(SmartClearCopy.unavailable, .info)
             return
         }
         let e = epoch
-        smartDoneWorking = true
+        smartClearWorking = true
         // A second run closes the first one's undo: the daemon undoes by
         // batch, and two receipts in one corner would be two countdowns.
-        smartDoneReceipt = nil
-        let result: SmartDoneResult?
+        smartClearReceipt = nil
+        let result: SmartClearResult?
         do {
-            result = try await APIClient.shared.smartDone()
+            result = try await APIClient.shared.smartClear()
         } catch let error as APIError where error.status == 429 {
             // One press at a time, daemon-side: another device got there
             // first. Its sweep is this mailbox's too, so show the result.
             guard e == epoch else { return }
-            smartDoneWorking = false
-            pushToast(SmartDoneCopy.alreadyRunning, .info)
+            smartClearWorking = false
+            pushToast(SmartClearCopy.alreadyRunning, .info)
             await refreshZones(force: true)
             return
         } catch {
             guard e == epoch else { return }
-            smartDoneWorking = false
-            pushToast(SmartDoneCopy.failed, .error)
+            smartClearWorking = false
+            pushToast(SmartClearCopy.failed, .error)
             // A timeout is not proof nothing happened: show what the daemon
             // has now rather than what the board had before.
             await refreshZones(force: true)
@@ -2135,14 +2135,14 @@ final class AppStore {
         // The OLD account's daemon answered; its ids mean nothing here. The
         // switch's wipe already put the pill back to rest.
         guard e == epoch else { return }
-        smartDoneWorking = false
+        smartClearWorking = false
         guard let result else {
-            pushToast(SmartDoneCopy.unavailable, .info)
+            pushToast(SmartClearCopy.unavailable, .info)
             return
         }
         // Counts only: never a sender, an address or a word of mail.
         Analytics.capture(
-            "smart_done",
+            "smart_clear",
             [
                 "cleared": result.cleared,
                 "senders": result.senders,
@@ -2155,10 +2155,10 @@ final class AppStore {
                 "undoable": result.batch_id != nil,
             ])
         guard result.cleared > 0 else {
-            pushToast(SmartDoneCopy.nothing(model: result.model), .info)
+            pushToast(SmartClearCopy.nothing(model: result.model), .info)
             return
         }
-        showSmartDoneReceipt(result)
+        showSmartClearReceipt(result)
         await sweepResolved(result.message_ids, epoch: e)
         guard e == epoch else { return }
         // The tiles left optimistically; this makes the daemon's list the
@@ -2168,35 +2168,35 @@ final class AppStore {
         await refreshPurgeCandidates(force: true)
     }
 
-    private func showSmartDoneReceipt(_ result: SmartDoneResult) {
-        let ttl = result.batch_id == nil ? Self.smartDoneNewsTTL : Self.smartDoneUndoTTL
+    private func showSmartClearReceipt(_ result: SmartClearResult) {
+        let ttl = result.batch_id == nil ? Self.smartClearNewsTTL : Self.smartClearUndoTTL
         let now = Date()
-        let receipt = SmartDoneReceipt(
+        let receipt = SmartClearReceipt(
             batchId: result.batch_id, cleared: result.cleared, senders: result.senders,
             byReason: result.by_reason, messageIds: result.message_ids,
-            modelMissed: SmartDoneCopy.modelMissed(result.model),
-            createdAt: now, clock: SmartDoneClock(startedAt: now, lasting: ttl),
+            modelMissed: SmartClearCopy.modelMissed(result.model),
+            createdAt: now, clock: SmartClearClock(startedAt: now, lasting: ttl),
             items: result.rows.map { rows in
                 rows.map {
-                    SmartDoneItem(
+                    SmartClearItem(
                         id: $0.message_id, reason: $0.reason ?? "", sender: $0.sender,
                         senderName: $0.sender_name, subject: $0.subject, receivedAt: $0.received_at)
                 }
             })
-        smartDoneListOpen = false
-        smartDoneReceipt = receipt
+        smartClearListOpen = false
+        smartClearReceipt = receipt
         let id = receipt.id
         Task { [weak self] in
             // The deadline can MOVE (the full list stops the clock), so this
             // asks the clock each time it wakes instead of sleeping the TTL.
-            while let self, let live = self.smartDoneReceipt, live.id == id {
+            while let self, let live = self.smartClearReceipt, live.id == id {
                 let left = live.clock.remaining(at: Date())
                 if live.clock.isPaused || live.undoing {
                     // Not while its undo is out either: that request's
                     // answer still has to find the receipt it belongs to.
                     try? await Task.sleep(for: .milliseconds(400))
                 } else if left <= 0 {
-                    self.smartDoneReceipt = nil
+                    self.smartClearReceipt = nil
                     return
                 } else {
                     try? await Task.sleep(for: .seconds(left))
@@ -2205,32 +2205,32 @@ final class AppStore {
         }
     }
 
-    func dismissSmartDoneReceipt() {
-        guard smartDoneReceipt?.undoing != true else { return }
-        smartDoneListOpen = false
-        smartDoneReceipt = nil
+    func dismissSmartClearReceipt() {
+        guard smartClearReceipt?.undoing != true else { return }
+        smartClearListOpen = false
+        smartClearReceipt = nil
     }
 
     /// Reopen exactly what the receipt on screen cleared.
-    func undoSmartDone() async {
-        guard let receipt = smartDoneReceipt, !receipt.undoing, let batch = receipt.batchId
+    func undoSmartClear() async {
+        guard let receipt = smartClearReceipt, !receipt.undoing, let batch = receipt.batchId
         else { return }
-        smartDoneReceipt?.undoing = true
+        smartClearReceipt?.undoing = true
         if PurgeFixture.active {
             try? await Task.sleep(for: .milliseconds(700))
-            smartDoneReceipt = nil
-            pushToast(SmartDoneCopy.undone(reopened: receipt.cleared), .info)
+            smartClearReceipt = nil
+            pushToast(SmartClearCopy.undone(reopened: receipt.cleared), .info)
             return
         }
         let e = epoch
         do {
-            let undone = try await APIClient.shared.undoSmartDone(batchId: batch)
+            let undone = try await APIClient.shared.undoSmartClear(batchId: batch)
             // Reopened on the OLD account's daemon: nothing to tell this one.
             guard e == epoch else { return }
             unresolve(Set(receipt.messageIds))
-            if smartDoneReceipt?.id == receipt.id { smartDoneReceipt = nil }
-            pushToast(SmartDoneCopy.undone(reopened: undone.reopened), .info)
-            Analytics.capture("smart_done_undone", ["reopened": undone.reopened])
+            if smartClearReceipt?.id == receipt.id { smartClearReceipt = nil }
+            pushToast(SmartClearCopy.undone(reopened: undone.reopened), .info)
+            Analytics.capture("smart_clear_undone", ["reopened": undone.reopened])
             // The refresh after the clear took these tiles out of the zone's
             // rows for real, so un-resolving alone shows nothing: the board
             // has to be read again. Forced, to outlast a pass already out.
@@ -2239,7 +2239,7 @@ final class AppStore {
             await refreshPurgeCandidates(force: true)
         } catch {
             guard e == epoch else { return }
-            if smartDoneReceipt?.id == receipt.id { smartDoneReceipt?.undoing = false }
+            if smartClearReceipt?.id == receipt.id { smartClearReceipt?.undoing = false }
             pushToast("Undo did not go through. Try again.", .error)
         }
     }
@@ -3702,11 +3702,11 @@ final class AppStore {
         purgeSuggestions = [:]
         purgeBodies = [:]
         purgeBodyFailures = []
-        // A smart done in flight was asked of the old daemon, and a receipt's
+        // A smart clear in flight was asked of the old daemon, and a receipt's
         // undo names a batch the new one never made.
-        smartDoneWorking = false
-        smartDoneReceipt = nil
-        smartDoneListOpen = false
+        smartClearWorking = false
+        smartClearReceipt = nil
+        smartClearListOpen = false
         // And the ignored-unsubscribe notice, for the same reason.
         UnsubscribeViolations.shared.reset()
         sitrep = SitrepData()
@@ -4336,7 +4336,7 @@ final class AppStore {
     /// The tour joins on `wantsBlur` alone: its three talking steps are modals
     /// like any other, but its coach marks POINT AT the board, so blurring what
     /// they are ringing would defeat them.
-    /// The purge, its end page and the smart done list are NOT here: they
+    /// The purge, its end page and the smart clear list are NOT here: they
     /// are pages in the content area beside the real rail, opaque over the
     /// board, and a blur would smear the rail they sit next to.
     var modalOverlayOpen: Bool {
@@ -8216,7 +8216,7 @@ final class AppStore {
     }
 
     /// The same for a batch, as ONE change to `resolvedIds`: every insert
-    /// fires its observers, and a smart done can name dozens of ids.
+    /// fires its observers, and a smart clear can name dozens of ids.
     func noteResolved(_ ids: Set<Int>) {
         guard !ids.isEmpty else { return }
         resolvedIds.formUnion(ids)

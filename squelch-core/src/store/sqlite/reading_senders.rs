@@ -111,8 +111,8 @@ macro_rules! sender_mail_sql {
 
 /// Received, opened, and cleared without opening, for one sender.
 ///
-/// "CLEARED" MEANS BY THE OWNER: `resolved_by IS NULL`. A row smart done swept
-/// is done and unopened too, but nobody decided that about it, and smart done
+/// "CLEARED" MEANS BY THE OWNER: `resolved_by IS NULL`. A row smart clear swept
+/// is done and unopened too, but nobody decided that about it, and smart clear
 /// itself reads this score to pick senders to sweep. Counted, each sweep would
 /// raise the score that justified it and the next one would take more.
 ///
@@ -222,7 +222,7 @@ pub struct ReadingSenders {
 }
 
 /// Everything measured about one sender, by the ONE path that measures it.
-/// The purge list shows it and smart done acts on it, so the score a sender is
+/// The purge list shows it and smart clear acts on it, so the score a sender is
 /// swept for is always the score the owner was shown.
 #[derive(Debug, Clone)]
 pub(super) struct Measured {

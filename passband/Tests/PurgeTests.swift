@@ -62,14 +62,14 @@ struct PurgeTests {
         theHeadlineFollowsWhereThingsStand()
         countsReadAsSentences()
         noDeckCopyCarriesADash()
-        try smartDoneRowsDecodeLeniently()
+        try smartClearRowsDecodeLeniently()
         print("purge: ok")
     }
 
-    /// The smart done answer's `rows`: optional, and tolerant row by row.
-    static func smartDoneRowsDecodeLeniently() throws {
-        func decode(_ json: String) throws -> SmartDoneResult {
-            try JSONDecoder().decode(SmartDoneResult.self, from: Data(json.utf8))
+    /// The smart clear answer's `rows`: optional, and tolerant row by row.
+    static func smartClearRowsDecodeLeniently() throws {
+        func decode(_ json: String) throws -> SmartClearResult {
+            try JSONDecoder().decode(SmartClearResult.self, from: Data(json.utf8))
         }
         let old = try decode(#"{"batch_id":"b","cleared":2,"senders":1,"by_reason":{},"message_ids":[1,2],"model":"ok"}"#)
         precondition(old.rows == nil, "a daemon without rows: no list, never a faked one")

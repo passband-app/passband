@@ -491,8 +491,8 @@ impl Default for NotifyConfig {
     }
 }
 
-/// The model behind smart done's one question (`[smart_done]`): has what this
-/// Reading mail is about already expired? See [`crate::triage::smart_done`].
+/// The model behind smart clear's one question (`[smart_clear]`): has what this
+/// Reading mail is about already expired? See [`crate::triage::smart_clear`].
 ///
 /// ITS OWN MODEL AND ITS OWN PRICES, the fourth pair in the ledger. It is not
 /// the notify model (too small to do date arithmetic over sixty summaries
@@ -501,28 +501,24 @@ impl Default for NotifyConfig {
 /// model and these prices move with it, or the estimate drifts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SmartDoneConfig {
+pub struct SmartClearConfig {
     /// The model asked. Default `claude-sonnet-5`, which the hosted gateway's
     /// allow-list carries in both spellings (verified 2026-10-05; it does NOT
     /// carry `claude-sonnet-5-5`). Qualified with the gateway's provider
-    /// prefix at call time, like every other model here. Env:
-    /// `SQUELCH_SMART_DONE_MODEL`.
+    /// prefix at call time, like every other model here.
     pub model: String,
     /// Reasoning depth, sent as `output_config.effort`. Default `low`: the
     /// question is date arithmetic, and the owner is waiting on the answer.
-    /// Env: `SQUELCH_SMART_DONE_EFFORT` (`none`/`off` clears it, for a model
-    /// that rejects the field).
     pub effort: Option<String>,
     /// USD per million input tokens for `model`. Default 2.0, the list price
     /// of `claude-sonnet-5` (Anthropic first-party API rates as of
-    /// 2026-09-25). Env: `SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK`.
+    /// 2026-09-25).
     pub price_in_per_mtok: f64,
     /// USD per million output tokens for `model`. Default 10.0, same source.
-    /// Env: `SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK`.
     pub price_out_per_mtok: f64,
 }
 
-impl Default for SmartDoneConfig {
+impl Default for SmartClearConfig {
     fn default() -> Self {
         Self {
             model: "claude-sonnet-5".to_string(),
@@ -1978,8 +1974,8 @@ pub struct Config {
     /// first-sight freshness test, and the rescue ceiling a late verdict has to
     /// beat.
     pub notify: NotifyConfig,
-    /// Smart done's model pass: which model, at what effort, at what price.
-    pub smart_done: SmartDoneConfig,
+    /// Smart clear's model pass: which model, at what effort, at what price.
+    pub smart_clear: SmartClearConfig,
     /// Scheduled re-evaluation: how often triage looks at its own past verdicts.
     pub revisit: RevisitPassConfig,
     /// APNs pusher: the blind relay's URL + bearer. Absent `relay_url` means the
@@ -2017,7 +2013,7 @@ impl Default for Config {
             sync: SyncConfig::default(),
             embed: EmbedConfig::default(),
             notify: NotifyConfig::default(),
-            smart_done: SmartDoneConfig::default(),
+            smart_clear: SmartClearConfig::default(),
             revisit: RevisitPassConfig::default(),
             pusher: PusherConfig::default(),
             tracking: TrackingConfig::default(),
@@ -2276,16 +2272,6 @@ impl Config {
         env_override(
             "SQUELCH_NOTIFY_PRICE_OUT_PER_MTOK",
             &mut self.notify.price_out_per_mtok,
-        );
-        env_override("SQUELCH_SMART_DONE_MODEL", &mut self.smart_done.model);
-        env_override_effort("SQUELCH_SMART_DONE_EFFORT", &mut self.smart_done.effort);
-        env_override(
-            "SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK",
-            &mut self.smart_done.price_in_per_mtok,
-        );
-        env_override(
-            "SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK",
-            &mut self.smart_done.price_out_per_mtok,
         );
         // Which embedding weights this daemon loads. An env var so a fleet-wide
         // pin can be moved without cutting a new image, and validated where
@@ -4140,46 +4126,29 @@ archive_access_daily_cap = 9
         unsafe { std::env::remove_var("SQUELCH_NOTIFY_MIN_IMPORTANCE") }
     }
 
-    /// `[smart_done]` reads from the file, and the env beats the file, with
-    /// `none` clearing an effort the configured model would reject.
+    /// `[smart_clear]` reads from the file and from nowhere else: like
+    /// `[translate]`, it takes hold at the daemon roll, so no env var moves it.
     #[test]
-    fn the_smart_done_section_reads_from_toml_and_env() {
+    fn the_smart_clear_section_reads_from_toml_only() {
         let _g = ENV_LOCK.lock().unwrap();
         // A config that predates the section has the defaults.
         let c: Config = toml::from_str("").unwrap();
-        assert_eq!(c.smart_done.model, "claude-sonnet-5");
-        let mut c: Config =
-            toml::from_str("[smart_done]\nmodel = \"from-the-file\"\nprice_in_per_mtok = 1.5\n")
+        assert_eq!(c.smart_clear.model, "claude-sonnet-5");
+        let c: Config =
+            toml::from_str("[smart_clear]\nmodel = \"from-the-file\"\nprice_in_per_mtok = 1.5\n")
                 .unwrap();
-        assert_eq!(c.smart_done.model, "from-the-file");
-        assert_eq!(c.smart_done.price_in_per_mtok, 1.5);
+        assert_eq!(c.smart_clear.model, "from-the-file");
+        assert_eq!(c.smart_clear.price_in_per_mtok, 1.5);
         assert_eq!(
-            c.smart_done.price_out_per_mtok, 10.0,
+            c.smart_clear.price_out_per_mtok, 10.0,
             "unnamed keys default"
         );
         // SAFETY: guarded by ENV_LOCK.
-        unsafe {
-            std::env::set_var("SQUELCH_SMART_DONE_MODEL", "from-the-env");
-            std::env::set_var("SQUELCH_SMART_DONE_EFFORT", "none");
-            std::env::set_var("SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK", "0.25");
-            std::env::set_var("SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK", "0.75");
-        }
-        c.apply_env_overrides();
-        unsafe {
-            std::env::remove_var("SQUELCH_SMART_DONE_MODEL");
-            std::env::remove_var("SQUELCH_SMART_DONE_EFFORT");
-            std::env::remove_var("SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK");
-            std::env::remove_var("SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK");
-        }
-        assert_eq!(c.smart_done.model, "from-the-env");
-        assert_eq!(c.smart_done.effort, None);
-        assert_eq!(
-            (
-                c.smart_done.price_in_per_mtok,
-                c.smart_done.price_out_per_mtok
-            ),
-            (0.25, 0.75)
-        );
+        unsafe { std::env::set_var("SQUELCH_SMART_CLEAR_MODEL", "from-the-env") }
+        let mut env = c.clone();
+        env.apply_env_overrides();
+        unsafe { std::env::remove_var("SQUELCH_SMART_CLEAR_MODEL") }
+        assert_eq!(env.smart_clear.model, "from-the-file");
     }
 
     /// THE FAST LANE'S DEFAULTS, asserted one by one because two of them are

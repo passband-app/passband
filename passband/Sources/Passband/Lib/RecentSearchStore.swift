@@ -21,9 +21,21 @@ final class RecentSearchStore {
     /// account. nil when there is no live account — nothing to read, nowhere to
     /// write, which is the Connect gate's state.
     private static let keyBase = "passband.search.recents"
-    private static var key: String? {
-        guard let id = AccountManager.shared.activeId else { return nil }
-        return AccountIndex.scopedKey(keyBase, id)
+    private static func key(for id: UUID?) -> String? {
+        id.map { AccountIndex.scopedKey(keyBase, $0) }
+    }
+
+    /// The account `queries` were read for. Writes go under ITS key, and only
+    /// while it is still the live account: an account switch commits the new
+    /// id before this store reloads, and a record in between would otherwise
+    /// write this account's ring under the next one's key.
+    private var loadedFor: UUID?
+
+    /// The key to write under now, or nil when there is none: no live
+    /// account, or the ring in memory belongs to one that is no longer live.
+    private var writableKey: String? {
+        guard let id = AccountManager.shared.activeId, id == loadedFor else { return nil }
+        return Self.key(for: id)
     }
 
     /// Newest first. Read straight from views: @Observable means the empty
@@ -36,10 +48,13 @@ final class RecentSearchStore {
 
     /// The ring alone: QuestionChats prunes against this store, so touching
     /// it from inside this one's first initialisation would recurse.
-    private init() { queries = Self.stored() }
+    private init() {
+        loadedFor = AccountManager.shared.activeId
+        queries = Self.stored(for: loadedFor)
+    }
 
-    private static func stored() -> [String] {
-        key.flatMap { UserDefaults.standard.stringArray(forKey: $0) } ?? []
+    private static func stored(for id: UUID?) -> [String] {
+        key(for: id).flatMap { UserDefaults.standard.stringArray(forKey: $0) } ?? []
     }
 
     /// Re-read for whatever account is live NOW. Called by the account switch
@@ -47,7 +62,8 @@ final class RecentSearchStore {
     /// derived from that id, so reloading any earlier re-reads the account that
     /// just went away.
     func reload() {
-        queries = Self.stored()
+        loadedFor = AccountManager.shared.activeId
+        queries = Self.stored(for: loadedFor)
         // The chats are scoped the same way and change account with the ring.
         QuestionChats.shared.reload()
     }
@@ -56,7 +72,7 @@ final class RecentSearchStore {
     /// on screen were fetched for, never the live field text — see the panel's
     /// `remember()` and docs/SEARCH.md §4.2.
     func record(_ query: String) {
-        guard let key = Self.key else { return }
+        guard let key = writableKey else { return }
         let next = RecentSearchRing.adding(query, to: queries)
         // Nothing moved: the ring refused it, or it is already the newest.
         // Skipping the write keeps re-opening the same search from touching
@@ -96,10 +112,10 @@ final class RecentSearchStore {
     /// "delete the app" — the button is in the empty state's own header, beside
     /// what it clears.
     func clear() {
+        guard let key = writableKey else { return }
         queries = []
         // The chats behind the questions are the same words and more.
         QuestionChats.shared.clear()
-        guard let key = Self.key else { return }
         UserDefaults.standard.removeObject(forKey: key)
     }
 }

@@ -135,7 +135,8 @@ struct SearchView: View {
     /// nothing rather than "no matches." at a question nobody asked.
     private var answered: Bool {
         store.search.answers(
-            store.search.query.trimmed, sort: prefs.searchSort, related: prefs.searchIncludeRelated)
+            store.search.query.trimmed, sort: prefs.searchSort, related: prefs.searchIncludeRelated,
+            plainOrder: store.searchPlainOrder)
     }
 
     var body: some View {
@@ -612,9 +613,10 @@ struct SearchView: View {
         // before a trip to Settings and rebuilt after one.
         let sort = prefs.searchSort
         let related = prefs.searchIncludeRelated
+        let plainOrder = store.searchPlainOrder
         let revision = store.search.revision
         let sameRanking = term == store.search.fetchedQuery && sort == store.search.fetchedSort
-            && related == store.search.fetchedRelated
+            && related == store.search.fetchedRelated && plainOrder == store.search.fetchedPlainOrder
         let selectedID = sameRanking ? store.search.hits[safe: store.search.index]?.id : nil
         // A bare operator (`from:` with the menu opening under it) is not a
         // search yet: the daemon would drop the valueless token and 400 the
@@ -625,6 +627,7 @@ struct SearchView: View {
             store.search.error = nil
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             store.search.diagnostics = nil
             store.search.nextCursor = nil
             // AND NOTHING IS ARMED. The index outlives the hits it was counted
@@ -645,7 +648,7 @@ struct SearchView: View {
         // predecessor used to rely on someone else covering (backspace inside
         // the debounce window lands here). The CURRENT task owns the flag now;
         // see the cancelled exits below.
-        guard !store.search.answers(term, sort: sort, related: related) else {
+        guard !store.search.answers(term, sort: sort, related: related, plainOrder: plainOrder) else {
             loading = false
             return
         }
@@ -664,7 +667,8 @@ struct SearchView: View {
             // PARTIAL, mode by preference, unfinished first and snippets
             // cleaned: all of that is `SearchFetch`, shared with the phone. The
             // agent's own searches never go through it.
-            let page = try await SearchFetch.page(term, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                term, sort: sort, related: related, plainOrder: plainOrder)
             // AND AGAIN AFTER THE AWAIT, which the iOS twin has always done
             // (`MobileSearchView`). A response landing in the window between
             // `task(id:)` cancelling this task and URLSession noticing resolves
@@ -685,6 +689,7 @@ struct SearchView: View {
             store.search.fetchedQuery = term
             store.search.fetchedSort = sort
             store.search.fetchedRelated = related
+            store.search.fetchedPlainOrder = plainOrder
             store.search.fetchedRevision = revision
             // Warm the head of the page only. Search rows are read and chosen
             // from, not swept, so the rest can wait for a real click — and the
@@ -708,6 +713,7 @@ struct SearchView: View {
             // resurrecting a stale error over stale hits.
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             // The diagnostics go with the query they described: judging the
             // next search on the last one's counts is exactly the mistake
             // pairing them prevents.
@@ -772,12 +778,18 @@ struct SearchView: View {
         // way to serve it.
         let sort = store.search.fetchedSort
         let related = store.search.fetchedRelated ?? false
+        // And the ORDER, for the same reason: page 2 of a grouped ranking asked
+        // in plain order skips hits. A flip mid-scroll re-fetches page 1
+        // through `runSearch` (`answers` keys on it).
+        let plainOrder = store.search.fetchedPlainOrder ?? store.searchPlainOrder
         let revision = store.search.revision
         loadingMore = true
         defer { loadingMore = false }
         do {
-            let page = try await SearchFetch.page(term, cursor: cursor, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                term, cursor: cursor, sort: sort, related: related, plainOrder: plainOrder)
             guard term == store.search.fetchedQuery, store.search.nextCursor == cursor,
+                  plainOrder == store.search.fetchedPlainOrder,
                   sort == store.search.fetchedSort, sort == prefs.searchSort,
                   related == store.search.fetchedRelated, related == prefs.searchIncludeRelated,
                   revision == store.search.revision else {

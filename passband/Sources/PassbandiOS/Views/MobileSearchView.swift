@@ -96,7 +96,8 @@ struct MobileSearchView: View {
     /// `fetchedQuery != nil` alone means only that SOME query was once
     /// answered.
     private var answered: Bool {
-        store.search.answers(term, sort: prefs.searchSort, related: related)
+        store.search.answers(
+            term, sort: prefs.searchSort, related: related, plainOrder: store.searchPlainOrder)
     }
 
     /// The remembered queries, newest first. Read through the store rather than
@@ -148,7 +149,7 @@ struct MobileSearchView: View {
             // for the next keystroke. An array because `task(id:)` needs one
             // Equatable value.
             .task(id: [store.search.query, prefs.searchSort.rawValue,
-                       String(store.search.revision)]) {
+                       String(prefs.searchIncludeRelated), String(store.search.revision)]) {
                 await runSearch()
             }
             #if DEBUG
@@ -585,6 +586,7 @@ struct MobileSearchView: View {
             store.search.error = nil
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             store.search.diagnostics = nil
             store.search.nextCursor = nil
             loading = false
@@ -597,12 +599,13 @@ struct MobileSearchView: View {
         // next visit instead of silently doing nothing until the reader edits
         // their query. Read at fetch time, not captured on mount.
         let sort = prefs.searchSort
-        let related = related
+        let related = prefs.searchIncludeRelated
+        let plainOrder = store.searchPlainOrder
         let revision = store.search.revision
         // CLEARS `loading` on the way out: this is the path a cancelled
         // predecessor used to rely on someone else covering. The CURRENT task
         // owns the flag now; see the cancelled exits below.
-        guard !store.search.answers(query, sort: sort, related: related) else {
+        guard !store.search.answers(query, sort: sort, related: related, plainOrder: plainOrder) else {
             loading = false
             return
         }
@@ -615,13 +618,14 @@ struct MobileSearchView: View {
         // "searching…" blinked off mid-type and let the empty state through.
         guard !Task.isCancelled else { return }
         do {
-            let page = try await SearchFetch.page(query, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                query, sort: sort, related: related, plainOrder: plainOrder)
             // Re-check after the await, same as the catch does: a superseded
             // task landing late must not stamp `fetchedQuery` with a term that
             // is no longer in the field — the `answers` guard above would then
             // refuse to fetch the term that IS.
             guard !Task.isCancelled, term == query, revision == store.search.revision,
-                  related == related else { return }
+                  related == prefs.searchIncludeRelated else { return }
             store.search.hits = page.items
             store.search.diagnostics = page.diagnostics
             store.search.nextCursor = page.next_cursor
@@ -629,6 +633,7 @@ struct MobileSearchView: View {
             store.search.fetchedQuery = query
             store.search.fetchedSort = sort
             store.search.fetchedRelated = related
+            store.search.fetchedPlainOrder = plainOrder
             store.search.fetchedRevision = revision
             for hit in page.items.prefix(Self.warmCount) {
                 ThreadPrefetch.shared.prefetch(hit.thread_id)
@@ -648,6 +653,7 @@ struct MobileSearchView: View {
             // with it: it belongs to a page set this view is no longer showing.
             store.search.fetchedQuery = nil
             store.search.fetchedSort = nil
+            store.search.fetchedPlainOrder = nil
             store.search.diagnostics = nil
             store.search.nextCursor = nil
         }
@@ -668,12 +674,16 @@ struct MobileSearchView: View {
         // not under whatever the preferences say now.
         let sort = store.search.fetchedSort
         let related = store.search.fetchedRelated ?? false
+        // And the plain-or-grouped ORDER, pinned the same way (SidePanel).
+        let plainOrder = store.search.fetchedPlainOrder ?? store.searchPlainOrder
         let revision = store.search.revision
         loadingMore = true
         defer { loadingMore = false }
         do {
-            let page = try await SearchFetch.page(query, cursor: cursor, sort: sort, related: related)
+            let page = try await SearchFetch.page(
+                query, cursor: cursor, sort: sort, related: related, plainOrder: plainOrder)
             guard query == store.search.fetchedQuery, store.search.nextCursor == cursor,
+                  plainOrder == store.search.fetchedPlainOrder,
                   sort == store.search.fetchedSort, related == store.search.fetchedRelated,
                   revision == store.search.revision else {
                 return

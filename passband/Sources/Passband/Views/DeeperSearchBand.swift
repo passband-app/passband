@@ -219,10 +219,27 @@ struct DeeperSearchBand: View {
                 .foregroundStyle(Palette.inkFaint)
             Spacer(minLength: Space.s4)
             if let trigger = offeredTrigger {
-                Button("ask the agent") { store.startDeeperSearch(trigger: trigger) }
-                    .buttonStyle(.glass)
-                    .font(Typo.chip)
-                    .help("Runs the assistant over these results. It costs a model call.")
+                #if os(macOS)
+                    Button("ask the agent") { store.startDeeperSearch(trigger: trigger) }
+                        .buttonStyle(.glass)
+                        .font(Typo.chip)
+                        .help("Runs the assistant over these results. It costs a model call.")
+                #else
+                    // PLAIN, with the glass painted by hand. On the phone the
+                    // band is a List row, and a Button of any other style in a
+                    // row can take a tap anywhere on the row: a stray tap would
+                    // spend a model call the reader never asked for.
+                    Button { store.startDeeperSearch(trigger: trigger) } label: {
+                        Text("ask the agent")
+                            .font(Typo.chip)
+                            .foregroundStyle(Palette.ink)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .glassCapsule()
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                #endif
             }
         }
     }

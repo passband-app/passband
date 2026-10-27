@@ -253,6 +253,11 @@ struct SearchSession: Sendable, Equatable {
     /// has to re-rank, or the setting silently does nothing until the reader
     /// edits their query.
     var fetchedSort: SearchSortChoice?
+    /// Whether those hits were asked for in plain ranked order
+    /// (`AppStore.searchPlainOrder` at the time). Pinned for the scroll like
+    /// the sort, because a cursor is an offset into ONE ranking and the flag
+    /// can flip between pages; a flip re-fetches page 1 instead.
+    var fetchedPlainOrder: Bool?
     /// What retrieval did with `fetchedQuery`, as the daemon reported it: the
     /// strict/any counts and each term's document frequency. Parked BESIDE the
     /// fetched query because it describes exactly that fetch — the classifier
@@ -4309,7 +4314,16 @@ final class AppStore {
     /// that question in history brings back. Every handoff goes through here
     /// (both of the Mac's and the phone's "continue in chat"), so none can move
     /// the conversation and leave its question behind.
+    ///
+    /// THE CHAT'S SAVED COPY STILL WINS (the rule `saveQuestionChat` keeps).
+    /// If the chat was already the conversation behind this same question
+    /// before adopting, its follow-ups are what history saved for it, and the
+    /// lane's copy (the lane narrowed on underneath since) is not written over
+    /// them. The chat now holds the lane's conversation and its next run end
+    /// saves that, which is the reader choosing it; until then, tapping the
+    /// question in history still opens the chat with its follow-ups.
     func adoptSearchLaneIntoChat() {
+        let heldSameQuestion = chatQuestionKey != nil && chatQuestionKey == laneQuestionKey
         let before = assistant.conversationId
         assistant.adopt(searchLane)
         // `adopt` refuses while either side is running; nothing moved then.
@@ -4317,6 +4331,7 @@ final class AppStore {
         chatQuestion = laneQuestionKey.map {
             QuestionTag(key: $0, conversation: assistant.conversationId)
         }
+        guard !heldSameQuestion else { return }
         saveQuestionChat(from: assistant)
     }
 
@@ -4386,7 +4401,11 @@ final class AppStore {
             RecentSearchStore.shared.rememberQuestion(text)
             return true
         }
-        guard !assistant.running, let snapshot = QuestionChats.shared.snapshot(forKey: key) else {
+        // A snapshot the chat cannot take up (see `canRestore`: a tool it no
+        // longer offers) is as good as none: the question is asked again.
+        guard !assistant.running, let snapshot = QuestionChats.shared.snapshot(forKey: key),
+            assistant.canRestore(snapshot)
+        else {
             askAgainFromHistory(text)
             return false
         }
@@ -4544,6 +4563,12 @@ final class AppStore {
             search.laneQuery = query
             search.refinementCount = searchLane.refinementCount
             captureLaneStart(search.laneTrigger)
+            // A new conversation is a new line of history, with its own chat,
+            // exactly as `startDeeperSearch` records the first one.
+            RecentSearchStore.shared.rememberQuestion(query)
+            laneQuestion = QuestionTag(
+                key: QuestionChats.key(forQuestion: query),
+                conversation: searchLane.conversationId)
         }
     }
 
@@ -4903,9 +4928,10 @@ final class AppStore {
     /// split, the owner's sent mail kept by `include_sent`. Read off the
     /// stats, STRICTLY `== true`, so an older daemon (or no stats yet) keeps
     /// the grouped ask that brings sent mail into its keyword results.
-    /// `SearchFetch.page` reads it per fetch; see `SearchOrder` for the one
-    /// exception (a grouped recall cursor finishes grouped). Stored: see
-    /// `noteStats`.
+    /// A first page reads it live; a page after the first passes the value
+    /// that page was fetched under (`SearchSession.fetchedPlainOrder`), since
+    /// a cursor is an offset into one ranking and the flag can flip mid-scroll
+    /// (the first stats landing, a daemon roll). Stored: see `noteStats`.
     private(set) var searchPlainOrder = false
 
     /// Fetch the drafts list into `draftsRows`. The drafts page calls it on open.
@@ -5319,7 +5345,8 @@ final class AppStore {
     func confirmDiscard() {
         guard let asked = discardAsk else { return }
         discardAsk = nil
-        guard compose?.id == asked else { return }
+        // A send that started while the card was up owns the composer now.
+        guard compose?.id == asked, compose?.sending != true else { return }
         discardCompose()
     }
 

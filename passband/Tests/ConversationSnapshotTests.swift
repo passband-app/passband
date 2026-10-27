@@ -29,6 +29,10 @@ struct ConversationSnapshotTests {
         wireEncodingIsUnchanged()
         sanitizeSettlesWhatWasMidFlight()
         aNewerShapeIsNotRestored()
+        theFileRoundTrips()
+        theFileRefusesWhatCannotComeBack()
+        anUnreadableFileIsNotAnEmptyOne()
+        aHistoryMayOnlyCallOfferedTools()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -176,6 +180,90 @@ struct ConversationSnapshotTests {
             text = text.replacingOccurrences(of: "\"archive_message\"", with: "\"gone_tool\"")
             check(ConversationSnapshot.decode(Data(text.utf8)) == nil, "unknown tool is refused")
         }
+    }
+
+    // MARK: - the file (SavedChat)
+
+    static let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    static func file(_ entries: [String: SavedChat]) -> Data? {
+        try? SavedChat.fileBytes(entries.mapValues { .chat($0) })
+    }
+
+    static func theFileRoundTrips() {
+        let fresh = SavedChat(savedAt: now.addingTimeInterval(-60), snapshot: sample())
+        // One entry as pre-encoded bytes (a save), one encoded by the writer.
+        let bytes = try? SavedChat.encodeEntry(fresh)
+        let data = bytes.flatMap {
+            try? SavedChat.fileBytes(["a \"quoted\" key": .bytes($0), "b": .chat(fresh)])
+        }
+        guard let data, let back = SavedChat.readFile(data, now: now) else {
+            fail("chats file did not round-trip")
+            return
+        }
+        check(Set(back.keys) == ["a \"quoted\" key", "b"], "both keys back, escaping intact")
+        check(back["b"]?.savedAt == fresh.savedAt, "saved-at kept")
+        check(back["a \"quoted\" key"]?.snapshot.transcript.count == sample().transcript.count, "chat kept")
+        check(SavedChat.readFile(Data("{}".utf8), now: now)?.isEmpty == true, "an empty file is no chats")
+    }
+
+    static func theFileRefusesWhatCannotComeBack() {
+        let old = SavedChat(
+            savedAt: now.addingTimeInterval(-SavedChat.maxAge - 1), snapshot: sample())
+        let edge = SavedChat(savedAt: now.addingTimeInterval(-SavedChat.maxAge), snapshot: sample())
+        var newer = sample()
+        newer.version = ConversationSnapshot.currentVersion + 1
+        // A file edited (or written by a bug) to hold a live card and a
+        // spinning chip, bypassing `sanitized` on the way out.
+        let live = ConversationSnapshot(
+            transcript: [
+                ChatItem(id: 1, kind: .user, text: "archive it"),
+                ChatItem(
+                    id: 2, kind: .action,
+                    action: PendingAction(id: UUID(), tool: .archiveMessage, verb: "Archive", state: .pending)),
+                ChatItem(
+                    id: 3, kind: .tool,
+                    tool: ToolActivity(useId: "x", name: "search_mail", summary: "Searching")),
+            ], history: [], askedThreadIds: [nil], nextItemId: 3)
+        let data = file([
+            "old": old, "edge": edge, "live": SavedChat(savedAt: now, snapshot: live),
+            "newer": SavedChat(savedAt: now, snapshot: newer),
+        ])
+        guard let data, let back = SavedChat.readFile(data, now: now) else {
+            fail("chats file did not read")
+            return
+        }
+        check(back["old"] == nil, "a chat past 30 days is dropped")
+        check(back["edge"] != nil, "a chat of exactly 30 days is kept")
+        check(back["newer"] == nil, "a chat under another version is dropped")
+        check(back["live"]?.snapshot.transcript[1].action?.state == .declined, "a live card reads declined")
+        check(back["live"]?.snapshot.transcript[2].tool?.state == .failed, "a spinning chip reads failed")
+        check(edge.isFresh(now: now) && !old.isFresh(now: now), "isFresh is the 30-day line")
+        check(live.restorable?.transcript[1].action?.state == .declined, "restorable sanitizes")
+        check(newer.restorable == nil, "restorable refuses another version")
+    }
+
+    static func anUnreadableFileIsNotAnEmptyOne() {
+        check(SavedChat.readFile(Data("not json".utf8), now: now) == nil, "garbage is unreadable, not empty")
+        check(SavedChat.readFile(Data("[1,2]".utf8), now: now) == nil, "a non-object is unreadable")
+        let one = file(["a": SavedChat(savedAt: now, snapshot: sample())]) ?? Data()
+        check(SavedChat.readFile(one.dropLast(), now: now) == nil, "a truncated file is unreadable")
+        // One bad ENTRY costs that entry only.
+        let mixed = Data(#"{"bad":{"savedAt":1},"good":"#.utf8)
+            + ((try? SavedChat.encodeEntry(SavedChat(savedAt: now, snapshot: sample()))) ?? Data())
+            + Data("}".utf8)
+        let back = SavedChat.readFile(mixed, now: now)
+        check(back != nil && back?["bad"] == nil && back?["good"] != nil, "one bad entry is dropped alone")
+    }
+
+    static func aHistoryMayOnlyCallOfferedTools() {
+        let s = sample()
+        check(s.calledTools == ["search_mail"], "called tools read off the history: \(s.calledTools)")
+        check(s.onlyCalls(["search_mail", "get_thread"]), "offered tools restore")
+        check(!s.onlyCalls(["get_thread"]), "a tool no longer offered refuses the restore")
+        var plain = s
+        plain.history = [.init(role: "user", content: .text("hi"))]
+        check(plain.onlyCalls([]), "a history with no tool calls restores anywhere")
     }
 
     static func check(_ ok: Bool, _ what: String) {

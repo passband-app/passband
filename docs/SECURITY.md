@@ -882,6 +882,15 @@ the call goes out.
   (`squelch-api/src/assistant.rs`) relays with a daemon-held credential and streams
   the bytes back, human door only, and 404s when no gateway is configured. The
   conversation body is treated like mail content and logged in neither direction.
+- **Saved chats on disk.** The conversation behind a question in search history is
+  the one place the client keeps a transcript at rest
+  (`passband/Sources/Passband/Lib/QuestionChats.swift`): one file per account under
+  Application Support's `Passband/QuestionChats`, excluded from backup, 0600 in a
+  0700 directory on the Mac and under complete file protection on the phone. A chat
+  expires 30 days after it was last saved, goes when its question leaves history,
+  and the file is deleted when history is cleared or the account is removed. A
+  restored chat is re-sanitized (no card comes back live) and is refused if its
+  history names a tool the chat no longer offers.
 
 **What a maintainer must not break.**
 - **Prompt injection is the standing threat, and the gate is the answer to it.**

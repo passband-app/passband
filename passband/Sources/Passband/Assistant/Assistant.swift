@@ -534,14 +534,31 @@ final class AssistantSession {
     /// Only between runs, for the reason `adopt` is. The id counter never goes
     /// backwards, so a restored row can never share an id with one this
     /// session already drew.
+    ///
+    /// Refused (see `canRestore`) for a snapshot this build cannot take up,
+    /// and settled again by `restorable` on the way in, so nothing restored can
+    /// look as if it is still waiting on a tap.
     func restore(_ snapshot: ConversationSnapshot) {
-        guard !running else { return }
+        guard !running, canRestore(snapshot), let snapshot = snapshot.restorable else { return }
         clear()
         transcript = snapshot.transcript
         history = snapshot.history
         askedThreadIds = snapshot.askedThreadIds
         rollbackMark = history.count
         nextItemId = max(nextItemId, snapshot.nextItemId, snapshot.transcript.map(\.id).max() ?? 0)
+    }
+
+    /// Whether `snapshot` can be picked up HERE: a version this build reads,
+    /// and a history that calls only tools the next request will define. A
+    /// follow-up replays every tool_use in the history to the provider, and one
+    /// naming a tool no longer offered (the Calendar tools with the page off,
+    /// a tool renamed since) is a request the provider may reject; the caller
+    /// asks the question again instead.
+    func canRestore(_ snapshot: ConversationSnapshot) -> Bool {
+        guard snapshot.version == ConversationSnapshot.currentVersion else { return false }
+        let offered = Set(
+            lane.definitions(calendar: AppStore.shared.calendarPageAvailable).map(\.name))
+        return snapshot.onlyCalls(offered)
     }
 
     /// WHICH CONVERSATION THIS IS. Bumped by `clear()` and so by everything

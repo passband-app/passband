@@ -376,6 +376,14 @@ private struct MobileShell: View {
         .overlay {
             if !store.authQueue.isEmpty { AuthCodeModal() }
         }
+        // AUTH MAIL OPENED FROM OUTSIDE THE LOGIN-CODES PAGE: an auth row in
+        // For your eyes, or a notification tap on auth mail. The same audited
+        // one-time panel, as the same full-screen cover the page uses.
+        // Everything else (search, mail lists, mixed threads) opens the reader.
+        .fullScreenCover(item: revealOpen) { meta in
+            RevealPanel(meta: meta, source: store.revealSource) { store.revealRequest = nil }
+                .background(Palette.canvas.ignoresSafeArea())
+        }
         // Which Google account to pick, said before the browser opens: the
         // sitrep's disconnected banner raises it.
         .overlay {
@@ -541,6 +549,11 @@ private struct MobileShell: View {
         Binding(
             get: { store.addAccountSheetOpen },
             set: { store.addAccountSheetOpen = $0 })
+    }
+
+    /// The reveal cover, off `store.revealRequest` (cleared on dismiss).
+    private var revealOpen: Binding<SealedMeta?> {
+        Binding(get: { store.revealRequest }, set: { store.revealRequest = $0 })
     }
 
     /// Presented-ness derived from the store's own `triageFix`, so dismissing the

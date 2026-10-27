@@ -3634,6 +3634,11 @@ pub async fn markdown_preview(
 // --- GET /client/sealed ------------------------------------------------------
 
 /// Sealed METADATA only. No bodies here, ever.
+///
+/// `kind` is the one kind a client sees, picked by priority across the
+/// decision's kinds. `critical`, `verdict` and `explained_by` are always
+/// present (`false` / `null` when there is nothing to say), so a client can
+/// tell this daemon from one without verdicts by the key alone.
 #[derive(Debug, Serialize)]
 struct SealedMeta {
     id: i64,
@@ -3642,6 +3647,9 @@ struct SealedMeta {
     subject: String,
     kind: Option<String>,
     received_at: DateTime<Utc>,
+    critical: bool,
+    verdict: Option<squelch_core::types::AuthVerdict>,
+    explained_by: Option<i64>,
 }
 
 pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
@@ -3658,9 +3666,65 @@ pub async fn list_sealed(State(state): State<ApiState>) -> Result<impl IntoRespo
             subject: m.subject,
             kind: m.sealed_kind,
             received_at: m.received_at,
+            critical: m.critical,
+            verdict: m.verdict,
+            explained_by: m.explained_by,
         })
         .collect();
     Ok(Json(items))
+}
+
+// --- PUT /client/sealed/{message_id}/verdict --------------------------------
+
+/// `{"verdict": "mine" | "not_mine" | null}`. The key is required: a body
+/// that forgot it must not read as "clear my ruling".
+#[derive(Debug, Deserialize)]
+pub struct AuthVerdictBody {
+    #[serde(deserialize_with = "required_nullable")]
+    verdict: Option<squelch_core::types::AuthVerdict>,
+}
+
+/// The owner's ruling on one auth message ("That was me" / "Not me"), kept
+/// on the server so every client sees it. `null` clears it. A `not_mine`
+/// puts the message in FYE; a `mine` takes a critical change back out.
+/// 404 for a message that is not auth mail. A legacy sealed row (sealed by
+/// the old pipeline, no agent decision) takes a ruling and serves it back,
+/// but it never moves FYE: it has no decision or attention to place.
+/// Every write is audited. HUMAN DOOR ONLY.
+pub async fn put_sealed_verdict(
+    State(state): State<ApiState>,
+    Path(message_id): Path<i64>,
+    Json(body): Json<AuthVerdictBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let verdict = body.verdict;
+    store_call(&state, move |store, account_id| {
+        store.set_auth_verdict(account_id, message_id, verdict, Utc::now())
+    })
+    .await?;
+    // A ruling moves FYE and the shredder, so it leaves a row like a reveal
+    // does: the message id and the ruling, nothing from the mail. The ruling
+    // has landed by now, so a failed audit is logged rather than failing a
+    // request whose effect a retry would only repeat.
+    let entry = NewAuditEntry {
+        actor: state.audit_actor.to_string(),
+        action: "auth_verdict".to_string(),
+        target: Some(message_id.to_string()),
+        detail: Some(
+            verdict
+                .map_or("cleared", |verdict| verdict.as_str())
+                .to_string(),
+        ),
+    };
+    if let Err(error) = store_call(&state, move |store, account_id| {
+        store.append_audit(account_id, &entry)
+    })
+    .await
+    {
+        eprintln!(
+            "squelch-api: auth verdict on {message_id} landed but its audit row did not ({error:?})"
+        );
+    }
+    Ok(Json(json!({ "id": message_id, "verdict": verdict })))
 }
 
 // --- POST /client/sealed/{message_id}/reveal --------------------------------
@@ -3681,23 +3745,52 @@ struct RevealedSealed {
     html: Option<String>,
 }
 
+/// `?source=notification` on a reveal opened by tapping a notification.
+/// Absent (every older client) or `interactive` is the owner choosing to
+/// reveal on the Auth page or FYE.
+#[derive(Debug, Default, Deserialize)]
+pub struct RevealQuery {
+    #[serde(default)]
+    source: Option<String>,
+}
+
 pub async fn reveal_sealed(
     State(state): State<ApiState>,
     Path(message_id): Path<i64>,
+    Query(query): Query<RevealQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The source rides on the audit row's detail. The Auth page's pairing
+    // reads a reveal as "the owner used this code", which a tap on an
+    // unsolicited code's banner is not, so notification reveals never
+    // explain an alert (`sealed_rows` skips them).
+    let detail = match query.source.as_deref() {
+        None | Some("interactive") => None,
+        Some("notification") => Some("notification".to_string()),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "source must be notification or interactive",
+            ));
+        }
+    };
     let sealed = store_call(&state, move |store, account_id| {
-        // Audit BEFORE returning the body, recording only the message id so the
-        // log itself never leaks a secret.
+        // Membership FIRST, then the audit, then the body leaves: a reveal
+        // row means a real reveal of auth mail. The Auth page's pairing
+        // reads these rows as "the owner used this code", so a refused
+        // reveal of some other id must leave none (it would read as used if
+        // that message were later classified auth). The audit still lands
+        // before anything is returned, and a failed audit returns nothing.
+        // Only the message id is recorded, so the log never leaks a secret.
+        let body = store.sealed_body(account_id, message_id)?;
         store.append_audit(
             account_id,
             &NewAuditEntry {
                 actor: AUDIT_ACTOR.to_string(),
                 action: "reveal_sealed".to_string(),
                 target: Some(message_id.to_string()),
-                detail: None,
+                detail,
             },
         )?;
-        store.sealed_body(account_id, message_id)
+        Ok(body)
     })
     .await?;
 

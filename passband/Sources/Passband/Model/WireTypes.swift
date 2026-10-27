@@ -248,8 +248,17 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     /// what re-enters the standing band regardless of tier: a reminder is the
     /// user declaring the mail owed attention, and that outranks a verdict.
     var reminded_at: String?
+    /// The auth kinds triage gave this message (`decision.auth.kinds` on the v2
+    /// feed row, raw strings). Set only by the feed adapter (`AgentFeedItem.row`);
+    /// nil on every other listing. Non-empty means auth mail, which a For-your-
+    /// eyes row shows sealed and opens in the reveal (Lib/AuthPolicy.swift).
+    var auth_kinds: [String]? = nil
+    /// The decision's own `auth.critical`, beside `auth_kinds`.
+    var auth_critical: Bool? = nil
 
     var hasAttachments: Bool { has_attachments ?? false }
+    /// Auth mail by the row's own decision.
+    var isAuthRow: Bool { !(auth_kinds ?? []).isEmpty }
 
     /// The stamp a mail list dates and sorts this row by: arrival, or first
     /// listing when the daemon is too old to say when it arrived.
@@ -2035,6 +2044,15 @@ enum SealedKind: LenientRawEnum {
     case loginAlert
     case securityAlert
     case verification
+    /// A security setting on the owner's account changed (recovery phone, 2FA,
+    /// password, SSH key, a card added to a wallet...). The serious ones also
+    /// carry `SealedMeta.critical`.
+    case accountChange
+    /// A third-party app was granted access to the account.
+    case appGrant
+    /// Proof the owner used one account to sign in to another service ("You
+    /// shared some Google Account data with X"). Never asks a question.
+    case signinReceipt
     case unknown(String)
 
     var rawValue: String {
@@ -2045,6 +2063,9 @@ enum SealedKind: LenientRawEnum {
         case .loginAlert: "login_alert"
         case .securityAlert: "security_alert"
         case .verification: "verification"
+        case .accountChange: "account_change"
+        case .appGrant: "app_grant"
+        case .signinReceipt: "signin_receipt"
         case .unknown(let raw): raw
         }
     }
@@ -2059,6 +2080,9 @@ enum SealedKind: LenientRawEnum {
         case "login_alert": self = .loginAlert
         case "security_alert": self = .securityAlert
         case "verification": self = .verification
+        case "account_change": self = .accountChange
+        case "app_grant": self = .appGrant
+        case "signin_receipt": self = .signinReceipt
         default: self = .unknown(rawValue)
         }
     }
@@ -2079,6 +2103,39 @@ struct SealedMeta: Codable, Sendable, Identifiable, Hashable {
     var subject: String
     var kind: SealedKind?
     var received_at: String
+    /// A takeover-class account change (recovery phone moved, 2FA off, password
+    /// changed...). ABSENT from a daemon older than server-side verdicts, and
+    /// that absence is how the client tells the two apart: a daemon that
+    /// serves this key also serves `verdict` and the PUT that writes it (see
+    /// Lib/AuthPolicy.swift, `speaksVerdicts`).
+    var critical: Bool? = nil
+    /// The owner's ruling, "mine" or "not_mine", or null while unruled. Kept as
+    /// the raw string so a value this build has never heard of decodes as
+    /// "no verdict" instead of failing the whole list.
+    var verdict: String? = nil
+    /// The message id of the code, link or receipt that explains this alert
+    /// (the same service, within minutes). Never set on a critical change.
+    var explained_by: Int? = nil
+}
+
+/// POST /client/sealed/{id}/reveal's optional `?source=`: where the reveal came
+/// from. Absent means interactive (a page the human acted on).
+enum RevealSource {
+    static let notification = "notification"
+}
+
+/// PUT /client/sealed/{id}/verdict. `verdict` nil CLEARS the ruling, and the
+/// key must still be on the wire as an explicit null: the shared encoder drops
+/// nil optionals, so this one encodes by hand.
+struct SealedVerdictBody: Encodable, Sendable {
+    var verdict: String?
+
+    private enum CodingKeys: String, CodingKey { case verdict }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(verdict, forKey: .verdict)
+    }
 }
 
 /// POST /client/sealed/{id}/reveal. `body` is a sensitive one-time reveal:
@@ -2957,7 +3014,7 @@ struct AgentFeedItem: Codable, Sendable {
     /// Adapter for shared row/reader controls while those controls still use
     /// AttentionUpdate. The neutral legacy tier is never used for membership.
     var row: AttentionUpdate {
-        AttentionUpdate(
+        var row = AttentionUpdate(
             id: message_id, thread_id: thread_id, tier: .signal,
             importance: Int((attention.factors.importance * 100).rounded()),
             sender: from_addr,
@@ -2966,6 +3023,9 @@ struct AgentFeedItem: Codable, Sendable {
             deadline: attention.factors.attention_at?.value,
             from_name: from_name,
             subject: subject, status: .new, surfaced_at: received_at)
+        row.auth_kinds = decision.auth?.kinds
+        row.auth_critical = decision.auth?.critical
+        return row
     }
 
     var readingRow: AttentionUpdate {
@@ -2993,6 +3053,33 @@ struct AgentMessageDecision: Codable, Sendable {
     var summary: String
     var reason: String
     var records: [AgentRecordProposal]?
+    /// `auth`: which auth kinds triage found. Optional throughout so a
+    /// decision shaped any other way still decodes.
+    var auth: AgentAuthAssessment? = nil
+}
+
+/// core::triage::decision::AuthAssessment, the two fields a client reads.
+/// Kinds stay raw strings (`sign_in_link`, not the sealed `magic_link`).
+struct AgentAuthAssessment: Codable, Sendable {
+    var kinds: [String]?
+    var critical: Bool?
+
+    init(kinds: [String]? = nil, critical: Bool? = nil) {
+        self.kinds = kinds
+        self.critical = critical
+    }
+
+    /// Field by field and forgiving: a feed whose consumer cannot decode one
+    /// row loses the whole page, and this block is presentation, not membership.
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            kinds = nil
+            critical = nil
+            return
+        }
+        kinds = (try? c.decodeIfPresent([String].self, forKey: .kinds)) ?? nil
+        critical = (try? c.decodeIfPresent(Bool.self, forKey: .critical)) ?? nil
+    }
 }
 
 /// Presentation consumes explicit record facts; it never infers kinds from copy.

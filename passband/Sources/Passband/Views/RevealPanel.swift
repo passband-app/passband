@@ -10,9 +10,13 @@ import SwiftUI
 
 struct RevealPanel: View {
     let meta: SealedMeta
+    /// The reveal's audit source; nil = a page the human acted on.
+    var source: String? = nil
     let onClose: () -> Void
 
     @State private var revealState: Loadable<RevealedSealed> = .loading
+
+    private static let radius: CGFloat = 20
 
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
@@ -20,22 +24,28 @@ struct RevealPanel: View {
                 banner
 
                 VStack(alignment: .leading, spacing: Space.s4) {
-                    Text(meta.subject)
+                    Text(subject)
                         .font(Typo.ui(15, weight: .semibold))
                         .foregroundStyle(Palette.ink)
                     HStack(spacing: Space.scaled(5)) {
                         Text(fromLine)
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaint)
-                        if meta.kind != nil {
+                        if kind != nil {
                             Chip(
-                                text: AuthCopy.label(meta.kind), tone: Palette.lock,
-                                symbol: AuthCopy.symbol(meta.kind))
+                                text: AuthCopy.label(kind), tone: Palette.lock,
+                                symbol: AuthCopy.symbol(kind))
                         }
                     }
                 }
                 .padding(.horizontal, Space.s16)
                 .padding(.vertical, Space.s12)
+
+                if AuthPolicy.offersAnswer(question) {
+                    RevealQuestion(meta: question)
+                        .padding(.horizontal, Space.s16)
+                        .padding(.bottom, Space.s12)
+                }
 
                 Divider().overlay(Palette.hairline)
 
@@ -62,7 +72,11 @@ struct RevealPanel: View {
                     .padding(Space.s16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 480)
+                // The body takes every point the header and footer leave, so a
+                // long mail reads like mail rather than through a slot. The
+                // frame sizes itself to its document and hands the wheel to
+                // this ScrollView (PassthroughWebView), so there is one scroll.
+                .frame(maxHeight: .infinity)
 
                 HStack {
                     Text("cleared from memory when you close this.")
@@ -74,16 +88,32 @@ struct RevealPanel: View {
                 .padding(.horizontal, Space.s16)
                 .padding(.vertical, Space.s10)
             }
-            // A Mac sizes this against the window it floats in; a phone has one
-            // measure and the panel takes it.
+            // A READING SURFACE, NOT A DIALOG: the panel runs the height of the
+            // page it floats over. On a Mac it is as wide as the reader's own
+            // column (ThreadViewer.columnWidth) and never wider than the page;
+            // a phone has one measure and the panel takes it.
             #if os(macOS)
-                .frame(width: 720)
+                .frame(maxWidth: ThreadViewer.columnWidth, maxHeight: .infinity)
             #else
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, Space.s12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             #endif
-            .passbandGlass(.pane, cornerRadius: 20, tint: Palette.lockSoft.opacity(0.85))
+            // The banner's fill is a plain rectangle; without the clip its top
+            // corners square off the card's rounded ones.
+            .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+            .passbandGlass(.pane, cornerRadius: Self.radius, tint: Palette.lockSoft.opacity(0.85))
             .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
+            // The margin OUTSIDE the glass, so it shows the page rather than
+            // padding the card. The Mac's is the inset the Auth page under it
+            // already uses, so the card's edges sit where the page's content
+            // does: clear of the window's top bar (the scrim covers the whole
+            // page, header included), then the page's own gutter.
+            #if os(macOS)
+                .padding(.horizontal, Space.scaled(22))
+                .padding(.top, TopBar.height + Space.s16)
+                .padding(.bottom, Space.s16)
+            #else
+                .padding(Space.s12)
+            #endif
         }
         .keyContext(.modal)
         .keyBindings(.modal, [
@@ -122,17 +152,94 @@ struct RevealPanel: View {
         .background(Palette.lockSoft)
     }
 
+    /// What the header names. A notification tap opens this with only an id
+    /// and an address, so once the reveal lands its own fields fill the gaps.
+    private var subject: String {
+        meta.subject.isEmpty ? (revealState.value?.subject ?? "") : meta.subject
+    }
+    private var kind: SealedKind? { meta.kind ?? revealState.value?.kind }
+
+    /// The meta the question is judged on: the listed sealed row when there is
+    /// one (it carries the verdict and `critical`), else what was handed in,
+    /// with the kind the reveal reported.
+    private var question: SealedMeta {
+        if let listed = AppStore.shared.sealedMeta(message: meta.id) { return listed }
+        var m = meta
+        m.kind = kind
+        return m
+    }
+
     private var fromLine: String {
-        let name = revealState.value?.from_name.map { "\($0) · " } ?? ""
-        return "\(name)\(meta.sender) · \(Fmt.dateTime(meta.received_at))"
+        let revealed = revealState.value
+        let name = revealed?.from_name.map { "\($0) · " } ?? ""
+        let sender = meta.sender.isEmpty ? (revealed?.sender ?? "") : meta.sender
+        let at = meta.received_at.isEmpty ? (revealed?.received_at ?? "") : meta.received_at
+        return "\(name)\(sender) · \(Fmt.dateTime(at))"
     }
 
     private func load() async {
         await $revealState.load("reveal failed") {
-            try await APIClient.shared.revealSealed(meta.id)
+            do {
+                return try await APIClient.shared.revealSealed(meta.id, source: source)
+            } catch let error as APIError where error.status == 404 {
+                // Usually a code already archived, used or shredded: say so
+                // calmly rather than "reveal failed".
+                throw APIError(error.kind, 404, "This one is no longer in your mailbox. It may have been archived or shredded.")
+            }
         }
         // How often humans actually need behind the seal — the count and
         // nothing else; the body itself never leaves the view above.
         if revealState.value != nil { Analytics.capture("sealed_revealed") }
+    }
+}
+
+/// The question this auth mail asks, answered right where it was read: the
+/// same buttons as the Auth page's card, and once answered, the answer with an
+/// Undo. Writes through `AuthDecisions`, like the card. Only metadata here,
+/// never the body.
+struct RevealQuestion: View {
+    let meta: SealedMeta
+    private var decisions = AuthDecisions.shared
+
+    init(meta: SealedMeta) { self.meta = meta }
+
+    private var tone: Color { meta.isCritical ? Palette.danger : Palette.lock }
+
+    var body: some View {
+        let verdict = decisions.decision(meta)
+        let answers = AuthPolicy.answers(meta)
+        HStack(spacing: Space.s8) {
+            Image(systemName: verdict == nil ? "questionmark.circle" : "checkmark.circle")
+                .font(Typo.ui(12))
+                .foregroundStyle(verdict == nil ? tone : Palette.inkFaint)
+            Text(verdict.map { AuthPolicy.answeredLine(meta, $0) } ?? AuthPolicy.questionPrompt(meta))
+                .font(Typo.ui(12, weight: .medium))
+                .foregroundStyle(verdict == nil ? Palette.ink : Palette.inkDim)
+            Spacer(minLength: Space.s8)
+            if verdict == nil {
+                Button(answers.mine) { decisions.set(meta, .mine) }
+                    .buttonStyle(.glassProminent)
+                    .tint(Palette.accent)
+                Button(answers.notMine) { decisions.set(meta, .notMine) }
+                    .buttonStyle(.glass)
+                    .foregroundStyle(Palette.danger)
+            } else {
+                Button("Undo") { decisions.set(meta, nil) }
+                    .buttonStyle(.glass)
+                    .foregroundStyle(Palette.inkDim)
+            }
+        }
+        .font(Typo.micro)
+        .controlSize(.small)
+        .padding(.horizontal, Space.s12)
+        .padding(.vertical, Space.s8)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(verdict == nil ? tone.opacity(0.08) : Palette.hairline.opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(verdict == nil ? tone.opacity(0.25) : .clear, lineWidth: 1)
+        )
     }
 }

@@ -593,7 +593,7 @@ Known limits:
   begins.
 
 The triage decision carries an optional `ends` for Reading mail (prompt version
-`agent-triage-v12`): when the offer, sale or event the message is about ends,
+`agent-triage-v14`): when the offer, sale or event the message is about ends,
 only when the message states it. It is validated with the same parser smart clear
 reads it with, so a local time with no offset is accepted. Decisions stored before it read as `null`. The
 prompt version is a label in each run's metadata; changing it re-triages

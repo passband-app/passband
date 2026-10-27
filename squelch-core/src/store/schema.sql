@@ -1065,6 +1065,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_account_ts ON audit_log(account_id, ts);
+-- The Auth page asks whether the owner revealed a message (an explained
+-- sign-in alert needs the code it pairs with to have been used).
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(account_id, action, target);
 
 -- NOTIFICATION EVENT LOG. The source of truth for "something worth interrupting
 -- the user happened", written by the SYNC ENGINE at each triage verdict — never
@@ -1712,6 +1715,13 @@ CREATE TABLE IF NOT EXISTS agent_message_decisions (
     decided_at TEXT NOT NULL,
     PRIMARY KEY(account_id,message_id)
 );
+-- The few decisions that can hold FYE on their own (`auth_fye_threads_cte!`):
+-- a partial index on EXACTLY the expression that query filters by, so FYE
+-- membership never parses every decision in the mailbox. Guarded by
+-- `json_valid` inside a CASE (evaluated lazily, unlike AND): an index
+-- expression that raised on malformed JSON would make that row's INSERT fail.
+CREATE INDEX IF NOT EXISTS idx_decisions_critical ON agent_message_decisions(account_id, message_id)
+    WHERE CASE WHEN json_valid(decision_json) THEN json_extract(decision_json,'$.auth.critical') END = 1;
 CREATE TABLE IF NOT EXISTS agent_message_destinations (
     account_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
@@ -2168,6 +2178,24 @@ CREATE TABLE IF NOT EXISTS archive_walk (
     covered_to TEXT
 );
 
+-- THE OWNER'S RULING ON AUTH MAIL ("That was me" / "Not me"), one row per
+-- message. Written only by the human door (`PUT /client/sealed/{id}/verdict`,
+-- audited) and served only there; no agent-door path returns a verdict. It
+-- moves FYE membership: `not_mine` puts the message there, and `mine` takes a
+-- critical account change back out (see `auth_fye_sql!`). The FYE list is
+-- shared with the agent door, so an UNRESTRICTED message's presence there can
+-- reflect a ruling; restricted mail never reaches the agent wherever it sits.
+-- It also keeps evidence from the shredder. No row is no ruling. It outlives
+-- re-triage on purpose: the owner ruled on the message, not on one model
+-- run's reading of it. A ruling on a legacy sealed row (no agent decision) is
+-- kept and served but never moves FYE.
+CREATE TABLE IF NOT EXISTS auth_verdicts (
+    account_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    verdict    TEXT NOT NULL CHECK(verdict IN ('mine','not_mine')),
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, message_id)
+);
 -- Auto-translate (docs/TRANSLATION.md): the English version of mail written in
 -- another language, BESIDE the message. `messages.subject`/`body`/`body_html`
 -- are never rewritten. A SERVED translation (`done`, `incomplete`) IS part of

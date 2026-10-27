@@ -355,8 +355,15 @@ final class SitrepPoller {
         // from the mailbox just left into the read model of the one arriving
         // would seed the new account's seen-set from the old account's mail.
         let e = store.epoch
+        // Numbered BEFORE the request, so a verdict written meanwhile knows
+        // this list may predate it (`AuthDecisions.listed`).
+        let fetch = AuthDecisions.shared.beginListFetch()
         guard let sealed = try? await APIClient.shared.listSealed() else { return }
         guard store.isCurrent(e) else { return }
+        // A list that started before one already applied is older news: it can
+        // still carry a verdict as null after the PUT, and would reopen a card.
+        guard AuthDecisions.shared.isFresh(fetch) else { return }
+        defer { AuthDecisions.shared.listed(sealed, fetch: fetch) }
         // ASSIGN ONLY ON CHANGE, for the same reason `performPull` does:
         // @Observable notifies on assignment, not on difference, and the
         // watcher downstream of this is an `onChange`.
@@ -386,6 +393,7 @@ final class SitrepPoller {
         // the switch anyway), and nothing it asked for has been answered.
         guard !Task.isCancelled, store.isCurrent(e), store.connStatus == .connected else { return .skipped }
         do {
+            let sealedFetch = AuthDecisions.shared.beginListFetch()
             async let feed = APIClient.shared.getFeed(destination: "fye", limit: Self.pageLimit)
             async let stats = APIClient.shared.getStats()
             async let sealed = APIClient.shared.listSealed()
@@ -393,8 +401,12 @@ final class SitrepPoller {
             guard !Task.isCancelled, store.isCurrent(e) else { return .skipped }
             // One ordered list. The older bands remain empty until the shared
             // reader state no longer needs their compatibility fields.
+            // The sealed leg only lands if no newer sealed list has (see
+            // `refreshSealed`); otherwise the board keeps the newer one.
+            let sealedFresh = AuthDecisions.shared.isFresh(sealedFetch)
             let next = SitrepData(
-                standing: page.items.map(\.row), new: [], open: [], sealed: sl, totalCount: page.total_count)
+                standing: page.items.map(\.row), new: [], open: [],
+                sealed: sealedFresh ? sl : store.sitrep.sealed, totalCount: page.total_count)
             // A row naming a message newer than a thread's cached copy is mail
             // that copy predates; it goes before anything can open it.
             ThreadPrefetch.shared.retire(next.standing.lazy.map { ($0.thread_id, $0.id) })
@@ -405,6 +417,7 @@ final class SitrepPoller {
             // the sync clock and change on nearly every tick, and while they
             // rode inside `SitrepData` this compare never once said "same".
             if next != store.sitrep { store.sitrep = next }
+            if sealedFresh { AuthDecisions.shared.listed(sl, fetch: sealedFetch) }
             if st != store.stats { store.stats = st }
             // Whose stats these are: the epoch this pull was asked under,
             // which the guard above has just confirmed is the live one. Set

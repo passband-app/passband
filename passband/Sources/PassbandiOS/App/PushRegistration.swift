@@ -35,8 +35,8 @@ final class PushRegistration {
     /// token), because the feed's first replay on a cold launch usually lands
     /// before this run's registration does, and that replay is exactly the
     /// backlog that must not banner again. Set by an accepted registration;
-    /// cleared only by a definite refusal (4xx), a failed APNs registration,
-    /// an unregister, or the account's removal (the key is account-scoped
+    /// cleared only by a definite refusal (401/403/404/410/422), a failed APNs
+    /// registration, or the account's removal (the key is account-scoped
     /// defaults). A timeout or being offline changes nothing: the daemon still
     /// has the device row.
     func covers(_ account: UUID) -> Bool {
@@ -175,7 +175,8 @@ final class PushRegistration {
 
     /// POST one authenticated JSON body to the human door. Neither the daemon
     /// URL nor the capability token reaches a log, here or in an error.
-    /// 2xx accepted, 4xx refused, anything else (no answer, 5xx) unknown.
+    /// 2xx accepted; a refusal that means "this device is not taken" refused;
+    /// anything else (no answer, 5xx, a 429 rate limit) unknown.
     @discardableResult
     private func post(_ path: String, body: [String: String], with settings: ConnectionSettings)
         async -> Answer
@@ -198,7 +199,7 @@ final class PushRegistration {
         else { return .unknown }
         switch http.statusCode {
         case 200..<300: return .accepted
-        case 400..<500: return .refused
+        case 401, 403, 404, 410, 422: return .refused
         default: return .unknown
         }
     }

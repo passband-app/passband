@@ -1297,6 +1297,22 @@ final class EmailFrameCoordinator: NSObject {
     /// covers the bubble flag, so what it turns away is the same document.
     private var documentBubble = false
 
+    /// The last document a host ASKED for, kept so a frame whose content
+    /// process WebKit killed can be given it again. Nothing else would: the
+    /// host's next update is turned away by a load guard that still believes
+    /// the dead document is there.
+    private var lastLoad: (html: String, source: Int, allowRemote: Bool, bubble: Bool, poolKey: String?)?
+    /// The document a failed navigation has already been retried for. ONE
+    /// retry, because the retry is the next update and every failure writes
+    /// @State through `onLoaded`: a document that always fails would otherwise
+    /// reload itself forever.
+    private var retriedSignature: String?
+    /// The document a dead content process was last reloaded for, cleared the
+    /// moment that reload finishes. A process that dies AGAIN before it does is
+    /// one this document kills, and reloading it would be a crash loop: the
+    /// frame is left blank instead, and a reopen builds a fresh one.
+    private var reloadedAfterTermination: String?
+
     init(
         onHeight: @escaping (FrameMeasurement) -> Void, onLoaded: @escaping () -> Void,
         onQuotedFound: @escaping (Bool) -> Void, onLink: @escaping (String) -> Void
@@ -1339,6 +1355,7 @@ final class EmailFrameCoordinator: NSObject {
         // a blank document lands the real one as a SECOND navigation — which
         // is what makes the load race reachable at all.
         guard !html.isEmpty else { return }
+        lastLoad = (html, source, allowRemote, bubble, poolKey)
         // THE DENSITY IS NOT PART OF THE SIGNATURE, on purpose: a flip is a
         // restyle of the document already here, not a new document to load.
         // Reloading every open message to change its padding would throw away
@@ -1503,6 +1520,7 @@ final class EmailFrameCoordinator: NSObject {
     /// point: a pushed height says nothing about which state of the document
     /// produced it, while an answer belongs to the question.
     func documentDidLoad(_ webView: WKWebView) {
+        reloadedAfterTermination = nil
         appliedCollapse = true
         documentLive = true
         // The density FIRST, and without a settle of its own: script calls run
@@ -1520,8 +1538,55 @@ final class EmailFrameCoordinator: NSObject {
     /// waiting for it would refuse every later height this frame ever offers —
     /// including the ones a retry or a resize produces. Releasing the wait
     /// costs nothing when there is genuinely nothing more to come.
-    func documentDidFail() {
+    ///
+    /// And the load guard forgets the document, once, so the update that
+    /// releasing the wait provokes loads it again instead of leaving the frame
+    /// empty for as long as the view lives. NOT for a cancellation: that is a
+    /// load superseded by a newer one (or one layer 4 turned away), and the
+    /// document the guard names is on its way, so forgetting it would only
+    /// load it twice.
+    func documentDidFail(_ error: Error) {
+        let e = error as NSError
+        let cancelled =
+            (e.domain == NSURLErrorDomain && e.code == NSURLErrorCancelled)
+            || (e.domain == WKError.errorDomain && e.code == 102)  // interrupted by policy
+        if !cancelled, loadedSignature != retriedSignature {
+            retriedSignature = loadedSignature
+            loadedSignature = nil
+        }
         onLoaded()
+    }
+
+    /// WEBKIT KILLED THIS FRAME'S CONTENT PROCESS — which iOS does freely to a
+    /// backgrounded app or one short of memory. The view survives, blank, and
+    /// nothing about it says so: the load guard still names the old document,
+    /// so no update would ever reload it. Load it again now.
+    func documentDidTerminate(_ webView: WKWebView) {
+        documentLive = false
+        // A load the process died holding may never reach the policy gate, and
+        // a permission left over from it would wave through the next
+        // navigation nobody started.
+        pendingOwnLoads = 0
+        guard let last = lastLoad else {
+            loadedSignature = nil
+            return
+        }
+        let signature = Self.signature(
+            allowRemote: last.allowRemote,
+            document: Self.documentHash(source: last.source, bubble: last.bubble))
+        // Died again before the last reload ever finished: give up. The guard
+        // keeps naming the document so no update retries it either, `loaded`
+        // is false so `release` throws the frame away, and the host is told
+        // there is nothing more to wait for.
+        guard reloadedAfterTermination != signature else {
+            onLoaded()
+            return
+        }
+        reloadedAfterTermination = signature
+        loadedSignature = nil
+        load(
+            webView, html: last.html, source: last.source, allowRemote: last.allowRemote,
+            bubble: last.bubble, poolKey: last.poolKey)
     }
 
     /// TELL THE HOST TO TAKE ONE LAST MEASUREMENT, and hand it the number.
@@ -1962,7 +2027,7 @@ final class FrameRelay: NSObject, WKScriptMessageHandler, WKNavigationDelegate,
         _ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error
     ) {
         loaded = false
-        owner?.documentDidFail()
+        owner?.documentDidFail(error)
     }
 
     func webView(
@@ -1970,7 +2035,21 @@ final class FrameRelay: NSObject, WKScriptMessageHandler, WKNavigationDelegate,
         withError error: Error
     ) {
         loaded = false
-        owner?.documentDidFail()
+        owner?.documentDidFail(error)
+    }
+
+    /// The content process is gone, so the document is too, whatever `loaded`
+    /// said. Owned, the frame reloads; parked, it is thrown out — a pool hit is
+    /// adopted WITHOUT a load, so a dead parked frame is a blank message on
+    /// every reopen until the app is quit.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        loaded = false
+        lastMeasurement = nil
+        if let owner {
+            owner.documentDidTerminate(webView)
+        } else {
+            WebFramePool.shared.discardParked(self)
+        }
     }
 
     /// No popups, ever.
@@ -2192,6 +2271,17 @@ final class WebFramePool {
             prerendered.remove(oldest)
             if let evicted = frames.removeValue(forKey: oldest) { Self.discard(evicted) }
         }
+    }
+
+    /// Drop the parked frame this relay belongs to, if one is: its content
+    /// process died while it sat here.
+    func discardParked(_ relay: FrameRelay) {
+        guard let key = frames.first(where: { $0.value.relay === relay })?.key,
+            let entry = frames.removeValue(forKey: key)
+        else { return }
+        order.removeAll { $0 == key }
+        prerendered.remove(key)
+        Self.discard(entry)
     }
 
     /// Drop every parked frame. An account switch: the key's `message` is a

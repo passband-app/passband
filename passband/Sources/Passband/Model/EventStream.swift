@@ -338,11 +338,14 @@ final class EventStream {
                 // NO BANNER FOR THE BACKLOG, where pushes stand behind it:
                 // while the app was away each of these reached the lock screen
                 // as a push, and replayed now they would pop up again as the
-                // app opens. Only for an account this phone is registered for
-                // push with; without that (notifications refused, a daemon with
-                // no relay, a failed registration) the catch-up banner is the
-                // only word the reader gets, and it stays. The Mac has no push
-                // behind it at all, so its catch-up banners all stay.
+                // app opens. Only for an account whose daemon has accepted this
+                // phone's push token (`PushRegistration.covers`, kept across
+                // launches); without that (a refused or failed registration)
+                // the catch-up banner stays. CAVEAT: the daemon accepts a token
+                // whether or not it has a relay to push through, so a
+                // self-hosted daemon with no relay counts as covered and its
+                // backlog goes unbannered; the board still shows it. The Mac
+                // has no push behind it at all, so its catch-up banners stay.
                 if PushRegistration.shared.covers(accountId),
                     EventBanner.isBacklog(createdAt: event.created_at, connectedAt: connectedAt)
                 {

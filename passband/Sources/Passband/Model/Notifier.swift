@@ -40,10 +40,29 @@ import os
 /// would then pop up as if new. Process memory is enough: a cold launch's
 /// replay is the backlog rule's (`EventBanner.isBacklog`), and a tap that
 /// launched the app lands here before the feed connects.
+///
+/// Remembered for TEN MINUTES, like the Notification Center check: past that
+/// the two copies of one mail have long since both arrived, and an id reused
+/// after a daemon's database is rebuilt must not be swallowed.
 enum ToldEvents {
-    private static let set = OSAllocatedUnfairLock(initialState: Set<String>())
-    static func note(_ identity: String) { set.withLock { _ = $0.insert(identity) } }
-    static func contains(_ identity: String) -> Bool { set.withLock { $0.contains(identity) } }
+    private static let told = OSAllocatedUnfairLock(initialState: [String: Date]())
+    private static let window: TimeInterval = 600
+
+    static func note(_ identity: String) {
+        let now = Date()
+        told.withLock { seen in
+            seen = seen.filter { now.timeIntervalSince($0.value) < window }
+            seen[identity] = now
+        }
+    }
+
+    static func contains(_ identity: String) -> Bool {
+        let now = Date()
+        return told.withLock { seen in
+            guard let at = seen[identity] else { return false }
+            return now.timeIntervalSince(at) < window
+        }
+    }
 }
 
 @MainActor

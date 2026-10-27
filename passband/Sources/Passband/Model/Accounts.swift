@@ -152,6 +152,9 @@ enum AccountIndex {
         "passband.thread-style",
         // The tag of the profile photo held for this account (AccountPhotos).
         "passband.account-photo-tag",
+        // Whether this phone's push token is registered with that account's
+        // daemon (PushRegistration.covers); gone with the account.
+        "passband.push.covered",
         // Search history (RecentSearchStore): the reader's own words about
         // their mail, questions to the agent among them. Removing the account
         // takes them with it.

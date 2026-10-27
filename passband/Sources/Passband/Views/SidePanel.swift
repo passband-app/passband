@@ -430,6 +430,9 @@ struct SearchView: View {
     private func header(above i: Int) -> String? {
         let hits = store.search.hits
         if store.search.showsListing { return i == 0 ? "Newest first" : nil }
+        // PLAIN ORDER (a daemon that offers it): ranked as found, not split by
+        // status, so there is no turn-over to label.
+        if store.searchPlainOrder { return nil }
         guard i == 0 || hits[i].is_done != hits[i - 1].is_done else { return nil }
         return hits[i].is_done.map { $0 ? "Done" : "Not done" } ?? "Results"
     }
@@ -939,17 +942,7 @@ private struct HitRow: View {
     }
 
     private func highlight(_ text: String, matches: [String]) -> AttributedString {
-        var attr = AttributedString(text)
-        for term in matches where !term.isEmpty {
-            var from = attr.startIndex
-            while from < attr.endIndex,
-                let range = attr[from...].range(of: term, options: .caseInsensitive) {
-                attr[range].backgroundColor = Palette.searchMatch
-                attr[range].foregroundColor = Palette.searchMatchInk
-                from = range.upperBound
-            }
-        }
-        return attr
+        SearchHighlight.paint(text, matches: matches)
     }
 }
 

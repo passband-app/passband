@@ -198,9 +198,34 @@ struct MobileSearchView: View {
             .padding(.top, 8)
     }
 
-    /// What sits under the agent's answer is the plain search, and says so.
+    /// The query's words as the daemon parsed them: what a hit is lit with
+    /// when the daemon does not say which words matched (the Mac's `terms`).
+    private var terms: [String] {
+        store.search.diagnostics?.terms.map(\.text) ?? []
+    }
+
+    /// What sits under the agent's answer is the plain search, and says so
+    /// with weight: a full rule and a heading in ink, so the agent's reading
+    /// and the list of mail never read as one block.
     private var resultsHeader: some View {
-        StatusHeader(title: "Search results")
+        VStack(alignment: .leading, spacing: 12) {
+            Rectangle()
+                .fill(Palette.hairlineStrong)
+                .frame(height: 1)
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Palette.inkDim)
+                Text("Search results")
+                    .font(Typo.ui(14, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+        }
+        .padding(.top, 18)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - the three shapes
@@ -295,6 +320,10 @@ struct MobileSearchView: View {
                 // not split: it is one run in date order under one header.
                 if store.search.showsListing {
                     if i == 0 { StatusHeader(title: "Newest first").plainRow() }
+                } else if store.searchPlainOrder {
+                    // Ranked as found, not split by status: nothing to label
+                    // (the Mac's `header(above:)` says the same).
+                    EmptyView()
                 } else if i == 0 || hit.is_done != hits[i - 1].is_done {
                     // Under "Search results" a bare "Results" would say it
                     // twice; Done / Not done still split the run beneath it.
@@ -302,7 +331,7 @@ struct MobileSearchView: View {
                         StatusHeader(isDone: hit.is_done).plainRow()
                     }
                 }
-                HitRow(hit: hit) {
+                HitRow(hit: hit, terms: terms) {
                     // OPENING A HIT IS WHERE A QUERY STOPS BEING KEYSTROKES,
                     // on this shell as on the Mac: the ring's one rule, called
                     // from the one gesture here that acts on the results.
@@ -666,12 +695,15 @@ private struct AgentAsk: Hashable, Identifiable {
 /// because a snippet cut to one is just a longer subject.
 private struct HitRow: View {
     let hit: SearchHit
+    /// The query's words, for a daemon too old to say which ones matched.
+    let terms: [String]
     let onOpen: () -> Void
 
     var body: some View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(hit.subject)
+                // The matched words lit the Mac's way (`SearchHighlight`).
+                Text(SearchHighlight.paint(hit.subject, matches: hit.subject_matches ?? terms))
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
@@ -687,7 +719,8 @@ private struct HitRow: View {
                 // The CLEANED excerpt, prepared once by `SearchFetch`: tracking
                 // links shown as their readable destination, footers dropped.
                 // The raw one only for a hit that somehow skipped that pass.
-                Text(hit.displaySnippet ?? hit.snippet)
+                Text(SearchHighlight.paint(
+                    hit.displaySnippet ?? hit.snippet, matches: hit.snippet_matches ?? terms))
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaintest)
                     .lineLimit(2)

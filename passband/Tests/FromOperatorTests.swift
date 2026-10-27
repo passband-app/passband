@@ -22,6 +22,7 @@ struct FromOperatorTests {
         aHeldRowMustStillMatch()
         pickingASenderListsTheirMail()
         operatorsAloneAreAListing()
+        searchOrderFollowsTheDaemon()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -184,6 +185,26 @@ struct FromOperatorTests {
         if got != expected {
             failures += 1
             print("FAIL isListing(\(query.debugDescription)) = \(got), expected \(expected)")
+        }
+    }
+
+    static func searchOrderFollowsTheDaemon() {
+        // An older daemon: today's ask exactly, grouped unless a listing.
+        order("wifi", plain: false, is: (true, false))
+        order("from:dan@example.com", plain: false, is: (false, false))
+        // A daemon with plain order: ranked, sent mail kept.
+        order("wifi", plain: true, is: (false, true))
+        order("wifi from:dan", plain: true, is: (false, true))
+        // A listing is asked as it always was.
+        order("from:dan@example.com", plain: true, is: (false, false))
+    }
+
+    static func order(_ term: String, plain: Bool, is expected: (Bool, Bool)) {
+        checks += 1
+        let got = SearchOrder.ask(term, plainOrder: plain)
+        if got.unfinishedFirst != expected.0 || got.includeSent != expected.1 {
+            failures += 1
+            print("FAIL SearchOrder.ask(\(term.debugDescription), plain: \(plain)) = \(got), expected \(expected)")
         }
     }
 

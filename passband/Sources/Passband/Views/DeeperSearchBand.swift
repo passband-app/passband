@@ -68,6 +68,16 @@ struct DeeperSearchBand: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(Palette.hairline, lineWidth: 0.75)
         )
+        // THE WHOLE BOX IS THE WAY INTO THE CHAT, on a shell that hosts its
+        // own (the phone): a tap anywhere but on an email card, or on one of
+        // the box's own buttons, opens the conversation. Those are Buttons and
+        // take their own taps first; this hears only what lands between them.
+        // Only once there is a conversation the chat can take.
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onTapGesture {
+            guard let openInChat, tapOpensChat else { return }
+            openInChat()
+        }
         .padding(.horizontal, expanded ? 0 : Space.s14)
         .padding(.bottom, expanded ? 0 : Space.s8)
         // STRUCTURE ONLY, for AskBar's reason: rows arriving is a change worth
@@ -134,6 +144,12 @@ struct DeeperSearchBand: View {
         }
         if !store.canOpenSearchLaneInChat { return "The chat is busy answering something else." }
         return "Continue in chat: the full answer, and room for follow-ups. ⌘Return"
+    }
+
+    /// The box's background tap goes to the chat: the same moment the expand
+    /// button is offered and enabled.
+    private var tapOpensChat: Bool {
+        search.laneStarted && !session.transcript.isEmpty && hostedChatOffered && hostedChatReady
     }
 
     /// A caller-owned chat is offered once the lane has stopped talking: there

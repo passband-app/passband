@@ -1348,9 +1348,20 @@ async fn discard_sent_attachments(state: &ApiState, draft_id: Option<i64>, ids: 
 
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
-    /// Human search's status grouping; omitted by agent callers.
+    /// Human search's status grouping; omitted by agent callers. Older apps
+    /// also lean on it to bring the owner's sent mail into keyword mode, so it
+    /// keeps implying `include_sent`.
     #[serde(default)]
     unfinished_first: bool,
+    /// Human search's corpus, independent of order: the owner's own sent mail
+    /// alongside inbound, as hybrid/semantic already search. A client that
+    /// wants plain ranked order (`unfinished_first` off) sends this to keep
+    /// the corpus `unfinished_first=true` gave it. Advertised as
+    /// `search_plain_order` on `/client/stats`. It widens nothing beyond the
+    /// owner's own mail: sealed, spam and every readable filter apply as for
+    /// any other search.
+    #[serde(default)]
+    include_sent: bool,
     /// The raw query, operators included (`invoice from:jane after:2026-01-01`).
     /// Parsed exactly once, here, then threaded into the store as
     /// `(text, filter)`.
@@ -1617,10 +1628,18 @@ pub async fn search(
     };
 
     let unfinished_first = query.unfinished_first;
+    let include_sent = query.include_sent;
     let grouped_recall = unfinished_first && effective != SearchMode::Keyword;
-    if resume.is_some() && !grouped_recall {
+    // RECALL PAGES BY WHAT IT HAS SERVED, not by offset, for the app: both the
+    // grouped order and plain order (`include_sent` alone). The candidate pool
+    // grows with the offset, and a fused ranking over a bigger pool is not the
+    // same ranking, so an offset into it repeats and skips hits. The cursor
+    // carries the served ids and the pool size instead. Callers that send
+    // neither flag keep offset paging exactly as before.
+    let recall_paging = (unfinished_first || include_sent) && effective != SearchMode::Keyword;
+    if resume.is_some() && !recall_paging {
         return Err(ApiError::bad_request(
-            "recall cursor requires grouped recall",
+            "recall cursor requires unfinished_first or include_sent",
         ));
     }
     let k = recall_k(limit, offset, &filter);
@@ -1662,19 +1681,20 @@ pub async fn search(
         let started = std::time::Instant::now();
         let queue_ms = queued_at.elapsed().as_millis();
         let mut filter = filter;
-        filter.include_sent = effective != SearchMode::Keyword || unfinished_first;
+        filter.include_sent =
+            effective != SearchMode::Keyword || unfinished_first || include_sent;
         filter.unfinished_first = unfinished_first;
         let mut resume = resume.unwrap_or_default();
-        if grouped_recall {
+        if recall_paging {
             filter.exclude_ids = resume.seen.clone();
-            if resume.done { filter.done = Some(true); }
+            if grouped_recall && resume.done { filter.done = Some(true); }
         }
         let mut current_k = k.max(resume.k).max(resume.seen.len().saturating_add(limit as usize)).min(600);
         // The strict count worth sharing, and only when it answers the same
         // question the diagnostics ask: no operator predicates. With a `from:`
         // or a date bound the page counted a narrower set, and the two deserve
         // their own counts.
-        let page_limit = if grouped_recall { limit.min(600 - resume.seen.len() as u32) } else { limit };
+        let page_limit = if recall_paging { limit.min(600 - resume.seen.len() as u32) } else { limit };
         let mut counted_strict = None;
         let (items, window_full): (Vec<SearchItem>, bool) = loop {
             let (items, window_full): (Vec<SearchItem>, bool) = match effective {
@@ -1760,16 +1780,17 @@ pub async fn search(
             // A first page containing enough unfinished hits needs no larger pool.
             // Before crossing into done mail, exhaust the bounded recall window.
             let unfinished = items.iter().filter(|item| !item.hit.is_done).count();
-            if grouped_recall && window_full && current_k < 600
-                && (items.len() < limit as usize || (!resume.done && unfinished < limit as usize)) {
+            if recall_paging && window_full && current_k < 600
+                && (items.len() < limit as usize
+                    || (grouped_recall && !resume.done && unfinished < limit as usize)) {
                 current_k = (current_k * 2).max(current_k + limit as usize).min(600);
                 continue;
             }
             break (items, window_full);
         };
-        let recall_next = if grouped_recall && !items.is_empty() {
+        let recall_next = if recall_paging && !items.is_empty() {
             resume.k = current_k;
-            resume.done |= items.iter().any(|item| item.hit.is_done);
+            resume.done |= grouped_recall && items.iter().any(|item| item.hit.is_done);
             resume.seen.extend(items.iter().map(|item| item.hit.id));
             if resume.seen.len() < 600 && (items.len() == limit as usize || window_full) {
                 Some(resume.encode())
@@ -1800,7 +1821,7 @@ pub async fn search(
     // sequence, and ranking is deterministic). A short page that served
     // NOTHING ends the walk even window-full: the same offset would rebuild
     // the same window and hand the client the same empty page forever.
-    let next = if grouped_recall {
+    let next = if recall_paging {
         recall_next
     } else {
         match next_cursor(items.len(), limit, offset) {
@@ -4042,6 +4063,12 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // (serde default) and would overwrite its single new-message draft with a
     // forward, so the client must not write those shapes without this flag.
     body["drafts_v2"] = json!(true);
+    // And for search order: whether `include_sent` on GET /client/search
+    // exists, so the app can drop `unfinished_first` (plain ranked order)
+    // without losing the owner's sent mail from keyword results. Another
+    // silent failure: an old daemon ignores the key and keyword searches lose
+    // sent mail, so the client keeps `unfinished_first=true` without the flag.
+    body["search_plain_order"] = json!(true);
     // And for scheduled send: whether /client/scheduled (POST, GET, DELETE
     // /{id}, POST /{id}/now) exists. Not a silent failure this time but a
     // LOUD one: an old daemon 404s every one of those routes, so a schedule

@@ -668,6 +668,8 @@ final class AppStore {
         if dead != gmailDisconnected { gmailDisconnected = dead }
         let draftsV2 = stats?.drafts_v2 == true
         if draftsV2 != draftsV2Available { draftsV2Available = draftsV2 }
+        let plainOrder = stats?.search_plain_order == true
+        if plainOrder != searchPlainOrder { searchPlainOrder = plainOrder }
         let scheduled = stats?.scheduled_send == true
         if scheduled != scheduledSendAvailable { scheduledSendAvailable = scheduled }
         let sharing = stats?.invite_sharing == true
@@ -4778,6 +4780,15 @@ final class AppStore {
     /// on an old daemon. Note `DraftSaver.save` tells the two nil cases apart;
     /// this flag does not need to. Stored: see `noteStats`.
     private(set) var draftsV2Available = false
+
+    /// Whether panel search asks for plain ranked order: no Not done / Done
+    /// split, the owner's sent mail kept by `include_sent`. Read off the
+    /// stats, STRICTLY `== true`, so an older daemon (or no stats yet) keeps
+    /// the grouped ask that brings sent mail into its keyword results.
+    /// `SearchFetch.page` reads it per fetch; see `SearchOrder` for the one
+    /// exception (a grouped recall cursor finishes grouped). Stored: see
+    /// `noteStats`.
+    private(set) var searchPlainOrder = false
 
     /// Fetch the drafts list into `draftsRows`. The drafts page calls it on open.
     ///

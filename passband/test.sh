@@ -598,6 +598,21 @@ run_suite sealed-event \
   Sources/Passband/Model/EventBanner.swift \
   Tests/SealedEventTests.swift
 
+# What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
+# sealed row from both daemon versions, which kinds open a question and for
+# how long, explained alerts, new-device bursts, critical changes, and the move
+# of the old device-local ledger up to a daemon that keeps verdicts. Pure, so
+# the Auth page, the rail badge and the phone all count by the one copy.
+run_suite auth-policy \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AuthPolicy.swift \
+  Tests/AuthPolicyTests.swift
+
 # Whether a search is a lookup or a question, what the setting lets that verdict
 # do, the single-slot queue that keeps the agent lane narrowing one need instead
 # of restarting, and the prompt it does that under. All four are pure by design

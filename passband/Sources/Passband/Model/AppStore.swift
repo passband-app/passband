@@ -612,6 +612,12 @@ final class AppStore {
     /// Model/Badge.swift.
     var sitrep = SitrepData() {
         didSet {
+            // The threads `ThreadPrefetch` refuses follow both signals: the
+            // sealed list and the feed rows' own decisions. (Verdict writes
+            // settle in `AuthDecisions.listed`, which the poller calls.)
+            if sitrep.sealed != oldValue.sealed || sitrep.standing != oldValue.standing {
+                authThreadIds = AuthPolicy.authThreadIds(standing: sitrep.standing, sealed: sitrep.sealed)
+            }
             guard sitrep.standing != oldValue.standing else { return }
             Badge.refresh(sitrep.standing)
             noteHeadlineBand()
@@ -1211,6 +1217,43 @@ final class AppStore {
     /// The phone's shell has opened the page `requestAuthPage` asked for.
     func consumeAuthPage() { pendingAuthPage = false }
 
+    /// A sealed message to open in the one-time reveal panel from somewhere that
+    /// is not an auth page: an auth row in For your eyes, or a notification tap
+    /// on auth mail. Mounted by ActionLayer on the Mac and by the phone's
+    /// shell; the Auth pages keep their own. Cleared by the account wipe.
+    ///
+    /// Only those surfaces route here. The human thread view SERVES threads
+    /// holding auth mail (by design), so search, All Mail, reply and a thread
+    /// that mixes a code with correspondence open the normal reader.
+    var revealRequest: SealedMeta?
+    /// Where `revealRequest` came from, for the reveal's audit source: nil for
+    /// a page the human acted on, `RevealSource.notification` for a banner tap.
+    private(set) var revealSource: String?
+
+    /// Threads that hold auth mail, per the sealed list AND the For-your-eyes
+    /// rows' own decisions: what `ThreadPrefetch` refuses to warm or cache.
+    /// A set, kept in step by `sitrep`'s didSet, because every prefetch asks.
+    @ObservationIgnored private(set) var authThreadIds: Set<String> = []
+
+    /// The sealed metadata for one message id, when it is auth mail.
+    func sealedMeta(message id: Int) -> SealedMeta? {
+        sitrep.sealed.first { $0.id == id }
+    }
+
+    /// The auth metadata for a For-your-eyes row, or nil when it is not auth
+    /// mail. The row's own decision decides first (`decision.auth.kinds`), so
+    /// a sealed list that is blank or stale (an account-switch snapshot) never
+    /// turns an auth row into a normal one; the sealed list is the second
+    /// signal and, when it has the row, the source of its verdict fields.
+    func authMeta(for update: AttentionUpdate) -> SealedMeta? {
+        AuthPolicy.authMeta(for: update, sealed: sealedMeta(message: update.id))
+    }
+
+    func requestReveal(_ meta: SealedMeta, source: String? = nil) {
+        revealSource = source
+        revealRequest = meta
+    }
+
     // MARK: read tracking
     /// The daemon's tracking answer, fetched once on connect. nil = never
     /// asked (or the daemon did not answer), which reads exactly like
@@ -1347,7 +1390,14 @@ final class AppStore {
         }
     }
 
-    private init() {}
+    private init() {
+        // A thread holding auth mail is never fetched speculatively or kept in
+        // the cache: its body is meant to arrive through the audited reveal
+        // (or a reader the human opened on purpose), not a hover or a warm.
+        // Keyed by `authThreadIds`, which the feed rows' own decisions feed
+        // too, so a blank sealed list cannot reopen the door.
+        ThreadPrefetch.shared.refuses = { AppStore.shared.authThreadIds.contains($0) }
+    }
 
     // MARK: - settings
 
@@ -2350,6 +2400,10 @@ final class AppStore {
     /// way, because every entry in it carries the old account's selection.
     private func wipeAccountState(landingOn page: MainView = .sitrep) {
         boardIsSnapshot = false
+        // A reveal up over the old account would keep showing its body, and
+        // one not yet mounted would reveal the same int on the NEW daemon.
+        revealRequest = nil
+        revealSource = nil
         // The unsubscribe tray's rows and buttons belong to the old account:
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.
@@ -2701,7 +2755,15 @@ final class AppStore {
     }
     @ObservationIgnored private(set) var readerSeed: ReaderSeed?
 
-    func openMessage(_ messageId: Int, from source: OpenSource) {
+    func openMessage(_ messageId: Int, from source: OpenSource, auth: SealedMeta? = nil) {
+        // AUTH MAIL OPENS IN THE REVEAL, decided BEFORE `getMessage`: that read
+        // carries the body, unaudited, and must not run first. `auth` is the
+        // caller's own knowledge (an event marked `is_auth`); the sealed list
+        // is the second signal.
+        if let meta = sealedMeta(message: messageId) ?? auth {
+            requestReveal(meta)
+            return
+        }
         let openedEpoch = epoch
         Task {
             do {

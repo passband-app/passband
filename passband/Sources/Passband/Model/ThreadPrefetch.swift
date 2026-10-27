@@ -66,6 +66,12 @@ final class ThreadPrefetch {
     private let inflight = AsyncMemo<String, Result<ClientThreadView, Error>>(
         limit: 1, keep: { _ in false })
     private let loader: @MainActor (String) async throws -> ClientThreadView
+    /// Thread ids this cache must never fetch or hold: threads holding auth
+    /// mail, whose body is meant to arrive through the audited reveal (or a
+    /// reader the human opened on purpose, which fetches for itself), never a
+    /// hover or a warm. Injected by the store (`AppStore.authThreadIds`), so
+    /// this file still builds without it.
+    var refuses: @MainActor (String) -> Bool = { _ in false }
     /// Bumped by `wipe()`. Every fetch this class starts captures it and files
     /// nothing once it no longer matches: a thread fetched for the old account
     /// must not land in the new account's cache, and the trickle of a batch
@@ -185,7 +191,7 @@ final class ThreadPrefetch {
     /// (warmed and right-rail threads outlive the 60s default), and a repeat
     /// prefetch may EXTEND a TTL, never shorten it.
     func prefetch(_ threadId: String, fresh: TimeInterval? = nil) {
-        guard !threadId.isEmpty else { return }
+        guard !threadId.isEmpty, !refuses(threadId) else { return }
         let ttl = fresh ?? Self.freshDefault
         if !settled(threadId, ttl: ttl) { start(threadId, ttl: ttl) }
     }
@@ -245,6 +251,7 @@ final class ThreadPrefetch {
     func fetch(_ threadId: String, fresh: TimeInterval? = nil) async throws -> ClientThreadView {
         let ttl = fresh ?? Self.freshDefault
         try Task.checkCancellation()
+        if refuses(threadId) { throw CancellationError() }
         if let hit = cache.get(threadId), live(hit, asking: ttl) {
             extend(threadId, hit, to: ttl)
             return hit.view
@@ -297,6 +304,7 @@ final class ThreadPrefetch {
     /// reopen is instant too. Synchronous, so the live generation is by
     /// definition the one this view was fetched under.
     func note(_ threadId: String, _ view: ClientThreadView) {
+        guard !refuses(threadId) else { return }
         put(threadId, view, newest: Self.newest(view), fresh: Self.freshDefault, gen: generation)
     }
 

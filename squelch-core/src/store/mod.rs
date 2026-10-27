@@ -1408,7 +1408,22 @@ pub struct SealedMessage {
     pub from_addr: String,
     pub subject: String,
     pub received_at: DateTime<Utc>,
+    /// The one kind a client sees: [`AuthKind::priority_pick`] over the
+    /// decision's kinds, in wire spelling (`magic_link`). Legacy rows keep
+    /// their stored `triage.sealed_kind`.
+    ///
+    /// [`AuthKind::priority_pick`]: crate::triage::decision::AuthKind::priority_pick
     pub sealed_kind: Option<String>,
+    /// A takeover-class account change that holds FYE: `AuthAssessment::
+    /// is_critical`, unless the sender explicitly failed authentication
+    /// (`auth_pass = 0`). The value FYE uses (`auth_critical_sql!`).
+    pub critical: bool,
+    /// The owner's server-side ruling, if they made one.
+    pub verdict: Option<crate::types::AuthVerdict>,
+    /// The auth message that accounts for this alert (a code, link or
+    /// sign-in receipt from the same service within minutes), computed at
+    /// read time by [`crate::triage::auth_pairing`].
+    pub explained_by: Option<i64>,
 }
 
 /// One row of the user's OWN sent mail, for the human door's sent listing
@@ -2329,6 +2344,19 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// BEFORE calling this and answers `no-store`. `NotFound` when the message
     /// does not exist or is not sealed.
     fn sealed_body(&self, account_id: AccountId, message_id: i64) -> Result<SealedBody>;
+
+    /// HUMAN-DOOR-ONLY (`PUT /client/sealed/{id}/verdict`): record the owner's
+    /// ruling on one auth message, or clear it with `None`. `NotFound` when the
+    /// message does not exist or is not auth mail (the membership
+    /// [`Store::sealed_body`] uses). A legacy sealed row (no agent decision)
+    /// takes a ruling but never moves FYE. MUST NOT be reachable from MCP.
+    fn set_auth_verdict(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+        verdict: Option<crate::types::AuthVerdict>,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
 
     /// HUMAN-DOOR-ONLY (`GET /client/sent`): the user's own sent mail, newest
     /// first (`received_at DESC, id DESC`), `limit`/`offset` paginating exactly

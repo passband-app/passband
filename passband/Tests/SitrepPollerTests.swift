@@ -448,3 +448,12 @@ enum Analytics {
     static let shared = ImageWarmer()
     func noteSitrepLanded() {}
 }
+
+/// The verdict ledger's view of sealed lists (Lib/AuthCode.swift): numbered
+/// fetches, stale lists dropped. Every list is fresh here.
+@MainActor final class AuthDecisions {
+    static let shared = AuthDecisions()
+    func beginListFetch() -> Int { 0 }
+    func isFresh(_ fetch: Int) -> Bool { true }
+    func listed(_ rows: [Int], fetch: Int) {}
+}

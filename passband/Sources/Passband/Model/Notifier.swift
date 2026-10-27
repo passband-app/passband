@@ -178,6 +178,7 @@ final class Notifier {
             EventBanner.authKey: event.isAuth,
             EventBanner.accountKey: account,
         ]
+        if event.isAuth { content.userInfo[EventBanner.senderKey] = event.sender }
         if copy.sound, !silent { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
 
         // The event id as the REQUEST id makes a re-delivered frame (a replay
@@ -318,6 +319,8 @@ final class Notifier {
         case message(Int)
         case event(Int)
         case auth
+        /// Auth mail with a message id: the audited reveal, never the reader.
+        case reveal(messageId: Int, threadId: String, sender: String)
     }
 
     /// A tap: front the app, restore the window if it was closed, open the
@@ -326,6 +329,14 @@ final class Notifier {
     func handleEventTap(eventId: Int, accountId: UUID) {
         Analytics.capture("notification_opened", ["has_thread": true])
         deliver(.event(eventId), accountId: accountId)
+    }
+
+    /// A tap on an auth banner that names its message: the one-time reveal,
+    /// built from the payload so it works on a cold launch, before the first
+    /// sealed list has landed. No body is fetched until the panel asks.
+    func handleRevealTap(messageId: Int, threadId: String, sender: String, accountId: UUID?) {
+        Analytics.capture("notification_opened", ["has_thread": true])
+        deliver(.reveal(messageId: messageId, threadId: threadId, sender: sender), accountId: accountId)
     }
 
     func handleMessageTap(messageId: Int, accountId: UUID?) {
@@ -338,10 +349,11 @@ final class Notifier {
         deliver(.thread(threadId), accountId: accountId)
     }
 
-    /// A background auth banner's tap: the Auth view of the mailbox the code
-    /// arrived in. NOT a reveal — the human lands on the list and asks for the
-    /// code themselves, which is the audited act this whole flow keeps in their
-    /// hands.
+    /// A tap on an auth banner that names no message: the Auth view of the
+    /// mailbox it arrived in, where the human asks for the mail themselves. A
+    /// banner that does name its message opens the reveal instead
+    /// (`handleRevealTap`), audited with source "notification" so the daemon's
+    /// pairing never counts a tap as "the owner used this code".
     ///
     /// The same analytics event as a thread tap, because it is the same act (a
     /// banner opened) and the bool already says which shape it had.
@@ -419,7 +431,10 @@ final class Notifier {
                 do {
                     let event = try await APIClient.shared.getEvent(eventId)
                     guard store.isCurrent(epoch) else { return }
-                    store.openMessage(event.message_id, from: .notification)
+                    // An event on auth mail opens the reveal, never the reader.
+                    store.openMessage(
+                        event.message_id, from: .notification,
+                        auth: event.isAuth ? AuthPolicy.authMeta(for: event) : nil)
                 } catch {
                     guard store.isCurrent(epoch) else { return }
                     store.pushToast("Could not open this notification. Please try again.", .error)
@@ -429,6 +444,12 @@ final class Notifier {
             // The routed Auth page on the Mac; on the phone, the login-codes
             // page behind the Quick Look tab's key.
             AppStore.shared.requestAuthPage()
+        case .reveal(let messageId, let threadId, let sender):
+            let store = AppStore.shared
+            store.requestReveal(
+                store.sealedMeta(message: messageId)
+                    ?? AuthPolicy.revealMeta(messageId: messageId, threadId: threadId, sender: sender),
+                source: RevealSource.notification)
         }
     }
 }
@@ -485,23 +506,20 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
-        let threadId = userInfo[EventBanner.threadKey] as? String
-        let messageId = (userInfo[EventBanner.messageKey] as? Int)
-            ?? (userInfo[EventBanner.messageKey] as? String).flatMap(Int.init)
+        // Decided from the payload alone, BEFORE anything is fetched: an auth
+        // tap opens the reveal (or the Auth page) and never `getMessage`.
+        let tap = EventBanner.tapRoute(userInfo)
         // Stored as a string and parsed here rather than crossing as one: a
         // payload that survived a relaunch (or came from an older build) can
         // hold anything, and an unparseable id must read as "no account", not
         // as some other account.
         let accountId = (userInfo[EventBanner.accountKey] as? String).flatMap(UUID.init(uuidString:))
-        // An auth banner carries no thread to open — routing it as an ordinary
-        // one would front the app and then do nothing.
-        let route = userInfo[EventBanner.routeKey] as? String
-        let unresolved = EventBanner.unresolvedPush(userInfo["event_id"] as? String)
         nonisolated(unsafe) let done = completionHandler
         onMain {
             // Answered once the tap is routed, whichever branch returns.
             defer { done() }
-            if route == EventBanner.updateRoute {
+            switch tap {
+            case .update:
                 Notifier.shared.front()
                 // A banner from before a quit: this launch has no card yet, and
                 // Sparkle's next scheduled check could be hours off. The tap is
@@ -509,26 +527,22 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                 #if os(macOS)
                     if Updater.shared.phase == .idle { Updater.shared.check() }
                 #endif
-                return
-            }
-            if let messageId, route != EventBanner.testRoute {
-                Notifier.shared.handleMessageTap(messageId: messageId, accountId: accountId)
-                return
-            }
-            if let unresolved, route != EventBanner.testRoute {
-                Notifier.shared.handleEventTap(eventId: unresolved.eventId, accountId: unresolved.accountId)
-                return
-            }
-            switch route {
-            case EventBanner.authRoute:
-                Notifier.shared.handleAuthTap(accountId: accountId)
             // A self-test opens nothing and is COUNTED as nothing: routing it
             // through handleTap would file a `notification_opened` and quietly
             // inflate the one metric that says whether banners are worth
             // posting at all.
-            case EventBanner.testRoute:
+            case .test:
                 Notifier.shared.front()
-            default:
+            case .reveal(let messageId, let threadId, let sender):
+                Notifier.shared.handleRevealTap(
+                    messageId: messageId, threadId: threadId, sender: sender, accountId: accountId)
+            case .authPage:
+                Notifier.shared.handleAuthTap(accountId: accountId)
+            case .message(let messageId):
+                Notifier.shared.handleMessageTap(messageId: messageId, accountId: accountId)
+            case .event(let unresolved):
+                Notifier.shared.handleEventTap(eventId: unresolved.eventId, accountId: unresolved.accountId)
+            case .thread(let threadId):
                 Notifier.shared.handleTap(threadId: threadId, accountId: accountId)
             }
         }

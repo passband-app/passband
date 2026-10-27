@@ -104,6 +104,59 @@ str_enum! {
         MagicLink => "magic_link",
         LoginAlert => "login_alert",
         Verification => "verification",
+        AccountChange => "account_change",
+        AppGrant => "app_grant",
+        SigninReceipt => "signin_receipt",
+        SecurityAlert => "security_alert",
+    }
+}
+
+impl From<crate::triage::decision::AuthKind> for SealedKind {
+    /// The wire name of a decision's auth kind. The one rename is
+    /// `sign_in_link`, which clients have always called `magic_link`.
+    fn from(kind: crate::triage::decision::AuthKind) -> Self {
+        use crate::triage::decision::AuthKind;
+        match kind {
+            AuthKind::Otp => SealedKind::Otp,
+            AuthKind::PasswordReset => SealedKind::PasswordReset,
+            AuthKind::SignInLink => SealedKind::MagicLink,
+            AuthKind::Verification => SealedKind::Verification,
+            AuthKind::LoginAlert => SealedKind::LoginAlert,
+            AuthKind::SecurityAlert => SealedKind::SecurityAlert,
+            AuthKind::AccountChange => SealedKind::AccountChange,
+            AuthKind::AppGrant => SealedKind::AppGrant,
+            AuthKind::SigninReceipt => SealedKind::SigninReceipt,
+        }
+    }
+}
+
+impl From<SealedKind> for crate::triage::decision::AuthKind {
+    /// For a legacy sealed row (no agent decision), so it can still pair.
+    fn from(kind: SealedKind) -> Self {
+        use crate::triage::decision::AuthKind;
+        match kind {
+            SealedKind::Otp => AuthKind::Otp,
+            SealedKind::PasswordReset => AuthKind::PasswordReset,
+            SealedKind::MagicLink => AuthKind::SignInLink,
+            SealedKind::Verification => AuthKind::Verification,
+            SealedKind::LoginAlert => AuthKind::LoginAlert,
+            SealedKind::SecurityAlert => AuthKind::SecurityAlert,
+            SealedKind::AccountChange => AuthKind::AccountChange,
+            SealedKind::AppGrant => AuthKind::AppGrant,
+            SealedKind::SigninReceipt => AuthKind::SigninReceipt,
+        }
+    }
+}
+
+str_enum! {
+    /// The owner's ruling on one auth message, kept server-side in
+    /// `auth_verdicts`. HUMAN DOOR ONLY: served on `GET /client/sealed` and
+    /// written by `PUT /client/sealed/{id}/verdict`; it never reaches MCP.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AuthVerdict {
+        Mine => "mine",
+        NotMine => "not_mine",
     }
 }
 

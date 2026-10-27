@@ -259,6 +259,12 @@ fn client_router(state: ApiState) -> Router {
             "/client/sealed/{message_id}/reveal",
             post(handlers::reveal_sealed),
         )
+        // The owner's "That was me / Not me" on one auth message. Human door
+        // only: the agent door never reads or writes a verdict.
+        .route(
+            "/client/sealed/{message_id}/verdict",
+            put(handlers::put_sealed_verdict),
+        )
         .route(
             "/client/shredder",
             get(handlers::get_shredder).post(handlers::set_shredder),

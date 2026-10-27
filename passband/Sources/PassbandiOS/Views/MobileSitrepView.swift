@@ -117,7 +117,11 @@ struct MobileSitrepView: View {
                 banner
                 hero
                 if !ranked.isEmpty {
-                    forYourEyes(visible: visible, overflow: overflow, queue: ranked)
+                    // Auth mail stays off the reader's queue: it opens in the
+                    // one-time reveal, never in the reader.
+                    forYourEyes(
+                        visible: visible, overflow: overflow,
+                        queue: ranked.filter { store.authMeta(for: $0) == nil })
                 } else if isClear {
                     // An empty board is the best state this app has, and it
                     // should not look like a broken one.
@@ -305,14 +309,24 @@ struct MobileSitrepView: View {
             VStack(spacing: 2) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { _, u in
                     let verbs = UpdateVerbs(update: u, queue: queue, surface: .sitrep)
-                    SwipeRow(leading: verbs.leadingVerbs, trailing: verbs.trailingVerbs) {
-                        UpdateRow(
-                            update: u,
-                            selected: false,
-                            onHover: {},
-                            onOpen: verbs.open)
+                    if let meta = store.authMeta(for: u) {
+                        // Sealed: summary and a lock, a tap opens the audited
+                        // reveal, and the only swipe is Done. Reply, remind,
+                        // archive and tune all start from somewhere this row
+                        // does not send auth mail.
+                        SwipeRow(leading: [], trailing: verbs.doneVerbs) {
+                            MobileAuthEyesRow(update: u, meta: meta) { store.requestReveal(meta) }
+                        }
+                    } else {
+                        SwipeRow(leading: verbs.leadingVerbs, trailing: verbs.trailingVerbs) {
+                            UpdateRow(
+                                update: u,
+                                selected: false,
+                                onHover: {},
+                                onOpen: verbs.open)
+                        }
+                        .updateContextMenu(verbs)
                     }
-                    .updateContextMenu(verbs)
                 }
                 if overflow > 0 {
                     // THE WHOLE ROW IS THE BUTTON, and only the pill is drawn.
@@ -383,6 +397,57 @@ private struct BoardFootnote: View {
                 .foregroundStyle(stamp.warn ? Palette.warn : Palette.inkFaintest)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Auth mail in For your eyes, at phone scale: a critical account change nobody
+/// has ruled on, or one the owner said was not them. The model's one-line
+/// summary and a lock; the body is sealed and is never fetched to draw this.
+struct MobileAuthEyesRow: View {
+    let update: AttentionUpdate
+    let meta: SealedMeta
+    let onOpen: () -> Void
+
+    private var tone: Color { meta.isCritical ? Palette.danger : Palette.lock }
+
+    var body: some View {
+        ListRow(
+            selected: false, cornerRadius: 10, tint: tone, hPadding: 10, vPadding: 8,
+            hoverFill: false, action: onOpen
+        ) { _, _ in
+            HStack(alignment: .top, spacing: 10) {
+                Avatar(sender: update.senderString, size: 26)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(SenderCache.resolved(update.senderString).displayName)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(tone)
+                        Spacer(minLength: 4)
+                        Text(Fmt.relAge(meta.received_at))
+                            .font(Typo.num(11))
+                            .foregroundStyle(Palette.inkFaintest)
+                    }
+                    Text(update.one_line.isEmpty ? AuthCopy.label(meta.kind) : update.one_line)
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkDim)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Label(
+                        meta.isCritical ? "Critical" : AuthCopy.label(meta.kind),
+                        systemImage: meta.isCritical
+                            ? "exclamationmark.triangle.fill" : AuthCopy.symbol(meta.kind)
+                    )
+                    .font(Typo.micro)
+                    .foregroundStyle(tone)
+                }
+            }
+        }
+        .accessibilityLabel(
+            "\(AuthCopy.label(meta.kind)) from \(SenderCache.resolved(update.senderString).displayName), sealed")
     }
 }
 

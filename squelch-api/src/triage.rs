@@ -119,7 +119,12 @@ pub async fn fye_headline(
     let now = Utc::now();
     let read = store_call(&state, move |store, account| {
         let fye = store.agent_fye(account, usize::MAX, &ranking, now)?;
-        let on_board = fye.len();
+        // The rows the line could speak for: "most of it was filed" is not
+        // a claim auth or restricted rows on the board can make true.
+        let on_board = fye
+            .iter()
+            .filter(|item| HeadlineItem::speaks_for(item))
+            .count();
         let items: Vec<HeadlineItem> = fye
             .iter()
             .filter_map(HeadlineItem::from_list_item)

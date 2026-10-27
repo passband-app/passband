@@ -331,6 +331,67 @@ fn insert_attachments_conn(
     Ok(())
 }
 
+/// [`external_messages_allowed_conn`]: whether EVERY message of account `?1`
+/// named in the JSON array `?2` may go out the agent door. Each message's
+/// current assessment is checked, and so is every source its decision
+/// consumed, transitively. The check fails closed: on a message that does not
+/// exist, an assessment that is unknown, pending or restricted, an owner's
+/// seal (an `external_access` correction), or a source whose revision has
+/// moved since the decision read it.
+///
+/// ONE WALK FOR THE WHOLE SET. Each condition is "no bad message (or stale
+/// edge) anywhere in what this message depends on", so "all of these are
+/// allowed" is the same question asked of the union of their dependencies.
+/// A thread's siblings mostly depend on each other, so the guard over a
+/// ten-message thread walks the thread once instead of ten times.
+///
+/// PINNED ORDER. `CROSS JOIN` keeps the walk's row outside each join onto
+/// `agent_decision_sources`, which is then a seek on its primary key. Without
+/// `sqlite_stat1` the planner is free to reach the table first by `account_id`
+/// alone and probe the walk from it (`queue_dependent_refreshes` measured what
+/// that costs). `agent_triage::tests::set_access_check_seeks_every_table`
+/// pins the plan.
+pub(super) const EXTERNAL_MESSAGES_ALLOWED_SQL: &str =
+    "WITH RECURSIVE dependencies(message_id) AS (
+         SELECT value FROM json_each(?2)
+         UNION
+         SELECT d.source_message_id FROM dependencies p
+         CROSS JOIN agent_decision_sources d ON d.account_id=?1 AND d.message_id=p.message_id
+     )
+     SELECT EXISTS(SELECT 1 FROM json_each(?2))
+       AND NOT EXISTS(
+         SELECT 1 FROM dependencies p
+         LEFT JOIN messages m ON m.id=p.message_id AND m.account_id=?1
+         LEFT JOIN agent_message_state a ON a.message_id=p.message_id AND a.account_id=?1
+         WHERE m.id IS NULL OR a.access IS NULL OR a.access!='allowed'
+           OR EXISTS(SELECT 1 FROM agent_triage_corrections c WHERE c.account_id=?1
+               AND c.message_id=p.message_id AND c.field='external_access' AND c.value_json='true')
+       )
+       AND NOT EXISTS(
+         SELECT 1 FROM dependencies p
+         CROSS JOIN agent_decision_sources d ON d.account_id=?1 AND d.message_id=p.message_id
+         LEFT JOIN agent_message_state a ON a.message_id=d.source_message_id AND a.account_id=?1
+         WHERE a.revision IS NULL OR a.revision!=d.source_revision
+       )";
+
+/// May every one of `message_ids` go out the agent door? See
+/// [`EXTERNAL_MESSAGES_ALLOWED_SQL`]. An empty set is NOT allowed, here and in
+/// the statement itself: a caller that ends up asking about nothing has lost
+/// track of what it is serving.
+pub(super) fn external_messages_allowed_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    message_ids: &[i64],
+) -> Result<bool> {
+    if message_ids.is_empty() {
+        return Ok(false);
+    }
+    let seeds = serde_json::to_string(message_ids).map_err(|e| CoreError::Other(e.into()))?;
+    Ok(conn
+        .prepare_cached(EXTERNAL_MESSAGES_ALLOWED_SQL)?
+        .query_row(params![account_id, seeds], |row| row.get(0))?)
+}
+
 /// Check the current assessment and every consumed source. Unknown assessments
 /// and changed sources fail closed, including dependencies of derived summaries.
 pub(super) fn external_message_allowed_conn(
@@ -338,32 +399,7 @@ pub(super) fn external_message_allowed_conn(
     account_id: AccountId,
     message_id: i64,
 ) -> Result<bool> {
-    Ok(conn.query_row(
-        "WITH RECURSIVE dependencies(message_id) AS (
-             SELECT ?2
-             UNION
-             SELECT d.source_message_id FROM agent_decision_sources d
-             JOIN dependencies p ON p.message_id=d.message_id
-             WHERE d.account_id=?1
-         )
-         SELECT EXISTS(SELECT 1 FROM messages WHERE account_id=?1 AND id=?2)
-           AND NOT EXISTS(
-             SELECT 1 FROM dependencies d
-             LEFT JOIN messages m ON m.id=d.message_id AND m.account_id=?1
-             LEFT JOIN agent_message_state a ON a.message_id=d.message_id AND a.account_id=?1
-             WHERE m.id IS NULL OR a.access IS NULL OR a.access!='allowed'
-               OR EXISTS(SELECT 1 FROM agent_triage_corrections c WHERE c.account_id=?1
-                   AND c.message_id=d.message_id AND c.field='external_access' AND c.value_json='true')
-           )
-           AND NOT EXISTS(
-             SELECT 1 FROM agent_decision_sources d
-             JOIN dependencies p ON p.message_id=d.message_id
-             LEFT JOIN agent_message_state a ON a.message_id=d.source_message_id AND a.account_id=?1
-             WHERE d.account_id=?1 AND (a.revision IS NULL OR a.revision!=d.source_revision)
-           )",
-        params![account_id, message_id],
-        |row| row.get(0),
-    )?)
+    external_messages_allowed_conn(conn, account_id, &[message_id])
 }
 
 /// The thread's messages as an external reader may count them: everything but
@@ -385,6 +421,95 @@ const EXTERNAL_THREAD_SUBJECT_SQL: &str = concat!(
     " ORDER BY m.received_at ASC LIMIT 1"
 );
 
+/// [`EXTERNAL_THREAD_IDS_SQL`]: the siblings the thread guard asks about.
+pub(super) fn external_thread_ids_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    thread_id: &str,
+) -> Result<Vec<i64>> {
+    Ok(conn
+        .prepare_cached(EXTERNAL_THREAD_IDS_SQL)?
+        .query_map(params![account_id, thread_id], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// THE THREAD GUARD, as one walk: may every sibling of `thread_id` that an
+/// external reader counts ([`EXTERNAL_THREAD_IDS_SQL`]), and every one of
+/// `also`, go out the agent door? A thread with no such sibling is not found.
+/// [`thread_guard_and_subject`] is this with nothing else to ask about; the
+/// listings and the per-message reads that also guard the message's thread
+/// pass their own messages in `also`, so the guard has one definition however
+/// it is asked.
+pub(super) fn thread_allowed_with_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    thread_id: &str,
+    also: &[i64],
+) -> Result<bool> {
+    let mut ids = external_thread_ids_conn(conn, account_id, thread_id)?;
+    if ids.is_empty() {
+        return Ok(false);
+    }
+    ids.extend_from_slice(also);
+    external_messages_allowed_conn(conn, account_id, &ids)
+}
+
+/// Judges the rows of one listing the way the agent door serves them, under
+/// the lock the caller holds: a row passes when its thread passes the guard
+/// together with the ids `half` names for that thread (`None` refuses the
+/// thread outright: the listings use it for attention read at a revision that
+/// has moved), and the row's own messages are allowed.
+///
+/// A thread with one row is one walk. A thread with more is judged once and
+/// each of its rows then walks its own messages alone: "all of A and B" is
+/// "all of A" and "all of B". A judge is for one lock hold; a verdict kept
+/// past it would answer for a store that may have changed since.
+pub(super) struct ListingJudge {
+    repeated: std::collections::HashMap<String, Option<bool>>,
+}
+
+impl ListingJudge {
+    /// A judge for rows in these threads, one entry per row.
+    pub(super) fn new<'a>(threads: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut rows: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for thread in threads {
+            *rows.entry(thread).or_default() += 1;
+        }
+        Self {
+            repeated: rows
+                .into_iter()
+                .filter(|&(_, rows)| rows > 1)
+                .map(|(thread, _)| (thread.to_string(), None))
+                .collect(),
+        }
+    }
+
+    pub(super) fn allowed(
+        &mut self,
+        conn: &Connection,
+        account_id: AccountId,
+        thread: &str,
+        own: &[i64],
+        half: impl Fn(&str) -> Result<Option<Vec<i64>>>,
+    ) -> Result<bool> {
+        let Some(verdict) = self.repeated.get_mut(thread) else {
+            let Some(mut ids) = half(thread)? else {
+                return Ok(false);
+            };
+            ids.extend_from_slice(own);
+            return thread_allowed_with_conn(conn, account_id, thread, &ids);
+        };
+        let thread_ok = match *verdict {
+            Some(known) => known,
+            None => *verdict.insert(match half(thread)? {
+                None => false,
+                Some(ids) => thread_allowed_with_conn(conn, account_id, thread, &ids)?,
+            }),
+        };
+        Ok(thread_ok && external_messages_allowed_conn(conn, account_id, own)?)
+    }
+}
+
 /// External full-thread reads require every sibling to be allowed, except an
 /// unassessed archive sibling, which is omitted instead (see
 /// `archive_unassessed_sql!`). A thread of nothing but those is not found.
@@ -394,17 +519,8 @@ pub(super) fn thread_guard_and_subject(
     account_id: AccountId,
     thread_id: &str,
 ) -> Result<String> {
-    let mut stmt = conn.prepare(EXTERNAL_THREAD_IDS_SQL)?;
-    let ids = stmt
-        .query_map(params![account_id, thread_id], |row| row.get::<_, i64>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if ids.is_empty() {
+    if !thread_allowed_with_conn(conn, account_id, thread_id, &[])? {
         return Err(CoreError::NotFound);
-    }
-    for id in ids {
-        if !external_message_allowed_conn(conn, account_id, id)? {
-            return Err(CoreError::NotFound);
-        }
     }
     conn.query_row(
         EXTERNAL_THREAD_SUBJECT_SQL,
@@ -414,6 +530,10 @@ pub(super) fn thread_guard_and_subject(
     .optional()?
     .ok_or(CoreError::NotFound)
 }
+
+/// Rows per store lock in [`SqliteStore::external_listing_allowed`]: about
+/// 8 ms of checks on 8-11 message threads, with or without statistics.
+const LISTING_CHECK_CHUNK: usize = 64;
 
 /// The most access checks one thread open asks for, live and archive together.
 const THREAD_ACCESS_BATCH: usize = 8;
@@ -590,15 +710,14 @@ pub(super) fn external_contributor_allowed_conn(
     account_id: AccountId,
     message_id: i64,
 ) -> Result<bool> {
-    if !external_message_allowed_conn(conn, account_id, message_id)? {
+    let thread: Option<String> = conn
+        .prepare_cached("SELECT thread_id FROM messages WHERE account_id=?1 AND id=?2")?
+        .query_row(params![account_id, message_id], |r| r.get(0))
+        .optional()?;
+    let Some(thread) = thread else {
         return Ok(false);
-    }
-    let thread: String = conn.query_row(
-        "SELECT thread_id FROM messages WHERE account_id=?1 AND id=?2",
-        params![account_id, message_id],
-        |r| r.get(0),
-    )?;
-    Ok(thread_guard_and_subject(conn, account_id, &thread).is_ok())
+    };
+    thread_allowed_with_conn(conn, account_id, &thread, &[message_id])
 }
 
 impl SqliteStore {
@@ -672,6 +791,41 @@ impl SqliteStore {
             Err(CoreError::NotFound) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// An agent door's own second look at a listing it is about to serve: for
+    /// each `(message, decision source, thread)`, may the message and the
+    /// message whose decision the row shows go out (what `agent_access_allowed`
+    /// asks), and may their thread (what [`Self::external_thread_allowed`]
+    /// asks)? One answer per row, in order, judged by [`ListingJudge`].
+    ///
+    /// One lock per [`LISTING_CHECK_CHUNK`] rows rather than two lock round
+    /// trips per row, so the store is held for one chunk at a time, and the
+    /// thread yields between chunks so a writer waiting on the mutex (which
+    /// is not fair) usually gets in.
+    pub fn external_listing_allowed(
+        &self,
+        account_id: AccountId,
+        items: &[(i64, i64, &str)],
+    ) -> Result<Vec<bool>> {
+        let mut allowed = Vec::with_capacity(items.len());
+        for (at, chunk) in items.chunks(LISTING_CHECK_CHUNK).enumerate() {
+            if at > 0 {
+                std::thread::yield_now();
+            }
+            let conn = self.lock()?;
+            let mut judge = ListingJudge::new(chunk.iter().map(|row| row.2));
+            for &(message_id, decision_source, thread_id) in chunk {
+                allowed.push(judge.allowed(
+                    &conn,
+                    account_id,
+                    thread_id,
+                    &[message_id, decision_source],
+                    |_| Ok(Some(Vec::new())),
+                )?);
+            }
+        }
+        Ok(allowed)
     }
 
     /// May a human client keep this thread in its on-disk cache? Stricter than

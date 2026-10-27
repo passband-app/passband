@@ -598,8 +598,8 @@ ref are text lifted from one message each, and that message may be restricted
 while the package's own mail is not (a pharmacy's order mail, then a plain
 carrier notice for the same number). On `get_shipments` (built from
 `external_shipments`), the merchant is dropped unless `order_merchant_msg` passes
-the agent door's message check (`external_message_allowed_conn` plus the thread
-guard); an agent link is dropped unless both its `message_id` and its
+the agent door's message check (`external_messages_allowed_conn` over the message
+and its thread's guard); an agent link is dropped unless both its `message_id` and its
 `merchant_msg` pass; a link or merchant with no provenance (legacy) is served
 only when the row's own creating and latest mail pass. The agent door groups on
 the links that survive, so a withheld ref can never merge two packages there

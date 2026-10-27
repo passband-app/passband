@@ -291,8 +291,9 @@ stale assessment denies external access until a current allowed decision exists.
 Model summaries, notification text, reasons, and evidence locations must not quote
 credentials. This is a model-output requirement; it is not a claim that arbitrary
 model output can be proven secret-free by a string filter.</p>
-<p><strong>Enforcement.</strong> <code>store/sqlite/messages.rs:external_message_allowed_conn</code> checks the
-current assessment and source provenance under the store lock. External whole-thread
+<p><strong>Enforcement.</strong> <code>store/sqlite/messages.rs:external_messages_allowed_conn</code> checks the
+current assessment and source provenance, of one message or of a set at once, under
+the store lock. External whole-thread
 reads require the thread&#39;s sources to be allowed. MCP and dedicated
 <code>/client/agent/</code> routes use these checks for messages and derived results. Search
 rehydrates results under the same guard instead of releasing stale cached snippets.

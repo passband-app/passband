@@ -227,8 +227,9 @@ Model summaries, notification text, reasons, and evidence locations must not quo
 credentials. This is a model-output requirement; it is not a claim that arbitrary
 model output can be proven secret-free by a string filter.
 
-**Enforcement.** `store/sqlite/messages.rs:external_message_allowed_conn` checks the
-current assessment and source provenance under the store lock. External whole-thread
+**Enforcement.** `store/sqlite/messages.rs:external_messages_allowed_conn` checks the
+current assessment and source provenance, of one message or of a set at once, under
+the store lock. External whole-thread
 reads require the thread's sources to be allowed. MCP and dedicated
 `/client/agent/` routes use these checks for messages and derived results. Search
 rehydrates results under the same guard instead of releasing stale cached snippets.
@@ -304,8 +305,8 @@ row does not exist yet, which is a different thing from "pending" on live mail:
   the vec0 index unchanged. The prefilter is a necessary condition and
   authorizes nothing: each
   leg's list is then cut to what the AUTHORITY allows
-  (`external_message_allowed_conn`, with its recursive check of every source a
-  decision consumed, plus `thread_guard_and_subject`) BEFORE the legs are fused,
+  (`external_messages_allowed_conn`, with its recursive check of every source a
+  decision consumed, plus the thread guard `thread_allowed_with_conn`) BEFORE the legs are fused,
   and every hit is rehydrated through the same authority on the way out. Which
   readable rows come back is therefore decided over readable mail alone. Their
   order is too at the vector leg and in the fusion; at the keyword leg it is

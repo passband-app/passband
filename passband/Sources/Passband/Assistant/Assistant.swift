@@ -25,209 +25,13 @@
 import Foundation
 import Observation
 
-// MARK: - wire shapes
-
-/// Minimal Anthropic /v1/messages shapes — just the fields this loop writes.
-/// Hand-rolled rather than an SDK because LLMProxy makes the HTTP call and
-/// AnthropicStream reads the response; this only builds the body.
-enum Wire {
-    struct ToolDef: Encodable {
-        var name: String
-        var description: String
-        var input_schema: Schema
-
-        struct Schema: Encodable {
-            var type = "object"
-            var properties: [String: Property]
-            var required: [String]?
-        }
-
-        struct Property: Encodable {
-            var type: String
-            var description: String
-            /// A closed vocabulary for a string parameter. Encoded as JSON
-            /// Schema's `enum`, spelled `values` here because the keyword makes
-            /// every call site a backtick.
-            var values: [String]? = nil
-            /// Element type, for an array parameter.
-            var items: Items? = nil
-
-            struct Items: Encodable { var type = "string" }
-
-            private enum CodingKeys: String, CodingKey {
-                case type, description, items
-                case values = "enum"
-            }
-        }
-    }
-
-    /// A content block we SEND back (assistant echo or tool results).
-    enum RequestBlock: Encodable {
-        case text(String)
-        case toolUse(id: String, name: String, input: [String: JSONValue])
-        case toolResult(toolUseId: String, content: String, isError: Bool)
-
-        func encode(to encoder: Encoder) throws {
-            var c = encoder.container(keyedBy: CodingKeys.self)
-            switch self {
-            case .text(let text):
-                try c.encode("text", forKey: .type)
-                try c.encode(text, forKey: .text)
-            case .toolUse(let id, let name, let input):
-                try c.encode("tool_use", forKey: .type)
-                try c.encode(id, forKey: .id)
-                try c.encode(name, forKey: .name)
-                try c.encode(input, forKey: .input)
-            case .toolResult(let toolUseId, let content, let isError):
-                try c.encode("tool_result", forKey: .type)
-                try c.encode(toolUseId, forKey: .tool_use_id)
-                try c.encode(content, forKey: .content)
-                try c.encode(isError, forKey: .is_error)
-            }
-        }
-
-        private enum CodingKeys: String, CodingKey {
-            case type, text, id, name, input, tool_use_id, content, is_error
-        }
-    }
-
-    struct MessageParam: Encodable {
-        var role: String
-        var content: Content
-
-        enum Content: Encodable {
-            case text(String)
-            case blocks([RequestBlock])
-
-            func encode(to encoder: Encoder) throws {
-                var c = encoder.singleValueContainer()
-                switch self {
-                case .text(let s): try c.encode(s)
-                case .blocks(let b): try c.encode(b)
-                }
-            }
-        }
-    }
-
-    struct Request: Encodable {
-        var model: String
-        var max_tokens: Int
-        var system: String
-        var tools: [ToolDef]
-        var messages: [MessageParam]
-        /// ALWAYS true: `LLMProxy.stream` asks for `text/event-stream` and the
-        /// accumulator can only read frames, so a body that forgot this would
-        /// hand a whole JSON message to an SSE parser that drops it.
-        var stream = true
-    }
-}
-
-// MARK: - citations
-
-/// A source the assistant actually consulted — surfaced as an answer citation.
-struct ToolCitation: Identifiable, Sendable, Hashable {
-    var threadId: String
-    var subject: String
-    var sender: String
-    var date: String
-    var id: String { threadId }
-}
-
-/// One email the assistant chose to SHOW — a clickable card in the transcript,
-/// richer than a citation. Every field comes from the daemon (the show_emails
-/// dispatcher re-reads each thread), never from the model's own description:
-/// a card the user will click on has the same honesty bar as a confirm card.
-struct EmailCard: Identifiable, Sendable, Hashable {
-    var threadId: String
-    var subject: String
-    var sender: String
-    var date: String
-    var snippet: String
-    var id: String { threadId }
-}
+// The wire shapes and the transcript's own types live in Transcript.swift, so
+// the conversation snapshot (ConversationSnapshot.swift) can be asserted in
+// test.sh without this file's network and app.
 
 struct AssistantError: Error, LocalizedError {
     var message: String
     var errorDescription: String? { message }
-}
-
-// MARK: - transcript
-
-/// One row of the tray. A FLAT struct rather than an enum with payloads,
-/// because the two hot mutations are "append a delta to this bubble's text" and
-/// "flip this chip's state": both are one in-place field write here, where an
-/// enum would rebuild (and re-copy) the payload on every token.
-struct ChatItem: Identifiable, Sendable {
-    enum Kind: Sendable { case user, assistant, tool, action, error, citations, emails }
-
-    /// Monotonic per session, so a row keeps its identity while its text grows.
-    let id: Int
-    let kind: Kind
-    /// user / assistant / error copy. GROWS IN PLACE while a turn streams.
-    var text: String = ""
-    var tool: ToolActivity? = nil
-    var action: PendingAction? = nil
-    var citations: [ToolCitation] = []
-    var emails: [EmailCard] = []
-}
-
-/// A tool the model called, as the tray shows it.
-struct ToolActivity: Sendable {
-    enum State: Sendable, Equatable { case running, ok, failed }
-
-    /// The provider's tool_use id. The chip is opened while the message is
-    /// still streaming and finished after it closes, so this is how the
-    /// executor finds its own row again.
-    var useId: String
-    var name: String
-    var summary: String
-    var state: State = .running
-}
-
-/// A Gmail-touching action, parked on the human. Carries only what the card
-/// needs to state its case: a verb, whatever object was cheaply available from
-/// the tool input, and (for a send) the mail itself to preview.
-struct PendingAction: Identifiable, Sendable {
-    enum State: Sendable, Equatable {
-        case pending
-        /// Approved and in flight.
-        case running
-        case declined
-        /// Handed to the composer for the user to finish by hand.
-        case handedOff
-        /// Done, with the past-tense line the card settles on.
-        case executed(String)
-        case failed(String)
-    }
-
-    let id: UUID
-    var tool: AgentTools.Tool
-    /// Imperative, for the card's title ("Archive", "Send").
-    var verb: String
-    /// Anything else worth stating, in the model's own words: label changes,
-    /// what a send is a reply to. NEVER the identity of what is being touched —
-    /// see below.
-    var detail: String?
-    /// WHO AND WHAT, AS THE DAEMON REPORTS THEM. Resolved by a `get_thread`
-    /// before the card is parked, never taken from the model's description.
-    /// THE TAP IS THE SECURITY BOUNDARY: a card that names its target only by
-    /// opaque id, or by a line the model wrote, is not informed consent — it
-    /// asks a human to authorize something they cannot audit. On a reply send,
-    /// `verifiedSender` IS the recipient.
-    var verifiedSender: String?
-    var verifiedSubject: String?
-    // send_email only, and the reason "edit in composer" can exist at all.
-    var replyToMessageId: Int?
-    var to: String?
-    /// The copy lists the model asked for, if any. On the card for the same
-    /// reason `to` is: approving a send means seeing everyone it reaches, and
-    /// a blind copy the confirmation did not mention is a recipient the user
-    /// authorized without knowing.
-    var cc: String?
-    var bcc: String?
-    var subject: String?
-    var body: String?
-    var state: State = .pending
 }
 
 /// What the human answered. `editedInComposer` is a DECLINE with a destination:
@@ -715,6 +519,42 @@ final class AssistantSession {
         adoptedThrough = other.nextItemId
     }
 
+    /// THIS CONVERSATION, WRITTEN DOWN, for search history to bring back. nil
+    /// while a run is open (its history and parked cards belong to the loop)
+    /// and when there is nothing to keep. See ConversationSnapshot.
+    func snapshot() -> ConversationSnapshot? {
+        guard !running else { return nil }
+        let snapshot = ConversationSnapshot.sanitized(
+            transcript: transcript, history: history, askedThreadIds: askedThreadIds,
+            nextItemId: nextItemId)
+        return snapshot.isEmpty ? nil : snapshot
+    }
+
+    /// PICK A SAVED CONVERSATION BACK UP, replacing this one: `adopt` from disk.
+    /// Only between runs, for the reason `adopt` is. The id counter never goes
+    /// backwards, so a restored row can never share an id with one this
+    /// session already drew.
+    func restore(_ snapshot: ConversationSnapshot) {
+        guard !running else { return }
+        clear()
+        transcript = snapshot.transcript
+        history = snapshot.history
+        askedThreadIds = snapshot.askedThreadIds
+        rollbackMark = history.count
+        nextItemId = max(nextItemId, snapshot.nextItemId, snapshot.transcript.map(\.id).max() ?? 0)
+    }
+
+    /// WHICH CONVERSATION THIS IS. Bumped by `clear()` and so by everything
+    /// that replaces one (`adopt`, `restore`, a lane restarting itself), never
+    /// by a turn. The store pins a saved question to the value it saw, and a
+    /// conversation that has since been replaced no longer matches.
+    var conversationId: Int { generation }
+
+    /// Called once a run has ended and the session is idle again, with the
+    /// session. NOT for a run that `clear()` tore down: that conversation is
+    /// gone, and there is nothing of it to report.
+    @ObservationIgnored var onRunEnded: (@MainActor (AssistantSession) -> Void)?
+
     /// Where the adopted conversation's source stood when it was copied, until
     /// this one is cleared. Lets the store tell "the chat already holds that
     /// search, follow-ups and all" from "the search has moved on since".
@@ -757,6 +597,9 @@ final class AssistantSession {
                 // `heldByPanel` deliberately survives: the reader shutting the
                 // panel is not something this run's ending undoes.
                 isPaused = false
+                // Before a pending refinement can open the next run: this is
+                // the one moment the conversation is both finished and idle.
+                onRunEnded?(self)
                 // A refinement that arrived after the last boundary is simply
                 // the next question — §6.2's idle rule, applied to the case
                 // where the turn ended before any boundary came. Held, it stays

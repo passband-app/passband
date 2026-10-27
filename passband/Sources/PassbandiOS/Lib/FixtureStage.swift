@@ -142,10 +142,16 @@
             // band sits over one real hit. The practice API sends no
             // diagnostics, so the no-strict-hits trigger cannot be staged here.
             // SEARCH HISTORY with a question in it: wants `--fixture-tab search`.
-            case "recents":
+            // `recents-restore` also keeps a chat behind the question and taps
+            // it (MobileSearchView plays the tap: the push is its own state).
+            case "recents", "recents-restore":
                 RecentSearchStore.shared.record("delta receipt")
-                RecentSearchStore.shared.rememberQuestion("when does my flight to Denver leave")
+                RecentSearchStore.shared.rememberQuestion(Self.historyQuestion)
                 RecentSearchStore.shared.record("from:maya@studio.example")
+                if scene == "recents-restore" {
+                    QuestionChats.shared.save(
+                        Self.historyChat, forKey: QuestionChats.key(forQuestion: Self.historyQuestion))
+                }
             case "search-lane":
                 store.search.query = "thursday?"
             case "accounts":
@@ -287,6 +293,55 @@
             store.stats?.scheduled_send = outbox
             store.mailMode = .sent
             await store.refreshSent(force: true)
+        }
+
+        /// The question in the staged search history.
+        static let historyQuestion = "when does my flight to Denver leave"
+
+        /// The question to tap once its chat is saved (`recents-restore`).
+        static var tapsHistoryQuestion: String? {
+            scene == "recents-restore" ? historyQuestion : nil
+        }
+
+        /// A finished conversation for that question, as a run would have left
+        /// it: a search, a read, an answer with a card, and a follow-up.
+        private static var historyChat: ConversationSnapshot {
+            let card = EmailCard(
+                threadId: "t-flight", subject: "Your trip to Denver: confirmation K7PQ2M",
+                sender: "United Airlines", date: "Oct 24",
+                snippet: "UA 1423 departs SFO Thu Oct 30 at 7:05 AM, arrives DEN 10:38 AM.")
+            let items: [ChatItem] = [
+                ChatItem(id: 1, kind: .user, text: historyQuestion),
+                ChatItem(
+                    id: 2, kind: .tool,
+                    tool: ToolActivity(
+                        useId: "tu1", name: "search_mail", summary: "Searched \"flight Denver\"",
+                        state: .ok)),
+                ChatItem(id: 3, kind: .emails, emails: [card]),
+                ChatItem(
+                    id: 4, kind: .assistant,
+                    text: "Thursday, October 30 at 7:05 AM from SFO (UA 1423)."),
+                ChatItem(id: 5, kind: .user, text: "and the return?"),
+                ChatItem(
+                    id: 6, kind: .assistant,
+                    text: "Sunday, November 2 at 6:20 PM from DEN, landing SFO at 8:01 PM."),
+            ]
+            let history: [Wire.MessageParam] = [
+                .init(role: "user", content: .text(historyQuestion)),
+                .init(
+                    role: "assistant",
+                    content: .blocks([
+                        .toolUse(id: "tu1", name: "search_mail", input: ["query": .string("flight Denver")])
+                    ])),
+                .init(
+                    role: "user",
+                    content: .blocks([.toolResult(toolUseId: "tu1", content: "[]", isError: false)])),
+                .init(role: "assistant", content: .blocks([.text(items[3].text)])),
+                .init(role: "user", content: .text("and the return?")),
+                .init(role: "assistant", content: .blocks([.text(items[5].text)])),
+            ]
+            return ConversationSnapshot(
+                transcript: items, history: history, askedThreadIds: [nil, nil], nextItemId: 6)
         }
 
         /// The newest card's rail, pulled out for a screenshot (`chain-swipe`).

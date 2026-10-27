@@ -34,14 +34,22 @@ final class RecentSearchStore {
     /// what both shells draw.
     var entries: [RecentEntry] { queries.map(RecentEntry.init(stored:)) }
 
-    private init() { reload() }
+    /// The ring alone: QuestionChats prunes against this store, so touching
+    /// it from inside this one's first initialisation would recurse.
+    private init() { queries = Self.stored() }
+
+    private static func stored() -> [String] {
+        key.flatMap { UserDefaults.standard.stringArray(forKey: $0) } ?? []
+    }
 
     /// Re-read for whatever account is live NOW. Called by the account switch
     /// AFTER the new id is committed, beside the other ledgers: this key is
     /// derived from that id, so reloading any earlier re-reads the account that
     /// just went away.
     func reload() {
-        queries = Self.key.flatMap { UserDefaults.standard.stringArray(forKey: $0) } ?? []
+        queries = Self.stored()
+        // The chats are scoped the same way and change account with the ring.
+        QuestionChats.shared.reload()
     }
 
     /// Remember a query the reader has ACTED on. Callers pass the term the hits
@@ -56,6 +64,8 @@ final class RecentSearchStore {
         guard next != queries else { return }
         queries = next
         UserDefaults.standard.set(next, forKey: key)
+        // A question pushed off the end takes its saved chat with it.
+        QuestionChats.shared.prune()
     }
 
     /// Put a submitted search in the ring, which is the one rule both shells
@@ -87,6 +97,8 @@ final class RecentSearchStore {
     /// what it clears.
     func clear() {
         queries = []
+        // The chats behind the questions are the same words and more.
+        QuestionChats.shared.clear()
         guard let key = Self.key else { return }
         UserDefaults.standard.removeObject(forKey: key)
     }

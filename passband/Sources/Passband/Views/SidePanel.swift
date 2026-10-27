@@ -586,9 +586,14 @@ struct SearchView: View {
     /// is opened — the reader may want to narrow it first.
     private func run(_ entry: RecentEntry) {
         // A question goes back to the agent; a search goes back in the field.
+        // Its saved chat comes back in the ⌘K bar when there is one; without
+        // one, it is asked again.
         if entry.kind == .question {
-            store.askAgainFromHistory(entry.text)
-            focused = true
+            if store.openQuestionFromHistory(entry.text) {
+                store.askBarOpen = true
+            } else {
+                focused = true
+            }
             return
         }
         let query = entry.text

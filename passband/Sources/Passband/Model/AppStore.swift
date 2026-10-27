@@ -1662,6 +1662,10 @@ final class AppStore {
         // Keyed by `authThreadIds`, which the feed rows' own decisions feed
         // too, so a blank sealed list cannot reopen the door.
         ThreadPrefetch.shared.refuses = { AppStore.shared.authThreadIds.contains($0) }
+        // A conversation that belongs to a question in search history is saved
+        // whenever one of its runs ends; see `saveQuestionChat`.
+        assistant.onRunEnded = { [weak self] in self?.saveQuestionChat(from: $0) }
+        searchLane.onRunEnded = { [weak self] in self?.saveQuestionChat(from: $0) }
     }
 
     // MARK: - settings
@@ -4256,7 +4260,7 @@ final class AppStore {
             return
         }
         guard canExpandSearchLane else { return }
-        assistant.adopt(searchLane)
+        adoptSearchLaneIntoChat()
         askBarOpen = true
     }
 
@@ -4297,8 +4301,107 @@ final class AppStore {
     func finishLaneHandoff() {
         guard askBarWatchesLane, !searchLane.running else { return }
         askBarWatchesLane = false
-        assistant.adopt(searchLane)
+        adoptSearchLaneIntoChat()
     }
+
+    /// THE CHAT TAKES THE LANE'S CONVERSATION, and with it the question that
+    /// conversation answers, so the follow-ups asked here are what tapping
+    /// that question in history brings back. Every handoff goes through here
+    /// (both of the Mac's and the phone's "continue in chat"), so none can move
+    /// the conversation and leave its question behind.
+    func adoptSearchLaneIntoChat() {
+        let before = assistant.conversationId
+        assistant.adopt(searchLane)
+        // `adopt` refuses while either side is running; nothing moved then.
+        guard assistant.conversationId != before else { return }
+        chatQuestion = laneQuestionKey.map {
+            QuestionTag(key: $0, conversation: assistant.conversationId)
+        }
+        saveQuestionChat(from: assistant)
+    }
+
+    // MARK: - question chats
+
+    /// A conversation's claim to be the chat behind a question in search
+    /// history: the question's key, and which conversation the session was
+    /// holding when the claim was made. A session that has since been cleared
+    /// (a new chat, a lane reset or restarting itself, an account switch) holds
+    /// a different conversation, so the claim lapses on its own and no path
+    /// that replaces a conversation has to remember to drop it.
+    private struct QuestionTag {
+        var key: String
+        var conversation: Int
+    }
+
+    private var laneQuestion: QuestionTag?
+    private var chatQuestion: QuestionTag?
+
+    private var laneQuestionKey: String? {
+        guard let tag = laneQuestion, tag.conversation == searchLane.conversationId else {
+            return nil
+        }
+        return tag.key
+    }
+
+    private var chatQuestionKey: String? {
+        guard let tag = chatQuestion, tag.conversation == assistant.conversationId else {
+            return nil
+        }
+        return tag.key
+    }
+
+    /// A run has ended in one of the two sessions: keep its conversation as
+    /// the chat behind its question, if it has one. THE CHAT WINS: once the
+    /// reader has taken a question's conversation into the chat, that is the
+    /// copy tapping the question opens, and the lane narrowing on underneath
+    /// does not overwrite it.
+    private func saveQuestionChat(from session: AssistantSession) {
+        let key: String?
+        if session === assistant {
+            key = chatQuestionKey
+        } else if session === searchLane {
+            let lane = laneQuestionKey
+            key = lane == chatQuestionKey ? nil : lane
+        } else {
+            key = nil
+        }
+        guard let key, let snapshot = session.snapshot() else { return }
+        QuestionChats.shared.save(snapshot, forKey: key)
+    }
+
+    /// A QUESTION TAPPED IN SEARCH HISTORY: bring back the chat it had, in the
+    /// ⌘K chat, rather than ask it all over again. True means the chat now
+    /// holds that conversation and the caller should show it (the Mac's bar,
+    /// the phone's push); false means there was nothing to bring back and the
+    /// question has been asked again instead (`askAgainFromHistory`).
+    ///
+    /// A CHAT MID-ANSWER IS NEVER REPLACED. If it is answering this very
+    /// question it is simply shown; if it is busy with something else, the
+    /// question is asked again in search, which leaves that run alone (the
+    /// same refusal the lane's "continue in chat" makes).
+    func openQuestionFromHistory(_ text: String) -> Bool {
+        let key = QuestionChats.key(forQuestion: text)
+        if chatQuestionKey == key {
+            askBarWatchesLane = false
+            RecentSearchStore.shared.rememberQuestion(text)
+            return true
+        }
+        guard !assistant.running, let snapshot = QuestionChats.shared.snapshot(forKey: key) else {
+            askAgainFromHistory(text)
+            return false
+        }
+        restoreQuestionChat(snapshot, key: key)
+        // Opened again is asked again, as far as the ring's order goes.
+        RecentSearchStore.shared.rememberQuestion(text)
+        return true
+    }
+
+    private func restoreQuestionChat(_ snapshot: ConversationSnapshot, key: String) {
+        askBarWatchesLane = false
+        assistant.restore(snapshot)
+        chatQuestion = QuestionTag(key: key, conversation: assistant.conversationId)
+    }
+
 
     /// ⌘⇧K and the bar's own button. Ends a watch first, so "new chat" can
     /// never clear the search lane it happened to be showing.
@@ -4368,8 +4471,12 @@ final class AppStore {
                     self.search.laneQuery = term
                     self.searchLane.sendAuthorizedSearch(term, hits: page.items)
                     // The conversation's first message is a line of search
-                    // history, drawn as a question (both shells).
+                    // history, drawn as a question (both shells), and this
+                    // conversation is the chat that line brings back.
                     RecentSearchStore.shared.rememberQuestion(term)
+                    self.laneQuestion = QuestionTag(
+                        key: QuestionChats.key(forQuestion: term),
+                        conversation: self.searchLane.conversationId)
                     self.searchEvidenceTask = nil
                     return
                 }

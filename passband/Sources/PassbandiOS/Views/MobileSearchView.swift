@@ -151,6 +151,21 @@ struct MobileSearchView: View {
                        String(store.search.revision)]) {
                 await runSearch()
             }
+            #if DEBUG
+                // `--fixture-scene recents-restore`: the tap on the history
+                // question, played once its chat has been staged.
+                .task {
+                    guard FixtureStage.on, let question = FixtureStage.tapsHistoryQuestion
+                    else { return }
+                    for _ in 0..<40 {
+                        if QuestionChats.shared.snapshot(forQuestion: question) != nil {
+                            reopen(question)
+                            return
+                        }
+                        try? await Task.sleep(for: .milliseconds(250))
+                    }
+                }
+            #endif
             .task(id: store.search.query) {
                 guard let found = await SearchFetch.senders(matching: store.search.query) else { return }
                 fetchedSenders = found
@@ -384,10 +399,11 @@ struct MobileSearchView: View {
             .plainRow()
             ForEach(Array(recents.enumerated()), id: \.offset) { _, entry in
                 RecentRow(entry: entry) {
-                    // A question goes back to the agent; a search back in the
-                    // field. The Mac's recents do the same.
+                    // A question goes back to the agent (its saved chat when
+                    // there is one); a search back in the field. The Mac's
+                    // recents do the same.
                     if entry.kind == .question {
-                        store.askAgainFromHistory(entry.text)
+                        reopen(entry.text)
                     } else {
                         store.search.query = entry.text
                     }
@@ -518,9 +534,16 @@ struct MobileSearchView: View {
     private func continueInChat() {
         if !store.chatHoldsSearchLane {
             guard store.canExpandSearchLane else { return }
-            store.assistant.adopt(store.searchLane)
+            store.adoptSearchLaneIntoChat()
         }
         ask = AgentAsk(text: nil)
+    }
+
+    /// A QUESTION FROM HISTORY: the chat it had, pushed with nothing to send,
+    /// the way "continue in chat" pushes one. With no saved chat the store has
+    /// asked it again in the lane instead, which this screen already shows.
+    private func reopen(_ question: String) {
+        if store.openQuestionFromHistory(question) { ask = AgentAsk(text: nil) }
     }
 
     /// Keyword or question, for the query whose hits are now on screen: the

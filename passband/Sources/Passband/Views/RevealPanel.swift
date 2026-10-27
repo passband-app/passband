@@ -16,6 +16,8 @@ struct RevealPanel: View {
 
     @State private var revealState: Loadable<RevealedSealed> = .loading
 
+    private static let radius: CGFloat = 20
+
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
             VStack(alignment: .leading, spacing: 0) {
@@ -70,7 +72,11 @@ struct RevealPanel: View {
                     .padding(Space.s16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 480)
+                // The body takes every point the header and footer leave, so a
+                // long mail reads like mail rather than through a slot. The
+                // frame sizes itself to its document and hands the wheel to
+                // this ScrollView (PassthroughWebView), so there is one scroll.
+                .frame(maxHeight: .infinity)
 
                 HStack {
                     Text("cleared from memory when you close this.")
@@ -82,16 +88,32 @@ struct RevealPanel: View {
                 .padding(.horizontal, Space.s16)
                 .padding(.vertical, Space.s10)
             }
-            // A Mac sizes this against the window it floats in; a phone has one
-            // measure and the panel takes it.
+            // A READING SURFACE, NOT A DIALOG: the panel runs the height of the
+            // page it floats over. On a Mac it is as wide as the reader's own
+            // column (ThreadViewer.columnWidth) and never wider than the page;
+            // a phone has one measure and the panel takes it.
             #if os(macOS)
-                .frame(width: 720)
+                .frame(maxWidth: ThreadViewer.columnWidth, maxHeight: .infinity)
             #else
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, Space.s12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             #endif
-            .passbandGlass(.pane, cornerRadius: 20, tint: Palette.lockSoft.opacity(0.85))
+            // The banner's fill is a plain rectangle; without the clip its top
+            // corners square off the card's rounded ones.
+            .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+            .passbandGlass(.pane, cornerRadius: Self.radius, tint: Palette.lockSoft.opacity(0.85))
             .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
+            // The margin OUTSIDE the glass, so it shows the page rather than
+            // padding the card. The Mac's is the inset the Auth page under it
+            // already uses, so the card's edges sit where the page's content
+            // does: clear of the window's top bar (the scrim covers the whole
+            // page, header included), then the page's own gutter.
+            #if os(macOS)
+                .padding(.horizontal, Space.scaled(22))
+                .padding(.top, TopBar.height + Space.s16)
+                .padding(.bottom, Space.s16)
+            #else
+                .padding(Space.s12)
+            #endif
         }
         .keyContext(.modal)
         .keyBindings(.modal, [

@@ -79,6 +79,7 @@ enum ReleaseVignette: String, CaseIterable, Sendable {
     case mailList, flow, unsubscribe, clearStack
     case smartBlock
     case loginCode, agentWrite, smartUnsubscribe
+    case smartClear, autoTranslate, archiveSearch, autoDone
     /// Not a drawn scene: the agent ad's own conversation, live.
     case agentSession
 }
@@ -261,6 +262,45 @@ struct ReleaseCatchUp: Sendable, Equatable {
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
+        ReleaseNote(
+            version: "0.0.15",
+            date: "2026-10-27",
+            headline: "Tokyo Update",
+            items: [
+                ReleaseItem(
+                    .app, "Smart clear",
+                    detail: "One press clears Reading mail that has run its course",
+                    symbol: "checkmark.circle", vignette: .smartClear),
+                ReleaseItem(
+                    .app, "Auto-translate",
+                    detail: "Mail in another language arrives with an English version",
+                    symbol: "character.bubble", vignette: .autoTranslate),
+                ReleaseItem(
+                    .app, "Search a year back",
+                    detail: "Find mail from before you joined Passband",
+                    symbol: "clock.arrow.circlepath", vignette: .archiveSearch),
+                ReleaseItem(
+                    .app, "Auto-done",
+                    detail: "Mail that is no longer important is cleared automatically",
+                    symbol: "calendar.badge.checkmark", vignette: .autoDone),
+                ReleaseItem(.app, "See opens under mail you sent"),
+                ReleaseItem(.app, "Search mail you wrote with `in:sent` and `from:me`"),
+                ReleaseItem(.app, "Login and security mail is better sorted"),
+                ReleaseItem(.app, "Security notices land in For Your Eyes, not Auth"),
+                ReleaseItem(.app, "Sealed mail opens full height"),
+                ReleaseItem(.app, "Instant account switching, and you stay on the same page"),
+                ReleaseItem(.app, "Much faster"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Search reaches a year back"),
+                ReleaseItem(.daemon, "Translates mail in other languages"),
+                ReleaseItem(.daemon, "Smart clear"),
+                ReleaseItem(.daemon, "Closes event mail once the event is over"),
+                ReleaseItem(.daemon, "Treats breach and security notices as important mail, not sign-ins"),
+                ReleaseItem(.daemon, "Your agent works in your timezone"),
+                ReleaseItem(.daemon, "Your agent can search mail you sent"),
+                ReleaseItem(.daemon, "Faster and steadier"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ]),
         ReleaseNote(
             version: "0.0.14",
             date: "2026-10-08",

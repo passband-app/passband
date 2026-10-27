@@ -1112,6 +1112,16 @@ fn dt_opt(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<Option<DateTime<U
     }
 }
 
+/// A COUNT or SUM column as `u64`. rusqlite 0.41 no longer reads `u64`
+/// directly (SQLite integers are signed), so read `i64` and refuse a negative
+/// rather than let it wrap.
+fn count(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<u64> {
+    let n: i64 = r.get(i)?;
+    u64::try_from(n).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Integer, Box::new(e))
+    })
+}
+
 fn parse_col_dt(i: usize, s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))

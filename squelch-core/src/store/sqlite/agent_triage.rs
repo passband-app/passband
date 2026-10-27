@@ -1474,7 +1474,7 @@ impl SqliteStore {
                AND state IN ('queued','leased') GROUP BY state",
         )?;
         for row in query.query_map([account_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            Ok((row.get::<_, String>(0)?, super::count(row, 1)?))
         })? {
             let (state, count) = row?;
             counts[usize::from(state == "leased")] = count;
@@ -1500,7 +1500,7 @@ impl SqliteStore {
         let (queued, leased): (u64, u64) = conn.query_row(
             TRIAGE_WAITING_SQL,
             params![account_id, now.to_rfc3339()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((super::count(row, 0)?, super::count(row, 1)?)),
         )?;
         Ok([queued, leased])
     }
@@ -1517,7 +1517,7 @@ impl SqliteStore {
         let (parked, resumes_at): (u64, Option<String>) = conn.query_row(
             TRIAGE_BUDGET_PARKED_SQL,
             params![account_id, Utc::now().to_rfc3339()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((super::count(row, 0)?, row.get(1)?)),
         )?;
         let resumes_at = resumes_at
             .as_deref()

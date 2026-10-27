@@ -119,6 +119,9 @@ enum PhoneReleaseNotes {
                     symbol: "character.bubble"),
             ],
             also: [
+                PhoneAside(
+                    "The person icon opens your accounts, with Settings at the bottom",
+                    symbol: "gearshape"),
                 PhoneAside("Delete a message you are writing with the trash in the corner", symbol: "trash"),
                 PhoneAside("Choose the languages you read in Account, under Mail", symbol: "globe"),
                 PhoneAside("Press and drag to select text in plain emails", symbol: "text.cursor"),

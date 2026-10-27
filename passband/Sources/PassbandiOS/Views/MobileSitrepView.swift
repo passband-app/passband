@@ -167,10 +167,12 @@ struct MobileSitrepView: View {
         // that a glyph is a door and the reason a bare icon still looks tappable.
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                // The whole Account page, which arrives from the same side
-                // the glyph is on (see AccountDoor).
+                // The picker, exactly what the swipe from the left edge
+                // opens: the glyph and the gesture are one door. The full
+                // Account page is the drawer's Settings button.
                 Button {
-                    AccountDoor.shared.pane = .page
+                    Haptics.tick()
+                    AccountDoor.shared.pane = .picker
                 } label: {
                     Image(systemName: "person.crop.circle")
                         .foregroundStyle(Palette.accent)

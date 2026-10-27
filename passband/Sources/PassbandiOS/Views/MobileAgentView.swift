@@ -287,7 +287,7 @@ struct MobileAgentView: View {
                     }
                     .buttonStyle(.plain)
                     .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                             .fill(Palette.hairline.opacity(0.35))
                     )
                 }
@@ -355,11 +355,11 @@ struct MobileAgentView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.accentSoft.opacity(0.6))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
         )
     }
@@ -424,7 +424,7 @@ struct MobileAgentView: View {
             .frame(maxHeight: 220)
             .padding(10)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.6))
             )
         }
@@ -512,7 +512,7 @@ struct MobileAgentView: View {
                 }
                 .buttonStyle(.plain)
                 .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(Palette.hairline.opacity(0.35))
                 )
             }
@@ -557,7 +557,7 @@ struct MobileAgentView: View {
                     }
                     .buttonStyle(.plain)
                     .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                             .fill(Palette.hairline.opacity(0.22))
                     )
                 }

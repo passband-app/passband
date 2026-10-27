@@ -528,7 +528,7 @@
         }
 
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
             let shown = Array(day.items.prefix(fold.shown))
             let nowAt = today ? MonthGrid.nowSlot(day.items, now: now) : nil
             // EVERY ROW AT ITS OWN NUMBER, not stacked: the day's items take
@@ -1098,7 +1098,7 @@
             let height = max(14, CGFloat(DaySweep.y(of: span.end, scale)) - top - 2)
             let hue = CalendarColor.parse(store.calendarWritable.first?.color).map(ChipHue.calendar) ?? .plain
             let inks = ChipColors.inks(hue)
-            let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
             return Text(DaySweep.label(span))
                 .font(Typo.ui(10.5, weight: .medium))
                 .monospacedDigit()

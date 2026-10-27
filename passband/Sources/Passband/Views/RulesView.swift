@@ -412,7 +412,7 @@ struct RulesView: View {
 
         var body: some View {
             ListRow(
-                selected: false, cornerRadius: 10, hPadding: Space.scaled(11), vPadding: Space.s10,
+                selected: false, cornerRadius: Radius.well, hPadding: Space.scaled(11), vPadding: Space.s10,
                 hoverFill: false, action: onOpen
             ) { _, _ in
                 HStack(alignment: .top, spacing: Space.s10) {
@@ -579,7 +579,7 @@ private struct RuleRow: View {
 
     var body: some View {
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: DeskRow.hPadding, vPadding: Space.scaled(7), action: onOpen
+            selected: selected, cornerRadius: Radius.row, hPadding: DeskRow.hPadding, vPadding: Space.scaled(7), action: onOpen
         ) { selected, _ in
             HStack(spacing: Space.scaled(9)) {
                 if row.nested {
@@ -1152,7 +1152,7 @@ struct RuleEditor: View {
             ForEach(Array(rules.enumerated()), id: \.element.id) { i, rule in
                 if i > 0 { Hairline() }
                 ListRow(
-                    selected: false, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7),
+                    selected: false, cornerRadius: Radius.row, hPadding: Space.s10, vPadding: Space.scaled(7),
                     action: { openExisting(rule) }
                 ) { _, _ in
                     HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
@@ -1178,11 +1178,11 @@ struct RuleEditor: View {
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.canvas.opacity(0.3))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairline, lineWidth: 0.75)
         )
     }

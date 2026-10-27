@@ -21,7 +21,7 @@ struct PracticeProductTour: View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
                 ForEach(Array(ringRects.enumerated()), id: \.offset) { _, ring in
-                    RoundedRectangle(cornerRadius: 16)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(Palette.accent, lineWidth: 2)
                         .shadow(color: Palette.accent.opacity(0.25), radius: 14)
                         .frame(width: ring.width, height: ring.height)
@@ -149,9 +149,9 @@ struct PracticeProductTour: View {
             .font(Typo.micro)
         }
         .padding(Space.s20)
-        .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: 20))
+        .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: Radius.modal, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20).strokeBorder(Palette.accent.opacity(0.24))
+            RoundedRectangle(cornerRadius: Radius.modal, style: .continuous).strokeBorder(Palette.accent.opacity(0.24))
         }
         .shadow(color: .black.opacity(0.22), radius: 24, y: 10)
     }

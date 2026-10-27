@@ -25,7 +25,7 @@ extension View {
     /// nil for a neutral pane.
     func passbandGlass(
         _ level: GlassLevel = .pane,
-        cornerRadius: CGFloat = 16,
+        cornerRadius: CGFloat = Radius.pane,
         tint: Color? = Palette.glassTint,
         interactive: Bool = false
     ) -> some View {
@@ -41,7 +41,7 @@ extension View {
     /// `GlassEffectContainer` and a shared `@Namespace`.
     func passbandGlass<ID: Hashable & Sendable>(
         _ level: GlassLevel = .pane,
-        cornerRadius: CGFloat = 16,
+        cornerRadius: CGFloat = Radius.pane,
         tint: Color? = Palette.glassTint,
         interactive: Bool = false,
         id: ID,
@@ -117,7 +117,7 @@ extension View {
         _ selected: Bool,
         hovering: Bool = false,
         tint: Color = Palette.accent,
-        cornerRadius: CGFloat = 9
+        cornerRadius: CGFloat = Radius.row
     ) -> some View {
         background(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -227,7 +227,7 @@ struct ZoneCard<Content: View>: View {
         }
         .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: tint?.opacity(0.12) ?? Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: tint?.opacity(0.12) ?? Palette.glassTint)
     }
 }
 
@@ -317,7 +317,7 @@ struct ModalCard<Content: View>: View {
                 .frame(maxWidth: Typo.measure(width))
                 .padding(.horizontal, Space.s12)
             #endif
-            .passbandGlass(.pane, cornerRadius: 20, tint: tint)
+            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: tint)
             .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
     }
 }

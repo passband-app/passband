@@ -645,13 +645,13 @@ struct ComposePane: View {
             // Near-opaque, like every input well: a translucent card over a
             // busy wallpaper leaves typed text unreadable.
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.65))
             )
             // The drop cue is the whole card lighting up: a file let go
             // anywhere on the message lands (see `composeDropTarget`).
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(
                         dropTargeted ? Palette.accent : Palette.hairlineStrong,
                         lineWidth: dropTargeted ? 1.5 : 0.75))
@@ -1027,11 +1027,11 @@ struct AgentDraftNotice: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.accentSoft)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.accent.opacity(0.4), lineWidth: 1))
     }
 }
@@ -1057,11 +1057,11 @@ struct GuardVerdictBox: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.dangerSoft)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.danger.opacity(0.4), lineWidth: 1))
     }
 }

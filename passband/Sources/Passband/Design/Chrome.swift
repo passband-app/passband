@@ -359,7 +359,7 @@ struct SectionCard<Content: View>: View {
         }
         .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 }
 

@@ -71,7 +71,7 @@
                 .frame(maxWidth: wide ? .infinity : nil)
                 .frame(height: Space.scaled(34))
                 .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(
                             role == .primary
                                 ? Palette.accent.opacity(hovering ? 0.88 : 1)
@@ -80,13 +80,13 @@
                                     : (lit ? Palette.accentSoft : Palette.hairline.opacity(hovering ? 1 : 0.6))))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .strokeBorder(
                             role == .primary
                                 ? Color.clear : (lit ? Palette.accent.opacity(0.5) : Palette.hairline),
                             lineWidth: 1)
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
             }
             .buttonStyle(.plain)
             .onHover {

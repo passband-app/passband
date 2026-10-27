@@ -57,7 +57,7 @@ struct SpamNotice: View {
         // and a semantic one would be a lie. A hairline says "this is a caption
         // about the page" and stops there.
         .overlay(
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 1)
         )
         .accessibilityElement(children: .combine)

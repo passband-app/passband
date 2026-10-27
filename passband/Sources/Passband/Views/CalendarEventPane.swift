@@ -245,11 +245,11 @@
             // Near-opaque, like every input well: a translucent card over a
             // busy wallpaper leaves typed text unreadable.
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.65))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         }
 
@@ -427,7 +427,7 @@
             _ placeholder: String, _ keyPath: WritableKeyPath<EventDraft, String>, _ field: Field, width: CGFloat,
             fills: TitleField? = nil, promptTone: Color = Palette.inkFaintest
         ) -> some View {
-            let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
             let inferred = fills.map { draft.titleRead.filled[$0] != nil } ?? false
             return TextField("", text: bind(keyPath, hand: fills), prompt: Text(placeholder).foregroundStyle(promptTone))
                 .textFieldStyle(.plain)
@@ -1328,7 +1328,7 @@
                     }
                     .buttonStyle(.plain)
                     .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                             .fill(i == picker.highlight ? Palette.accentSoft : .clear)
                     )
                     .accessibilityAddTraits(i == picker.highlight ? .isSelected : [])

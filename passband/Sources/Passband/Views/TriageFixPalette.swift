@@ -39,7 +39,7 @@ struct TriageFixPalette: View {
                     palette
                         .frame(width: Typo.measure(560))
                         .passbandGlass(
-                            .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
+                            .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                             id: "palette", in: paletteGlass)
                         .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
                 }
@@ -237,7 +237,8 @@ private struct TargetRow: View {
         // hoverFill off: the pointer MOVES the selection here, so the selection
         // fill is already following it — a hover wash under it would double up.
         ListRow(
-            selected: selected, tint: axisTone, hPadding: Space.s10, vPadding: Space.scaled(7),
+            selected: selected, cornerRadius: Radius.concentric(Radius.modal, inset: Space.s8),
+            tint: axisTone, hPadding: Space.s10, vPadding: Space.scaled(7),
             hoverFill: false, onHoverChange: { if $0 { onHover() } }, action: onPick
         ) { _, _ in
             HStack(spacing: Space.s10) {

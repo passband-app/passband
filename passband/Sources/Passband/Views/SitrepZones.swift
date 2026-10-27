@@ -330,7 +330,7 @@ private struct ShipmentCard: View {
         .padding(Space.scaled(9))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering && target != nil ? 0.85 : 0.5))
         )
         .contentShape(Rectangle())
@@ -824,14 +824,14 @@ private struct ReadingCard: View {
             .padding(Space.scaled(9))
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(
                         sender.isContent
                             ? Palette.readingContent.opacity(hovering ? 1 : 0.8)
                             : Palette.hairline.opacity(hovering ? 0.85 : 0.5))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(
                         sender.rule != nil ? Palette.accent.opacity(0.35) : .clear,
                         lineWidth: 1)
@@ -931,7 +931,7 @@ private struct ReadingHero: View {
                 // the neutral well when sampling failed — which must stay
                 // distinguishable from a white sample.
                 .background(hero.fill ?? Palette.canvas.opacity(0.7))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.scaled(9)), style: .continuous))
         } else {
             // Zero in BOTH axes: a zero-height-only placeholder would still
             // collect the HStack's spacing and indent the text.
@@ -1126,7 +1126,7 @@ struct RecordRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                     .fill(hovering ? Palette.accentSoft.opacity(0.7) : .clear)
             )
             .opacity(configuration.isPressed ? 0.7 : 1)

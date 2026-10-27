@@ -630,7 +630,7 @@ struct GroupsView: View {
 
         var body: some View {
             ListRow(
-                selected: false, cornerRadius: 10, hPadding: Space.scaled(11), vPadding: Space.s10,
+                selected: false, cornerRadius: Radius.well, hPadding: Space.scaled(11), vPadding: Space.s10,
                 hoverFill: false, action: onOpen
             ) { _, _ in
                 HStack(spacing: Space.s12) {
@@ -698,7 +698,7 @@ private struct GroupRow: View {
     let onEdit: () -> Void
 
     var body: some View {
-        ListRow(selected: selected, cornerRadius: 8, hPadding: DeskRow.hPadding, vPadding: Space.scaled(7), action: onSelect) {
+        ListRow(selected: selected, cornerRadius: Radius.row, hPadding: DeskRow.hPadding, vPadding: Space.scaled(7), action: onSelect) {
             _, _ in
             VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 HStack(spacing: Space.s6) {
@@ -771,7 +771,7 @@ private struct GroupHistoryRow: View {
 
 
     var body: some View {
-        ListRow(selected: false, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7), action: onOpen) {
+        ListRow(selected: false, cornerRadius: Radius.row, hPadding: Space.s10, vPadding: Space.scaled(7), action: onOpen) {
             _, _ in
             HStack(spacing: Space.s10) {
                 VStack(alignment: .leading, spacing: Space.s2) {

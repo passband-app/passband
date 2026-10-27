@@ -41,7 +41,7 @@ struct SidebarRail: View {
     static let railWidth: CGFloat = 60
     static let iconWidth: CGFloat = 44
     static let iconHeight: CGFloat = 36
-    static let selectorRadius: CGFloat = 11
+    static let selectorRadius: CGFloat = Radius.well
     /// The space between a tile and the rail's edge, (60 - 44) / 2.
     static let sideGutter: CGFloat = (railWidth - iconWidth) / 2
 
@@ -483,7 +483,7 @@ struct PracticeRailFeedback: ViewModifier {
     func body(content: Content) -> some View {
         content
             .overlay {
-                RoundedRectangle(cornerRadius: SidebarRail.selectorRadius)
+                RoundedRectangle(cornerRadius: SidebarRail.selectorRadius, style: .continuous)
                     .strokeBorder(Palette.accent.opacity(highlighted ? 0.65 : 0), lineWidth: 1.5)
                     .allowsHitTesting(false)
             }

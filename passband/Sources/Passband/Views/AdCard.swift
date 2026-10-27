@@ -15,7 +15,7 @@ import SwiftUI
 enum AdCard {
     static let width: CGFloat = 340
     static let heroHeight: CGFloat = 196
-    static let cornerRadius: CGFloat = 20
+    static let cornerRadius: CGFloat = Radius.modal
 }
 
 /// The card itself: glass, its shadow, and the arrival from the corner.

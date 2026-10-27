@@ -191,12 +191,12 @@ struct ActionLayer: View {
                     }
                     .buttonStyle(.plain)
                     .background(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.toast, style: .continuous)
                             .fill(.clear)
                     )
                     .glassEffect(
                         .regular.tint(tone(toast.tone).opacity(0.16)).interactive(),
-                        in: .rect(cornerRadius: 11, style: .continuous)
+                        in: .rect(cornerRadius: Radius.toast, style: .continuous)
                     )
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
@@ -228,7 +228,7 @@ struct ActionLayer: View {
                     .buttonStyle(.plain)
                     .glassEffect(
                         .regular.tint(Palette.warn.opacity(0.18)).interactive(),
-                        in: .rect(cornerRadius: 11, style: .continuous)
+                        in: .rect(cornerRadius: Radius.toast, style: .continuous)
                     )
                     .transition(.move(edge: .leading).combined(with: .opacity))
                     .tourTarget(.undoToast)

@@ -588,7 +588,7 @@ private struct ChartCard<Plot: View, Table: View>: View {
         }
         .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 }
 
@@ -629,10 +629,10 @@ private struct ChartReadout: View {
         .padding(.horizontal, Space.scaled(9))
         .padding(.vertical, Space.scaled(7))
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.readerBackground)
+            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous).fill(Palette.readerBackground)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
@@ -681,7 +681,7 @@ private struct StatTile: View {
         .padding(.horizontal, Space.s14)
         .padding(.vertical, Space.s12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 }
 

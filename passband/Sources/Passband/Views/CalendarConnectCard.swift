@@ -146,7 +146,7 @@
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Space.s10)
                     .padding(.vertical, Space.scaled(7))
-                    .background(Palette.hairline.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+                    .background(Palette.hairline.opacity(0.6), in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
             }
         }
     }

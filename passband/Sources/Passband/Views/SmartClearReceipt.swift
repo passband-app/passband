@@ -94,7 +94,7 @@ struct SmartClearReceiptCard: View {
             // The host gives it the screen's width; it fills that.
             .frame(maxWidth: .infinity, alignment: .leading)
         #endif
-        .passbandGlass(.pane, cornerRadius: 16, tint: Palette.glassTintStrong)
+        .passbandGlass(.pane, cornerRadius: Radius.toast, tint: Palette.glassTintStrong)
         .shadow(color: .black.opacity(0.28), radius: 24, y: 12)
         // In from the corner it lives in: the right on the Mac, the
         // bottom (the tab bar's edge) on a phone.
@@ -265,9 +265,9 @@ struct SmartClearGroupSection: View {
                     row(item)
                 }
             }
-            .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(smartClearPaper))
+            .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(smartClearPaper))
             .overlay(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(Palette.hairline, lineWidth: 1)
             )
         }

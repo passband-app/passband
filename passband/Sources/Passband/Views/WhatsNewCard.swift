@@ -60,7 +60,7 @@ struct WhatsNewCard: View {
     private var onLast: Bool { page >= pageCount - 1 }
 
     private static let width: CGFloat = 580
-    private static let radius: CGFloat = 20
+    private static let radius: CGFloat = Radius.modal
     /// A feature page's picture, the stage's 2:1 across the card.
     private static let artHeight: CGFloat = (width * VignetteClock.canvas.height / VignetteClock.canvas.width).rounded()
     /// Every page of a walk is this tall, so Next changes what the card says
@@ -643,12 +643,12 @@ private struct KeyedLine: View {
                         .padding(.horizontal, Space.s6)
                         .frame(minWidth: 21, minHeight: 21)
                         .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                                 .fill(Palette.ink.opacity(0.06)))
                         // EVEN all round, and a soft shadow beneath rather
                         // than a lit top edge.
                         .overlay(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
                         .shadow(color: .black.opacity(0.12), radius: 0.5, y: 1)
                 }

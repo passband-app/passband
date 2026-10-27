@@ -11,9 +11,15 @@
 //   - A value that is TUNED and must not move in compact (an odd 5pt row
 //     inset, a control's fixed height, anything aligned to something else):
 //     `Space.scaled(5)`, which is exact in compact and follows the same curve.
-//   - Optical constants stay literal: hairlines, border widths, corner radii,
-//     dot diameters, shadow offsets, anything in the brand renderers. They
-//     describe the ink, not the room around it.
+//   - Corner radii come from `Radius` (below): a ROLE per kind of container,
+//     not a number per view. They are NOT density-scaled; a card's corner is
+//     the same curve in compact and comfortable. A shape nested inside
+//     another takes `Radius.concentric(outer, inset:)` with the padding that
+//     actually separates them, so the two curves stay parallel.
+//   - Optical constants stay literal: hairlines, border widths, dot
+//     diameters, shadow offsets, anything in the brand renderers (Vignette,
+//     Phosphor, the Squelch drawings), and any radius derived from a size
+//     (height / 2, size * 0.24). They describe the ink, not the room around it.
 //
 // Every accessor reads `Prefs.shared.density`, so a view that uses one in its
 // body is observing the setting and re-lays itself out when it flips. The
@@ -53,4 +59,33 @@ enum Space {
     /// than size between the two (a second line that only comfortable has
     /// room for). Sizes should come from the ladder, not from a branch on this.
     static var density: DensityChoice { Prefs.shared.density }
+}
+
+/// THE CORNER VOCABULARY: one radius per ROLE. Pick by what the shape IS, not
+/// by what looks right next to its neighbour, so two cards that do the same
+/// job round the same way on every page.
+///
+/// Constants on purpose: radii describe the ink, and do not follow density.
+enum Radius {
+    /// A glass pane: zone cards, section cards, the reader's chrome cards.
+    static let pane: CGFloat = 18
+    /// Something floating over the page: modals, palettes, the ask bar,
+    /// side panels, What's New and the ad card.
+    static let modal: CGFloat = 20
+    /// A corner toast (they stack, so they must match) and floating banners.
+    static let toast: CGFloat = 14
+    /// An inset well INSIDE a card: fields, option buttons, tiles, code
+    /// blocks, inline banners, an attachment chip with a thumbnail.
+    static let well: CGFloat = 10
+    /// A list row's selection and hover fill.
+    static let row: CGFloat = 8
+    /// Small things: non-capsule pills, keycaps, tooltips, tiny tiles.
+    static let chip: CGFloat = 6
+
+    /// The radius for a shape inset `inset` points inside one rounded at
+    /// `outer`, so the two curves run parallel. Pass the padding as actually
+    /// laid out (density-scaled), so it stays concentric in comfortable too.
+    static func concentric(_ outer: CGFloat, inset: CGFloat) -> CGFloat {
+        max(outer - inset, 2)
+    }
 }

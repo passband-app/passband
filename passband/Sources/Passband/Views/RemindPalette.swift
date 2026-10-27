@@ -60,7 +60,7 @@ struct RemindPalette: View {
                     palette
                         .frame(width: Typo.measure(560))
                         .passbandGlass(
-                            .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
+                            .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                             id: "remind", in: paletteGlass)
                         .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
                 }
@@ -272,7 +272,8 @@ struct RemindRow: View {
         // the pointer MOVES the selection here, so the selection fill already
         // follows it and a hover wash under it would double up.
         ListRow(
-            selected: selected, tint: Palette.accent, hPadding: Space.s10, vPadding: Space.scaled(7),
+            selected: selected, cornerRadius: Radius.concentric(Radius.modal, inset: Space.s8),
+            tint: Palette.accent, hPadding: Space.s10, vPadding: Space.scaled(7),
             hoverFill: false, onHoverChange: { if $0 { onHover() } }, action: onPick
         ) { _, _ in
             HStack(spacing: Space.s10) {

@@ -60,7 +60,7 @@ struct RecentSearches: View {
                 }
                 .buttonStyle(.plain)
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                         .fill(i == armed ? Palette.accentSoft : .clear)
                 )
             }

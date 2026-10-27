@@ -16,7 +16,7 @@ struct RevealPanel: View {
 
     @State private var revealState: Loadable<RevealedSealed> = .loading
 
-    private static let radius: CGFloat = 20
+    private static let radius: CGFloat = Radius.modal
 
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
@@ -234,11 +234,11 @@ struct RevealQuestion: View {
         .padding(.horizontal, Space.s12)
         .padding(.vertical, Space.s8)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(verdict == nil ? tone.opacity(0.08) : Palette.hairline.opacity(0.5))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(verdict == nil ? tone.opacity(0.25) : .clear, lineWidth: 1)
         )
     }

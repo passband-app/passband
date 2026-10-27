@@ -912,12 +912,12 @@
                 .padding(.vertical, Space.s10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(Palette.accentSoft)
                 )
                 // Selection lights the edge EVENLY, all the way round.
                 .overlay(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .strokeBorder(Palette.accent.opacity(selected ? 0.45 : 0), lineWidth: 1)
                 )
                 .contentShape(Rectangle())
@@ -1158,7 +1158,7 @@
                 .padding(.horizontal, Space.s12)
                 .padding(.vertical, Space.s6)
                 .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .strokeBorder(Palette.hairline, lineWidth: 1)
                 )
                 .accessibilityElement(children: .combine)
@@ -1212,7 +1212,7 @@
             .padding(.horizontal, Space.s12)
             .padding(.vertical, Space.s6)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(Palette.hairline, lineWidth: 1)
             )
             .accessibilityElement(children: .combine)

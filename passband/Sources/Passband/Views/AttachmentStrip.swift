@@ -263,10 +263,10 @@ private struct AttachmentCard: View {
             }
             .frame(width: 38, height: 38)
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s8), style: .continuous)
                     .fill(Palette.hairline.opacity(0.6))
             )
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s8), style: .continuous))
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.filename)
@@ -292,7 +292,7 @@ private struct AttachmentCard: View {
         }
         .padding(Space.s8)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering ? 0.7 : 0.4))
         )
         .opacity(stored ? 1 : 0.55)
@@ -385,9 +385,9 @@ private struct InlineImage: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: Self.maxHeight, alignment: .leading)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                             .strokeBorder(Palette.hairline, lineWidth: 1)
                     )
                     .contentShape(Rectangle())
@@ -404,7 +404,7 @@ private struct InlineImage: View {
             case .blank?:
                 EmptyView()
             case nil:
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.hairline.opacity(0.4))
                     .frame(height: Self.placeholderHeight)
                     .overlay(ProgressView().controlSize(.small))

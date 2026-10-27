@@ -428,7 +428,7 @@ struct ConnectView: View {
             #else
                 .frame(maxWidth: 440)
             #endif
-            .passbandGlass(.pane, cornerRadius: 24, tint: Palette.glassTintStrong)
+            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong)
             .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
     }
 
@@ -736,7 +736,7 @@ struct ConnectView: View {
                     .font(Typo.mono(13))
                     .padding(.horizontal, Space.s10)
                     .padding(.vertical, Space.scaled(7))
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas))
+                    .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas))
             }
             .padding(Space.s16)
         }
@@ -948,7 +948,7 @@ struct ConnectView: View {
         }
         .padding(Space.s14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
+        .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas.opacity(0.3)))
     }
 
     private var pairForm: some View {
@@ -1310,8 +1310,8 @@ private struct WelcomeActions: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+            .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas.opacity(0.3)))
+            .overlay(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
 
             if let retrySaved {
                 Button(retrying ? "Trying saved connection…" : "Try saved connection again", action: retrySaved)
@@ -1404,8 +1404,8 @@ struct SavedConnectionWait: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+        .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas.opacity(0.3)))
+        .overlay(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
     }
 }
 
@@ -1518,8 +1518,8 @@ private struct SetupStep: View {
                 }
                 .padding(.horizontal, Space.scaled(9))
                 .padding(.vertical, Space.s6)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas.opacity(0.9)))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.hairline, lineWidth: 0.75))
+                .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas.opacity(0.9)))
+                .overlay(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 0.75))
                 .padding(.top, Space.s2)
             }
         }
@@ -1656,11 +1656,11 @@ extension View {
             .padding(.horizontal, Space.s10)
             .padding(.vertical, Space.s8)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.9))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
             )
     }

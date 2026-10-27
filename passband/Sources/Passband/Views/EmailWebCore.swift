@@ -408,7 +408,7 @@ struct EmailWebView: View {
                 sizing = .settling
                 sizingIsUserDriven = false
             }
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
             // The speech tail, on the DOCUMENT's outer bottom corner, in the
             // document's own page colour. BEHIND the frame, not over it: the
             // tail's solid span reaches well inside the bubble to bury the

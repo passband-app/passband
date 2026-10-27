@@ -309,7 +309,7 @@ private struct ScheduledFileChip: View {
                 .foregroundStyle(Palette.inkFaintest)
                 .frame(width: Space.scaled(32), height: Space.scaled(32))
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s6), style: .continuous)
                         .fill(Palette.hairline.opacity(0.6)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(file.filename)
@@ -326,7 +326,7 @@ private struct ScheduledFileChip: View {
         .padding(Space.s6)
         .padding(.trailing, Space.s4)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(0.4)))
         .accessibilityElement(children: .combine)
     }

@@ -378,11 +378,11 @@ struct InlineReply: View {
             .frame(height: editorHeight)
             .padding(Space.s8)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.65))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(
                         dropTargeted ? Palette.accent : Palette.hairlineStrong,
                         lineWidth: dropTargeted ? 1.5 : 0.75))
@@ -407,7 +407,7 @@ struct InlineReply: View {
         /// address line to send button, fits between the reader's header and
         /// a raised keyboard. Past it the editor grows with the text.
         private static var editorFloor: CGFloat { Space.scaled(92) }
-        private static var cardRadius: CGFloat { 18 }
+        private static var cardRadius: CGFloat { Radius.pane }
     #endif
 
     #if os(macOS)

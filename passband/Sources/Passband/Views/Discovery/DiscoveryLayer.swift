@@ -214,7 +214,7 @@ private struct DiscoveryMomentHost: View {
             // still is the frame that explains the gesture, and a loop caught
             // mid-way (a stack already cleared) is an empty box.
             DiscoveryMoment(set: set, live: live && hovering)
-                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Radius.pane, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

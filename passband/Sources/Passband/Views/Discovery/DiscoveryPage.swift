@@ -232,7 +232,7 @@ struct DiscoveryRow: View {
         HStack(alignment: .center, spacing: featured ? 18 : Self.gap) {
             // ONLY UNDER THE POINTER. Everything else holds its poster.
             DiscoveryVignette(
-                set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: featured ? 9 : 5)
+                set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: featured ? Radius.concentric(Radius.pane, inset: 12) : 5)
                 .frame(width: picture)
 
             if featured {
@@ -274,12 +274,12 @@ struct DiscoveryRow: View {
         .padding(.leading, featured ? 12 : Self.inset)
         .padding(.trailing, Self.inset)
         .background {
-            RoundedRectangle(cornerRadius: featured ? 14 : 9, style: .continuous)
+            RoundedRectangle(cornerRadius: featured ? Radius.pane : Radius.row, style: .continuous)
                 .fill(fill)
         }
         .overlay {
             // The card's edge, even all round. Plain rows have none.
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.pane, style: .continuous)
                 .strokeBorder(selected ? Palette.accent.opacity(0.5) : Palette.hairline, lineWidth: 0.75)
                 .opacity(featured ? 1 : 0)
         }
@@ -406,12 +406,12 @@ struct DiscoveryKeycap: View {
             .padding(.horizontal, 7)
             .frame(minWidth: 22, minHeight: 21)
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                     .fill(Palette.readerBackground.opacity(0.85))
                     .shadow(color: .black.opacity(0.14), radius: 0.5, y: 1)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                     .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
             )
             .fixedSize()
@@ -430,7 +430,7 @@ struct DiscoveryMoment: View {
 
     var body: some View {
         HStack(spacing: 13) {
-            DiscoveryVignette(set: set, live: live, fixedTime: fixedTime, cornerRadius: 9)
+            DiscoveryVignette(set: set, live: live, fixedTime: fixedTime, cornerRadius: Radius.concentric(Radius.pane, inset: 9))
                 .frame(width: 98)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -458,7 +458,7 @@ struct DiscoveryMoment: View {
         }
         .padding(9)
         .padding(.trailing, 7)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTintStrong)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTintStrong)
         .shadow(color: .black.opacity(0.26), radius: 22, y: 10)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(set.foundTitle) \(set.foundLine)")

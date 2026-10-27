@@ -196,7 +196,7 @@ struct SchedulePalette: View {
                     palette
                         .frame(width: Typo.measure(560))
                         .passbandGlass(
-                            .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
+                            .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                             id: "schedule", in: paletteGlass)
                         .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
                 }

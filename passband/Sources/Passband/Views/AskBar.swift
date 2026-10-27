@@ -73,7 +73,7 @@ struct AskBar: View {
                 }
                 .frame(width: Typo.measure(620))
                 .passbandGlass(
-                    .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
+                    .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                     id: "askbar", in: askGlass)
                 .shadow(color: .black.opacity(0.34), radius: 50, y: 22)
             }
@@ -296,7 +296,7 @@ struct AskBar: View {
                 .padding(.horizontal, Space.s10)
                 .padding(.vertical, Space.s6)
                 .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(Palette.accentSoft)
                 )
         }
@@ -385,11 +385,11 @@ struct AskBar: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.accentSoft.opacity(0.6))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
         )
     }
@@ -447,7 +447,7 @@ struct AskBar: View {
             .frame(maxHeight: Space.scaled(140))
             .padding(Space.s8)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.6))
             )
         }

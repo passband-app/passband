@@ -47,7 +47,7 @@ import UIKit
 struct SwipeRow<Content: View>: View {
     var leading: [SwipeVerb] = []
     var trailing: [SwipeVerb] = []
-    var cornerRadius: CGFloat = 10
+    var cornerRadius: CGFloat = PhoneRow.radius
     /// Width of one rail button. Wide enough for a 15pt glyph over a caption.
     var buttonWidth: CGFloat = 74
     /// What the row slides OVER its rail on; nil is the sitrep's zone-card

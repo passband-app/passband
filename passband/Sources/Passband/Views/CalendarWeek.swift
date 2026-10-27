@@ -285,7 +285,7 @@
         let action: () -> Void
 
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
             Button(action: action) {
                 HStack(alignment: .center, spacing: Space.s2) {
                     Text(label.weekday)

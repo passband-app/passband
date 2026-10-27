@@ -569,7 +569,7 @@ private struct IntroMailCard: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(organized ? mail.color : Palette.inkDim)
                 .frame(width: 35, height: 35)
-                .background((organized ? mail.color : Palette.inkDim).opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
+                .background((organized ? mail.color : Palette.inkDim).opacity(0.09), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
                     Text(mail.sender)
@@ -590,8 +590,8 @@ private struct IntroMailCard: View {
         }
         .padding(16)
         .frame(height: 76)
-        .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: 17))
-        .overlay(RoundedRectangle(cornerRadius: 17).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+        .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 17, style: .continuous).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         .shadow(color: .black.opacity(organized ? 0.07 : 0.12), radius: organized ? 12 : 20, y: 8)
     }
 }

@@ -254,7 +254,7 @@ private struct DraftRow: View {
 
     var body: some View {
         ListRow(
-            selected: selected && !inert, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.s6,
+            selected: selected && !inert, cornerRadius: Radius.row, hPadding: Space.scaled(11), vPadding: Space.s6,
             hoverFill: !inert,
             onHoverChange: inert ? nil : { if $0 { onHover() } },
             action: {

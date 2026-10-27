@@ -151,7 +151,7 @@ struct RecipientField<F: Hashable>: View {
                 // card the line is the field.
                 InlineFieldRow(label: label, accessory: accessory) { pillRow }
                     .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                             .fill(Palette.accentSoft)
                             .opacity(dropTargeted ? 1 : 0)
                     )
@@ -167,7 +167,7 @@ struct RecipientField<F: Hashable>: View {
                     pillRow
                         .fieldWell()
                         .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .strokeBorder(Palette.accent, lineWidth: dropTargeted ? 1.5 : 0)
                         )
                         .animation(.easeOut(duration: 0.12), value: dropTargeted)
@@ -378,7 +378,7 @@ struct RecipientField<F: Hashable>: View {
                 }
                 .buttonStyle(.plain)
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s4), style: .continuous)
                         .fill(i == index ? Palette.accentSoft : .clear)
                 )
             }
@@ -416,7 +416,7 @@ struct RecipientField<F: Hashable>: View {
                 }
                 .buttonStyle(.plain)
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s4), style: .continuous)
                         .fill(i + groupHits.count == index ? Palette.accentSoft : .clear)
                 )
             }
@@ -433,11 +433,11 @@ struct RecipientField<F: Hashable>: View {
         }
         .padding(Space.s4)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.canvas.opacity(0.85))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         // Mounts WITH the list, so these register after everything else and win
         // exactly while there is a list to drive.

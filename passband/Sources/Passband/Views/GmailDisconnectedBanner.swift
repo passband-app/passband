@@ -77,9 +77,9 @@ struct GmailDisconnectedBanner: View {
         }
         .padding(.horizontal, Space.scaled(13))
         .padding(.vertical, Space.s10)
-        .background(Palette.warnSoft, in: RoundedRectangle(cornerRadius: 9))
+        .background(Palette.warnSoft, in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.warn.opacity(0.30), lineWidth: 1)
         )
         // One announcement for a screen reader, not four fragments.
@@ -129,7 +129,7 @@ struct ReconnectAccountPrompt: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Space.s10)
                     .padding(.vertical, Space.scaled(7))
-                    .background(Palette.warnSoft, in: RoundedRectangle(cornerRadius: 7))
+                    .background(Palette.warnSoft, in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
                 Text("Google will show every account signed in to your browser. Choosing a different one will not reconnect this mailbox.")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
@@ -204,10 +204,10 @@ struct SyncStatusBanner: View {
         .padding(.vertical, Space.s10)
         .background(
             status.isWarning ? Palette.warnSoft : Palette.accentSoft,
-            in: RoundedRectangle(cornerRadius: 9)
+            in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(tone.opacity(0.30), lineWidth: 1)
         )
         .help(status.rawReason.map { "Gmail reported: \($0)" } ?? "")

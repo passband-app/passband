@@ -68,7 +68,7 @@ private struct UnsubscribeCard: View {
         .padding(.vertical, Space.scaled(9))
         .padding(.leading, Space.s10)
         .padding(.trailing, Space.s12)
-        .passbandGlass(.pane, cornerRadius: 14, tint: tint)
+        .passbandGlass(.pane, cornerRadius: Radius.toast, tint: tint)
         .accessibilityElement(children: .combine)
     }
 

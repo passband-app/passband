@@ -100,7 +100,7 @@ private struct TestFlightAdCard: View {
                         .padding(5)
                         // Pinned white in both themes: a phone camera reads
                         // dark-on-light, and an inverted code is a coin flip.
-                        .background(.white, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .background(.white, in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
                         .accessibilityLabel("QR code for the TestFlight invite")
                 }
                 VStack(alignment: .leading, spacing: 3) {

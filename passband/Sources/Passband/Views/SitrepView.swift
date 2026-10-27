@@ -967,7 +967,7 @@ private struct DashHero: View {
             }
             .buttonStyle(.plain)
             .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                     .fill(Palette.hairline.opacity(hovering ? 0.7 : 0))
             }
             // Our own hint rather than `.help`: the system tooltip waits most
@@ -984,11 +984,11 @@ private struct DashHero: View {
                 .padding(.horizontal, Space.scaled(7))
                 .padding(.vertical, Space.s4)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                         .fill(Palette.canvas)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                         .strokeBorder(Palette.hairline, lineWidth: 0.5)
                 )
                 .fixedSize()
@@ -1232,7 +1232,7 @@ private struct ObligationWash: View {
     let hover: RowHover
     let tint: Color
 
-    private static let radius: CGFloat = 9
+    private static let radius: CGFloat = Radius.row
 
     /// Short-circuits exactly as it did on the row: with the keyboard idle
     /// `cursor.index` is never read, so the index write every hover performs
@@ -1437,7 +1437,7 @@ struct FlowLayout: Layout {
             .frame(width: Self.width)
             // The strong tint: the stats sit over a busy board, and the
             // board's rows bled through the lighter one.
-            .passbandGlass(.pane, cornerRadius: 22, tint: Palette.glassTintStrong)
+            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong)
             .shadow(color: .black.opacity(0.32), radius: 40, y: 18)
         }
 

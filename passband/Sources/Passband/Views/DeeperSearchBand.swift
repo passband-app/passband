@@ -61,11 +61,11 @@ struct DeeperSearchBand: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.accentSoft.opacity(0.35))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairline, lineWidth: 0.75)
         )
         // THE WHOLE BOX IS THE WAY INTO THE CHAT, on a shell that hosts its
@@ -73,7 +73,7 @@ struct DeeperSearchBand: View {
         // the box's own buttons, opens the conversation. Those are Buttons and
         // take their own taps first; this hears only what lands between them.
         // Only once there is a conversation the chat can take.
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         .onTapGesture {
             guard let openInChat, tapOpensChat else { return }
             openInChat()

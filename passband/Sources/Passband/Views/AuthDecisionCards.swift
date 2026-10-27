@@ -169,11 +169,11 @@ struct AuthDecisionCard: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(meta.isCritical ? Palette.danger.opacity(0.10) : Palette.hairline.opacity(0.5))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(
                     meta.isCritical ? Palette.danger.opacity(0.35) : .clear, lineWidth: 1)
         )
@@ -244,7 +244,7 @@ struct AuthBurstCard: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(0.5))
         )
     }

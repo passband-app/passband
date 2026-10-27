@@ -80,7 +80,7 @@ struct AuthCodeModal: View {
                     .frame(maxWidth: Typo.measure(420))
                     .padding(.horizontal, Space.s14)
                 #endif
-                .passbandGlass(.pane, cornerRadius: 22, tint: Palette.lockSoft.opacity(0.9))
+                .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.lockSoft.opacity(0.9))
                 .shadow(color: .black.opacity(0.34), radius: 50, y: 22)
             }
             .keyContext(.modal)

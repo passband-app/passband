@@ -144,11 +144,11 @@ private struct AttachmentRow: View {
         .padding(Space.s6)
         .padding(.trailing, editable ? 0 : Space.s4)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering ? 0.7 : 0.4))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(
                     attachment.failed ? Palette.danger.opacity(0.5) : .clear, lineWidth: 1)
         )
@@ -180,10 +180,10 @@ private struct AttachmentRow: View {
         }
         .frame(width: 38, height: 38)
         .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s6), style: .continuous)
                 .fill(Palette.hairline.opacity(0.6))
         )
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s6), style: .continuous))
     }
 
     private var status: String {

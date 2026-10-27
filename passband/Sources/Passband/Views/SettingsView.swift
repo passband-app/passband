@@ -317,7 +317,7 @@ struct SettingsView: View {
         }
         .buttonStyle(.plain)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                 .fill(active ? Palette.accentSoft : .clear)
         )
     }
@@ -363,11 +363,11 @@ struct SettingsView: View {
         .padding(.horizontal, DeskRow.hPadding)
         .padding(.vertical, Space.s6)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                 .fill(Palette.canvas.opacity(0.65))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                 .strokeBorder(
                     searchFocused ? Palette.accent.opacity(0.55) : Palette.hairlineStrong,
                     lineWidth: 0.75)
@@ -779,7 +779,7 @@ private struct DensityTile: View {
     /// grew with the setting, both pictures would change size on every flip and
     /// the comparison between them would be of two different windows.
     private static let size = CGSize(width: 156, height: 92)
-    private static let radius: CGFloat = 10
+    private static let radius: CGFloat = Radius.well
 
     private static let sample: [(name: String, line: String)] = [
         ("Maya Okafor", "Lunch on Thursday?"),
@@ -1265,11 +1265,11 @@ struct SignatureSection: View {
                 .frame(height: Space.scaled(140))
                 .padding(Space.s8)
                 .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(Palette.canvas.opacity(0.65))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         }
         .frame(maxWidth: .infinity)
@@ -1763,7 +1763,7 @@ struct CredentialsEditor: View {
         }
         .padding(Space.s12)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.canvas.opacity(0.5))
         )
         .onAppear {

@@ -160,11 +160,11 @@ struct SharePanel: View {
                     .frame(minHeight: Space.scaled(220), maxHeight: .infinity)
                     .padding(Space.s8)
                     .background(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                             .fill(Palette.canvas.opacity(0.65))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                             .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
             }
             .frame(maxHeight: .infinity)

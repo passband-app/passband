@@ -474,8 +474,9 @@ impl SqliteStore {
     ///
     /// THIS IS THE AUTHORITY for every external search result: the full
     /// per-message check (its own assessment, the owner's seal, and every
-    /// source its decision consumed) and then the thread guard. Whatever a
-    /// recall leg filtered beforehand, nothing is returned that fails here.
+    /// source its decision consumed) and the thread guard, asked as one walk
+    /// (`messages::thread_allowed_with_conn`). Whatever a recall leg filtered
+    /// beforehand, nothing is returned that fails here.
     pub fn external_search_hits(
         &self,
         account_id: AccountId,
@@ -484,28 +485,22 @@ impl SqliteStore {
         let conn = self.lock()?;
         let mut allowed = Vec::new();
         for id in hits.iter().map(|hit| hit.id) {
-            if !super::messages::external_message_allowed_conn(&conn, account_id, id)? {
-                continue;
-            }
             let hit = conn
-                .query_row(
-                    concat!(
-                        "SELECT ",
-                        hit_columns_sql!(original),
-                        " FROM messages m LEFT JOIN triage t ON t.message_id=m.id
-                         WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0"
-                    ),
-                    params![account_id, id],
-                    map_search_hit,
-                )
+                .prepare_cached(concat!(
+                    "SELECT ",
+                    hit_columns_sql!(original),
+                    " FROM messages m LEFT JOIN triage t ON t.message_id=m.id
+                     WHERE m.account_id=?1 AND m.id=?2 AND m.is_spam=0"
+                ))?
+                .query_row(params![account_id, id], map_search_hit)
                 .optional()?;
             let Some(hit) = hit else {
                 continue;
             };
-            match super::messages::thread_guard_and_subject(&conn, account_id, &hit.thread_id) {
-                Ok(_) => allowed.push(hit),
-                Err(CoreError::NotFound) => {}
-                Err(error) => return Err(error),
+            // The hit itself by name, and its thread's guard, in one walk.
+            if super::messages::thread_allowed_with_conn(&conn, account_id, &hit.thread_id, &[id])?
+            {
+                allowed.push(hit);
             }
         }
         Ok(allowed)

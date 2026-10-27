@@ -681,6 +681,43 @@ impl SquelchServer {
             .map_err(Self::map_err)
     }
 
+    /// The second layer `get_inbox_updates` and `get_reading` wear. The store
+    /// already restricts what it lists (and is what the tests can see); each
+    /// row's message, the message whose decision it shows, and their thread
+    /// are asked about again here, so a regression in the store's restriction
+    /// still has to get past this door. The rows that pass, in order. One
+    /// store call for the whole listing: the checks `agent_access_allowed`
+    /// and [`Self::thread_is_unavailable`] make, without taking the store
+    /// mutex twice per row. An answer count that does not match the rows
+    /// fails the call rather than pairing a row with another row's answer.
+    fn still_allowed(
+        &self,
+        items: Vec<squelch_core::store::agent_triage::AgentListItem>,
+    ) -> Result<Vec<squelch_core::store::agent_triage::AgentListItem>, ErrorData> {
+        let rows: Vec<(i64, i64, &str)> = items
+            .iter()
+            .map(|item| {
+                (
+                    item.message_id,
+                    item.decision_source_message_id,
+                    item.thread_id.as_str(),
+                )
+            })
+            .collect();
+        let allowed = self
+            .store
+            .external_listing_allowed(self.account_id, &rows)
+            .map_err(Self::map_err)?;
+        if allowed.len() != items.len() {
+            return Err(ErrorData::internal_error("internal error", None));
+        }
+        Ok(items
+            .into_iter()
+            .zip(allowed)
+            .filter_map(|(item, allowed)| allowed.then_some(item))
+            .collect())
+    }
+
     /// Number of registered MCP tools (for smoke tests / introspection).
     #[allow(dead_code)]
     pub fn tool_count(&self) -> usize {
@@ -818,19 +855,16 @@ impl SquelchServer {
             .external_agent_fye(self.account_id, 1000, &self.ranking_config, Utc::now())
             .map_err(Self::map_err)?;
         let rules = self.sender_rules()?;
-        let mut out = Vec::new();
+        let mut recent = Vec::new();
         for item in updates {
             let received_at = DateTime::parse_from_rfc3339(&item.received_at)
                 .map_err(|_| ErrorData::internal_error("invalid received timestamp", None))?;
-            if received_at.with_timezone(&Utc) < params.since
-                || !self
-                    .store
-                    .agent_access_allowed(self.account_id, item.message_id)
-                    .map_err(Self::map_err)?
-                || self.thread_is_unavailable(&item.thread_id)?
-            {
-                continue;
+            if received_at.with_timezone(&Utc) >= params.since {
+                recent.push(item);
             }
+        }
+        let mut out = Vec::new();
+        for item in self.still_allowed(recent)? {
             out.push(InboxUpdate {
                 standing_instruction: Self::instruction_for(&item.from_addr, &rules),
                 message_id: item.message_id,
@@ -882,19 +916,7 @@ impl SquelchServer {
             .map_err(Self::map_err)?;
         let rules = self.sender_rules()?;
         let mut out = Vec::new();
-        for item in items {
-            // The store already restricts these (and is what the tests can
-            // see). The per-row checks are the same second layer
-            // `get_inbox_updates` wears, kept so a regression in the store's
-            // restriction still has to get past this door.
-            if !self
-                .store
-                .agent_access_allowed(self.account_id, item.message_id)
-                .map_err(Self::map_err)?
-                || self.thread_is_unavailable(&item.thread_id)?
-            {
-                continue;
-            }
+        for item in self.still_allowed(items)? {
             out.push(ReadingItem {
                 standing_instruction: Self::instruction_for(&item.from_addr, &rules),
                 message_id: item.message_id,

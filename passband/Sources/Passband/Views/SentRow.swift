@@ -60,8 +60,8 @@ struct SentRow: View {
     /// The inbox rows' own numbers on either platform, so the page under the
     /// segmented control keeps its rhythm when it flips.
     #if os(macOS)
-        private static var hPadding: CGFloat { Space.scaled(11) }
-        private static var vPadding: CGFloat { Space.s6 }
+        private static var hPadding: CGFloat { DeskRow.hPadding }
+        private static var vPadding: CGFloat { DeskRow.vPadding }
         private static let radius: CGFloat = 8
     #else
         private static var hPadding: CGFloat { PhoneRow.hPadding }

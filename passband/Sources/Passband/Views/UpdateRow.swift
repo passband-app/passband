@@ -73,8 +73,8 @@ struct UpdateRow: View {
     /// Phone rows are taller: a tap target, and two lines instead of one, so the
     /// same padding would crowd them.
     #if os(macOS)
-        private static var hPadding: CGFloat { Space.scaled(11) }
-        private static var vPadding: CGFloat { Space.s6 }
+        private static var hPadding: CGFloat { DeskRow.hPadding }
+        private static var vPadding: CGFloat { DeskRow.vPadding }
         private static let radius: CGFloat = 8
     #else
         // `PhoneRow`'s, which the sent and outbox rows read too.

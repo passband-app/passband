@@ -59,7 +59,7 @@
                             .frame(maxWidth: twoPanes ? paneWidth : .infinity, maxHeight: .infinity, alignment: .top)
                     }
                 }
-                .padding(.horizontal, Space.scaled(22))
+                .padding(.horizontal, Space.page)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }

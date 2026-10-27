@@ -40,9 +40,12 @@ struct UsageView: View {
             }
             ScrollView {
                 content
-                    .padding(.horizontal, Space.s24)
+                    .padding(.horizontal, Space.page)
                     .padding(.vertical, Space.scaled(18))
-                    .frame(maxWidth: 980, alignment: .leading)
+                    // Capped on the type's curve, like the settings panes: the
+                    // cards hold charts with labelled axes, so the cap is a
+                    // measure and grows with the text in comfortable.
+                    .frame(maxWidth: Typo.measure(980), alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }

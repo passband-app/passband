@@ -65,8 +65,8 @@ struct ScheduledRow: View {
 
     /// SentRow's numbers on either platform: the two are one list.
     #if os(macOS)
-        private static var hPadding: CGFloat { Space.scaled(11) }
-        private static var vPadding: CGFloat { Space.s6 }
+        private static var hPadding: CGFloat { DeskRow.hPadding }
+        private static var vPadding: CGFloat { DeskRow.vPadding }
         private static let radius: CGFloat = 8
     #else
         private static var hPadding: CGFloat { PhoneRow.hPadding }

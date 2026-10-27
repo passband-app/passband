@@ -25,7 +25,7 @@
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Rectangle().fill(Palette.hairline).frame(height: 1)
                 bottom
-                    .padding(.horizontal, Space.scaled(22))
+                    .padding(.horizontal, Space.page)
                     .frame(height: Space.scaled(54))
             }
             // NO BACKGROUND AND NO INSETS OF ITS OWN: this is mounted in the

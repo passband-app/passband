@@ -136,7 +136,7 @@ struct AuthView: View {
                 mainColumn(d)
                 rail(d)
             }
-            .padding(.horizontal, Space.scaled(22))
+            .padding(.horizontal, Space.page)
             .padding(.vertical, Space.s16)
         }
         .keyBindings(.modal, bindings)

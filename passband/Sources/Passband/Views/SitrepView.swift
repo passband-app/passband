@@ -107,12 +107,6 @@ struct SitrepView: View {
     /// the comfortable rail's extra width moves the breakpoint with it.
     private static var railBreakpoint: CGFloat { Typo.measure(654) + railWidth }
 
-    /// The page's side margin for everything above the two columns: the
-    /// column's own 24 plus the 4 a ClearNote is inset by, as a sum of two
-    /// steps so the hero and the banners stay on that inset line in either
-    /// density (a scaled 28 lands two points off it in comfortable).
-    private static var gutter: CGFloat { Space.s24 + Space.s4 }
-
     /// The records rail. On the spacing curve rather than the type's: a rail
     /// row is a name beside two chips and an amount, and it is the chips'
     /// padding that grows. Held at 306, comfortable left the name no room at
@@ -152,13 +146,13 @@ struct SitrepView: View {
             // arrived actually looks.
             if store.gmailDisconnected {
                 GmailDisconnectedBanner()
-                    .padding(.horizontal, Self.gutter)
+                    .padding(.horizontal, Space.page)
                     .padding(.top, Space.s14)
             } else if case let status = store.syncStatus, status.showsBanner {
                 // Throttled, erroring, catching up, or triage held: the same
                 // slot, because it answers the same question.
                 SyncStatusBanner(status: status)
-                    .padding(.horizontal, Self.gutter)
+                    .padding(.horizontal, Space.page)
                     .padding(.top, Space.s14)
             }
             // THE HERO STAYS PUT. It sits above BOTH columns, so it cannot scroll
@@ -181,7 +175,7 @@ struct SitrepView: View {
                 // a reader of them.
                 empty: store.sitrep.standing.isEmpty ? emptyHero : nil)
                 .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
-                .padding(.horizontal, Self.gutter)
+                .padding(.horizontal, Space.page)
                 .padding(.bottom, Space.scaled(18))
 
             if pageWidth < Self.railBreakpoint {
@@ -203,7 +197,7 @@ struct SitrepView: View {
                 }
                 .scrollIndicators(.hidden)
                 .scrollShadowRoom(topFade: Space.s14)
-                .padding(.horizontal, Space.s24)
+                .padding(.horizontal, Space.page)
             } else {
                 HStack(alignment: .top, spacing: Space.scaled(18)) {
                     // THE ONLY THING THAT SCROLLS WITH THE PAGE.
@@ -244,7 +238,7 @@ struct SitrepView: View {
                     .tourTarget(.records)
                     }
                 }
-                .padding(.horizontal, Space.s24)
+                .padding(.horizontal, Space.page)
             }
         }
         // The window shell draws the scene (it runs under the rail and the
@@ -368,7 +362,6 @@ struct SitrepView: View {
                 .tourTarget(.eyes)
         } else if isClear {
             ClearNote()
-                .padding(.horizontal, Space.s4)
                 .transition(.opacity)
         }
         // Empty reading still stands beside a live For-your-eyes (a zone that
@@ -462,7 +455,7 @@ struct SitrepView: View {
                 }
             #endif
         }
-        .padding(.horizontal, Space.s24)
+        .padding(.horizontal, Space.page)
         // THE TOP BAR. The wordmark sits on the traffic lights' line rather than
         // under it, which is why this is a fixed height and not padding: the
         // rail beside it starts at the same line, and the two only read as one

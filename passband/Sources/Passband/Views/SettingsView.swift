@@ -60,8 +60,9 @@ struct SettingsView: View {
                 // RULES AND GROUPS ARE WHOLE PAGES, moved here off the rail with
                 // their own scrollers and their own key bar along the bottom.
                 // They take the height like the ledger and none of the pane's
-                // padding: each already sets its rows on the page gutter, and a
-                // key bar inset on both sides reads as a card with no card.
+                // padding: each already sets its rows' words on the page gutter
+                // (the same line the card panes' borders sit on), and a key bar
+                // inset on both sides reads as a card with no card.
                 if pagePane {
                     pane(prefs.settingsSection)
                         .padding(.top, Space.s8)
@@ -72,7 +73,7 @@ struct SettingsView: View {
                         }
                 } else if fullHeightPane {
                     pane(prefs.settingsSection)
-                        .padding(.horizontal, Space.scaled(22))
+                        .padding(.horizontal, Space.page)
                         .padding(.vertical, Space.scaled(18))
                         .frame(
                             maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -85,7 +86,11 @@ struct SettingsView: View {
                                 pane(prefs.settingsSection)
                             }
                         }
-                        .padding(.horizontal, Space.scaled(22))
+                        // ONE EDGE FOR EVERY SUB-PAGE: a card's border here, and
+                        // on Rules and Groups the rows' words (they inset
+                        // themselves through `DeskRow`), both on the page
+                        // gutter in from the pane's edge.
+                        .padding(.horizontal, Space.page)
                         .padding(.vertical, Space.scaled(18))
                         // 720 IS A READING MEASURE, not a layout habit: a
                         // column of labelled switches stops being scannable
@@ -248,7 +253,7 @@ struct SettingsView: View {
                     Rectangle()
                         .fill(Palette.hairline)
                         .frame(height: 0.5)
-                        .padding(.horizontal, Space.scaled(11))
+                        .padding(.horizontal, DeskRow.hPadding)
                         .padding(.vertical, Space.s8)
                 }
                 ForEach(group, id: \.self) { section in
@@ -258,7 +263,11 @@ struct SettingsView: View {
             Spacer()
         }
         .frame(width: Typo.measure(158))
-        .padding(.horizontal, Space.s12)
+        // THE COLUMN STARTS ON THE PAGE GUTTER, the line the "Settings" title
+        // above it is set on. The rows' fill reaches out into this inset and
+        // their padding carries the icons, the search glass and the rule
+        // between the two groups the rest of the way: `DeskRow`'s two halves.
+        .padding(.horizontal, DeskRow.listInset)
         .padding(.vertical, Space.scaled(18))
     }
 
@@ -274,6 +283,9 @@ struct SettingsView: View {
         [.account, .rules, .groups],
         [.general, .mail, .assistant, .agents, .privacy, .audit],
     ]
+
+    /// The fixed icon slot a nav row and the search field both lead with.
+    private static var iconSlot: CGFloat { Space.scaled(18) }
 
     private func navRow(_ section: SettingsSection) -> some View {
         // Nothing is selected while a search is up, because nothing IS: the
@@ -293,13 +305,13 @@ struct SettingsView: View {
                 // lines and the column stops reading as a column.
                 Image(systemName: section.symbol)
                     .font(Typo.ui(12, weight: .medium))
-                    .frame(width: Space.scaled(18))
+                    .frame(width: Self.iconSlot)
                 Text(section.label)
                     .font(Typo.ui(12, weight: .medium))
             }
                 .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Space.scaled(9))
+                .padding(.horizontal, DeskRow.hPadding)
                 .padding(.vertical, Space.s6)
                 .contentShape(Rectangle())
         }
@@ -315,10 +327,13 @@ struct SettingsView: View {
     /// and answers it better: the panes are a filing system somebody else
     /// chose, and this one takes the word you already had.
     private var search: some View {
-        HStack(spacing: Space.s6) {
+        // The nav rows' slot, gap and padding, so the glass is centred over
+        // their icons and the placeholder starts where their labels do.
+        HStack(spacing: Space.s8) {
             Image(systemName: "magnifyingglass")
                 .font(Typo.ui(11, weight: .medium))
                 .foregroundStyle(Palette.inkFaintest)
+                .frame(width: Self.iconSlot)
             TextField("search settings", text: $query)
                 .textFieldStyle(.plain)
                 .font(Typo.ui(12))
@@ -345,7 +360,7 @@ struct SettingsView: View {
                 .help("Clear")
             }
         }
-        .padding(.horizontal, Space.s8)
+        .padding(.horizontal, DeskRow.hPadding)
         .padding(.vertical, Space.s6)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)

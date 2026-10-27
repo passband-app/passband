@@ -36,6 +36,13 @@ enum Space {
     static var s24: CGFloat { scaled(24) }
     static var s32: CGFloat { scaled(32) }
 
+    /// THE PAGE GUTTER: the leading and trailing edge every page's title, its
+    /// content and its key-hint bar share, so switching tabs does not move the
+    /// text. A list whose selection fill bleeds past its words gets there in
+    /// two parts, container inset + row padding = `page`, which puts the WORDS
+    /// on this line and lets the fill reach out to the left of it.
+    static var page: CGFloat { s24 }
+
     /// An off-ladder compact value on the same curve. For the tuned numbers
     /// the ladder would shift by a point; not a way around choosing a step.
     static func scaled(_ compact: CGFloat) -> CGFloat {

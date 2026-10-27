@@ -77,10 +77,12 @@ struct RulesView: View {
         // middle. One real container means one frame, and the bar keeps its
         // natural height while the body takes what is left.
         VStack(spacing: 0) {
+            // Notes and the empty state on the line the rows' words take,
+            // which is the page gutter inside the settings pane.
             if rulesState.isLoading && rules.isEmpty {
-                BandNote("loading rules…")
+                BandNote("loading rules…").padding(.horizontal, DeskRow.listInset)
             } else if let error = rulesState.error {
-                BandNote(error)
+                BandNote(error).padding(.horizontal, DeskRow.listInset)
             } else if rules.isEmpty {
                 VStack(alignment: .leading, spacing: Space.s6) {
                     HStack(spacing: Space.s4) {
@@ -92,7 +94,7 @@ struct RulesView: View {
                     }
                     .foregroundStyle(Palette.inkFaintest)
                 }
-                .padding(.horizontal, Space.scaled(22))
+                .padding(.horizontal, Space.page)
                 .padding(.vertical, Space.s24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
@@ -121,7 +123,7 @@ struct RulesView: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, Space.scaled(18))
+                        .padding(.horizontal, DeskRow.listInset)
                         .padding(.bottom, Space.s10)
                     }
                     .onChange(of: index) { _, i in
@@ -508,7 +510,7 @@ private struct RuleSectionHeader: View {
                 .fill(Palette.hairline)
                 .frame(height: 1)
         }
-        .padding(.horizontal, Space.scaled(11))
+        .padding(.horizontal, DeskRow.hPadding)
         .padding(.top, Space.scaled(18))
         .padding(.bottom, Space.s6)
         .help(disposition.hint)
@@ -533,7 +535,13 @@ private struct DomainHeaderRow: View {
                 .foregroundStyle(Palette.inkFaintest)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, Space.scaled(11))
+        // On the rows' text edge: the Mac's rows pad by `DeskRow`, the phone's
+        // (PhoneRuleRow) by 11.
+        #if os(macOS)
+            .padding(.horizontal, DeskRow.hPadding)
+        #else
+            .padding(.horizontal, Space.scaled(11))
+        #endif
         .padding(.top, Space.scaled(7))
         .padding(.bottom, Space.s2)
     }
@@ -571,7 +579,7 @@ private struct RuleRow: View {
 
     var body: some View {
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.scaled(7), action: onOpen
+            selected: selected, cornerRadius: 8, hPadding: DeskRow.hPadding, vPadding: Space.scaled(7), action: onOpen
         ) { selected, _ in
             HStack(spacing: Space.scaled(9)) {
                 if row.nested {

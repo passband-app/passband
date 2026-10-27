@@ -188,7 +188,7 @@
                 CalendarStatusLines()
                 if store.calendarFeed == nil && !store.calendarLoaded {
                     BandNote("loading your calendar…")
-                        .padding(.horizontal, Space.scaled(10))
+                        .padding(.horizontal, DeskRow.listInset)
                     Spacer(minLength: 0)
                 } else {
                     ScrollViewReader { proxy in
@@ -218,7 +218,11 @@
                             }
                             Spacer(minLength: 0)
                         }
-                        .padding(.horizontal, Space.scaled(22))
+                        // The agenda's rows bleed: their fill reaches into the
+                        // leading inset and their words land on the page
+                        // gutter (`DeskRow`). The trailing edge is the page's.
+                        .padding(.leading, DeskRow.listInset)
+                        .padding(.trailing, Space.page)
                         .onChange(of: scrollTarget) { _, id in
                             guard let id else { return }
                             withAnimation(Motion.scrollFollow) { proxy.scrollTo(id, anchor: .center) }
@@ -259,7 +263,7 @@
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkFaintest)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, Space.scaled(11))
+                        .padding(.horizontal, DeskRow.hPadding)
                 }
                 // The daemon cut the list short: said where the list ends,
                 // in the faintest ink, because nothing is wrong.
@@ -267,7 +271,7 @@
                     Text(note)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
-                        .padding(.horizontal, Space.scaled(11))
+                        .padding(.horizontal, DeskRow.hPadding)
                 }
             }
         }
@@ -289,7 +293,7 @@
                         .font(Typo.num(11))
                         .foregroundStyle(Palette.inkFaintest)
                 }
-                .padding(.horizontal, Space.scaled(11))
+                .padding(.horizontal, DeskRow.hPadding)
                 .padding(.bottom, Space.s4)
 
                 if !day.earlier.isEmpty {
@@ -305,7 +309,7 @@
                     Text(isToday ? "Nothing on today." : "Nothing on.")
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkFaintest)
-                        .padding(.horizontal, Space.scaled(11))
+                        .padding(.horizontal, DeskRow.hPadding)
                         .padding(.vertical, Space.s4)
                 }
                 rows(day.visible, day: day, selected: selected, cal: cal, thin: false)
@@ -340,7 +344,7 @@
                     // beside the event pane, where the list is all there is.
                     if !twoColumns, isSelected, !store.eventPaneOpen {
                         CalendarDetail(item: item, calendar: cal)
-                            .padding(.leading, Space.scaled(11))
+                            .padding(.leading, DeskRow.hPadding)
                             .padding(.bottom, Space.s8)
                             .transition(.opacity)
                     }
@@ -731,8 +735,12 @@
         let selected: Bool
         let action: () -> Void
 
+        /// The mark's diameter, an optical constant. The fold lines read it
+        /// too, to start under the titles rather than under the mark.
+        static let markSize: CGFloat = 10
+
         var body: some View {
-            ListRow(selected: selected, hPadding: Space.scaled(11), vPadding: Space.scaled(5), action: action) {
+            ListRow(selected: selected, hPadding: DeskRow.hPadding, vPadding: Space.scaled(5), action: action) {
                 _, _ in
                 HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
                     Text(time)
@@ -743,7 +751,7 @@
                     AgendaMark(
                         fill: item.fill, estimated: item.endEstimated,
                         thin: thin || item.cancelled, hue: ChipColors.inks(item).edge)
-                        .frame(width: 10, height: 10)
+                        .frame(width: Self.markSize, height: Self.markSize)
                         // On the first line's middle, not its baseline.
                         .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
                     HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
@@ -861,7 +869,7 @@
                 .font(Typo.micro)
                 .padding(.vertical, Space.scaled(3))
                 // Under the titles, past the time column and the mark.
-                .padding(.leading, Space.scaled(11) + Typo.measure(62) + Space.s10 * 2 + 10)
+                .padding(.leading, DeskRow.hPadding + Typo.measure(62) + Space.s10 * 2 + AgendaRow.markSize)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.textAction)
@@ -968,7 +976,7 @@
                 .font(Typo.ui(9.5))
                 .foregroundStyle(Palette.inkFaintest)
             }
-            .padding(.horizontal, Space.scaled(11))
+            .padding(.horizontal, DeskRow.hPadding)
             .accessibilityElement()
             .accessibilityLabel("Today, 7am to midnight, \(blocks.count) blocks")
         }
@@ -1101,17 +1109,17 @@
                 if !store.calendarCardUp {
                     if waiting, let wait {
                         CalendarConnectBanner(waiting: true, renewing: wait.renewing)
-                            .padding(.horizontal, Space.scaled(22))
+                            .padding(.horizontal, Space.page)
                             .padding(.top, Space.s12)
                     } else if store.calendarOffer == .banner {
                         CalendarConnectBanner(waiting: false, renewing: false)
-                            .padding(.horizontal, Space.scaled(22))
+                            .padding(.horizontal, Space.page)
                             .padding(.top, Space.s12)
                     }
                 }
                 if !waiting, let notice {
                     CalendarSyncLine(notice: notice, canRenew: store.calendarRenewRoute != nil)
-                        .padding(.horizontal, Space.scaled(22))
+                        .padding(.horizontal, Space.page)
                         .padding(.top, Space.s12)
                 }
             }
@@ -1159,7 +1167,8 @@
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
                     .lineLimit(1)
-                    .padding(.horizontal, Space.scaled(11))
+                    // Plain words, so on the page gutter itself, the line the
+                    // agenda's rows set their words on below it.
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }

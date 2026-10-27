@@ -87,7 +87,8 @@ struct MailRow: View {
         let subject = Self.subject(update)
         let gist = Self.gist(update, subject: subject)
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 7,
+            selected: selected, cornerRadius: 8,
+            hPadding: DeskRow.hPadding, vPadding: DeskRow.vPadding,
             onHoverChange: { if $0 { onHover() } },
             action: {
                 onHover()

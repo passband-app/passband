@@ -150,6 +150,25 @@ enum MeterSlot {
     }
 #endif
 
+/// THE MAC'S BLEEDING LIST ROW, the desktop twin of `PhoneRow`. A list whose
+/// selection fill reaches past its words (the mail tab's rows, the rules and
+/// groups pages, the audit ledger, the calendar agenda) lands those words on
+/// the page gutter in two parts that have to add up: the list is inset
+/// `listInset`, the row pads `hPadding`, and the fill reaches out into the
+/// inset to the left of the text. Headings and notes inside such a list pad
+/// by `hPadding` too, which is what puts them on the same line as the rows.
+///
+/// Not fenced to macOS: several of those rows compile into the phone target
+/// (`MailRow` among them, never mounted there), so the numbers exist on both.
+@MainActor
+enum DeskRow {
+    static var listInset: CGFloat { Space.page - hPadding }
+    static var hPadding: CGFloat { Space.s12 }
+    /// The mail tab's row height, which `MailRow`, `UpdateRow`, `SentRow` and
+    /// `ScheduledRow` share so the page keeps its rhythm between modes.
+    static var vPadding: CGFloat { Space.s6 }
+}
+
 // MARK: - rules
 
 /// The 0.5pt rule dividing a header from what it heads. Ink-side (see
@@ -284,9 +303,9 @@ struct KeyHintBar: View {
             }
             Spacer()
         }
-        // 22 is the page gutter RoutedHeader sets its title on, so the hints
-        // start under the title; scaled rather than snapped to keep that line.
-        .padding(.horizontal, Space.scaled(22))
+        // The page gutter RoutedHeader sets its title on, so the hints start
+        // under the title.
+        .padding(.horizontal, Space.page)
         .padding(.vertical, Space.s10)
         .overlay(alignment: .top) { Hairline() }
     }

@@ -53,7 +53,7 @@ struct MailFilterBar: View {
                 .opacity(reminders ? 0.4 : 1)
         }
         #if os(macOS)
-            .padding(.horizontal, Space.s24)
+            .padding(.horizontal, Space.page)
         #else
             // Trailing only: the lenses' own scroller reaches the screen's
             // leading edge and insets its content instead (`pillScroller`).
@@ -223,8 +223,13 @@ struct DayHeading: View {
             .foregroundStyle(Palette.inkFaint)
             .textCase(.uppercase)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Space.scaled(11))
-            .padding(.top, first ? 4 : 16)
+            #if os(macOS)
+                // The rows' padding, so the words sit on their text edge.
+                .padding(.horizontal, DeskRow.hPadding)
+            #else
+                .padding(.horizontal, Space.scaled(11))
+            #endif
+            .padding(.top, first ? Space.s4 : Space.s16)
             .padding(.bottom, Space.scaled(5))
             #if !os(macOS)
                 // A plain List pins section headers; without a ground the

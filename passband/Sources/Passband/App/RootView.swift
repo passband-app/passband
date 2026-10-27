@@ -917,7 +917,7 @@ struct RoutedHeader<Trailing: View>: View {
             Spacer(minLength: Space.s8)
             trailing
         }
-        .padding(.horizontal, Space.scaled(22))
+        .padding(.horizontal, Space.page)
         // THE BAR'S HEIGHT, not this header's own padding: it sits in the window
         // strip beside the traffic lights, and the rail's top edge is cut to the
         // same line. A header that set its own height would break that join.

@@ -54,7 +54,7 @@ fastembed = { workspace = true }
 # instead of guessing from the directory listing (see `embed/fastembed_impl.rs`).
 # default-features off, which is how fastembed takes it, so this line compiles
 # nothing new: the downloader features stay fastembed's to turn on.
-hf-hub = { version = "0.5", default-features = false }
+hf-hub = { version = "1.0", default-features = false }
 sqlite-vec = { workspace = true }
 zerocopy = { workspace = true }
 whatlang = { workspace = true }

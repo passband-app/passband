@@ -30,6 +30,34 @@ final class PushRegistration {
         timeout: 15, resource: 30,
         cachePolicy: .reloadIgnoringLocalCacheData, emptyHeaders: true)
     private var token: String?
+    /// WHETHER A PUSH STANDS BEHIND AN ACCOUNT: its daemon accepted this
+    /// device's token. Kept ACROSS LAUNCHES (a per-account bool, never the
+    /// token), because the feed's first replay on a cold launch usually lands
+    /// before this run's registration does, and that replay is exactly the
+    /// backlog that must not banner again. Set by an accepted registration;
+    /// cleared only by a definite refusal (401/403/404/410/422), a failed APNs
+    /// registration, or the account's removal (the key is account-scoped
+    /// defaults). A timeout or being offline changes nothing: the daemon still
+    /// has the device row.
+    func covers(_ account: UUID) -> Bool {
+        UserDefaults.standard.bool(forKey: Self.coveredKey(account))
+    }
+
+    static let coveredKeyBase = "passband.push.covered"
+    private static func coveredKey(_ account: UUID) -> String {
+        AccountIndex.scopedKey(coveredKeyBase, account)
+    }
+
+    private func setCovered(_ account: UUID, _ on: Bool) {
+        if on {
+            UserDefaults.standard.set(true, forKey: Self.coveredKey(account))
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.coveredKey(account))
+        }
+    }
+
+    /// What a daemon said to a device call.
+    private enum Answer { case accepted, refused, unknown }
     private var syncing = false
     private var needsAnotherSync = false
 
@@ -92,6 +120,8 @@ final class PushRegistration {
 
     func registrationFailed() {
         token = nil
+        // No token, so no push reaches this phone for any account.
+        for account in AccountManager.shared.accounts { setCovered(account.id, false) }
     }
 
     /// Tell one account's daemon to stop pushing to this device. Called on the
@@ -106,7 +136,7 @@ final class PushRegistration {
     /// the token gone.
     func unregister(_ settings: ConnectionSettings) async {
         guard let token else { return }
-        await post("/client/devices/unregister", body: ["token": token], with: settings)
+        _ = await post("/client/devices/unregister", body: ["token": token], with: settings)
     }
 
     private func syncAllAccounts() async {
@@ -136,19 +166,26 @@ final class PushRegistration {
             "tag": tag.uuidString,
         ]
         if let env = APNsEnvironment.current { body["environment"] = env.rawValue }
-        await post("/client/devices", body: body, with: settings)
+        switch await post("/client/devices", body: body, with: settings) {
+        case .accepted: setCovered(tag, true)
+        case .refused: setCovered(tag, false)
+        case .unknown: break
+        }
     }
 
     /// POST one authenticated JSON body to the human door. Neither the daemon
     /// URL nor the capability token reaches a log, here or in an error.
+    /// 2xx accepted; a refusal that means "this device is not taken" refused;
+    /// anything else (no answer, 5xx, a 429 rate limit) unknown.
+    @discardableResult
     private func post(_ path: String, body: [String: String], with settings: ConnectionSettings)
-        async
+        async -> Answer
     {
         var base = settings.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }
         guard let url = URL(string: base + path),
             let encoded = try? JSONSerialization.data(withJSONObject: body)
-        else { return }
+        else { return .unknown }
 
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.httpMethod = "POST"
@@ -157,6 +194,13 @@ final class PushRegistration {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.identifyClient()
         request.httpBody = encoded
-        _ = try? await session.data(for: request)
+        guard let (_, response) = try? await session.data(for: request),
+            let http = response as? HTTPURLResponse
+        else { return .unknown }
+        switch http.statusCode {
+        case 200..<300: return .accepted
+        case 401, 403, 404, 410, 422: return .refused
+        default: return .unknown
+        }
     }
 }

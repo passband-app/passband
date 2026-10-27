@@ -127,6 +127,56 @@ enum EventBanner {
         return .authSignal(kind)
     }
 
+    /// WHICH EVENT A NOTIFICATION IS ABOUT, as "<account>:<event id>", from
+    /// either shape the phone sees: a banner the app posted, or a push the
+    /// service extension enriched (both carry `accountKey` + `eventKey`), or
+    /// a push it could not enrich (the relay's raw `event_id`). nil for
+    /// anything about no single event (auth, tests, updates). Two
+    /// notifications with one identity are the same mail told twice.
+    static func eventIdentity(_ userInfo: [AnyHashable: Any]) -> String? {
+        if let account = userInfo[accountKey] as? String,
+            let event = (userInfo[eventKey] as? Int) ?? (userInfo[eventKey] as? NSNumber)?.intValue
+        {
+            return "\(account.lowercased()):\(event)"
+        }
+        if let push = unresolvedPush(userInfo["event_id"] as? String) {
+            return "\(push.accountId.uuidString.lowercased()):\(push.eventId)"
+        }
+        return nil
+    }
+
+    /// The same identity for an event off the feed, before any notification.
+    static func eventIdentity(account: UUID, event: Int) -> String {
+        "\(account.uuidString.lowercased()):\(event)"
+    }
+
+    /// BACKLOG: an event that happened before the feed connected, replayed
+    /// from the cursor the app last saved. On the phone a push already put it
+    /// on the lock screen while the app was closed, so bannering it again the
+    /// moment the app opens is an old notification popping up on open. Live
+    /// events (after the connection) are never backlog. `grace` absorbs clock
+    /// skew between the daemon and the device. An unreadable stamp is never
+    /// backlog: a missed banner is worse than a repeated one.
+    static func isBacklog(createdAt: String, connectedAt: Date, grace: TimeInterval = 15) -> Bool {
+        guard let created = eventDate(createdAt) else { return false }
+        return created < connectedAt.addingTimeInterval(-grace)
+    }
+
+    /// RFC 3339, with or without fractional seconds (the daemon writes both
+    /// shapes across versions).
+    static func eventDate(_ text: String) -> Date? {
+        plainStamp.date(from: text) ?? fractionalStamp.date(from: text)
+    }
+
+    /// Made once: a reconnect's replay parses a stamp per frame on the main
+    /// actor. ISO8601DateFormatter is safe to share for parsing.
+    nonisolated(unsafe) private static let plainStamp = ISO8601DateFormatter()
+    nonisolated(unsafe) private static let fractionalStamp: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
     static func shouldPresentForeground(appActive: Bool, windowVisible: Bool, isTest: Bool, isAuth: Bool) -> Bool {
         isTest || isAuth || !(appActive && windowVisible)
     }

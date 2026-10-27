@@ -21,6 +21,9 @@
 // header and NOWHERE else: never in the URL, never in an error message.
 
 import Foundation
+#if os(iOS)
+    import UIKit
+#endif
 
 // MARK: - SSE framing
 
@@ -150,6 +153,14 @@ final class EventStream {
     private static let resourceTimeout: TimeInterval = 24 * 60 * 60
 
     private let resident = ResidentTask()
+    /// When the live connection opened (its 200 arrived), moved up to the
+    /// moment the app last came back to the foreground. Frames for events
+    /// older than this are the replay of what happened while the app was away,
+    /// whether the socket was rebuilt or survived the suspension.
+    private var connectedAt = Date.distantFuture
+    #if os(iOS)
+        nonisolated(unsafe) private var foregroundObserver: NSObjectProtocol?
+    #endif
     private var cursor: Int?
     private var cursorLoaded = false
 
@@ -171,7 +182,23 @@ final class EventStream {
         self.accountId = accountId
         self.settings = settings
         self.cursorKey = AccountIndex.scopedKey(Self.cursorKeyBase, accountId)
+        #if os(iOS)
+            foregroundObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.connectedAt != .distantFuture else { return }
+                    self.connectedAt = Date()
+                }
+            }
+        #endif
     }
+
+    #if os(iOS)
+        deinit {
+            if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
+        }
+    #endif
 
     /// Start following the feed. Idempotent.
     func start() {
@@ -215,6 +242,7 @@ final class EventStream {
                 // poller are what tell the human their token is wrong.
                 return
             }
+            connectedAt = Date()
             // THE BYTE LOOP IS OFF THE MAIN ACTOR. This class is main-actor
             // (it writes the store and posts notifications), and the loop
             // used to run here too — which meant one main-actor hop PER BYTE
@@ -300,6 +328,30 @@ final class EventStream {
             // is what keeps this stream from having an opinion about which
             // account is live.
             AppStore.shared.noteLiveEvent(event, accountId: accountId)
+            #if os(iOS)
+                // ALREADY TOLD: a push for this mail was shown while the app
+                // was open, or tapped (which takes it out of Notification
+                // Center, where willPresent's own check would look).
+                if ToldEvents.contains(EventBanner.eventIdentity(account: accountId, event: event.id)) {
+                    return
+                }
+                // NO BANNER FOR THE BACKLOG, where pushes stand behind it:
+                // while the app was away each of these reached the lock screen
+                // as a push, and replayed now they would pop up again as the
+                // app opens. Only for an account whose daemon has accepted this
+                // phone's push token (`PushRegistration.covers`, kept across
+                // launches); without that (a refused or failed registration)
+                // the catch-up banner stays. CAVEAT: the daemon accepts a token
+                // whether or not it has a relay to push through, so a
+                // self-hosted daemon with no relay counts as covered and its
+                // backlog goes unbannered; the board still shows it. The Mac
+                // has no push behind it at all, so its catch-up banners stay.
+                if PushRegistration.shared.covers(accountId),
+                    EventBanner.isBacklog(createdAt: event.created_at, connectedAt: connectedAt)
+                {
+                    return
+                }
+            #endif
             Notifier.shared.post(event, accountId: accountId)
         } else if let signal = AgentOpenSignal.parse(frame.data) {
             // Not a notification and not in the log: it has no id of its own

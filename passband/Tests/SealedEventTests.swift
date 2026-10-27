@@ -36,6 +36,8 @@ struct SealedEventTests {
         """.utf8))
         expect(auth.isAuth && EventBanner.copy(for: auth).sound, "Login alerts carry explicit auth and sound even at low importance")
         aLoginCodeIsReadOutOfTheDaemonsSentenceAndNothingElse()
+        theReplayAfterAnOpenIsBacklog()
+        aPushAndALocalBannerForOneEventShareAnIdentity()
         aFocusHoldsThePanelBackOnlyWhenAskedTo()
         anOrdinaryEventDecodesWithNoSealedKey()
         aSealedEventCarriesItsKind()
@@ -325,6 +327,57 @@ struct SealedEventTests {
             expect(!everything.contains(chip), "the chip \(chip) reaches no field of the banner")
             expect(!everything.contains("2026"), "nor the date it was made from")
         }
+    }
+
+    /// The phone's open: events older than the connection (less a grace for
+    /// clock skew) were already pushed and are not bannered again; anything
+    /// at or after it is live; a stamp nobody can read is never backlog.
+    static func theReplayAfterAnOpenIsBacklog() {
+        let connected = EventBanner.eventDate("2026-10-27T15:00:00Z")!
+        expect(
+            EventBanner.isBacklog(createdAt: "2026-10-27T09:12:00Z", connectedAt: connected),
+            "mail from this morning, replayed on open, is backlog")
+        expect(
+            EventBanner.isBacklog(createdAt: "2026-10-27T14:59:30.250Z", connectedAt: connected),
+            "fractional-second stamps parse too")
+        expect(
+            !EventBanner.isBacklog(createdAt: "2026-10-27T14:59:50Z", connectedAt: connected),
+            "inside the skew grace is live")
+        expect(
+            !EventBanner.isBacklog(createdAt: "2026-10-27T15:00:05Z", connectedAt: connected),
+            "after the connection is live")
+        expect(
+            !EventBanner.isBacklog(createdAt: "not a date", connectedAt: connected),
+            "an unreadable stamp is bannered rather than lost")
+    }
+
+    /// The dedupe's key: the app's banner, an enriched push and a raw push for
+    /// one event must agree (case of the UUID included), different events or
+    /// accounts must not, and an auth banner (no event key) has none.
+    static func aPushAndALocalBannerForOneEventShareAnIdentity() {
+        let account = "6F9619FF-8B86-D011-B42D-00C04FC964FF"
+        let local: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.eventKey: 41,
+            EventBanner.threadKey: "t1",
+        ]
+        let enriched: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.eventKey: NSNumber(value: 41),
+        ]
+        let raw: [AnyHashable: Any] = ["event_id": "\(account.lowercased()):41"]
+        let other: [AnyHashable: Any] = [EventBanner.accountKey: account, EventBanner.eventKey: 42]
+        let elsewhere: [AnyHashable: Any] = [
+            EventBanner.accountKey: "11111111-2222-3333-4444-555555555555", EventBanner.eventKey: 41,
+        ]
+        let auth: [AnyHashable: Any] = [
+            EventBanner.accountKey: account, EventBanner.routeKey: EventBanner.authRoute,
+        ]
+        let id = EventBanner.eventIdentity(local)
+        expect(id != nil, "a local banner has an identity")
+        expect(EventBanner.eventIdentity(enriched) == id, "an enriched push matches its local banner")
+        expect(EventBanner.eventIdentity(raw) == id, "an unenriched push matches it too")
+        expect(EventBanner.eventIdentity(other) != id, "another event does not")
+        expect(EventBanner.eventIdentity(elsewhere) != id, "the same id in another account does not")
+        expect(EventBanner.eventIdentity(auth) == nil, "an auth banner is about no single event")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

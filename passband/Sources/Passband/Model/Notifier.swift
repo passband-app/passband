@@ -24,12 +24,46 @@
 // first if that is where it lives.
 
 import UserNotifications
+import os
 
 // Fronting the app and finding its window are AppKit-only ideas, and MainWindow
 // itself is a macOS file — the notification half below is what ships everywhere.
 #if os(macOS)
     import AppKit
 #endif
+
+/// EVENTS THIS PROCESS HAS ALREADY TOLD THE READER ABOUT, by
+/// `EventBanner.eventIdentity`: every notification presented while the app is
+/// open, and every one tapped. The phone hears new mail twice (the daemon's
+/// push and the app's own feed), and Notification Center alone cannot dedupe
+/// them: a tapped push leaves it, and the feed's banner for the same mail
+/// would then pop up as if new. Process memory is enough: a cold launch's
+/// replay is the backlog rule's (`EventBanner.isBacklog`), and a tap that
+/// launched the app lands here before the feed connects.
+///
+/// Remembered for TEN MINUTES, like the Notification Center check: past that
+/// the two copies of one mail have long since both arrived, and an id reused
+/// after a daemon's database is rebuilt must not be swallowed.
+enum ToldEvents {
+    private static let told = OSAllocatedUnfairLock(initialState: [String: Date]())
+    private static let window: TimeInterval = 600
+
+    static func note(_ identity: String) {
+        let now = Date()
+        told.withLock { seen in
+            seen = seen.filter { now.timeIntervalSince($0.value) < window }
+            seen[identity] = now
+        }
+    }
+
+    static func contains(_ identity: String) -> Bool {
+        let now = Date()
+        return told.withLock { seen in
+            guard let at = seen[identity] else { return false }
+            return now.timeIntervalSince(at) < window
+        }
+    }
+}
 
 @MainActor
 final class Notifier {
@@ -486,6 +520,47 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let route = notification.request.content.userInfo[EventBanner.routeKey] as? String
         let isAuth = notification.request.content.userInfo[EventBanner.authKey] as? Bool ?? false
         nonisolated(unsafe) let done = completionHandler
+        #if os(iOS)
+            // ONE BANNER PER EVENT. The phone hears new mail twice while it is
+            // open: the daemon pushes every event, and the app's own feed
+            // posts a banner for it too, under a different identifier, so the
+            // system would show both. Whichever arrives SECOND finds the first
+            // already in Notification Center and is shown as nothing.
+            //
+            // Two records answer "already told": this process's own
+            // (`ToldEvents`, which a TAP also writes, since a tapped push
+            // leaves Notification Center), and Notification Center for what
+            // arrived before this process heard it. Only the last ten minutes
+            // of the second count: event ids restart if a daemon's database is
+            // rebuilt, and yesterday's "event 41" must not swallow today's.
+            //
+            // ANSWERED ON MAIN. `getDeliveredNotifications` calls back on a
+            // background queue, and answering this handler off main has killed
+            // the phone app before ("Call must be made on main thread").
+            if let identity = EventBanner.eventIdentity(notification.request.content.userInfo) {
+                let own = notification.request.identifier
+                if ToldEvents.contains(identity) {
+                    DispatchQueue.main.async { done([]) }
+                    return
+                }
+                center.getDeliveredNotifications { delivered in
+                    let recent = Date().addingTimeInterval(-600)
+                    let told = delivered.contains {
+                        $0.request.identifier != own && $0.date > recent
+                            && EventBanner.eventIdentity($0.request.content.userInfo) == identity
+                    }
+                    ToldEvents.note(identity)
+                    // The phone's own rule, as below: no foreground check yet.
+                    let options = told
+                        ? []
+                        : Notifier.presentation(
+                            appActive: false, windowVisible: false,
+                            isTest: route == EventBanner.testRoute, isAuth: isAuth)
+                    DispatchQueue.main.async { done(options) }
+                }
+                return
+            }
+        #endif
         onMain {
             #if os(macOS)
                 let (active, visible) = (NSApp.isActive, MainWindow.find()?.isVisible == true)
@@ -506,6 +581,9 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
+        // A tapped notification has been told, and has left Notification
+        // Center: remember it so the feed's banner for it stays quiet.
+        if let identity = EventBanner.eventIdentity(userInfo) { ToldEvents.note(identity) }
         // Decided from the payload alone, BEFORE anything is fetched: an auth
         // tap opens the reveal (or the Auth page) and never `getMessage`.
         let tap = EventBanner.tapRoute(userInfo)

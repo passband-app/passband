@@ -795,7 +795,9 @@ private struct ReadingCard: View {
             // Hero left as a FIXED square, text right: every card in the grid
             // keeps the same height whether or not its sender ships art.
             HStack(alignment: .top, spacing: Space.scaled(9)) {
-                ReadingHero(threadId: sender.latestThreadId, sender: sender.sender)
+                ReadingHero(
+                    threadId: sender.latestThreadId, sender: sender.sender,
+                    address: sender.address)
                 VStack(alignment: .leading, spacing: Space.s6) {
                     HStack(spacing: Space.s6) {
                         Text(SenderCache.resolved(sender.sender).displayName)
@@ -863,6 +865,9 @@ private struct ReadingCard: View {
 private struct ReadingHero: View {
     let threadId: String
     let sender: String
+    /// The grouping address: keys the sender's art on disk, which is what
+    /// paints this card on its first frame after a relaunch or a cleared stack.
+    let address: String
     @State private var resolved: HeroCache.Hero?
 
     /// Side of the square thumb. SMALLER ON THE PHONE, because the card is: a
@@ -889,8 +894,11 @@ private struct ReadingHero: View {
 
     /// Falling back to the cache INSIDE the read keeps a recycled card from
     /// flashing empty: `@State` is gone the moment the card is dropped, the
-    /// cached hero is not, so it repaints on the very first frame.
-    private var hero: HeroCache.Hero? { resolved ?? HeroCache.shared.cached(threadId) }
+    /// cached hero is not, so it repaints on the very first frame. Before the
+    /// thread has a verdict that is the SENDER's last art, off disk.
+    private var hero: HeroCache.Hero? {
+        resolved ?? HeroCache.shared.cached(threadId, address: address)
+    }
 
     var body: some View {
         content
@@ -900,8 +908,12 @@ private struct ReadingHero: View {
                 // again costs a second body pass. The guard is INSIDE the task,
                 // not around it: a conditional modifier would change this view's
                 // identity as the verdict lands.
-                guard !HeroCache.shared.isResolved(threadId) else { return }
-                resolved = await HeroCache.shared.resolve(threadId)
+                // `learn` still files the warmer's verdict under this sender.
+                guard !HeroCache.shared.isResolved(threadId) else {
+                    HeroCache.shared.learn(threadId, address: address)
+                    return
+                }
+                resolved = await HeroCache.shared.resolve(threadId, address: address)
             }
     }
 

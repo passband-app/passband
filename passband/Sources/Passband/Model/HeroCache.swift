@@ -49,19 +49,24 @@ final class HeroCache {
     /// cards never re-fetch, bounded so a long list cannot grow forever.
     private static let cacheMax = 512
 
-    /// threadId -> resolved hero, or nil for "checked, has none". The outer
-    /// Optional is cache membership; the inner one is the verdict.
-    private let memo = AsyncMemo<String, Hero?>(limit: cacheMax)
+    /// threadId -> what its resolve concluded. ONE table for the art and the
+    /// verdict, so both share the memo's eviction and its account-switch
+    /// generation guard: a resolve from the old account cannot file a verdict
+    /// into the new one.
+    private let memo = AsyncMemo<String, Resolved>(limit: cacheMax)
 
-    /// threadId -> what its resolve concluded, for the sender index. Kept beside
-    /// the memo rather than in it because the memo's value is what the card
-    /// DRAWS, and a failed fetch draws the sender's old art: the memo alone
-    /// cannot tell "no art" from "could not look".
-    private var verdicts = LRUMap<String, Verdict>(limit: cacheMax)
+    fileprivate struct Resolved {
+        /// What the thread's own mail drew. nil for both `none` and `failed`.
+        let hero: Hero?
+        let verdict: Verdict
+    }
 
-    /// `art` carries the content hash so a card can file it under its sender.
+    /// Why a thread drew what it drew. The sender index needs to tell "no art"
+    /// from "could not look", which a bare `Hero?` flattens.
     fileprivate enum Verdict {
-        case art(hash: String)
+        /// `from` is the bare lowercased address of the message the art came
+        /// from: only that sender's card may file it as theirs.
+        case art(hash: String, from: String)
         case none
         case failed
     }
@@ -73,10 +78,18 @@ final class HeroCache {
     ///
     /// Before this thread has a verdict, the SENDER's last art stands in: the
     /// same senders keep sending the same logo, and a card that paints it on
-    /// frame one beats a correct one a second later. A verdict always wins,
-    /// including "none", so a sender who stopped sending art is not haunted by it.
+    /// frame one beats a correct one a second later. A verdict wins, including
+    /// "none". A FAILED one does not: that is "could not look", and the
+    /// sender's last art is the better guess.
     func cached(_ threadId: String, address: String? = nil) -> Hero? {
-        if let entry = memo.cached(threadId) { return entry }
+        if let resolved = memo.cached(threadId) {
+            guard case .failed = resolved.verdict else { return resolved.hero }
+        }
+        return standIn(address)
+    }
+
+    /// The sender's last art off disk, under the same gates as a fetch.
+    private func standIn(_ address: String?) -> Hero? {
         guard let address, Prefs.shared.loadRemoteImages, !RehearsalMode.isEnabled else { return nil }
         return HeroDisk.shared.hero(sender: address)
     }
@@ -90,10 +103,7 @@ final class HeroCache {
     /// `HeroDisk` is NOT wiped: it is keyed by a hash of the image url and of the
     /// sender address, neither of which a daemon minted, so a hit in the next
     /// account is the same art.
-    func wipe() {
-        memo.clear()
-        verdicts.removeAll()
-    }
+    func wipe() { memo.clear() }
 
     /// Whether this thread has a VERDICT — art, or a cached "has none". `cached`
     /// flattens both to nil and cannot answer it; a card checks this before
@@ -108,37 +118,42 @@ final class HeroCache {
     /// and stands in when the fetch FAILS. The warmer has none and passes nil.
     @discardableResult
     func resolve(_ threadId: String, address: String? = nil) async -> Hero? {
-        if let entry = memo.cached(threadId) {
-            learn(threadId, address: address)
-            return entry
+        let resolved: Resolved
+        if let hit = memo.cached(threadId) {
+            resolved = hit
+        } else if let joined = await memo.joinPending(threadId) {
+            resolved = joined
+        } else {
+            guard Prefs.shared.loadRemoteImages, !threadId.isEmpty else { return nil }
+            resolved = await memo.resolve(threadId) { await Self.fetch(threadId) }
         }
-        if let joined = await memo.joinPending(threadId) {
-            learn(threadId, address: address)
-            return joined
-        }
-        guard Prefs.shared.loadRemoteImages, !threadId.isEmpty else { return nil }
-        let hero = await memo.resolve(threadId) { [weak self] in
-            let (hero, verdict) = await Self.fetch(threadId)
-            self?.verdicts.set(threadId, verdict)
-            guard case .failed = verdict, let address else { return hero }
-            return HeroDisk.shared.hero(sender: address)
-        }
-        learn(threadId, address: address)
-        return hero
+        learn(resolved, address: address)
+        if case .failed = resolved.verdict { return standIn(address) }
+        return resolved.hero
     }
 
-    /// File this thread's verdict under its sender: art becomes the sender's
-    /// art, a confirmed "none" forgets theirs, and a failure changes nothing.
-    /// Also called by a card whose thread the warmer already resolved, since
-    /// the warmer had no sender to file it under.
+    /// Called by a card whose thread the warmer already resolved, since the
+    /// warmer had no sender to file the verdict under.
     func learn(_ threadId: String, address: String?) {
-        guard let address, let verdict = verdicts.peek(threadId) else { return }
-        switch verdict {
-        case .art(let hash): HeroDisk.shared.link(sender: address, to: hash)
-        case .none: HeroDisk.shared.unlink(sender: address)
-        case .failed: break
-        }
+        guard let resolved = memo.cached(threadId) else { return }
+        learn(resolved, address: address)
     }
+
+    /// File a verdict under its sender. Only ART is filed, and only art from a
+    /// message that sender wrote: the newest message of a thread can be a
+    /// reply from someone else on the list. "None" never erases a sender's
+    /// art, so a forged From with no image cannot blank a real sender's card
+    /// (docs/SECURITY.md §3); the thread's own verdict still wins on its card.
+    private func learn(_ resolved: Resolved, address: String?) {
+        guard let address, case .art(let hash, let from) = resolved.verdict,
+            from == Self.bare(address)
+        else { return }
+        HeroDisk.shared.link(sender: address, to: hash)
+    }
+
+    /// The Reading zone's own grouping key (`Reading.derive`), so a message's
+    /// From and a card's address compare equal however either was spelled.
+    private static func bare(_ address: String) -> String { SenderID.address(address) }
 
     /// Warm the cache for a whole zone's worth of senders, `preloadWidth` at a
     /// time. Fire-and-forget: already-cached and in-flight ids fall straight
@@ -158,22 +173,32 @@ final class HeroCache {
     /// Thread -> hero src -> bytes -> thumbnail + fill. Every failure is a
     /// negative cache entry, not a retry loop.
     ///
-    /// A src already on disk skips the download AND the render: the thumbnail
-    /// there is exactly what this would have produced from the same url.
-    private static func fetch(_ threadId: String) async -> (Hero?, Verdict) {
+    /// The art comes from the newest message the user did NOT write: a reply
+    /// of theirs at the bottom of a newsletter thread is not the newsletter.
+    ///
+    /// A src already on disk, and fresh, skips the download AND the render: the
+    /// thumbnail there is what this would have produced from the same url. A
+    /// stale one is re-fetched, because a stable url (`/logo.png`) can change
+    /// its bytes, and kept if the re-fetch fails.
+    private static func fetch(_ threadId: String) async -> Resolved {
         guard let view = try? await ThreadPrefetch.shared.fetch(threadId, fresh: 600) else {
-            return (nil, .failed)
+            return Resolved(hero: nil, verdict: .failed)
         }
-        guard let newest = view.messages.last, let html = newest.html,
+        guard let newest = view.messages.last(where: { !$0.fromMe }), let html = newest.html,
             let src = Trackers.extractHeroSrc(html), let url = URL(string: src)
-        else { return (nil, .none) }
+        else { return Resolved(hero: nil, verdict: .none) }
 
         let hash = HeroDisk.hash(src)
-        if let hit = HeroDisk.shared.hero(hash: hash) { return (hit, .art(hash: hash)) }
+        let art = Verdict.art(hash: hash, from: bare(newest.from_addr))
+        let onDisk = HeroDisk.shared.hero(hash: hash)
+        if let onDisk, HeroDisk.shared.isFresh(hash) { return Resolved(hero: onDisk, verdict: art) }
 
         // Offline, a timeout, a 5xx: no verdict about the ART, so the sender's
         // last one may still stand in.
-        guard let bytes = await HeroBytes.shared.load(url) else { return (nil, .failed) }
+        guard let bytes = await HeroBytes.shared.load(url) else {
+            if let onDisk { return Resolved(hero: onDisk, verdict: art) }
+            return Resolved(hero: nil, verdict: .failed)
+        }
 
         // Off the main actor; only the thumbnail and colour components come back.
         let rendered = await Task.detached(priority: .utility) {
@@ -181,13 +206,13 @@ final class HeroCache {
         }.value
 
         guard let rendered, let image = PlatformImage(data: rendered.thumbnail) else {
-            return (nil, .none)
+            return Resolved(hero: nil, verdict: .none)
         }
         let hero = Hero(image: image, fill: rendered.rgb.map(\.color), isMark: rendered.isMark)
         HeroDisk.shared.store(
             hash: hash, png: rendered.thumbnail, rgb: rendered.rgb, isMark: rendered.isMark,
             hero: hero)
-        return (hero, .art(hash: hash))
+        return Resolved(hero: hero, verdict: art)
     }
 
     /// What crosses back from the detached task — Sendable by construction.
@@ -274,9 +299,10 @@ final class HeroBytes {
 /// paint on its first frame the next time their mail shows up.
 ///
 /// Holds NO urls and NO addresses, only their hashes (docs/SECURITY.md §3, the
-/// same rule as `ImageStore`). Small enough to stay on the main actor: an index
-/// of a few hundred rows read once, and thumbnails of tens of KB read on a
-/// card's first frame. Writes go to a detached task.
+/// same rule as `ImageStore`). The index lives on the main actor because cards
+/// read it in `body`; it is a few hundred rows. Every byte that touches disk
+/// goes through ONE serial queue, so a delete and a re-write of the same file
+/// land in the order they were asked for.
 @MainActor
 final class HeroDisk {
     static let shared = HeroDisk(
@@ -289,6 +315,9 @@ final class HeroDisk {
         var rgb: [Double]?
         var isMark: Bool
         var lastAccess: Double
+        /// When the bytes were fetched. Optional so an index written before the
+        /// field existed still decodes (as stale).
+        var storedAt: Double?
     }
 
     private struct Index: Codable {
@@ -297,9 +326,13 @@ final class HeroDisk {
         var senders: [String: String] = [:]
     }
 
-    /// How many thumbnails to keep. A few tens of KB each, so this is a few tens
-    /// of MB at worst, and far more senders than one Reading board ever holds.
+    /// How many thumbnails to keep. About 9KB each measured on real mail, so a
+    /// few MB, and far more senders than one Reading board ever holds.
     static let maxEntries = 600
+    /// How long stored art is trusted without a re-fetch. Logos change seldom;
+    /// a url whose bytes DO change (a rebrand behind the same `/logo.png`)
+    /// corrects itself within this.
+    static let maxAge: TimeInterval = 14 * 24 * 3600
     /// How many DECODED heroes stay in memory, so a card redrawn mid-scroll does
     /// not re-read its file.
     private static let decodedMax = 256
@@ -307,6 +340,7 @@ final class HeroDisk {
 
     private let dir: URL
     private let indexURL: URL
+    private let io = DispatchQueue(label: "app.passband.herodisk", qos: .utility)
     private var index = Index()
     private var loaded = false
     private var decoded: LRUMap<String, HeroCache.Hero>
@@ -318,7 +352,7 @@ final class HeroDisk {
         decoded = LRUMap(limit: Self.decodedMax)
     }
 
-    static func hash(_ s: String) -> String { SHA256.hash(data: Data(s.utf8)).hex }
+    nonisolated static func hash(_ s: String) -> String { SHA256.hash(data: Data(s.utf8)).hex }
 
     private static func senderKey(_ address: String) -> String {
         hash(address.trimmingCharacters(in: .whitespaces).lowercased())
@@ -327,11 +361,32 @@ final class HeroDisk {
     // MARK: - reads
 
     /// The hero stored under this content hash, decoded once and then kept.
+    /// Counts as a USE for eviction: this is the resolve path, once per thread.
     func hero(hash: String) -> HeroCache.Hero? {
-        ensureLoaded()
-        guard let meta = index.heroes[hash] else { return nil }
+        guard let hero = load(hash) else { return nil }
         index.heroes[hash]?.lastAccess = Date().timeIntervalSince1970
         scheduleSave()
+        return hero
+    }
+
+    /// The last hero this sender sent, if we kept it. Read from a view body on
+    /// every pass before a verdict, so it does NOT touch the index: the resolve
+    /// that follows does that once.
+    func hero(sender address: String) -> HeroCache.Hero? {
+        ensureLoaded()
+        guard let hash = index.senders[Self.senderKey(address)] else { return nil }
+        return load(hash)
+    }
+
+    /// Whether this hash's bytes are young enough to skip a re-fetch.
+    func isFresh(_ hash: String) -> Bool {
+        guard let at = index.heroes[hash]?.storedAt else { return false }
+        return Date().timeIntervalSince1970 - at < Self.maxAge
+    }
+
+    private func load(_ hash: String) -> HeroCache.Hero? {
+        ensureLoaded()
+        guard let meta = index.heroes[hash] else { return nil }
         if let hit = decoded.get(hash) { return hit }
         guard let png = try? Data(contentsOf: fileURL(hash)), let image = PlatformImage(data: png)
         else {
@@ -348,13 +403,6 @@ final class HeroDisk {
         return hero
     }
 
-    /// The last hero this sender sent, if we kept it.
-    func hero(sender address: String) -> HeroCache.Hero? {
-        ensureLoaded()
-        guard let hash = index.senders[Self.senderKey(address)] else { return nil }
-        return hero(hash: hash)
-    }
-
     // MARK: - writes
 
     func store(
@@ -362,15 +410,17 @@ final class HeroDisk {
     ) {
         ensureLoaded()
         let url = fileURL(hash)
-        Task.detached(priority: .utility) { try? png.write(to: url, options: .atomic) }
+        io.async { try? png.write(to: url, options: .atomic) }
+        let now = Date().timeIntervalSince1970
         index.heroes[hash] = Meta(
-            rgb: rgb.map { [$0.r, $0.g, $0.b] }, isMark: isMark,
-            lastAccess: Date().timeIntervalSince1970)
+            rgb: rgb.map { [$0.r, $0.g, $0.b] }, isMark: isMark, lastAccess: now, storedAt: now)
         decoded.set(hash, hero)
         evictIfNeeded()
         scheduleSave()
     }
 
+    /// There is no `unlink`: a verdict of "no art" never erases a sender's
+    /// art, so a forged From cannot blank a real sender (see HeroCache.learn).
     func link(sender address: String, to hash: String) {
         ensureLoaded()
         guard index.heroes[hash] != nil else { return }
@@ -378,20 +428,6 @@ final class HeroDisk {
         guard index.senders[key] != hash else { return }
         index.senders[key] = hash
         scheduleSave()
-    }
-
-    func unlink(sender address: String) {
-        ensureLoaded()
-        guard index.senders.removeValue(forKey: Self.senderKey(address)) != nil else { return }
-        scheduleSave()
-    }
-
-    /// Write the index now. For tests, and nothing else needs it: a lost index
-    /// costs one re-render per sender.
-    func flush() {
-        saveTask?.cancel()
-        saveTask = nil
-        saveNow()
     }
 
     // MARK: - disk
@@ -403,7 +439,7 @@ final class HeroDisk {
         decoded.removeValue(forKey: hash)
         index.senders = index.senders.filter { $0.value != hash }
         let url = fileURL(hash)
-        Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: url) }
+        io.async { try? FileManager.default.removeItem(at: url) }
         scheduleSave()
     }
 
@@ -420,7 +456,6 @@ final class HeroDisk {
         guard saveTask == nil else { return }
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: Self.saveDelay)
-            guard !Task.isCancelled else { return }
             self?.saveTask = nil
             self?.saveNow()
         }
@@ -429,34 +464,45 @@ final class HeroDisk {
     private func saveNow() {
         guard let data = try? JSONEncoder().encode(index) else { return }
         let url = indexURL
-        Task.detached(priority: .utility) { try? data.write(to: url, options: .atomic) }
+        io.async { try? data.write(to: url, options: .atomic) }
     }
 
-    /// First touch: make the directory, read the index, and drop rows whose
-    /// file is gone plus files no row knows about.
+    /// First touch: read the index and drop rows whose file is gone. Reading
+    /// the index here is a few KB; everything else (the directory, the backup
+    /// flag, deleting files no row knows about) is queued behind it on `io`.
+    ///
+    /// The orphan sweep only deletes files at least a minute old: a PNG lands
+    /// before the debounced index save that names it, and a second copy of the
+    /// app (a dev build beside the installed one) shares this directory.
     private func ensureLoaded() {
         guard !loaded else { return }
         loaded = true
-        let fm = FileManager.default
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        var mutable = dir
-        try? mutable.setResourceValues(values)
-
         if let data = try? Data(contentsOf: indexURL),
             let decoded = try? JSONDecoder().decode(Index.self, from: data)
         {
             index = decoded
         }
-        let names = Set((try? fm.contentsOfDirectory(atPath: dir.path)) ?? [])
+        let names = Set((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
         for hash in index.heroes.keys where !names.contains(hash + ".png") {
             index.heroes.removeValue(forKey: hash)
         }
         index.senders = index.senders.filter { index.heroes[$0.value] != nil }
-        for name in names where name.hasSuffix(".png") {
-            if index.heroes[String(name.dropLast(4))] == nil {
-                try? fm.removeItem(at: dir.appendingPathComponent(name))
+
+        let known = Set(index.heroes.keys)
+        let dir = self.dir
+        io.async {
+            let fm = FileManager.default
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var mutable = dir
+            try? mutable.setResourceValues(values)
+            let cutoff = Date().addingTimeInterval(-60)
+            for name in names where name.hasSuffix(".png") && !known.contains(String(name.dropLast(4))) {
+                let url = dir.appendingPathComponent(name)
+                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                if modified < cutoff { try? fm.removeItem(at: url) }
             }
         }
     }

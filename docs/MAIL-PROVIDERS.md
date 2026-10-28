@@ -108,6 +108,16 @@ These stay Gmail-shaped in the engine or around it, deliberately:
   fails safe to "no verdict") are untouched.
 - **The startup log line** still reads `gmail REST sync starting`; it is chosen
   by the source's provider.
+- **In the writer:** `MailWriter::modify` takes Gmail label ids, and
+  `FetchedRaw.raw_b64` stays base64url (its callers decode it, and moving the
+  decode into the writer would change how a bad body is reported in the
+  forward and send-echo paths). `SCAN_SLACK`, the scheduled-send scan's
+  allowance for Gmail's `internalDate` skew, is imported from
+  `write::gmail`. `WriteError`'s text still says "gmail api status".
+- **The write door's provider read** is one store call per write action. An
+  unknown provider is a 501 ("not supported by this build; upgrade
+  squelchd"), never a Gmail writer; the callers' audit detail for it is still
+  their existing `rejected:no_write_credential`.
 
 ## Adding a provider
 

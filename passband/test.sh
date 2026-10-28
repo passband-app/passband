@@ -615,6 +615,15 @@ run_suite settings-search \
   Sources/Passband/Lib/SettingsSearch.swift \
   Tests/SettingsSearchTests.swift
 
+# Session replay's privacy contract: a layer tree with a subject, an avatar, a
+# hued pill and a web view must come out as grey boxes with no text, no hue
+# and nothing from inside the web view, and the outbound validator must refuse
+# anything else. Plus the gzip member the uploads ride in.
+run_suite replay-wireframe \
+  Sources/Passband/Lib/ReplayWireframe.swift \
+  Sources/Passband/Lib/Gzip.swift \
+  Tests/ReplayWireframeTests.swift
+
 # What the assistant says about Passband itself: the three help tools' answers.
 # All three are text a model reads and repeats to a person, so the suite asks
 # the questions ("how do I reply all?", "where is dark mode?") and holds the

@@ -1,0 +1,314 @@
+// Session replay's privacy contract, held against a layer tree built to tempt
+// it: a CATextLayer carrying a subject, an image, a colored pill, a REAL
+// WKWebView subclass and a real NSTextField with things inside them. Green
+// means the wireframe kept the geometry and dropped every one of those, and
+// that the outbound validator refuses anything that is not a grey, a closed
+// word or a number.
+//
+// Also: SwiftUI's 0×0 container layers (which do not clip) must not hide
+// their children, a clipping scroll view must drop its off-screen rows, and
+// the gzip member must be one a server can open.
+
+import AppKit
+import Foundation
+import QuartzCore
+import WebKit
+
+/// The app's own web view is a subclass (EmailWebView's PassthroughWebView),
+/// so the boundary must be found by kind, not by name.
+final class AppStyleWebView: WKWebView {}
+
+@main
+@MainActor
+struct ReplayWireframeTests {
+    static var failures = 0
+    static var checks = 0
+
+    static func main() {
+        noTextLeaves()
+        webContentIsOneOpaqueBox()
+        textFieldsAreOpaque()
+        offscreenBoundaryLetsNothingThrough()
+        paintIsAFixedPalette()
+        zeroSizedContainersKeepTheirChildren()
+        clippingDropsOffscreenRows()
+        flippedAndUnflippedAgree()
+        textWidthsAreQuantized()
+        validatorIsClosed()
+        gzipIsAGzipMember()
+
+        if failures > 0 {
+            print("FAILED: \(failures) of \(checks) checks")
+            exit(1)
+        }
+        print("ok: \(checks) checks passed")
+    }
+
+    // MARK: - fixtures
+
+    static func layer(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CALayer {
+        let l = CALayer()
+        l.frame = CGRect(x: x, y: y, width: w, height: h)
+        return l
+    }
+
+    static func image() -> CGImage {
+        let ctx = CGContext(
+            data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 16,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        return ctx.makeImage()!
+    }
+
+    /// A window-sized root with one of everything a replay must not show.
+    static func tempting() -> CALayer {
+        let root = layer(0, 0, 800, 600)
+        root.isGeometryFlipped = true
+        let card = layer(20, 20, 400, 100)
+        card.backgroundColor = CGColor(red: 0.9, green: 0.1, blue: 0.1, alpha: 1)
+        card.cornerRadius = 12
+        root.addSublayer(card)
+        let subject = CATextLayer()
+        subject.frame = CGRect(x: 10, y: 10, width: 203, height: 16)
+        subject.string = "SECRET SUBJECT Your invoice from Acme"
+        card.addSublayer(subject)
+        let avatar = layer(300, 10, 40, 40)
+        avatar.contents = image()
+        card.addSublayer(avatar)
+        let webView = AppStyleWebView(frame: CGRect(x: 0, y: 0, width: 500, height: 300))
+        webView.wantsLayer = true
+        let web = webView.layer!
+        web.frame = CGRect(x: 20, y: 200, width: 500, height: 300)
+        root.addSublayer(web)
+        // A plain CALayer, not a WK one: only the view's kind stops the walk.
+        let inside = layer(10, 10, 100, 20)
+        inside.backgroundColor = CGColor(red: 0, green: 0.5, blue: 1, alpha: 1)
+        let insideText = CATextLayer()
+        insideText.string = "SECRET BODY"
+        insideText.frame = CGRect(x: 0, y: 0, width: 90, height: 14)
+        inside.addSublayer(insideText)
+        web.addSublayer(inside)
+        return root
+    }
+
+    static func walk(_ root: CALayer, flipped: Bool = true, clip: CGRect? = nil)
+        -> [ReplayWireframe.Node]
+    {
+        var out: [ReplayWireframe.Node] = []
+        ReplayWireframe.nodes(
+            root: root, flipped: flipped, offset: .zero,
+            clip: clip ?? root.bounds, into: &out)
+        return out
+    }
+
+    static func json(_ nodes: [ReplayWireframe.Node]) -> String {
+        let snap = ReplayWireframe.fullSnapshot(
+            nodes, width: 800, height: 600, background: "#1E1E1EFF", timestamp: 1)
+        let data = try! JSONSerialization.data(withJSONObject: snap)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    // MARK: - checks
+
+    static func noTextLeaves() {
+        let nodes = walk(tempting())
+        let out = json(nodes)
+        expect(!out.contains("SECRET"), "no layer text reaches the wire")
+        expect(!out.contains("Acme"), "not even part of it")
+        expect(nodes.contains { $0.kind == .text }, "the text layer is still drawn, as a bar")
+        expect(nodes.contains { $0.kind == .image }, "the avatar is drawn, as an empty box")
+        let snap = ReplayWireframe.fullSnapshot(
+            nodes, width: 800, height: 600, background: "#1E1E1EFF", timestamp: 1)
+        expect(ReplayWireframe.validate([snap], extra: []), "a real frame passes the validator")
+    }
+
+    static func webContentIsOneOpaqueBox() {
+        let nodes = walk(tempting())
+        let web = nodes.filter { $0.kind == .opaque }
+        expect(web.count == 1, "the web view is exactly one box (got \(web.count))")
+        expect(web.first.map { $0.x == 20 && $0.y == 200 && $0.w == 500 } ?? false,
+            "and it sits where the web view does")
+        // The blue fill and the body text inside it were never visited.
+        let insideWeb = nodes.filter {
+            $0.kind != .opaque && $0.x >= 20 && $0.y >= 200 && $0.x < 520 && $0.y < 500
+        }
+        expect(insideWeb.isEmpty, "nothing under the web view is walked (got \(insideWeb.count))")
+    }
+
+    static func textFieldsAreOpaque() {
+        let root = layer(0, 0, 800, 600)
+        root.isGeometryFlipped = true
+        let field = NSTextField(string: "SECRET typed reply")
+        field.frame = CGRect(x: 0, y: 0, width: 300, height: 24)
+        field.wantsLayer = true
+        field.layer!.frame = CGRect(x: 40, y: 40, width: 300, height: 24)
+        root.addSublayer(field.layer!)
+        let nodes = walk(root)
+        expect(nodes.count == 1 && nodes[0].kind == .opaque,
+            "a text field is one opaque box (got \(nodes.map(\.kind)))")
+        expect(nodes.first.map { $0.w == 300 } ?? false, "at the field's own width, not the text's")
+    }
+
+    static func offscreenBoundaryLetsNothingThrough() {
+        // A web view scrolled out of the clip whose content overflows back in.
+        let root = layer(0, 0, 800, 600)
+        root.isGeometryFlipped = true
+        let webView = AppStyleWebView(frame: .zero)
+        webView.wantsLayer = true
+        let web = webView.layer!
+        web.frame = CGRect(x: 0, y: -400, width: 400, height: 300)
+        root.addSublayer(web)
+        let overflow = layer(0, 350, 200, 100)  // lands at canvas y -50...50
+        overflow.backgroundColor = CGColor(gray: 0.5, alpha: 1)
+        web.addSublayer(overflow)
+        expect(walk(root).isEmpty, "nothing under an off-screen web view is drawn")
+    }
+
+    static func paintIsAFixedPalette() {
+        let palette: Set<String> = [
+            ReplayWireframe.panelPaint, ReplayWireframe.borderPaint, ReplayWireframe.textPaint,
+            ReplayWireframe.imagePaint, ReplayWireframe.opaquePaint, ReplayWireframe.opaqueBorder,
+        ]
+        let root = layer(0, 0, 800, 600)
+        root.isGeometryFlipped = true
+        // Past due red, delivered green, a dark logo, a light logo.
+        for (i, c) in [(1.0, 0.23, 0.19), (0.2, 0.78, 0.35), (0.1, 0.1, 0.1), (0.96, 0.96, 0.96)]
+            .enumerated()
+        {
+            let pill = layer(CGFloat(i) * 100, 0, 80, 20)
+            pill.backgroundColor = CGColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: 1)
+            pill.borderWidth = 1
+            pill.borderColor = CGColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: 1)
+            root.addSublayer(pill)
+        }
+        let nodes = walk(root) + walk(tempting())
+        let paints = Set(nodes.flatMap { [$0.fill, $0.border].compactMap { $0 } })
+        expect(paints.isSubset(of: palette), "every paint is from the fixed palette (extra: \(paints.subtracting(palette)))")
+        let fills = Set(nodes.filter { $0.kind == .fill && $0.fill != nil }.map(\.fill))
+        expect(fills.count == 1, "red, green, dark and light fills are indistinguishable")
+        for p in palette { expect(ReplayWireframe.isHexPaint(p), "\(p) passes the validator") }
+        let red = ReplayWireframe.backgroundPaint(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
+        expect(red == "#363636FF", "a window background lands as its luminance (got \(red ?? "nil"))")
+        expect(ReplayWireframe.backgroundPaint(CGColor(gray: 0, alpha: 0)) == nil, "clear draws nothing")
+    }
+
+    static func zeroSizedContainersKeepTheirChildren() {
+        let root = layer(0, 0, 800, 600)
+        root.isGeometryFlipped = true
+        let container = layer(100, 100, 0, 0)
+        root.addSublayer(container)
+        let child = layer(0, 0, 50, 20)
+        child.backgroundColor = CGColor(gray: 0.5, alpha: 1)
+        container.addSublayer(child)
+        expect(
+            walk(root).contains { $0.x == 100 && $0.y == 100 && $0.w == 50 },
+            "a child of a 0x0 non-clipping container is still drawn")
+
+        container.masksToBounds = true
+        expect(walk(root).isEmpty, "but a 0x0 container that clips hides it")
+    }
+
+    static func clippingDropsOffscreenRows() {
+        let root = layer(0, 0, 800, 600)
+        root.isGeometryFlipped = true
+        let scroll = layer(0, 0, 400, 300)
+        scroll.masksToBounds = true
+        root.addSublayer(scroll)
+        let doc = layer(0, 0, 400, 3000)
+        scroll.addSublayer(doc)
+        for i in 0..<100 {
+            let row = layer(0, CGFloat(i) * 30, 400, 28)
+            row.backgroundColor = CGColor(gray: 0.3, alpha: 1)
+            doc.addSublayer(row)
+        }
+        let rows = walk(root).filter { $0.kind == .fill }
+        expect(rows.count == 10, "only the ten visible rows survive (got \(rows.count))")
+        expect(rows.allSatisfy { $0.y + $0.h <= 300 }, "and each is cut to the scroll view")
+    }
+
+    static func flippedAndUnflippedAgree() {
+        // The same box, described in an up-y root and in a down-y root, lands
+        // at the same canvas position.
+        let up = layer(0, 0, 800, 600)
+        let a = layer(10, 500, 100, 50)  // y up: 50pt from the top
+        a.backgroundColor = CGColor(gray: 0.5, alpha: 1)
+        up.addSublayer(a)
+        let down = layer(0, 0, 800, 600)
+        down.isGeometryFlipped = true
+        let b = layer(10, 50, 100, 50)
+        b.backgroundColor = CGColor(gray: 0.5, alpha: 1)
+        down.addSublayer(b)
+        let u = walk(up, flipped: false).first
+        let d = walk(down, flipped: true).first
+        expect(u != nil && u == d, "flip handling places both at the top (\(String(describing: u)) vs \(String(describing: d)))")
+    }
+
+    static func textWidthsAreQuantized() {
+        let bars = walk(tempting()).filter { $0.kind == .text }
+        expect(!bars.isEmpty, "there is a bar to measure")
+        for b in bars {
+            expect(b.w % ReplayWireframe.textQuantum == 0, "bar width \(b.w) is a multiple of the quantum")
+            expect(b.x % ReplayWireframe.textQuantum == 0, "bar x \(b.x) is on the grid too")
+        }
+        // 203pt starting at x=30 spans 30...233, snapped out to 24...240.
+        expect(bars.first?.w == 216, "203pt of text reads as 216 (got \(bars.first?.w ?? -1))")
+        expect(bars.first?.x == 24, "and starts on the grid (got \(bars.first?.x ?? -1))")
+    }
+
+    static func validatorIsClosed() {
+        let ok: [String: Any] = ["type": 4, "timestamp": 1, "data": ["href": "sitrep", "width": 1, "height": 1]]
+        expect(ReplayWireframe.validate([ok], extra: ["sitrep"]), "a screen name from the vocabulary passes")
+        expect(!ReplayWireframe.validate([ok], extra: []), "the same name outside the vocabulary fails")
+        let text: [String: Any] = ["type": 2, "data": ["wireframes": [["type": "text", "text": "hi"]]]]
+        expect(!ReplayWireframe.validate([text], extra: []), "a text wireframe fails")
+        let hue: [String: Any] = ["style": ["backgroundColor": "#FF0000FF"]]
+        expect(!ReplayWireframe.validate([hue], extra: []), "a hue fails")
+        let lower: [String: Any] = ["style": ["backgroundColor": "#aaaaaaff"]]
+        expect(!ReplayWireframe.validate([lower], extra: []), "a lowercase paint fails")
+        let key: [String: Any] = ["subject": 1]
+        expect(!ReplayWireframe.validate([key], extra: []), "an unknown key fails")
+        let data: [String: Any] = ["data": Data([1, 2, 3])]
+        expect(!ReplayWireframe.validate([data], extra: []), "a value of any other type fails")
+    }
+
+    static func gzipIsAGzipMember() {
+        expect(Gzip.crc32(Data("123456789".utf8)) == 0xCBF4_3926, "CRC-32 check value")
+        let input = Data(String(repeating: "{\"type\":\"rectangle\"},", count: 500).utf8)
+        guard let gz = Gzip.compress(input) else {
+            expect(false, "compresses")
+            return
+        }
+        expect(gz.count < input.count / 5, "repetitive JSON shrinks (\(input.count) -> \(gz.count))")
+        expect(gz.prefix(3) == Data([0x1F, 0x8B, 0x08]), "gzip magic and deflate method")
+        let body = gz.subdata(in: 10..<(gz.count - 8))
+        let inflated = try? (body as NSData).decompressed(using: .zlib) as Data
+        expect(inflated == input, "the deflate stream round-trips")
+        let trailer = [UInt8](gz.suffix(8))
+        let crc = UInt32(trailer[0]) | UInt32(trailer[1]) << 8 | UInt32(trailer[2]) << 16 | UInt32(trailer[3]) << 24
+        let size = UInt32(trailer[4]) | UInt32(trailer[5]) << 8 | UInt32(trailer[6]) << 16 | UInt32(trailer[7]) << 24
+        expect(crc == Gzip.crc32(input) && size == UInt32(input.count), "trailer carries CRC and length")
+        // And the system's own gunzip agrees, which is the real test.
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("replay-gz-\(getpid()).gz")
+        try? gz.write(to: tmp)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/gunzip")
+        p.arguments = ["-c", tmp.path]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        try? p.run()
+        let out = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        try? FileManager.default.removeItem(at: tmp)
+        expect(p.terminationStatus == 0 && out == input, "gunzip opens it")
+    }
+
+    static func expect(_ cond: Bool, _ what: String) {
+        checks += 1
+        if !cond {
+            failures += 1
+            print("  FAIL: \(what)")
+        }
+    }
+}

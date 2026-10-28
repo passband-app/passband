@@ -37,11 +37,65 @@ to the next capture.
 |---|---|
 | `none` | Nothing. The hosted id still flips on adoption so a later opt-in arrives as the same person. |
 | `minimal` | App opens, screen views, sessions, the counter events below marked M, milestones, and the person properties. |
-| `full` | Everything: adds the action verbs (`compose_opened`, `email_labeled`, `whats_new_shown`, `search_deeper_started`) and every `via` / `surface` / `source` property still rides on the M events. |
+| `full` | Everything: adds the action verbs (`compose_opened`, `email_labeled`, `whats_new_shown`, `search_deeper_started`) and every `via` / `surface` / `source` property still rides on the M events. On the Mac, also session replay (below) and its two frustration events. |
 
 Every event captured while the practice inbox is up carries `practice: true`,
 except the three onboarding-funnel events, which are the real thing. `daily`
 events and milestones are not emitted at all from the practice inbox.
+
+## Session replay (Mac, `full` only)
+
+PostHog has no macOS replay, so the app speaks its mobile replay format by
+hand: `$snapshot` events to `/s/` (gzipped, a lane of their own in
+`PostHogClient`) carrying rrweb records, under the same `$session_id` as the
+events, so a recording in PostHog shows the session's events on its timeline.
+Code: `Lib/SessionReplay.swift` (when to record) and
+`Lib/ReplayWireframe.swift` (what a frame is).
+
+**What a frame is.** The window's Core Animation layer tree, reduced to
+rectangles. Read per layer: frame, visibility, opacity, clipping, and only
+WHETHER it has a fill, border or corner radius. Every box is drawn in one of
+a few fixed greys (`ReplayWireframe.panelPaint` and friends) whatever its real
+color, because some fills are derived from mail (a reading tile's logo
+background, an avatar's hue, a triage-colored pill) and even luminance told
+them apart. The window background is the one real paint (the theme). Never
+read: `contents` (rendered text, avatars, images) or a `CATextLayer`'s
+string. Web views, text fields and text views (`isKind(of:)` on the layer's
+view, so app subclasses count) are one box each and the walk never enters
+them, on screen or off. A text run becomes a bar snapped outward to an 8pt
+grid on all four edges. Sheets, popovers and panels over the window are drawn
+onto the same canvas. The meta record's `href` is the current `$screen_name`.
+
+**The guard.** `Analytics.replay` runs `ReplayWireframe.validate` on every
+record: each key must be an rrweb field name, each String a grey `#LLLLLLAA`,
+`rectangle`, or an `allowedStrings` screen name. Anything else drops the
+record (and asserts in debug). `Tests/ReplayWireframeTests.swift` holds the
+contract against a layer tree with a subject, an avatar, a hued pill and a web
+view in it.
+
+**When.** A walk every 0.5 s on the main thread, plus one per click; a frame
+is sent only when it changed, at most once a second. Nothing while the app is
+in the background or the window is hidden, and nothing after 2 minutes
+without a click, key or scroll, so an idle open window does not keep a
+session alive. A click after a pause sends a full frame first. Clicks are
+rrweb touch records (start and end) at canvas points from the window's
+top-left.
+
+| Event | Properties | Question |
+|---|---|---|
+| `$rageclick` | `x`, `y`, `$screen_name` | Three clicks within 30pt inside a second. PostHog's name, so the recordings list filters on it. |
+| `$dead_click` | `x`, `y`, `$screen_name` | A click after which the wireframe did not change for 1.5 s. Heuristic: a click that only moves focus, drags the window, or swaps an icon reads as dead. |
+
+Neither counts a click inside a web view or text field (a triple-click there
+selects; a link may have opened the browser), and a click that opens a menu is
+never dead (menus are not drawn).
+
+The `/s/` body is posthog-ios's shape: a bare JSON array, each event with
+its own `api_key`, a `uuid`, and `distinct_id` repeated in `properties`.
+Buffered frames are dropped, not sent, once the level falls below `full`.
+
+PostHog side: the project must have session recording turned on, and mobile
+recordings count against the mobile replay quota.
 
 ## Identity
 

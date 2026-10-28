@@ -404,9 +404,16 @@
       Event names and property values come from a fixed allowlist enforced in
       code: message content, subjects, senders, recipients, labels, and search
       queries are structurally unable to leave the app through this channel.
+      At the default level the Mac app also records each session as a
+      wireframe: the layout of the window as plain grey boxes, and where you
+      clicked. Text, images, and colors are never recorded; a line of text
+      becomes a blank bar of roughly its length, and an email's body and
+      anything you type are drawn as a single empty box. This helps us see
+      where the app is confusing.
       Events are keyed to a random per-install identifier, or for hosted
       accounts to an opaque account identifier that is not your email address.
-      You can reduce or disable telemetry in Settings under Privacy.
+      You can reduce or disable telemetry in Settings under Privacy; any level
+      below Full turns recording off.
     </p>
 
     <h2>Retention and deletion</h2>

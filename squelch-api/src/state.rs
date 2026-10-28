@@ -163,6 +163,10 @@ pub struct ApiState {
     /// clone of the state, rather than on the mailer: it rations the owner's
     /// screen, of which there is one per mailbox however many mailers exist.
     pub(crate) draft_open_clock: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Smart re-notify (issue #625, [`crate::renotify`]): how it behaves, the
+    /// channel its banners reach the Mac on, and the wake the event stream
+    /// pokes when a Mac arrives. See the module for the contract.
+    pub(crate) renotify: crate::renotify::RenotifyShared,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
@@ -625,6 +629,7 @@ impl ApiState {
             event_notifier: None,
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
+            renotify: crate::renotify::RenotifyShared::default(),
             shutdown: None,
             scheduled_wake: Arc::new(tokio::sync::Notify::new()),
             worker_clock_skew: chrono::Duration::zero(),
@@ -827,6 +832,13 @@ impl ApiState {
     /// stream otherwise keeps the server from finishing its drain.
     pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
         self.shutdown = Some(shutdown);
+        self
+    }
+
+    /// Smart re-notify's tunables (`[renotify]`). Whether it runs at all is
+    /// the `renotify` hidden feature.
+    pub fn with_renotify_config(mut self, config: squelch_core::config::RenotifyConfig) -> Self {
+        self.renotify = crate::renotify::RenotifyShared::new(config);
         self
     }
 
@@ -1400,6 +1412,7 @@ impl ApiState {
                 cfg.notify.price_in_per_mtok,
                 cfg.notify.price_out_per_mtok,
             )
+            .with_renotify_config(cfg.renotify.clone())
             // Smart clear's own model and prices, for the same reason.
             .with_smart_clear_config(
                 cfg.smart_clear.model.clone(),

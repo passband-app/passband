@@ -1118,6 +1118,46 @@ CREATE TABLE IF NOT EXISTS events (
 -- The read pattern is exactly "rows after my cursor, for my account".
 CREATE INDEX IF NOT EXISTS idx_events_account_id ON events(account_id, id);
 
+-- SMART RE-NOTIFY (issue #625, docs/RENOTIFY.md). Written only while the
+-- `renotify` hidden feature is on for the account.
+--
+-- `client_sessions`: one row per Mac event stream (`/client/events?opens=1`),
+-- open while `disconnected_at` is NULL. What it answers is "how long was the
+-- Mac away before this connection", which is the client-online trigger.
+-- Rows a crash left open are closed at the next daemon start. Pruned to the
+-- newest few hundred per account on every insert.
+CREATE TABLE IF NOT EXISTS client_sessions (
+    id              INTEGER PRIMARY KEY,
+    account_id      INTEGER NOT NULL,
+    platform        TEXT NOT NULL,
+    connected_at    TEXT NOT NULL,
+    disconnected_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_client_sessions_account ON client_sessions(account_id, id);
+
+-- One re-notify banner (`renotify_batches`) and the messages it named
+-- (`renotify_items`, in banner order). `opened_at` is the banner tap the app
+-- reports; whether each message was HANDLED after it is derived on read from
+-- the message's own state, never stored, so it cannot drift from it.
+CREATE TABLE IF NOT EXISTS renotify_batches (
+    id                INTEGER PRIMARY KEY,
+    account_id        INTEGER NOT NULL,
+    trigger           TEXT NOT NULL,     -- client_online | meeting_end
+    fired_at          TEXT NOT NULL,
+    listeners         INTEGER NOT NULL,  -- Macs the frame was sent to
+    opened_at         TEXT,
+    opened_message_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_renotify_batches_account ON renotify_batches(account_id, id);
+CREATE TABLE IF NOT EXISTS renotify_items (
+    batch_id   INTEGER NOT NULL REFERENCES renotify_batches(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    position   INTEGER NOT NULL,
+    PRIMARY KEY(batch_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_renotify_items_message ON renotify_items(account_id, message_id);
+
 -- THE NOTIFY DECISION LEDGER: one row per (message, lane) recording what that
 -- lane decided about notifying, and nothing else (docs/NOTIFY.md §11.4).
 --

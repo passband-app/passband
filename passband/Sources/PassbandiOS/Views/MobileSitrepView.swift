@@ -422,13 +422,17 @@ private struct BoardFootnote: View {
                 .foregroundStyle(store.syncStatus.isWarning ? Palette.warn : Palette.inkFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            // The same stamp and tint as the Mac's status strip.
+            // A healthy stamp only when it is late: "synced just now" under
+            // every board was a line of reassurance nobody reads (the founder:
+            // "drop it"). Stale, it is a warning, and stays.
             let stamp = SyncStatus.syncedStamp(
                 stats: store.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
-            Text(stamp.text)
-                .font(Typo.micro)
-                .foregroundStyle(stamp.warn ? Palette.warn : Palette.inkFaintest)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if stamp.warn {
+                Text(stamp.text)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.warn)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
@@ -504,26 +508,34 @@ private struct VisibleWarmKeeper: View {
 }
 
 /// QUICK LOOK'S RECORDS, under the board while the calendar holds their tab.
-/// No heading: what sets them apart is the surface. The board's cards sit on
-/// the page; these sit on a tray a shade off it, rounded at the top and
-/// running to the bottom of the scroll, so the eye reads a second layer (the
-/// things kept for you) under the first (the things that need you) without a
-/// line of copy to explain it. An even fill, no edge stroke along one side.
+/// The surface sets them apart: the board's cards sit on the page; these sit
+/// on a tray a shade off it, rounded at the top and running to the bottom of
+/// the scroll, so the eye reads a second layer (the things kept for you) under
+/// the first (the things that need you). The tray says its own name, in the
+/// zone cards' title weight rather than the old serif masthead. An even fill,
+/// no edge stroke along one side.
 private struct RecordsTray: View {
     var body: some View {
-        RecordZones()
-            .padding(.horizontal, 16)
-            .padding(.top, 20)
-            .padding(.bottom, 40)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                UnevenRoundedRectangle(
-                    topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
-                    topTrailingRadius: 28, style: .continuous)
-                    .fill(Palette.hairline.opacity(0.9))
-                    // Past the end of the scroll too, so a bounce never shows
-                    // the page under the tray's foot.
-                    .padding(.bottom, -600)
-            )
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Quick Look")
+                .font(Typo.ui(20, weight: .semibold))
+                .foregroundStyle(Palette.ink)
+                .padding(.horizontal, 4)
+                .accessibilityAddTraits(.isHeader)
+            RecordZones()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 20)
+        .padding(.bottom, 40)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            UnevenRoundedRectangle(
+                topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
+                topTrailingRadius: 28, style: .continuous)
+                .fill(Palette.hairline.opacity(0.45))
+                // Past the end of the scroll too, so a bounce never shows
+                // the page under the tray's foot.
+                .padding(.bottom, -600)
+        )
     }
 }

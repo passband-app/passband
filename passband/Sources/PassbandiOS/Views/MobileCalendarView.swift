@@ -76,7 +76,31 @@ struct MobileCalendarView: View {
             let items = memo.items(store.calendarFeed, calendar: cal)
             let model = memo.month(items, month: place.month, calendar: cal)
             let week = model.weeks.first { w in w.days.contains { cal.isDate($0.day, inSameDayAs: place.day) } }
-            ScrollViewReader { proxy in
+            Group {
+              if mode == .month {
+                // THE MONTH IS THE WHOLE SCREEN, the way Google's is: every
+                // day a cell with its plans in it. Picking a day opens it.
+                VStack(spacing: 0) {
+                    MobileCalendarStatus()
+                        .padding(.horizontal, 16)
+                    MobileMonthGrid(
+                        model: model, now: now, calendar: cal, stepForward: $stepForward,
+                        open: { day in
+                            Haptics.tick()
+                            withAnimation(.snappy) {
+                                store.selectCalendarDay(day, open: false, now: now)
+                                mode = .day
+                            }
+                        },
+                        turn: { forward in
+                            stepForward = forward
+                            Haptics.tick()
+                            withAnimation(.snappy) { store.moveCalendarMonth(.months(forward ? 1 : -1), now: now) }
+                        })
+                }
+                .background(Palette.canvas)
+              } else {
+              ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         MobileCalendarStatus()
@@ -97,6 +121,8 @@ struct MobileCalendarView: View {
                         withAnimation(.snappy) { proxy.scrollTo(day, anchor: .top) }
                     }
                 }
+              }
+              }
             }
             // THE STRIP RIDES THE BAR. A safe-area bar, not a pinned header:
             // the list scrolls under it with the platform's own edge effect,
@@ -197,13 +223,8 @@ struct MobileCalendarView: View {
     ) -> some View {
         switch mode {
         case .month:
-            // The grid picks the day; the list runs on from it.
-            let days = Agenda.days(items, now: now, calendar: cal, from: place.day)
-            nextCard(cal.isDate(place.day, inSameDayAs: now) ? days : [], now: now, cal: cal)
-            ForEach(days) { day in
-                daySection(day, now: now, cal: cal)
-            }
-            footnote(model: model, cal: cal)
+            // Drawn by MobileMonthGrid, never as a list.
+            EmptyView()
         case .week:
             // Every day of the strip's week, a quiet one as a single line.
             let first = week?.days.first?.day ?? place.day
@@ -353,19 +374,6 @@ struct MobileCalendarView: View {
         }
     }
 
-    /// Where the list stops. The request covers the strip's month plus the
-    /// agenda's own window, so past that a quiet list is not an empty future.
-    @ViewBuilder
-    private func footnote(model: MonthModel, cal: Calendar) -> some View {
-        if let last = model.days.last?.day, store.calendarLoaded {
-            Text("Showing plans through \(Agenda.format(last, "MMM d", cal)).")
-                .font(Typo.ui(12))
-                .foregroundStyle(Palette.inkFaintest)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, 4)
-        }
-    }
-
     private func span(_ item: AgendaItem, _ cal: Calendar) -> String {
         let full = Agenda.fullTime(item, calendar: cal)
         guard let end = full.end else { return full.lead }
@@ -407,12 +415,14 @@ private struct MobileCalendarStrip: View {
     let place: MonthPlace
     let now: Date
     let calendar: Calendar
-    /// The whole month (Month) rather than the picked day's week.
+    /// The month is on screen as its own grid: the weekday letters only.
     let expanded: Bool
     @Binding var stepForward: Bool
 
     var body: some View {
-        let weeks = expanded ? model.weeks : model.weeks.filter { week in
+        // On the month the grid below IS the days: the strip is only their
+        // letters.
+        let weeks = expanded ? [] : model.weeks.filter { week in
             week.days.contains { calendar.isDate($0.day, inSameDayAs: place.day) }
         }
         VStack(spacing: 6) {
@@ -1122,5 +1132,185 @@ private struct MobileDayTimeline: View {
                 guard abs(dx) > abs(value.translation.height), abs(dx) > 60 else { return }
                 step(dx < 0)
             }
+    }
+}
+
+// MARK: - the month, whole
+
+/// The month as Google's phone app draws it, and as the Mac's month does
+/// (`MonthGrid.build`, `fit`, `fold`): every day a cell, its plans top-down
+/// as small chips in their calendars' colours, trips as bars across the days
+/// they cover, and "+N" when a day runs out of room. The cells share the
+/// screen's height, so a five-week month has taller days than a six-week one.
+/// A day tapped opens in Day. Sideways turns the month.
+private struct MobileMonthGrid: View {
+    let model: MonthModel
+    let now: Date
+    let calendar: Calendar
+    @Binding var stepForward: Bool
+    let open: (Date) -> Void
+    let turn: (_ forward: Bool) -> Void
+
+    static let numberBand: CGFloat = 24
+    static let rowHeight: CGFloat = 15
+    static let rowGap: CGFloat = 2
+    static let foot: CGFloat = 3
+    static let inset: CGFloat = 2
+    /// A cell never shrinks past a date and two rows; a month that cannot fit
+    /// at that height scrolls.
+    static var minCell: CGFloat { numberBand + 2 * (rowHeight + rowGap) + foot }
+
+    var body: some View {
+        GeometryReader { geo in
+            let rows = max(1, model.weeks.count)
+            let cell = max(Self.minCell, floor(geo.size.height / CGFloat(rows)))
+            let width = geo.size.width / 7
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(model.weeks) { week in
+                        weekRow(week, cellHeight: cell, cellWidth: width)
+                    }
+                }
+                .id(model.month)
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: stepForward ? .trailing : .leading).combined(with: .opacity),
+                        removal: .move(edge: stepForward ? .leading : .trailing).combined(with: .opacity)))
+            }
+            .scrollDisabled(cell * CGFloat(rows) <= geo.size.height + 1)
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .clipped()
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded { value in
+                    let dx = value.translation.width
+                    guard abs(dx) > abs(value.translation.height), abs(dx) > 60 else { return }
+                    turn(dx < 0)
+                })
+    }
+
+    private func weekRow(_ week: MonthWeek, cellHeight: CGFloat, cellWidth: CGFloat) -> some View {
+        let slots = MonthGrid.slots(
+            cellHeight: Double(cellHeight), lanes: 0, numberBand: Double(Self.numberBand),
+            rowHeight: Double(Self.rowHeight), rowGap: Double(Self.rowGap), foot: Double(Self.foot))
+        let fit = MonthGrid.fit(week, slots: slots)
+        return ZStack(alignment: .topLeading) {
+            HStack(spacing: 0) {
+                ForEach(Array(week.days.enumerated()), id: \.element.id) { column, day in
+                    cellView(
+                        day, rows: fit.rows[column],
+                        fold: MonthGrid.fold(
+                            rows: fit.rows[column],
+                            barLanes: MonthGrid.barLanes(fit.bars, column: column),
+                            hiddenSpans: fit.overflow[column], slots: slots),
+                        width: cellWidth, height: cellHeight)
+                }
+            }
+            // The trips, over the cells they cross, in their lanes.
+            ForEach(fit.bars) { bar in
+                spanBar(bar, cellWidth: cellWidth)
+            }
+        }
+        .frame(height: cellHeight, alignment: .top)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Palette.hairline).frame(height: 0.5)
+        }
+    }
+
+    private func y(_ row: Int) -> CGFloat {
+        Self.numberBand + CGFloat(row) * (Self.rowHeight + Self.rowGap)
+    }
+
+    private func cellView(
+        _ day: MonthDay, rows: [Int], fold: CellFold, width: CGFloat, height: CGFloat
+    ) -> some View {
+        let isToday = calendar.isDate(day.day, inSameDayAs: now)
+        return Button {
+            open(day.day)
+        } label: {
+            ZStack(alignment: .topLeading) {
+                Text(Agenda.format(day.day, "d", calendar))
+                    .font(Typo.num(12, weight: isToday ? .semibold : .medium))
+                    .foregroundStyle(
+                        isToday ? Color.white : day.inMonth ? Palette.ink : Palette.inkFaintest)
+                    .frame(width: 22, height: 22)
+                    .background {
+                        if isToday { Circle().fill(Palette.accent) }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 1)
+                ForEach(Array(zip(day.items.prefix(fold.shown), rows.prefix(fold.shown))), id: \.0.id) {
+                    item, row in
+                    chip(item, sub: nil, width: width - 2 * Self.inset, flatLeading: false, flatTrailing: false)
+                        .offset(x: Self.inset, y: y(row))
+                }
+                if let moreRow = fold.moreRow, fold.more > 0 {
+                    Text("+\(fold.more)")
+                        .font(Typo.ui(10, weight: .semibold))
+                        .foregroundStyle(Palette.inkFaint)
+                        .frame(height: Self.rowHeight)
+                        .offset(x: Self.inset + 3, y: y(moreRow))
+                }
+            }
+            .frame(width: width, height: height, alignment: .topLeading)
+            .opacity(day.inMonth ? 1 : 0.55)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Palette.hairline).frame(width: 0.5)
+        }
+        .accessibilityLabel(accessibility(day, isToday: isToday))
+    }
+
+    private func spanBar(_ bar: SpanSegment, cellWidth: CGFloat) -> some View {
+        let label = MonthGrid.spanLabel(bar, calendar: calendar)
+        let lead: CGFloat = bar.startsHere ? Self.inset : 0
+        let trail: CGFloat = bar.endsHere ? Self.inset : 0
+        let width = CGFloat(bar.lastColumn - bar.firstColumn + 1) * cellWidth - lead - trail
+        return chip(bar.item, sub: label.sub, width: width, flatLeading: !bar.startsHere, flatTrailing: !bar.endsHere)
+            .offset(x: CGFloat(bar.firstColumn) * cellWidth + lead, y: y(bar.lane))
+            .allowsHitTesting(false)
+    }
+
+    /// One plan in a cell: its calendar's fill, its title clipped rather than
+    /// ellipsized (at 50 points "Lunch w" says more than "Lu..."). A timed
+    /// plan keeps the ink of its hue on a lighter fill, like the Mac's chip.
+    private func chip(
+        _ item: AgendaItem, sub: String?, width: CGFloat, flatLeading: Bool, flatTrailing: Bool
+    ) -> some View {
+        let style = CalendarColor.style(item)
+        let inks = ChipColors.inks(style.hue)
+        let r: CGFloat = 4
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: flatLeading ? 0 : r, bottomLeadingRadius: flatLeading ? 0 : r,
+            bottomTrailingRadius: flatTrailing ? 0 : r, topTrailingRadius: flatTrailing ? 0 : r,
+            style: .continuous)
+        return HStack(spacing: 3) {
+            Text(item.title)
+                .font(Typo.ui(10, weight: item.fill == .outline ? .medium : .semibold))
+                .foregroundStyle(Palette.ink)
+                .strikethrough(style.struck, color: Palette.inkFaint)
+            if let sub {
+                Text(sub)
+                    .font(Typo.ui(9.5))
+                    .foregroundStyle(Palette.inkDim)
+            }
+        }
+        .lineLimit(1)
+        .fixedSize()
+        .padding(.horizontal, 3)
+        .frame(width: max(0, width), height: Self.rowHeight, alignment: .leading)
+        .background(ChipFill(style: style, inks: inks, shape: shape, stripeSpacing: 4))
+        .clipShape(shape)
+    }
+
+    private func accessibility(_ day: MonthDay, isToday: Bool) -> String {
+        let date = Agenda.format(day.day, "EEEE MMMM d", calendar)
+        let titles = day.items.map(\.title)
+        let plans = titles.isEmpty ? "" : ", " + titles.joined(separator: ", ")
+        return (isToday ? "Today, " : "") + date + plans
     }
 }

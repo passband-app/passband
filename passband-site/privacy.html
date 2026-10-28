@@ -169,10 +169,8 @@
     <p>
       Passband asks Google for one Gmail permission, granted in a single
       consent at signup (or at <code>squelchd auth</code> on self-host); a
-      consent without it sets nothing up. The sync and triage pipeline and the
-      actions you take are still kept apart in Passband's own code: they load
-      separate credential slots, and the sync pipeline is structurally unable
-      to load the one used for archiving, labeling and sending.
+      consent without it sets nothing up. That permission can read and write;
+      see Security below for how Passband keeps sync away from writing.
     </p>
     <p>
       Every write action is user-initiated or the direct result of a rule you
@@ -441,10 +439,12 @@
 
     <h2>Security</h2>
     <p>
-      The read credential and the write credential are held in separate slots,
-      and the sync pipeline is structurally unable to load the write slot.
-      Agent-facing interfaces are read-only and never expose security-sensitive
-      mail. Self-hosted daemons bind to loopback by default. Hosted accounts are
+      Passband's one Gmail permission can read and write, so the separation is
+      kept in Passband's own code: the sync pipeline loads its own credential
+      slot and has no code that archives, labels, or sends. Agent-facing
+      interfaces never expose security-sensitive mail; agents can leave drafts
+      for you to review, and can send only if you turn sending on, with your
+      approval for each message. Self-hosted daemons bind to loopback by default. Hosted accounts are
       isolated from one another at the container, network, and storage layers,
       and each has its own encryption identity. Secrets are encrypted at rest.
       A summary of these controls, our subprocessors, and retention is at

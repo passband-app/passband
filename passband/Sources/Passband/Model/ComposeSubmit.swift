@@ -132,7 +132,7 @@ enum ComposeSubmit {
 /// state in two different voices.
 enum ComposeCopy {
     /// 403: the read credential cannot send.
-    static let noWriteCredential = "no write credential — run `squelchd auth --write`"
+    static let noWriteCredential = "no write credential — run `squelchd auth`"
 
     /// Why review cannot open yet, when the tray is not settled: an upload
     /// still on its way, or one that failed. nil when every file is staged.

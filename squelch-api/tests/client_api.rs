@@ -1885,7 +1885,7 @@ async fn action_without_write_credential_is_403() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let json = body_json(resp).await;
-    assert!(json["error"].as_str().unwrap().contains("--write"));
+    assert!(json["error"].as_str().unwrap().contains("squelchd auth"));
 }
 
 #[tokio::test]
@@ -9214,7 +9214,7 @@ impl CredentialStore for DeadCreds {
 async fn a_forward_whose_write_credential_is_dead_says_so_instead_of_blaming_gmail() {
     // The raw fetch runs on the WRITE token too, so a dead credential fails
     // inside it — before any send. Collapsing that into the fetch's 502 told the
-    // composer to blame Gmail when the fix is `squelchd auth --write`, which the
+    // composer to blame Gmail when the fix is `squelchd auth`, which the
     // client already knows how to say when it sees the 403.
     let (base, handle) = mock_gmail(0).await;
     let (state, store, acct) = state_with(|store, acct| {
@@ -9246,7 +9246,7 @@ async fn a_forward_whose_write_credential_is_dead_says_so_instead_of_blaming_gma
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let json = body_json(resp).await;
     assert!(
-        json["error"].as_str().unwrap().contains("auth --write"),
+        json["error"].as_str().unwrap().contains("squelchd auth"),
         "the 403 names the fix: {json}"
     );
     handle.abort();

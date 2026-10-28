@@ -679,7 +679,7 @@ pub fn signup_form(
 <summary>Google will ask to read, change, and send your Gmail, and optionally for your calendar.</summary>
 <ul>
 <li><strong>Read</strong>: mail triage.</li>
-<li><strong>Change</strong>: archiving and labeling, never permanent deletion.</li>
+<li><strong>Change</strong>: archiving, labeling and moving to trash, never permanent deletion.</li>
 <li><strong>Send</strong>: replying from the app.</li>
 </ul>
 <p>All three come from one Google permission, <code>gmail.modify</code>, so keep that box checked. It also asks for your name and profile photo, to show them in the app, and for Google Calendar (<code>calendar.events</code>), which can view and edit your events; both are optional. Calendar is asked for now so it never needs a second consent, and nothing touches your calendar until calendar is available on your account. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>

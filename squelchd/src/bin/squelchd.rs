@@ -14,8 +14,8 @@ use chrono::{Duration, SecondsFormat};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use squelch_core::auth::{
     AuthFlowOptions, AuthScopes, ConsentBind, CredentialTransfer, DEFAULT_HEADLESS_PORT,
-    TransferCredential, decode_transfer, encode_transfer, printable, run_auth_flow,
-    run_broker_flow, run_export_flow, verify_transfer_credential,
+    TransferCredential, check_token_covers_slot, decode_transfer, encode_transfer, printable,
+    run_auth_flow, run_broker_flow, run_export_flow, verify_transfer_credential,
 };
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
 use squelch_core::credentials::{
@@ -1055,7 +1055,13 @@ fn mint_credential(
             run_auth_flow(client, email, &opts)?
         }
     };
-    for kind in gmail_slots(scopes) {
+    // Every slot checked before any is written, so a grant without
+    // gmail.modify stores nothing rather than a Write slot that cannot write.
+    let slots = gmail_slots(scopes);
+    for kind in &slots {
+        check_token_covers_slot(*kind, &token)?;
+    }
+    for kind in slots {
         store_and_announce(backend, creds_path, email, kind, &token)?;
     }
     if token.refresh_token.is_some() {
@@ -1186,7 +1192,11 @@ fn cmd_auth_export(config: &Config, args: &AuthArgs) -> Result<(), squelch_core:
             )));
         }
         account = Some(mailbox);
-        for kind in gmail_slots(scopes) {
+        let slots = gmail_slots(scopes);
+        for kind in &slots {
+            check_token_covers_slot(*kind, &token)?;
+        }
+        for kind in slots {
             credentials.push(TransferCredential {
                 kind,
                 token: token.clone(),

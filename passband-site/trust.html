@@ -505,8 +505,8 @@
         </p>
         <div class="facts">
           <div>
-            <h3>Reading can't send</h3>
-            <p>Sync loads its own credential slot. The one used to archive, label and send lives apart, and the sync path cannot load it.</p>
+            <h3>Sync never writes</h3>
+            <p>Google grants Passband one Gmail permission, and it can read and write. Passband keeps the two apart in its own code: the sync and triage path loads its own credential slot and has no code that archives, labels or sends.</p>
           </div>
           <div>
             <h3>One instance per account</h3>
@@ -521,8 +521,8 @@
             <p>Verification codes, sign-in links and password resets are sealed as they are recognized, by rules first and triage second. Sealed mail is never shown to the assistant or to AI agents, and opens only when you reveal it.</p>
           </div>
           <div>
-            <h3>Agents read, never write</h3>
-            <p>The interface Passband offers to AI agents is read-only and serves text only, never HTML and never sealed mail.</p>
+            <h3>Agents draft, you send</h3>
+            <p>The interface Passband offers to AI agents serves mail as text only, never HTML and never sealed mail. Agents can leave drafts for you to review. Sending is off unless you turn it on, and then each message needs your approval.</p>
           </div>
           <div>
             <h3>Mail renders sandboxed</h3>

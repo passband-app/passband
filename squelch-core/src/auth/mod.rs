@@ -637,6 +637,17 @@ fn transfer_client_error(kind: CredentialKind, err: &CoreError) -> CoreError {
     ))
 }
 
+/// Fail unless a freshly minted token's recorded scopes cover what the slot
+/// `kind` needs. The Gmail consent's token is stored in BOTH Gmail slots, but
+/// its exchange was only held to the Read floor, which a legacy
+/// `gmail.readonly` grant (unioned back by Google) can meet without
+/// `gmail.modify`. Without this a person who unticks modify would get a Write
+/// slot that cannot archive or send, failing at the first button instead of
+/// at the consent. Callers check every slot before storing any.
+pub fn check_token_covers_slot(kind: CredentialKind, token: &StoredToken) -> Result<()> {
+    check_scope_grant(AuthScopes::from(kind), token.scopes.as_deref())
+}
+
 /// Fail unless the grant covers every scope that was requested.
 ///
 /// A partial consent is a hard error rather than a warning because it is
@@ -2078,6 +2089,31 @@ mod tests {
         assert!(check_scope_grant(AuthScopes::Read, Some(&declined)).is_ok());
     }
 
+    /// THE GMAIL CONSENT FILLS TWO SLOTS, so its token is held to each. A
+    /// grant without gmail.modify (a legacy readonly grant unioned back after
+    /// the person unticked modify) meets the Read floor and must still not
+    /// land in Write. Legacy write tokens (modify + send) keep passing.
+    #[test]
+    fn a_fresh_token_is_held_to_every_slot_it_fills() {
+        let token = |scopes: &[&str]| {
+            StoredToken::from_response("a".into(), Some("r".into()), None)
+                .with_scopes(Some(scopes.iter().map(|s| s.to_string()).collect()))
+        };
+        let unticked = token(&[GMAIL_READONLY_SCOPE, GOOGLE_PROFILE_SCOPE]);
+        assert!(check_token_covers_slot(CredentialKind::Read, &unticked).is_ok());
+        let err = check_token_covers_slot(CredentialKind::Write, &unticked)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(GMAIL_MODIFY_SCOPE), "{err}");
+
+        let modify = token(&[GMAIL_MODIFY_SCOPE]);
+        for kind in [CredentialKind::Read, CredentialKind::Write] {
+            assert!(check_token_covers_slot(kind, &modify).is_ok(), "{kind:?}");
+        }
+        let legacy_write = token(&[GMAIL_MODIFY_SCOPE, crate::config::GMAIL_SEND_SCOPE]);
+        assert!(check_token_covers_slot(CredentialKind::Write, &legacy_write).is_ok());
+    }
+
     /// The cap has to hold for a body that DECLARES its size and for one that
     /// declares nothing, because the other end picks which.
     #[test]
@@ -2274,7 +2310,8 @@ mod tests {
         assert!(err.contains("wrong reach"), "{err}");
         assert!(err.contains(GMAIL_MODIFY_SCOPE), "{err}");
 
-        // Each grant in its own slot is what a real export produces.
+        // A gmail.modify token in either slot is what a current export
+        // produces; a legacy read token in Read is what an old one did.
         assert!(
             judge(
                 "me@gmail.com",

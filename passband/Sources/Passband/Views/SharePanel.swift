@@ -106,7 +106,7 @@ struct SharePanel: View {
                     "Passband cannot send mail as you yet.",
                     detail:
                         "An invite is sent from your own mailbox, which needs the write "
-                        + "credential. Run `squelchd auth --write` on your daemon and come back."
+                        + "credential. Run `squelchd auth` on your daemon and come back."
                 )
             } else {
                 message(

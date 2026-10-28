@@ -1550,13 +1550,12 @@ impl SqliteStore {
             )?;
             // When a `revisit:` run for it last committed a decision: the
             // newest answer to "is this still needed".
-            let mut answered = tx.prepare(
-                "SELECT r.completed_at FROM agent_triage_runs r
-                 JOIN agent_triage_jobs j ON j.id=r.job_id AND j.account_id=r.account_id
-                 WHERE r.account_id=?1 AND r.message_id=?2 AND r.outcome='applied'
-                   AND j.trigger LIKE 'revisit:%'
-                 ORDER BY julianday(r.completed_at) DESC LIMIT 1",
-            )?;
+            let mut answered = tx.prepare(concat!(
+                "SELECT r.completed_at FROM agent_triage_runs r, agent_triage_jobs j
+                 WHERE r.account_id=?1 AND r.message_id=?2 AND ",
+                revisit_answer_sql!("r", "j"),
+                " ORDER BY julianday(r.completed_at) DESC LIMIT 1"
+            ))?;
             // Has anything its dates come from changed since it was asked: a
             // ghost it feeds, or the decision of any source of one. Its own
             // decision is a source's.
@@ -6068,6 +6067,38 @@ mod tests {
         decide(&store, 1, 1, &landing("2026-10-20T15:45"));
         assert_eq!(schedule(&store, 1, LATER), vec![1]);
         assert_eq!(triggers(&store, 1)[1], ask("2026-10-21T22:45:00Z"));
+    }
+
+    /// History retention keeps what this pass reads. Once the answer's run is
+    /// past the retention window (slimmed, and every older run around it
+    /// gone), a wobble is still a wobble: the answer is found, and nothing is
+    /// paid for twice.
+    #[test]
+    fn an_answer_past_the_retention_window_still_counts() {
+        let store = fixture();
+        flight_mail(&store, 1, 1, "checkin");
+        assert_eq!(schedule(&store, 1, FLIGHT_ASK), vec![1]);
+        complete_all(&store);
+        // A quarter and more later, with the worker still running.
+        let pruned_at = utc(FLIGHT_ASK) + chrono::Duration::days(HISTORY_RETENTION_DAYS + 30);
+        sql(
+            &store,
+            &format!(
+                "UPDATE agent_triage_runs SET metadata_json='{{\"model_turns\":3}}';
+                 INSERT INTO agent_triage_runs(job_id,account_id,message_id,outcome,completed_at)
+                 VALUES(0,1,1,'applied','{}'),(0,1,1,'applied','{}')",
+                utc(FLIGHT_ASK).to_rfc3339(),
+                pruned_at.to_rfc3339()
+            ),
+        );
+        let pruned = store.prune_history(pruned_at).unwrap();
+        assert_eq!((pruned.runs, pruned.runs_trimmed), (1, 1));
+        let mut moved = zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]);
+        if let RecordProposal::Event { end, .. } = &mut moved.records[0] {
+            *end = tz_time("2026-10-20T13:45", Some("America/Los_Angeles"));
+        }
+        decide(&store, 1, 1, &moved);
+        assert!(schedule(&store, 1, LATER).is_empty(), "still answered");
     }
 
     #[test]

@@ -1756,8 +1756,9 @@ CREATE TABLE IF NOT EXISTS agent_triage_runs (
     metadata_json TEXT NOT NULL DEFAULT '{}',
     completed_at TEXT NOT NULL
 );
--- One row per run, kept for HISTORY_RETENTION_DAYS (`retention.rs`, a daily
--- pass; an applied revisit run is kept for good, the revisit pass reads it),
+-- One row per run, kept for HISTORY_RETENTION_DAYS (`retention.rs`; a
+-- message's newest answered revisit is kept past it, slimmed, because the
+-- revisit pass reads it),
 -- so without this the diagnostics read (`agent_diagnostics`: the newest 25
 -- runs for one message) is a scan of the whole window. The first open after
 -- this shipped built it over the whole table, synchronously, before the
@@ -2138,8 +2139,8 @@ CREATE TABLE IF NOT EXISTS sender_zones (
 );
 
 -- Independent model assessments for human notification diagnostics. Multiple
--- attempts remain inspectable for HISTORY_RETENTION_DAYS (`retention.rs`, a
--- daily pass); the notification ledger still records delivery, and it, not
+-- attempts remain inspectable for HISTORY_RETENTION_DAYS (`retention.rs`);
+-- the notification ledger still records delivery, and it, not
 -- this table, is what stops a second model call.
 CREATE TABLE IF NOT EXISTS notification_assessments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

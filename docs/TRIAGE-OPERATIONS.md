@@ -298,9 +298,11 @@ also refresh the existing last-success metric.
 The fast notification assessment also persists auth classification, score,
 reason, model, prompt version, and timestamp for the human inspector.
 Applied runs record prompt version, model, configuration, token usage, model-turn
-and tool-call counts, and source IDs. Both are kept for 90 days: a daily pass
-deletes older assessments and runs, except an applied revisit run, which the
-revisit pass reads to tell an answered question from an unanswered one. Reported usage is retained for refusals,
+and tool-call counts, and source IDs. Both are kept for 90 days: a pass every
+six hours deletes older assessments and runs. A message's newest applied
+revisit run is the exception, because the revisit pass reads it to tell an
+answered question from an unanswered one: it is kept, with its metadata
+emptied. Reported usage is retained for refusals,
 truncation and invalid output as well. Truncation returns to the bounded caller
 instead of silently making another paid transport call. Missing usage remains
 unknown; the existing ledger is not durable per-call monetary settlement. Raw provider failures are not persisted as

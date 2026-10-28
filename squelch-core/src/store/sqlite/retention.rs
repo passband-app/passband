@@ -24,126 +24,224 @@ pub const HISTORY_RETENTION_DAYS: i64 = 90;
 
 /// Rows looked at, and at most deleted, per hold of the store mutex. The
 /// first pass on a store with a long history (every run since install) clears
-/// it in short steps, between which the sync engine, the worker and the doors
-/// get the lock, rather than in one long delete or one long scan.
+/// it in short steps rather than in one long delete or one long scan.
 pub(super) const PRUNE_CHUNK_ROWS: i64 = 500;
 
-/// What [`SqliteStore::prune_history`] deleted.
+/// The pause between pages. The store mutex is not fair: a thread that
+/// unlocks and locks again at once usually wins it back from a waiter that
+/// was woken, so without a pause the sync engine or a door request could wait
+/// out the whole walk instead of one page.
+const PAGE_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// What [`SqliteStore::prune_history`] did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryPruned {
+    /// Runs deleted.
     pub runs: u64,
+    /// Answered-revisit runs past the window that were kept, with their
+    /// metadata emptied.
+    pub runs_trimmed: u64,
+    /// Fast-lane assessments deleted.
     pub assessments: u64,
 }
 
-/// The next [`PRUNE_CHUNK_ROWS`] runs above `?1` by rowid: the last id among
-/// them, the first one inside the window (`?2` the cutoff, `?3` now), and how
-/// many there were.
-///
-/// Ids are assigned in commit order and `completed_at` is the commit's own
-/// clock, so the window starts at the first row inside it and everything
-/// below is older. Walking up from the bottom a page at a time finds that row
-/// without an index on the timestamp, and each pass's walk is short: once one
-/// has run, the rows below the window are a day's worth and the few that are
-/// kept.
-///
-/// A row stamped after now (a clock that ran ahead, then was corrected) is not
-/// the window's start: taken for it, it would stop every pass at itself until
-/// the clock caught up. It is walked past here and kept by the delete's own
-/// timestamp check.
-pub(super) const RUNS_PAGE_SQL: &str = "SELECT MAX(id),
-        MIN(CASE WHEN julianday(completed_at) >= julianday(?2)
-                  AND julianday(completed_at) <= julianday(?3) THEN id END),
-        COUNT(*)
-   FROM (SELECT id, completed_at FROM agent_triage_runs
-          WHERE id > ?1 ORDER BY id LIMIT ?4)";
+/// How one table is pruned. Every statement takes `?1` the id the page starts
+/// after; the page also takes `?2` the cutoff, `?3` now and `?4` the page size;
+/// the delete and trim take `?2` the id the page stops before and `?3` the
+/// cutoff.
+pub(super) struct Pruning {
+    /// The newest row's timestamp, by id.
+    newest: &'static str,
+    /// The next page above `?1` by rowid: its last id, the first id inside
+    /// the window, and how many rows it held.
+    pub(super) page: &'static str,
+    pub(super) delete: &'static str,
+    /// Rows kept past the window that are slimmed instead.
+    pub(super) trim: Option<&'static str>,
+}
 
-/// The old runs in `(?1, ?2)`, one page's worth at most. The timestamp is
-/// checked again, so a run is deleted only if it is itself older than the
-/// window, whatever order a clock that stepped back stored it in.
+/// Runs.
 ///
-/// KEPT: an `applied` run of a `revisit:` job. The ghost-event revisit pass
-/// reads the newest one per message as "when was this last answered" and
-/// asks the model again (a billed run) if it finds none. Revisits are capped
-/// per message, so these few rows stay.
-pub(super) const RUNS_DELETE_SQL: &str = "DELETE FROM agent_triage_runs
-  WHERE id > ?1 AND id < ?2
-    AND julianday(completed_at) < julianday(?3)
-    AND NOT (outcome = 'applied' AND EXISTS (
-          SELECT 1 FROM agent_triage_jobs j
-           WHERE j.id = agent_triage_runs.job_id
-             AND j.account_id = agent_triage_runs.account_id
-             AND j.trigger LIKE 'revisit:%'))";
+/// THE PAGE. Ids are assigned in commit order and `completed_at` is taken in
+/// the committing transaction, so the window starts at the first row inside
+/// it and everything below is older. Walking up from the bottom a page at a
+/// time finds that row without an index on the timestamp, and each pass's
+/// walk is short: once one has run, the rows below the window are a few
+/// hours' worth and the answers kept below. A row stamped after now (a clock
+/// that ran ahead, then was corrected) is not the window's start: taken for
+/// it, it would stop every pass at itself until the clock caught up. It is
+/// walked past, and kept by the delete's own timestamp check.
+///
+/// THE DELETE rechecks every row's own timestamp, so nothing inside the window
+/// goes, whatever order a clock that stepped back stored it in. It keeps a
+/// message's NEWEST ANSWERED REVISIT ([`revisit_answer_sql!`]), the one row
+/// the revisit pass reads. Its older answers go.
+///
+/// THE TRIM empties the metadata of the answers kept past the window: the
+/// revisit pass reads only their outcome, job and time, so a kept answer
+/// costs a hundred bytes rather than its 1-3 KB, however many messages have
+/// one.
+pub(super) const RUNS: Pruning = Pruning {
+    newest: "SELECT completed_at FROM agent_triage_runs ORDER BY id DESC LIMIT 1",
+    page: "SELECT MAX(id),
+            MIN(CASE WHEN julianday(completed_at) >= julianday(?2)
+                      AND julianday(completed_at) <= julianday(?3) THEN id END),
+            COUNT(*)
+       FROM (SELECT id, completed_at FROM agent_triage_runs
+              WHERE id > ?1 ORDER BY id LIMIT ?4)",
+    delete: concat!(
+        "DELETE FROM agent_triage_runs AS r
+          WHERE r.id > ?1 AND r.id < ?2
+            AND julianday(r.completed_at) < julianday(?3)
+            AND NOT EXISTS (
+                  SELECT 1 FROM agent_triage_jobs j WHERE ",
+        revisit_answer_sql!("r", "j"),
+        " AND NOT EXISTS (
+                    SELECT 1 FROM agent_triage_runs n, agent_triage_jobs nj
+                     WHERE n.account_id = r.account_id AND n.message_id = r.message_id AND ",
+        revisit_answer_sql!("n", "nj"),
+        " AND julianday(n.completed_at) > julianday(r.completed_at)))"
+    ),
+    trim: Some(
+        "UPDATE agent_triage_runs SET metadata_json = '{}'
+          WHERE id > ?1 AND id < ?2
+            AND julianday(completed_at) < julianday(?3)
+            AND metadata_json <> '{}'",
+    ),
+};
 
-/// [`RUNS_PAGE_SQL`] for assessments. `id` is AUTOINCREMENT and
-/// `assessed_at` the insert's clock.
-pub(super) const ASSESSMENTS_PAGE_SQL: &str = "SELECT MAX(id),
-        MIN(CASE WHEN julianday(assessed_at) >= julianday(?2)
-                  AND julianday(assessed_at) <= julianday(?3) THEN id END),
-        COUNT(*)
-   FROM (SELECT id, assessed_at FROM notification_assessments
-          WHERE id > ?1 ORDER BY id LIMIT ?4)";
+/// Fast-lane assessments, the same walk with no exception: the notification
+/// ledger, not this table, is what stops a second model call. `id` is
+/// AUTOINCREMENT and `assessed_at` is taken just before the insert, outside
+/// the store lock, so two assessments landing together may be stored a moment
+/// out of order; the delete's own timestamp check is what keeps the window
+/// whole, here as for runs.
+pub(super) const ASSESSMENTS: Pruning = Pruning {
+    newest: "SELECT assessed_at FROM notification_assessments ORDER BY id DESC LIMIT 1",
+    page: "SELECT MAX(id),
+            MIN(CASE WHEN julianday(assessed_at) >= julianday(?2)
+                      AND julianday(assessed_at) <= julianday(?3) THEN id END),
+            COUNT(*)
+       FROM (SELECT id, assessed_at FROM notification_assessments
+              WHERE id > ?1 ORDER BY id LIMIT ?4)",
+    delete: "DELETE FROM notification_assessments
+              WHERE id > ?1 AND id < ?2
+                AND julianday(assessed_at) < julianday(?3)",
+    trim: None,
+};
 
-/// [`RUNS_DELETE_SQL`] for assessments, with no exception: the notification
-/// ledger, not this table, is what stops a second model call.
-pub(super) const ASSESSMENTS_DELETE_SQL: &str = "DELETE FROM notification_assessments
-  WHERE id > ?1 AND id < ?2
-    AND julianday(assessed_at) < julianday(?3)";
+/// One page of [`SqliteStore::prune_page`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PageStep {
+    pub(super) deleted: u64,
+    pub(super) trimmed: u64,
+    /// Where the next page starts, or `None` when this one reached the window
+    /// or the end of the table.
+    pub(super) next: Option<i64>,
+}
 
 impl SqliteStore {
     /// Delete run diagnostics and fast-lane assessments older than
-    /// [`HISTORY_RETENTION_DAYS`] before `now`, for every account.
+    /// [`HISTORY_RETENTION_DAYS`], for every account.
     ///
-    /// A page of [`PRUNE_CHUNK_ROWS`] at a time, each under its own hold of
-    /// the mutex. The pages freed go to SQLite's freelist and are reused by
-    /// later writes, so the file stops growing for this history rather than
-    /// shrinking: the store is not `auto_vacuum`, and a `VACUUM` rewrites the
-    /// whole file under the write lock.
+    /// The window ends at `now`, or at the newest stored row's own time when
+    /// that is earlier: a pass on a clock that jumped ahead, before anything
+    /// was stamped with it, then deletes nothing the real window holds, and
+    /// an account idle for longer than the window keeps its last 90 days of
+    /// activity.
+    ///
+    /// A page of [`PRUNE_CHUNK_ROWS`] at a time, one transaction and one hold
+    /// of the mutex each. The pages freed go to SQLite's freelist and are
+    /// reused by later writes, so the file stops growing for this history
+    /// rather than shrinking: the store is not `auto_vacuum`, and a `VACUUM`
+    /// rewrites the whole file under the write lock.
     ///
     /// Off the open path and on a timer, like
-    /// [`refresh_statistics`](Self::refresh_statistics): the daemon calls it
-    /// daily (`spawn_history_retention` in squelchd).
+    /// [`refresh_statistics`](Self::refresh_statistics) (`spawn_history_retention`
+    /// in squelchd). Both tables are tried even when the first fails, so a
+    /// busy file does not hold the other back, and the first error is
+    /// returned after.
     pub fn prune_history(&self, now: DateTime<Utc>) -> Result<HistoryPruned> {
-        let cutoff = (now - chrono::Duration::days(HISTORY_RETENTION_DAYS)).to_rfc3339();
-        let now = now.to_rfc3339();
+        let runs = self.prune_table(&RUNS, now);
+        let assessments = self.prune_table(&ASSESSMENTS, now);
+        let (runs_deleted, runs_trimmed) = runs?;
         Ok(HistoryPruned {
-            runs: self.prune_table(RUNS_PAGE_SQL, RUNS_DELETE_SQL, &cutoff, &now)?,
-            assessments: self.prune_table(
-                ASSESSMENTS_PAGE_SQL,
-                ASSESSMENTS_DELETE_SQL,
-                &cutoff,
-                &now,
-            )?,
+            runs: runs_deleted,
+            runs_trimmed,
+            assessments: assessments?.0,
         })
     }
 
-    /// Walk the table up from the bottom a page at a time, deleting each
-    /// page's old rows, until a page reaches the window or the end.
-    fn prune_table(&self, page: &str, delete: &str, cutoff: &str, now: &str) -> Result<u64> {
-        let mut after = 0i64;
-        let mut deleted = 0u64;
+    /// The cutoff for one table: [`HISTORY_RETENTION_DAYS`] before `now` or
+    /// before its newest row, whichever is earlier.
+    pub(super) fn retention_cutoff(
+        &self,
+        table: &Pruning,
+        now: DateTime<Utc>,
+    ) -> Result<DateTime<Utc>> {
+        let newest: Option<String> = self
+            .lock()?
+            .prepare_cached(table.newest)?
+            .query_row([], |r| r.get(0))
+            .optional()?;
+        let end = newest
+            .and_then(|at| DateTime::parse_from_rfc3339(&at).ok())
+            .map_or(now, |at| at.with_timezone(&Utc).min(now));
+        Ok(end - chrono::Duration::days(HISTORY_RETENTION_DAYS))
+    }
+
+    /// Walk one table up from the bottom a page at a time until a page
+    /// reaches the window or the end: (deleted, trimmed).
+    fn prune_table(&self, table: &Pruning, now: DateTime<Utc>) -> Result<(u64, u64)> {
+        let cutoff = self.retention_cutoff(table, now)?.to_rfc3339();
+        let now = now.to_rfc3339();
+        let (mut deleted, mut trimmed, mut after) = (0, 0, 0);
         loop {
-            let done = {
-                let conn = self.lock()?;
-                let (last, window, seen): (Option<i64>, Option<i64>, i64) = conn
-                    .prepare_cached(page)?
-                    .query_row(params![after, cutoff, now, PRUNE_CHUNK_ROWS], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?;
-                let Some(last) = last else {
-                    return Ok(deleted);
-                };
-                let below = window.unwrap_or(last + 1);
-                deleted += conn
-                    .prepare_cached(delete)?
-                    .execute(params![after, below, cutoff])? as u64;
-                after = last;
-                window.is_some() || seen < PRUNE_CHUNK_ROWS
-            };
-            if done {
-                return Ok(deleted);
+            let step = self.prune_page(table, after, &cutoff, &now)?;
+            deleted += step.deleted;
+            trimmed += step.trimmed;
+            match step.next {
+                Some(next) => after = next,
+                None => return Ok((deleted, trimmed)),
             }
-            // A waiter on the mutex gets in before the next page.
-            std::thread::yield_now();
+            std::thread::sleep(PAGE_PAUSE);
         }
+    }
+
+    /// One page above `after`: its old rows deleted (or trimmed, where kept),
+    /// in one transaction under one hold of the mutex.
+    pub(super) fn prune_page(
+        &self,
+        table: &Pruning,
+        after: i64,
+        cutoff: &str,
+        now: &str,
+    ) -> Result<PageStep> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let (last, window, seen): (Option<i64>, Option<i64>, i64) = tx
+            .prepare_cached(table.page)?
+            .query_row(params![after, cutoff, now, PRUNE_CHUNK_ROWS], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+        let Some(last) = last else {
+            return Ok(PageStep::default());
+        };
+        let before = window.unwrap_or(last + 1);
+        let deleted = tx
+            .prepare_cached(table.delete)?
+            .execute(params![after, before, cutoff])? as u64;
+        let trimmed = match table.trim {
+            Some(trim) => tx
+                .prepare_cached(trim)?
+                .execute(params![after, before, cutoff])? as u64,
+            None => 0,
+        };
+        tx.commit()?;
+        Ok(PageStep {
+            deleted,
+            trimmed,
+            next: (window.is_none() && seen == PRUNE_CHUNK_ROWS).then_some(last),
+        })
     }
 }

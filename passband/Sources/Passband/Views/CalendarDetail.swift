@@ -11,8 +11,8 @@
 //
 // THE PHONE PUSHES THIS SAME VIEW (PassbandiOS/Views/MobileCalendarView.swift).
 // What differs there is only the verbs: no key chips on a phone, and edit
-// opens the phone's sheet (PassbandiOS/Views/MobileEventSheet.swift). No
-// delete there yet.
+// opens the phone's sheet (PassbandiOS/Views/MobileEventSheet.swift), and
+// delete asks on the phone's own page (MobileEventPage).
 
 import SwiftUI
 
@@ -278,11 +278,7 @@ struct CalendarDetail: View {
                 HStack(spacing: Space.s14) {
                     if editable {
                         HintButton(key: "e", label: "edit") { store.openEventEditor(editing: event) }
-                        // The phone edits in its sheet; deleting is a later
-                        // pass there.
-                        #if os(macOS)
-                            HintButton(key: "⌫", label: "delete") { store.askDeleteEvent(event) }
-                        #endif
+                        HintButton(key: "⌫", label: "delete") { store.askDeleteEvent(event) }
                     }
                     if let link {
                         HintButton(key: "↵", label: "open in Google Calendar") { Opener.open(link) }

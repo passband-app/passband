@@ -608,8 +608,18 @@ to these rules:
   that asked for it on its own authenticated event stream
   (`GET /client/events?opens=1`) receives an unpersisted, dated `open_draft`
   frame. Nothing is stored or replayed, and the app drops a frame more than a
-  minute old, so a Mac that wakes from sleep has no window thrown at it. The
-  phone never asks and is never told.
+  minute old, so a Mac that wakes from sleep has no window thrown at it.
+- The phone is told by push, ONCE PER DRAFT. The same request hands a
+  `DraftPing` (draft id + creation second) to the APNs pusher over a second
+  in-memory channel (`ApiState::draft_pings`); it is not an event, is never
+  persisted, and is tried once. The relay sees `"<tag>:draft:<id>:<created>"`
+  and `kind: "draft"`, which picks a fixed fallback line and can carry no
+  text of its own; no subject, recipient or body crosses it. The phone's
+  service extension resolves the draft from its own daemon and opens it only
+  if the daemon says an agent wrote it at that second. A tap opens the
+  composer; nothing on the phone sends without the owner pressing send.
+  Asking again for the same draft never buzzes the phone again
+  (`ApiState::draft_pinged`).
 - Only a draft an agent wrote can be named. The mailer refuses any other id
   with the same `not found` as an unknown one, and the app checks
   `from_agent` AGAIN against the daemon's own draft list before opening

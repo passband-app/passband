@@ -868,6 +868,11 @@ pub struct MessageOpen {
 pub const OPEN_PROXIED: &str = "proxied";
 /// Open classification for every other fetcher.
 pub const OPEN_UNKNOWN: &str = "unknown";
+/// Open classification for a fetch whose agent marks it as a machine: a
+/// security scanner or link checker that fetches a mail's images on delivery.
+/// Stored and listed, but never counted as an open and never notified. See
+/// [`crate::tracking::classify_user_agent`].
+pub const OPEN_SCANNER: &str = "scanner";
 
 /// The message a tracking token points at, resolved in one hop from the token.
 /// Only ever `Some` when the tracker exists, belongs to the account, and its

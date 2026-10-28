@@ -2277,7 +2277,7 @@ struct MessageOpen: Codable, Sendable, Hashable {
     /// Unix SECONDS — the one stamp on this wire that is not RFC3339 text.
     var opened_at: Int
     var user_agent: String?
-    /// "proxied" or "unknown". Kept as a String because the daemon's set is
+    /// "proxied", "scanner" or "unknown". Kept as a String because the daemon's set is
     /// open-ended: an unrecognised value must read as the weaker claim rather
     /// than be collapsed onto the stronger one.
     var classification: String
@@ -2287,6 +2287,10 @@ struct MessageOpen: Codable, Sendable, Hashable {
     /// The fetch came from Gmail's image proxy, which may be warming a cache
     /// rather than showing a human the mail. The copy says so.
     var viaProxy: Bool { classification == "proxied" }
+
+    /// The fetcher's agent marks it as a machine (a security scanner that loads
+    /// a mail's images the moment it arrives). Listed, never counted as an open.
+    var probableScanner: Bool { classification == "scanner" }
 }
 
 struct MessageOpensResult: Codable, Sendable {

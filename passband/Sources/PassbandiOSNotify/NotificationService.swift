@@ -89,6 +89,23 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             original = request.content
         }
 
+        // An agent's draft is not an event: a different fetch, a different
+        // banner, and no badge (a draft changes nothing the badge counts).
+        if let draft = EventBanner.draftPush(request.content.userInfo[PushRoute.eventIdKey] as? String) {
+            nonisolated(unsafe) let fallback = request.content
+            let task = Task { [weak self] in
+                let content = await Self.draftContent(draft)
+                guard let self else { return }
+                self.deliver(content ?? fallback)
+            }
+            let spent = lock.withLock { () -> Bool in
+                work = task
+                return handler == nil
+            }
+            if spent { task.cancel() }
+            return
+        }
+
         guard let route = PushRoute(userInfo: request.content.userInfo) else {
             return deliver(request.content)
         }
@@ -316,6 +333,56 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         // not share. Silencing the kinds the app silences matters more than
         // which chime the rest use.
         content.sound = copy.sound ? .default : nil
+        return content
+    }
+
+    // MARK: - an agent's draft
+
+    /// The banner for a draft an agent asked the owner to review, or nil to
+    /// keep the relay's generic one. The push names a draft by id and creation
+    /// second only; what is shown is whatever THIS account's daemon holds
+    /// under that id, and only when the daemon marks it as an agent's and its
+    /// second matches. The owner's own drafts never become a banner.
+    ///
+    /// The raw push's `event_id` survives a nil here, so a tap on the generic
+    /// banner still opens the draft (`EventBanner.tapRoute`).
+    private static func draftContent(_ push: EventBanner.DraftPush) async -> UNNotificationContent? {
+        guard let settings = try? SettingsStore.load(accountId: push.accountId) else { return nil }
+
+        var base = settings.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        guard var comps = URLComponents(string: base + "/client/drafts") else { return nil }
+        comps.queryItems = [URLQueryItem(name: "forwards", value: "1")]
+        guard let url = comps.url else { return nil }
+
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.setValue("Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Silent on every failure, for the reason `fetch` is.
+        guard let (data, response) = try? await Self.session.data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let rows = try? JSONDecoder().decode([DraftView].self, from: data),
+            let draft = rows.first(where: { $0.id == push.draftId }),
+            draft.from_agent == true,
+            EventBanner.draftSecond(draft.created_at) == push.created
+        else { return nil }
+
+        let account = push.accountId.uuidString
+        let copy = EventBanner.agentDraftCopy(
+            to: draft.to, subject: draft.subject, isReply: draft.reply_to_message_id != nil,
+            parentFrom: draft.parent_from)
+        let content = UNMutableNotificationContent()
+        content.title = copy.title
+        content.body = copy.body
+        content.threadIdentifier = "\(account).agent-drafts"
+        content.userInfo = [
+            EventBanner.routeKey: EventBanner.agentDraftRoute,
+            EventBanner.accountKey: account,
+            EventBanner.draftKey: push.draftId,
+            EventBanner.draftCreatedKey: push.created,
+        ]
+        content.sound = .default
         return content
     }
 }

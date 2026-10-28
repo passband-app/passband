@@ -40,6 +40,25 @@ pub fn is_mintable_base_url(base_url: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+/// Whether a pixel minted against `base_url` is fetched from the relay at
+/// `relay_url`: same scheme, host (case-insensitively) and port. Only then do
+/// opens buffer on the relay for this daemon to collect. Any path on either
+/// side is ignored; the pixel route and the drain both hang off the origin.
+///
+/// A self-hoster who fronts the relay's pixel with a second hostname (a CNAME
+/// for deliverability) should name the same hostname in both settings.
+pub fn pixel_lands_on_relay(base_url: &str, relay_url: &str) -> bool {
+    let parse = |u: &str| url::Url::parse(u.trim()).ok();
+    let (Some(a), Some(b)) = (parse(base_url), parse(relay_url)) else {
+        return false;
+    };
+    // `Url` already lowercases the scheme and a domain host.
+    a.scheme() == b.scheme()
+        && a.host_str().is_some()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
 /// The opens poller's cursor row in `sync_state`: `uidvalidity` unused,
 /// `last_uid` holds the highest relay row id durably written here. Its own key,
 /// distinct from the pusher's and the sync engine's.
@@ -157,6 +176,13 @@ impl OpensPoller {
     /// collect, so all a poller there could do is drain and ack away ANOTHER
     /// daemon's opens. Having a relay (for push) is not a reason to collect.
     /// The daemon's own `/t/:token` route needs neither.
+    ///
+    /// And the pixel must POINT AT THAT RELAY ([`pixel_lands_on_relay`]). A
+    /// daemon whose pixel is its own public `/t/` route (every hosted tenant)
+    /// records opens directly and has nothing buffered on the relay, even when
+    /// it holds a relay for iOS push. Polling there would at best 401 forever
+    /// on the push-only bearer and at worst drain the self-hosted daemons'
+    /// opens.
     pub fn from_config(
         store: Arc<dyn Store>,
         account_id: AccountId,
@@ -179,6 +205,14 @@ impl OpensPoller {
             .as_deref()
             .is_some_and(is_mintable_base_url);
         if !mints_pixels {
+            return Ok(None);
+        }
+        if !config
+            .tracking
+            .base_url
+            .as_deref()
+            .is_some_and(|base| pixel_lands_on_relay(base, &relay_url))
+        {
             return Ok(None);
         }
         // The error carries no url and no bearer; neither reached the builder.
@@ -466,21 +500,52 @@ mod tests {
                 .expect("a scheme-less tracking url is not an error")
                 .is_none()
         );
+        // A pixel on a DIFFERENT host than the relay: opens land wherever the
+        // pixel points (a hosted tenant's own `/t/`), so nothing is buffered
+        // on the relay for this daemon and it must not collect.
+        config.tracking.base_url = Some("https://track.example.com".to_string());
+        assert!(
+            OpensPoller::from_config(store.clone(), 1, &config)
+                .expect("a pixel off the relay is not an error")
+                .is_none()
+        );
+
         // Case and surrounding whitespace do not matter, as in minting.
-        config.tracking.base_url = Some("  HTTPS://track.example.com ".to_string());
+        config.tracking.base_url = Some("  HTTPS://Relay.example.com ".to_string());
         assert!(
             OpensPoller::from_config(store.clone(), 1, &config)
                 .expect("building the client")
                 .is_some()
         );
 
-        // Both named: the poller exists.
-        config.tracking.base_url = Some("https://track.example.com".to_string());
+        // Both naming the relay: the poller exists.
+        config.tracking.base_url = Some("https://relay.example.com".to_string());
         let p = OpensPoller::from_config(store, 1, &config)
             .expect("building the client")
-            .expect("a relay plus a tracking url builds a poller");
+            .expect("a relay plus a pixel on it builds a poller");
         // The trailing slash does not become a double slash on the path.
         assert_eq!(p.opens_url, "https://relay.example.com/v1/opens");
+    }
+
+    #[test]
+    fn a_pixel_lands_on_the_relay_only_at_the_same_origin() {
+        let relay = "https://relay.squelch.sh";
+        assert!(pixel_lands_on_relay("https://relay.squelch.sh", relay));
+        assert!(pixel_lands_on_relay("https://relay.squelch.sh/", relay));
+        assert!(pixel_lands_on_relay(" HTTPS://RELAY.squelch.sh ", relay));
+        assert!(pixel_lands_on_relay("https://relay.squelch.sh:443", relay));
+        // A hosted tenant: its own vhost, with the relay held for push alone.
+        assert!(!pixel_lands_on_relay(
+            "https://ethan-2.passband.email",
+            relay
+        ));
+        assert!(!pixel_lands_on_relay("http://relay.squelch.sh", relay));
+        assert!(!pixel_lands_on_relay(
+            "https://relay.squelch.sh:8443",
+            relay
+        ));
+        assert!(!pixel_lands_on_relay("relay.squelch.sh", relay));
+        assert!(!pixel_lands_on_relay("", relay));
     }
 
     /// A first-ever start collects from zero, not from HEAD: the relay is

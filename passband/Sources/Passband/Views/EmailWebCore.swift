@@ -432,10 +432,14 @@ struct EmailWebView: View {
             // slowest CDN. Measurement fires at document end, before images.
             .opacity(measured ? 1 : 0)
 
-            // Under the mail: the quoted-history toggle and the tracker
-            // footnote, on one line when both are here. Conditional as a
-            // whole, or an empty row would still cost the stack's spacing.
-            if hasQuoted || (prepared.trackers > 0 && !prepared.trackersAllowed) {
+            // Under the mail: the quoted-history toggle on the left and the
+            // tracker footnote at the document's bottom-right, on one line
+            // when both are here. The row is as wide as the frame (so the
+            // note sits under the mail's right edge, not the column's), with
+            // a floor so a one-word bubble does not squeeze the note.
+            // Conditional as a whole, or an empty row would still cost the
+            // stack's spacing.
+            if hasQuoted || prepared.trackers > 0 {
               HStack(spacing: Space.s10) {
                 if hasQuoted {
                     Button {
@@ -452,8 +456,10 @@ struct EmailWebView: View {
                     .buttonStyle(.textAction)
                     .help("the quoted reply chain below this message")
                 }
+                Spacer(minLength: 0)
                 trackerNote
               }
+              .frame(maxWidth: frameWidth > 0 ? max(frameWidth, 240) : .infinity)
             }
         }
         .onAppear {
@@ -725,22 +731,6 @@ struct EmailWebView: View {
             .foregroundStyle(Palette.inkFaint)
             .help(
                 "remote images are off by default (Settings → Mail); load them for this email only")
-        } else if prepared.trackers > 0, prepared.trackersAllowed {
-            // The count is honest about what was LEFT IN: this sender is someone
-            // the user writes to, so they are allowed to see the open. Muted, not
-            // green — nothing was protected here.
-            Label(
-                "trackers allowed (known sender)",
-                systemImage: "eye"
-            )
-            .font(Typo.micro)
-            .foregroundStyle(Palette.inkFaint)
-            .padding(.horizontal, Space.scaled(9))
-            .padding(.vertical, Space.s4)
-            .glassCapsule(interactive: false)
-            .help(
-                "\(prepared.trackers) tracking pixel\(prepared.trackers == 1 ? "" : "s") left in place: you have emailed this sender, so they may see that you opened this"
-            )
         }
     }
 
@@ -749,11 +739,23 @@ struct EmailWebView: View {
     /// stripped — and a green capsule over every bubble was the reader being
     /// congratulated for the default. Faint, small, and after the mail, where
     /// a note about how it was rendered belongs; the help text carries the
-    /// detail. The two things that DO warrant attention before reading — the
-    /// remote-images offer and pixels left in for a known sender — stay above.
+    /// detail. The one thing that DOES warrant attention before reading, the
+    /// remote-images offer, stays above. Pixels left in for a known sender
+    /// used to be a pill up there too; it is the same kind of note about how
+    /// the mail was rendered, so it lives here, as faint as the blocked one.
     @ViewBuilder
     private var trackerNote: some View {
-        if prepared.trackers > 0, !prepared.trackersAllowed {
+        if prepared.trackers > 0, prepared.trackersAllowed {
+            // Muted, not green: nothing was protected here. This sender is
+            // someone the user writes to, so they may see the open.
+            Label("trackers allowed (known sender)", systemImage: "eye")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .padding(.horizontal, Space.s2)
+                .help(
+                    "\(prepared.trackers) tracking pixel\(prepared.trackers == 1 ? "" : "s") left in place: you have emailed this sender, so they may see that you opened this"
+                )
+        } else if prepared.trackers > 0 {
             Label(
                 "\(prepared.trackers) tracker\(prepared.trackers == 1 ? "" : "s") blocked",
                 systemImage: "eye.slash"

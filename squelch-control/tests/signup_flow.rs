@@ -1079,8 +1079,9 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     // The consent URL is the mock's authorize endpoint, asking for all three
     // grants in ONE consent: hosted Passband ships the actions, and the daemon's
     // write path has no other way to be filled. The optional name-and-photo
-    // scope rides along; the mock below grants only the three, which is the
-    // unticked-box case, and the signup still completes.
+    // scope and both calendar scopes ride along; the mock below grants only
+    // the three, which is the unticked-box case, and the signup still
+    // completes.
     assert!(consent_url.contains("/authorize"), "{consent_url}");
     let asked = query_param(&consent_url, "scope");
     assert_eq!(
@@ -1089,7 +1090,9 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
             READONLY,
             MODIFY,
             SEND,
-            squelch_core::config::GOOGLE_PROFILE_SCOPE
+            squelch_core::config::GOOGLE_PROFILE_SCOPE,
+            CAL_EVENTS,
+            CAL_LIST,
         ],
         "{consent_url}"
     );
@@ -1101,7 +1104,7 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     assert_eq!(query_param(&consent_url, "access_type"), "offline");
     assert_eq!(query_param(&consent_url, "prompt"), "consent");
     // Incremental, so a later grant never loses an earlier one; and signup
-    // names no account and asks for no calendar.
+    // names no account.
     assert_eq!(query_param(&consent_url, "include_granted_scopes"), "true");
     assert_eq!(query_param(&consent_url, "login_hint"), "");
 
@@ -1988,6 +1991,36 @@ async fn a_wider_grant_than_we_asked_for_is_accepted() {
     let (status, body) = h.run_signup("ada", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("Your mailbox is ready"), "{body}");
+}
+
+/// SIGNUP CARRIES CALENDAR EVEN WITH THE FEATURE OFF. A new tenant has no
+/// `calendar` feature row, and a signup that granted calendar still provisions
+/// and seals the whole grant: the reconnect pipeline's feature gate is for a
+/// calendar-only consent, not for signup. The daemon holds the scope unused
+/// until the feature turns on, and then needs no second trip through Google.
+#[tokio::test]
+async fn a_signup_that_grants_calendar_keeps_it_with_the_feature_off() {
+    let h = Harness::new().await;
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
+
+    let slots = last_installed_slots(&h, "ada");
+    let read = &slots["slots"][MAILBOX];
+    assert_eq!(read, &slots["slots"][format!("{MAILBOX}#write")]);
+    let recorded: Vec<&str> = read["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(recorded, vec![READONLY, MODIFY, SEND, CAL_EVENTS, CAL_LIST]);
+    // One token, no separate calendar slot: the same shape a calendar
+    // reconnect installs.
+    assert!(slots["slots"].get(format!("{MAILBOX}#calendar")).is_none());
 }
 
 /// With the Bifrost trio configured, signup mints TWO virtual keys per tenant

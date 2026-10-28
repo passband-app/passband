@@ -682,7 +682,7 @@ pub fn signup_form(
 <li><strong>Change</strong> (<code>gmail.modify</code>): archiving and labeling, never deletion.</li>
 <li><strong>Send</strong> (<code>gmail.send</code>): replying from the app.</li>
 </ul>
-<p>Passband needs all three, so keep those boxes checked. It also asks for your name and profile photo, to show them in the app; that one is optional. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
+<p>Passband needs all three, so keep those boxes checked. It also asks for your name and profile photo, to show them in the app, and for Google Calendar, so Passband can put events from your mail beside your schedule; both are optional. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
 </details>
 {links_html}"#,
             error_html = error_html,

@@ -89,8 +89,8 @@ finding.
 | `https://www.googleapis.com/auth/userinfo.email` | Sensitive |
 | `https://www.googleapis.com/auth/userinfo.profile` | Non-sensitive |
 | `openid` | — |
-| `https://www.googleapis.com/auth/calendar.events` | Sensitive (confirm at filing). **Optional**: requested only by the calendar grant |
-| `https://www.googleapis.com/auth/calendar.calendarlist.readonly` | Sensitive (confirm at filing). **Optional**: requested only by the calendar grant |
+| `https://www.googleapis.com/auth/calendar.events` | Sensitive (confirm at filing). **Optional**: requested at hosted signup and by the calendar grant |
+| `https://www.googleapis.com/auth/calendar.calendarlist.readonly` | Sensitive (confirm at filing). **Optional**: requested at hosted signup and by the calendar grant |
 
 `userinfo.profile` is requested and never required: it feeds the account's name
 and photo in the client (`squelch-core/src/sync/profile.rs`), read through the
@@ -103,15 +103,19 @@ The constants are pinned in `squelch-core/src/config.rs` and re-pinned in
 `squelch-control/tests/signup_flow.rs`. Keep this table and those constants in
 agreement.
 
-The two calendar scopes are never part of signup and never required. They are
-asked for only when the user chooses to connect a calendar: on hosted by
+The two calendar scopes are never required. Hosted signup asks for them
+beside the Gmail scopes (since 2026-10-27, even while the calendar feature is
+off for that tenant), so they appear on the signup consent screen a reviewer
+sees. Existing hosted tenants are asked at
 `signup.passband.app/reconnect?calendar=1`, which asks for the three Gmail
-scopes again plus these two in one consent, and on self-host by `squelchd auth
+scopes again plus these two in one consent, and self-host by `squelchd auth
 --calendar`. A user who unticks them at Google keeps a working mailbox and
 nothing is installed. Every grant flow sends `include_granted_scopes=true`, so
-a later Gmail reconnect does not drop a calendar grant made earlier. Per
-`docs/CALENDAR.md` §8, calendar is filed as an amendment after the Gmail
-submission, once the feature exists to demonstrate.
+a later Gmail reconnect does not drop a calendar grant made earlier.
+`docs/CALENDAR.md` §8 planned to file calendar as an amendment after the Gmail
+submission. Now that signup asks for it, the reviewer sees these scopes on the
+first consent screen, so they belong in the Gmail submission itself, with the
+calendar feature shown in the demo video.
 
 ### Justifications
 

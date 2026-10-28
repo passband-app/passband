@@ -1006,9 +1006,13 @@ from the plan below:
   control plane passes it to Google as `login_hint` and, at the callback,
   installs nothing when a different account consented. The hint is a guard,
   never an authority: the tenant is still found from the account Google names.
-- **New signups** do NOT see calendar yet: signup asks for Gmail only, and the
-  calendar is granted later from the calendar page. Folding it into signup is
-  a later decision.
+- **New signups** are asked for calendar at signup (decided 2026-10-27), even
+  while the `calendar` hidden feature is off for them. It is optional, like
+  the profile scope: a person who unticks it still gets a mailbox. A daemon
+  without the feature holds the scope and calls nothing; when the feature
+  turns on, calendar works with no second consent. The callback's feature
+  gate applies to the calendar reconnect only, never to signup. Tenants from
+  before this still grant through the calendar page.
 - **Self-host** connects from the app (`POST /client/calendar/connect`, the
   daemon running the consent on loopback) or from a terminal with
   `squelchd auth --calendar`. Both BUILT, and both build the same consent.

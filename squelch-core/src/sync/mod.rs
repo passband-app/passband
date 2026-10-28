@@ -2297,7 +2297,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // The account's Google name and photo. Due once a day, so nearly
         // every tick this is a single atomic load; it sits before the walk
         // because a mailbox whose walk keeps failing should still have a face.
-        self.refresh_profile().await;
+        //
+        // GOOGLE ACCOUNTS ONLY, and exhaustively so: the fetch carries the
+        // account's Read token to Google's People API, and another provider's
+        // token must never be handed to Google. A new provider has to decide
+        // here, in a match the compiler makes it write. No source, no
+        // profile, and no `?`: nothing before the walk may fail the tick
+        // (the reminder sweep below depends on that).
+        if let Ok(source) = self.source() {
+            match source.provider() {
+                MailProvider::Gmail => self.refresh_profile().await,
+            }
+        }
         // BEFORE the walk, for the same reason: the sweep is purely local —
         // one indexed UPDATE, no Gmail, no model spend — so hanging it off a
         // call that can Err would let a bad credential or a Gmail outage
@@ -2488,9 +2499,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // it here would spend most of this daemon's fetch budget on mail nobody
         // asked to see. It is fetched on demand instead — see `sync_spam_window`.
 
-        // Each walk's cursor is already at or past `start`, so the merge is
-        // the one commit covering both.
-        self.store_cursor(&self.source()?.merge_cursors(&inbox_cursor, &sent_cursor))?;
+        // Both walks started from `start`; the merge is the one commit
+        // covering both.
+        self.store_cursor(
+            &self
+                .source()?
+                .merge_cursors(start, &inbox_cursor, &sent_cursor),
+        )?;
         Ok(true)
     }
 
@@ -6076,8 +6091,8 @@ mod tests {
         ) -> std::result::Result<Changes, ChangesError> {
             self.inner.changes(since, folder).await
         }
-        fn merge_cursors(&self, a: &SyncCursor, b: &SyncCursor) -> SyncCursor {
-            self.inner.merge_cursors(a, b)
+        fn merge_cursors(&self, since: &SyncCursor, a: &SyncCursor, b: &SyncCursor) -> SyncCursor {
+            self.inner.merge_cursors(since, a, b)
         }
         async fn fetch_raw(&self, id: &str, urgency: Urgency) -> Result<FetchedMessage> {
             self.inner.fetch_raw(id, urgency).await

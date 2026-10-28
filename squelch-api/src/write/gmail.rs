@@ -11,7 +11,7 @@ use squelch_core::credentials::CredentialStore;
 // The Gmail endpoint, the INBOX label and the Gmail-API response shapes are
 // defined once in core sync; the write path reuses them rather than re-deriving
 // its own copy. Archiving == removing `LABEL_INBOX`.
-use squelch_core::sync::{GMAIL_API_BASE, GmailMessage, LABEL_INBOX};
+use squelch_core::sync::{GMAIL_API_BASE, GmailMessage, LABEL_INBOX, LABEL_SPAM};
 use squelch_core::types::AccountId;
 
 use super::mime::{OUTBOX_HEADER, bare_message_id, outbox_token};
@@ -276,6 +276,16 @@ impl MailWriter for GmailWriteClient {
     async fn archive(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
         self.modify(gmail_msg_id, &[], &[LABEL_INBOX.to_string()])
             .await
+    }
+
+    /// Not spam: add INBOX back and remove SPAM, in one modify.
+    async fn not_spam(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
+        self.modify(
+            gmail_msg_id,
+            &[LABEL_INBOX.to_string()],
+            &[LABEL_SPAM.to_string()],
+        )
+        .await
     }
 
     /// Move a message to Gmail's Trash — `/trash`, NEVER `messages.delete`.
@@ -657,6 +667,20 @@ mod tests {
         );
         assert!(req.contains("\"removeLabelIds\":[\"INBOX\"]"));
         assert!(req.contains("\"addLabelIds\":[]"));
+    }
+
+    /// Not spam is the one modify the door used to spell out itself: INBOX
+    /// added, SPAM removed, on the same endpoint.
+    #[tokio::test]
+    async fn not_spam_sends_modify_adding_inbox_and_removing_spam() {
+        let (base, handle) = mock_once(200, "{}").await;
+        let c = client(base);
+        c.not_spam("gmail-9").await.unwrap();
+        let req = handle.await.unwrap();
+        assert!(req.starts_with("POST "), "must be a POST");
+        assert!(req.contains("/messages/gmail-9/modify"), "modify path");
+        assert!(req.contains("\"addLabelIds\":[\"INBOX\"]"));
+        assert!(req.contains("\"removeLabelIds\":[\"SPAM\"]"));
     }
 
     #[tokio::test]

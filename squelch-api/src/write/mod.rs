@@ -102,7 +102,8 @@ pub struct FetchedRaw {
 /// account), opaque to the caller.
 ///
 /// WHAT IS STILL GMAIL-SHAPED, deliberately, until a second provider needs it
-/// otherwise: [`Self::modify`] takes label ids, [`FetchedRaw`] carries the raw
+/// otherwise: [`Self::modify`] takes label ids (the label editor's own
+/// contract with the client; another provider maps it or refuses it), [`FetchedRaw`] carries the raw
 /// message base64url-encoded the way Gmail returns it, and a send's
 /// `thread_id` is a provider thread id. [`Self::find_scheduled_send`]'s window
 /// is sized by the caller with Gmail's clock-skew slack
@@ -119,6 +120,11 @@ pub trait MailWriter: Send + Sync {
 
     /// Take a message out of the inbox.
     async fn archive(&self, msg_id: &str) -> Result<(), WriteError>;
+
+    /// Undo the provider's spam verdict: out of spam, back into the inbox.
+    /// An intent rather than a [`Self::modify`] call because it is labels in
+    /// Gmail and a folder move in Outlook or IMAP.
+    async fn not_spam(&self, msg_id: &str) -> Result<(), WriteError>;
 
     /// Move a message to the trash: recoverable, never a permanent delete.
     async fn trash(&self, msg_id: &str) -> Result<(), WriteError>;

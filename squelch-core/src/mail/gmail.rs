@@ -650,7 +650,9 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GmailSource<C> {
         })
     }
 
-    fn merge_cursors(&self, a: &SyncCursor, b: &SyncCursor) -> SyncCursor {
+    /// One historyId spans the whole mailbox and only grows, so the max of the
+    /// two walks covers both; `since` is behind both by construction.
+    fn merge_cursors(&self, _since: &SyncCursor, a: &SyncCursor, b: &SyncCursor) -> SyncCursor {
         SyncCursor::new(
             advance_history_cursor(parse_history_id(a.as_str()), [parse_history_id(b.as_str())])
                 .to_string(),

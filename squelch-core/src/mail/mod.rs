@@ -184,9 +184,9 @@ pub struct FetchedHeaders {
 pub struct Changes {
     /// Ids added to the folder, deduplicated, in no particular order.
     pub ids: Vec<String>,
-    /// The cursor after this walk. Covers THIS folder's progress; combine
-    /// walks of several folders from one start with [`MailSource::
-    /// merge_cursors`].
+    /// The cursor after this walk: the start cursor with THIS folder's
+    /// progress applied. Combine walks of several folders from one start with
+    /// [`MailSource::merge_cursors`].
     pub cursor: SyncCursor,
     /// The source can prove NOTHING in the whole mailbox changed since the
     /// start cursor, in any folder: the engine may then skip its other walks.
@@ -251,9 +251,14 @@ pub trait MailSource: Send + Sync {
         folder: Folder,
     ) -> std::result::Result<Changes, ChangesError>;
 
-    /// The cursor covering two walks that started from the same cursor, never
-    /// behind either.
-    fn merge_cursors(&self, a: &SyncCursor, b: &SyncCursor) -> SyncCursor;
+    /// The cursor covering two walks (`a`, `b`) that both started from
+    /// `since`, never behind either.
+    ///
+    /// `since` is what makes this possible for a provider whose positions
+    /// cannot be ordered: Outlook's per-folder delta links are opaque URLs, so
+    /// the only way to tell which part of `a` is new is that it differs from
+    /// `since`. Gmail's historyIds are ordered and need only the max.
+    fn merge_cursors(&self, since: &SyncCursor, a: &SyncCursor, b: &SyncCursor) -> SyncCursor;
 
     /// One message's raw RFC 822 bytes.
     async fn fetch_raw(&self, id: &str, urgency: Urgency) -> Result<FetchedMessage>;
@@ -347,7 +352,7 @@ mod tests {
         ) -> std::result::Result<Changes, ChangesError> {
             unimplemented!()
         }
-        fn merge_cursors(&self, a: &SyncCursor, _: &SyncCursor) -> SyncCursor {
+        fn merge_cursors(&self, _: &SyncCursor, a: &SyncCursor, _: &SyncCursor) -> SyncCursor {
             a.clone()
         }
         async fn fetch_raw(&self, _: &str, _: Urgency) -> Result<FetchedMessage> {

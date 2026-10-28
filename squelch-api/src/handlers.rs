@@ -22,7 +22,7 @@ use squelch_core::store::{
     OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
     SitrepBand, SmartBlockMemo, SpamScope, SqliteStore, Store,
 };
-use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
+use squelch_core::sync::{decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
 use squelch_core::triage::rule_suggest;
@@ -4988,15 +4988,7 @@ pub async fn action_not_spam(
         // NOT ResolveDone: this mail is arriving, not being handled. `clear_spam`
         // puts the attention row back to 'new' so it lands in the New band.
         OnSuccess::LeaveOpen,
-        |client, msg| async move {
-            client
-                .modify(
-                    &msg.gmail_msg_id,
-                    &[LABEL_INBOX.to_string()],
-                    &[LABEL_SPAM.to_string()],
-                )
-                .await
-        },
+        |client, msg| async move { client.not_spam(&msg.gmail_msg_id).await },
     )
     .await?;
 

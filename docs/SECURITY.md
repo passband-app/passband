@@ -948,7 +948,13 @@ it. That move is what the guard below exists for.
   link: an unsubscribe may complete on a plain GET. The job starts from
   `POST /client/unsubscribe` with `auto: true` (`squelch-api/src/unsub_job.rs`),
   human door only; the agent door has no unsubscribe route at all, and the
-  assistant's tool goes through the confirm card (§6).
+  assistant's tool goes through the confirm card (§6). `auto: true` also needs
+  `confirm: true`, like every other route that acts for the user: without it
+  the daemon answers 400 and audits `rejected:confirm` before reading the
+  message or fetching anything
+  (`auto_without_confirm_is_refused_before_anything_is_fetched`). A request
+  without `auto` needs no `confirm`: its answer is a link the person opens in
+  their own browser.
 - **Not for mail we cannot trust.** Spam (`is_spam`) and mail without a passing
   authentication verdict (`auth_pass` not true) are never unsubscribed from
   automatically: fetching a spammer's link confirms the address is live, and an

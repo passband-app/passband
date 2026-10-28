@@ -5795,6 +5795,65 @@ mod tests {
         );
     }
 
+    /// The thread CTE is driven FROM the held messages, one rowid probe each,
+    /// with and without statistics. The canary is the same CTE unpinned under
+    /// the statistics a real store has an hour in: a large `messages`, and no
+    /// row for the empty `auth_verdicts`, so the planner takes the union for a
+    /// large table and scans every message instead (300 ms at 50k, in every
+    /// FYE, inventory and stats read).
+    #[test]
+    fn auth_fye_threads_drive_from_the_held_messages() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        let sql = format!(
+            "{} SELECT display_tier, COUNT(*) FROM classified GROUP BY display_tier",
+            super::super::attention::CANONICAL_MAIL_CTE
+        );
+        let unpinned = sql.replace("CROSS JOIN messages fm", "JOIN messages fm");
+        assert_ne!(unpinned, sql, "the pin is in the CTE");
+        let plan = |sql: &str| -> Vec<String> {
+            conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let driven = |steps: &[String]| {
+            steps.iter().any(|s| s == "SCAN h")
+                && steps
+                    .iter()
+                    .any(|s| s == "SEARCH fm USING INTEGER PRIMARY KEY (rowid=?)")
+                && !steps.iter().any(|s| s.starts_with("SCAN fm"))
+        };
+        assert!(driven(&plan(&sql)), "no statistics: {:?}", plan(&sql));
+
+        conn.execute_batch(
+            "ANALYZE;
+             DELETE FROM sqlite_stat1;
+             INSERT INTO sqlite_stat1(tbl,idx,stat) VALUES
+               ('accounts','sqlite_autoindex_accounts_1','1 1'),
+               ('agent_message_decisions','sqlite_autoindex_agent_message_decisions_1','50000 50000 1'),
+               ('agent_message_state','sqlite_autoindex_agent_message_state_1','50000 50000 1'),
+               ('agent_thread_attention','sqlite_autoindex_agent_thread_attention_1','15862 15862 1'),
+               ('messages','idx_messages_from_nocase','50000 50000 10'),
+               ('messages','idx_messages_from','50000 50000 10'),
+               ('messages','idx_messages_received','50000 50000 1'),
+               ('messages','idx_messages_thread_received','50000 50000 4 1'),
+               ('messages','idx_messages_thread','50000 50000 4'),
+               ('messages','sqlite_autoindex_messages_1','50000 50000 1'),
+               ('triage','idx_triage_status','50000 50000 16667');
+             ANALYZE sqlite_schema;",
+        )
+        .unwrap();
+        assert!(
+            !driven(&plan(&unpinned)),
+            "canary: unpinned, a store with statistics scans every message: {:?}",
+            plan(&unpinned)
+        );
+        assert!(driven(&plan(&sql)), "with statistics: {:?}", plan(&sql));
+    }
+
     /// The shredder keeps evidence: never a message ruled "Not me", never a
     /// critical change still waiting for a ruling.
     #[test]

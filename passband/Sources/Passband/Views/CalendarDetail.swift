@@ -16,10 +16,15 @@
         @Environment(AppStore.self) private var store
         let item: AgendaItem
         let calendar: Calendar
+        /// The card's picture once it is known (Model/EventVisuals.swift).
+        @State private var visual: EventVisual?
 
         var body: some View {
             VStack(alignment: .leading, spacing: Space.s12) {
                 header
+                if let visual {
+                    EventVisualView(visual: visual)
+                }
                 VStack(alignment: .leading, spacing: Space.s4) {
                     Text(item.title)
                         .font(Typo.ui(17, weight: .semibold))
@@ -33,14 +38,34 @@
                     }
                 }
                 facts
-                if let ghost = item.ghost, !ghost.sources.isEmpty {
-                    MailBehind(sources: ghost.sources)
+                // A ghost's own mail, or the mail behind the ghost matched to
+                // a real event (Gmail's reservation event, say).
+                if !item.sources.isEmpty {
+                    MailBehind(sources: item.sources)
                 }
                 actions
             }
             .padding(Space.s16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
+            .animation(.easeOut(duration: 0.2), value: visual != nil)
+            .task(id: visualKey) {
+                let visuals = EventVisuals.shared
+                if let known = visuals.cached(visualKey) {
+                    visual = known
+                    return
+                }
+                visual = nil
+                let found = await visuals.resolve(
+                    key: visualKey, threadIds: item.sources.map(\.thread_id), place: item.location)
+                if !Task.isCancelled { visual = found }
+            }
+        }
+
+        /// What the picture depends on: the row, its place and its mail.
+        private var visualKey: String {
+            ([item.id, item.location ?? ""] + item.sources.map(\.thread_id))
+                .joined(separator: "\u{1F}")
         }
 
         // MARK: header
@@ -69,7 +94,8 @@
         /// mail made it.
         private var source: String {
             if let event = item.event {
-                return event.calendar_name.map { "\($0) calendar" } ?? "Your calendar"
+                let name = event.calendar_name.map { "\($0) calendar" } ?? "Your calendar"
+                return event.from_gmail == true ? "\(name), added by Gmail" : name
             }
             switch item.ghost?.kind ?? .other {
             case .ticket: return "Ticket, from your mail"

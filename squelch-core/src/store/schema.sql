@@ -2053,6 +2053,7 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     description     TEXT,
     guests_truncated INTEGER NOT NULL DEFAULT 0,
     organizer_unreadable INTEGER NOT NULL DEFAULT 0,
+    from_gmail      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);

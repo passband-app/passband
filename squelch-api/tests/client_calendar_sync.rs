@@ -2437,6 +2437,7 @@ fn row_at(id: String, now: DateTime<Utc>, minutes: i64) -> squelch_core::gcal::E
         start_timezone: None,
         organizer_email: None,
         organizer_unreadable: false,
+        from_gmail: false,
         organizer_self: false,
         self_response: None,
         transparent: false,

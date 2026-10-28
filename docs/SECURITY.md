@@ -1269,6 +1269,8 @@ input, default or code path can ask for it.
   to the daemon. Of each guest only the address (kept only when it is one), the
   name (laundered like a title), the answer and two flags are stored; past 100,
   Google sends the user's entry alone and the event is marked truncated.
+  Each event's `eventType` is read only to mark Gmail's own events
+  (`fromGmail`), which the edit guard then refuses, since Google does.
   Its description is read (the app shows it): markup becomes text, each line is
   laundered like a place, and it stops at 2000 characters. Google's own
   boilerplate on an event it made from mail ("To see detailed information for
@@ -1545,6 +1547,18 @@ typed into that one field leaves the device for Apple, from the client and
 only once it is two characters long; the title, the times, the notes, the
 calendar and the account do not, the daemon is not involved, and no location
 permission is requested. Google's Places API is not used.
+
+**What the event card fetches (client, `Model/EventVisuals.swift`).** The
+calendar card's picture is, in order: a photo from the mail behind the event,
+or the venue from Apple MapKit, or nothing. The photo is fetched only while
+"load remote images" is on, from the newest message by someone else in the
+event's threads, at most four of its images, through `HeroBytes` (ephemeral
+session, no cookies, no referrer, no cache, 8 MB, `image/*` only), exactly
+like a Reading card's hero; a sender learns no more than opening the mail
+would tell them. The venue lookup sends the card's place text alone to Apple
+(`MKLocalSearch`, then `MKLookAroundSceneRequest` for the item it returns),
+never for a link or a call, and Apple's answer is used only when its name
+matches the place. No location permission, no key, no Google.
 
 **The token is the union; the slot is the boundary.** Self-host
 `squelchd auth --calendar` stores its token in its own credential slot

@@ -2843,6 +2843,7 @@ final class AppStore {
         PreparedKeyMemo.shared.wipe()
         InBodyImages.shared.wipe()
         HeroCache.shared.wipe()
+        EventVisuals.shared.wipe()
         AttachmentThumbs.shared.wipe()
         ComposeAttach.wipe()
         // The staged preview files, for the same reason and with more teeth: a

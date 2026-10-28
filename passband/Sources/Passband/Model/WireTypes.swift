@@ -1763,6 +1763,10 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// and theirs to organize. Nil (an older daemon) is NO, and is also how
     /// the client knows a daemon cannot invite at all (Lib/EventGuests.swift).
     var guest_editable: Bool?
+    /// Gmail made this event itself from the user's mail (Google's
+    /// `eventType: fromGmail`). Google refuses edits to it, so `editable` is
+    /// false; the card says where it came from. Nil from an older daemon.
+    var from_gmail: Bool?
 }
 
 /// How a guest answered, in the daemon's four words.

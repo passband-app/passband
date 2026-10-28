@@ -2442,6 +2442,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "description",
                 "guests_truncated",
                 "organizer_unreadable",
+                "from_gmail",
             ]
         );
         assert_eq!(
@@ -2481,7 +2482,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let upgraded = SqliteStore::open(&path).unwrap();
         let conn = upgraded.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         assert_eq!(columns(&conn, "calendar_event_guests").len(), 9);
         assert!(index_exists(&conn));
         let mail: i64 = conn
@@ -2528,7 +2529,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let conn = reopened.lock().unwrap();
         assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         // A store from before guests was synced one attendee at a time: its
         // tokens are forgotten, so the next pass reads every calendar in full
         // with the new parameters.
@@ -2580,7 +2581,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     let reopened = SqliteStore::open(&path).unwrap();
     {
         let conn = reopened.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 22);
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
         let sync: (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT sync_token, full_synced_at FROM calendar_calendars",
@@ -2592,6 +2593,37 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
             sync,
             (None, None),
             "the organizer mark alone forgets the tokens"
+        );
+    }
+    drop(reopened);
+    // And one from before the Gmail mark: that column alone forgets the
+    // tokens too, so the next pass rereads with `eventType` in the mask.
+    let reopened = SqliteStore::open(&path).unwrap();
+    reopened
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE calendar_events DROP COLUMN from_gmail;
+             UPDATE calendar_calendars SET sync_token='minted-before-gmail',
+                    full_synced_at='2026-10-03T00:00:00+00:00';",
+        )
+        .unwrap();
+    drop(reopened);
+    let reopened = SqliteStore::open(&path).unwrap();
+    {
+        let conn = reopened.lock().unwrap();
+        assert_eq!(columns(&conn, "calendar_events").len(), 23);
+        let sync: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT sync_token, full_synced_at FROM calendar_calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            sync,
+            (None, None),
+            "the Gmail mark alone forgets the tokens"
         );
     }
     drop(reopened);
@@ -2628,6 +2660,7 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         start_timezone: None,
         organizer_email: None,
         organizer_unreadable: false,
+        from_gmail: false,
         organizer_self: true,
         self_response: None,
         transparent: false,
@@ -2789,6 +2822,7 @@ fn calendar_places_are_pending_stored_and_pruned_by_location() {
         start_timezone: None,
         organizer_email: None,
         organizer_unreadable: false,
+        from_gmail: false,
         organizer_self: true,
         self_response: None,
         transparent: false,

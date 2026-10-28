@@ -740,6 +740,21 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // Gmail's own events (2026-10-28). A row from before the mark reads as
+    // an ordinary event, which offers an edit Google then refuses; so when
+    // the column is new every calendar forgets its token and last full read,
+    // and the next pass rereads each in full with `eventType` in the mask.
+    if add_column_if_missing(
+        conn,
+        "calendar_events",
+        "from_gmail",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        conn.execute(
+            "UPDATE calendar_calendars SET sync_token=NULL, full_synced_at=NULL",
+            [],
+        )?;
+    }
 
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'

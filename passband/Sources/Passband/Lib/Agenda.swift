@@ -242,6 +242,14 @@ struct AgendaItem: Identifiable, Sendable, Hashable {
     let unverified: Bool
     /// Unlikely: folds into the day's count instead of taking a row.
     let folded: Bool
+    /// A real event's mail: the messages behind the ghosts the daemon
+    /// matched to it (the reservation that made Gmail's own event, say),
+    /// oldest first. The matched ghost is not drawn, so this is how the card
+    /// still reaches its mail. Empty for a ghost, which carries its own.
+    var mail: [GhostSource] = []
+
+    /// The mail behind this row, ghost or event.
+    var sources: [GhostSource] { ghost?.sources ?? mail }
 
     var ghost: TimelineGhost? {
         if case .ghost(let g) = origin { return g }
@@ -291,8 +299,12 @@ enum Agenda {
     ) -> [AgendaItem] {
         var out: [AgendaItem] = []
         out.reserveCapacity(feed.ghosts.count + (feed.events?.count ?? 0))
+        let mail = matchedMail(feed.ghosts)
         for event in feed.events ?? [] {
-            if let item = item(event, calendar: calendar) { out.append(item) }
+            if var item = item(event, calendar: calendar) {
+                item.mail = mail[eventKey(event.calendar_id, event.id)] ?? []
+                out.append(item)
+            }
         }
         for ghost in feed.ghosts {
             if let item = item(ghost, calendar: calendar, showDismissed: showDismissed) {
@@ -300,6 +312,26 @@ enum Agenda {
             }
         }
         return out
+    }
+
+    /// The mail behind each matched event, by `eventKey`: every source of
+    /// every ghost matched to it, each message once, in the ghosts' order.
+    static func matchedMail(_ ghosts: [TimelineGhost]) -> [String: [GhostSource]] {
+        var out: [String: [GhostSource]] = [:]
+        for ghost in ghosts {
+            guard let match = ghost.matched_event else { continue }
+            let key = eventKey(match.calendar_id, match.id)
+            var list = out[key] ?? []
+            for source in ghost.sources where !list.contains(where: { $0.message_id == source.message_id }) {
+                list.append(source)
+            }
+            out[key] = list
+        }
+        return out
+    }
+
+    private static func eventKey(_ calendarId: String, _ id: String) -> String {
+        "\(calendarId)\u{1F}\(id)"
     }
 
     static func item(

@@ -633,6 +633,7 @@ mod tests {
             start_timezone: None,
             organizer_email: None,
             organizer_unreadable: false,
+            from_gmail: false,
             organizer_self: true,
             self_response: None,
             transparent: false,

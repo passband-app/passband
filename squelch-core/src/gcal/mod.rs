@@ -387,6 +387,11 @@ pub struct EventRow {
     /// Laundered like a location, line breaks kept, at most
     /// [`ghost::DESCRIPTION_CAP`] characters.
     pub description: Option<String>,
+    /// Google's `eventType` is `fromGmail`: Gmail made the event itself from
+    /// a reservation, a flight or a ticket in the user's mail. Google refuses
+    /// a change to its title, time, place or notes, so the edit guard does
+    /// not offer one ([`SyncedEvent::editable`]).
+    pub from_gmail: bool,
     /// The attendees Google sent, in its order, at most [`MAX_GUESTS`].
     pub guests: Vec<Guest>,
     /// Google holds more attendees than `guests` (`attendeesOmitted`, or a
@@ -459,7 +464,8 @@ impl SyncedEvent {
     /// could not be read ([`EventRow::organizer_unreadable`]) is someone
     /// else, and so is an event whose stored guest list names an organizer
     /// that is not this calendar (`organizer` and not `self`), whatever the
-    /// organizer field says.
+    /// organizer field says. And never an event Gmail made itself
+    /// ([`EventRow::from_gmail`]), which Google will not let anyone edit.
     pub fn editable(&self, account_email: &str) -> bool {
         let writable = self.calendar_access.is_some_and(AccessRole::writable);
         let organized_elsewhere = self.row.guests.iter().any(|g| g.organizer && !g.is_self);
@@ -470,7 +476,7 @@ impl SyncedEvent {
                     .organizer_email
                     .as_deref()
                     .is_none_or(|org| org.eq_ignore_ascii_case(account_email.trim())));
-        writable && own && !organized_elsewhere
+        writable && own && !organized_elsewhere && !self.row.from_gmail
     }
 
     /// THE GUEST GUARD: whether the app offers to change this event's guest
@@ -675,6 +681,7 @@ pub fn read_event(
             .and_then(Value::as_str),
     );
     let organizer_unreadable = organizer.is_some() && !organizer_self && organizer_email.is_none();
+    let from_gmail = item.get("eventType").and_then(Value::as_str) == Some("fromGmail");
     let end = end.and_then(|end| match end {
         EventTime::Date(day) => day
             .pred_opt()
@@ -699,6 +706,7 @@ pub fn read_event(
         start_timezone,
         organizer_email,
         organizer_unreadable,
+        from_gmail,
         organizer_self,
         self_response,
         transparent: item.get("transparency").and_then(Value::as_str) == Some("transparent"),
@@ -882,6 +890,7 @@ mod tests {
             start_timezone: None,
             organizer_email: None,
             organizer_unreadable: false,
+            from_gmail: false,
             organizer_self: false,
             self_response: None,
             transparent: false,
@@ -1563,6 +1572,20 @@ mod tests {
             "attendees": [{"email": "me@example.com", "self": true, "organizer": true}]
         }));
         assert!(!own.row.organizer_unreadable && own.editable(me));
+        // An event Gmail made from the user's mail is on their own calendar
+        // with them as organizer, and still not theirs to edit: Google
+        // refuses the change.
+        let gmail = synced(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "eventType": "fromGmail",
+            "organizer": {"self": true}
+        }));
+        assert!(gmail.row.from_gmail && !gmail.editable(me) && !gmail.guest_editable(me));
+        let default = synced(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "eventType": "default"
+        }));
+        assert!(!default.row.from_gmail && default.editable(me));
 
         // Colour: the event's own over the calendar's.
         let mut colored = event(owner, None, true);

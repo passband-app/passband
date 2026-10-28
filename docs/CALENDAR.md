@@ -828,6 +828,22 @@ list, Esc closes the place list, then the delete question, then the pane.
 - **Month** (DECIDED: in the first version). The shape of the month: multi-day
   spans for trips and stays, load per day, ghost marks, and a day opens its
   column. Not a wall of truncated titles.
+- **The card's picture** (2026-10-28, `Model/EventVisuals.swift`, rules in
+  `Lib/EventVisualPick.swift`). A strip across the top of the detail card:
+  a photo from the mail behind the event (photo-shaped, not a logo on a flat
+  banner; only while remote images load), else Apple's Look Around of the
+  venue, else a map with a pin, else nothing. The venue is used only when
+  Apple's answer has the place's name. A real event that a ghost was matched
+  to carries that ghost's mail (`AgendaItem.mail`), so Gmail's reservation
+  event shows the reservation email behind it and its photo.
+- **Gmail's own events** (2026-10-28). An event Gmail made from mail
+  (`eventType: fromGmail`) is served with `from_gmail: true`, is never
+  editable (Google refuses the change), and its card names it "added by
+  Gmail". Passband does not delete it and write its own in its place: Gmail
+  keeps such an event current from later mail (a moved reservation, a
+  delayed flight), a replacement would lose that, a guest's copy cannot be
+  replaced at all, and nothing writes to a calendar on its own (above). The
+  card enriches it instead: the cleaned place, the picture, the mail.
 - **Event detail.** Title, time (with "~" on an estimate), place, the
   likelihood reason, and the mail behind it (§9).
 - **iOS.** The agenda replaces the Calendar card in `MobileRecordsView`. The

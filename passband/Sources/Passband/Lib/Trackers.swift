@@ -171,4 +171,25 @@ enum Trackers {
         return hero
     }
 
+    /// Every http(s) `<img>` that passes `extractHeroSrc`'s chrome test, in
+    /// document order, at most `limit`: the candidates for an event card's
+    /// photo, which is often not the first image (that is usually the
+    /// sender's logo).
+    static func extractImageSrcs(_ html: String, limit: Int) -> [String] {
+        var found: [String] = []
+        guard limit > 0 else { return found }
+        _ = HTMLImg.walk(strip(html).html) { tag in
+            guard var src = attrValue(tag, "src")?.trimmingCharacters(in: .whitespaces),
+                !src.isEmpty
+            else { return .keep }
+            if src.hasPrefix("//") { src = "https:" + src }
+            guard src.lowercased().hasPrefix("http") else { return .keep }
+            if let w = pxDim(attrValue(tag, "width")), w < 80 { return .keep }
+            if let h = pxDim(attrValue(tag, "height")), h < 40 { return .keep }
+            if !found.contains(src) { found.append(src) }
+            return found.count >= limit ? .stop : .keep
+        }
+        return found
+    }
+
 }

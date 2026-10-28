@@ -2304,6 +2304,7 @@ pub(crate) fn calendar_event_view(
         })).collect::<Vec<_>>(),
         "guests_truncated": row.guests_truncated,
         "guest_editable": event.guest_editable(account_email),
+        "from_gmail": row.from_gmail,
     })
 }
 

@@ -34,6 +34,8 @@ struct AgendaTests {
         unlikelyFoldsIntoACount()
         endLabels()
         matchedGhostsAndDeclinedEventsAreNotDrawn()
+        aMatchedGhostsMailRidesOnTheEvent()
+        theCleanedPlaceIsWhatTheCardShows()
         earlierTodayFoldsAndTodayAlwaysExists()
         theNextCommitment()
         dayTitles()
@@ -394,6 +396,49 @@ struct AgendaTests {
         expect(tue?.visible.map(\.id) == ["e:primary|a", "g:61", "e:primary|u"],
                "the matched ghost and the declined event are gone; the rest stay")
         expect(tue?.visible.last?.title == "Untitled event", "a blank title is named, not blank")
+    }
+
+    /// The matched ghost is not drawn, but its mail is not lost: the event
+    /// carries it, each message once, and an unmatched event carries none.
+    static func aMatchedGhostsMailRidesOnTheEvent() {
+        var second = ghost(70, "Dinner", start: "2026-10-06T19:00:00-07:00", matched: true)
+        second.id = 71
+        second.sources = [
+            GhostSource(message_id: 70, thread_id: "t70", role: .agreed),
+            GhostSource(message_id: 72, thread_id: "t72", role: .updated),
+        ]
+        let items = Agenda.items(
+            TimelineFeed(
+                ghosts: [ghost(70, "Dinner", start: "2026-10-06T19:00:00-07:00", matched: true), second],
+                events: [
+                    event("ev70", "Dinner", start: "2026-10-06T19:00:00-07:00"),
+                    event("other", "Gym", start: "2026-10-06T07:00:00-07:00"),
+                ]),
+            calendar: cal)
+        let dinner = items.first { $0.event?.id == "ev70" }
+        expect(dinner?.mail.map(\.message_id) == [70, 72], "both ghosts' mail, each message once")
+        expect(dinner?.sources.map(\.thread_id) == ["t70", "t72"], "the card reads it as its sources")
+        expect(items.first { $0.event?.id == "other" }?.mail.isEmpty == true, "no match, no mail")
+        let ghostRow = Agenda.items(
+            TimelineFeed(ghosts: [ghost(80, "Party", start: "2026-10-06T20:00:00-07:00")], events: []),
+            calendar: cal
+        ).first
+        expect(ghostRow?.sources.map(\.message_id) == [80], "a ghost's sources are its own")
+    }
+
+    /// The daemon's cleaned place wins over the raw location; "" hides it;
+    /// without one (an older daemon, or not cleaned yet) the location shows.
+    static func theCleanedPlaceIsWhatTheCardShows() {
+        var raw = event("p", "Dinner", start: "2026-10-06T19:00:00-07:00")
+        raw.location = "Dingles Public House, Tock is now part of the Resy network."
+        let shown = { (e: TimelineEvent) in Agenda.item(e, calendar: cal)?.location }
+        expect(shown(raw) == raw.location, "no place yet: the location")
+        var cleaned = raw
+        cleaned.place = "Dingles Public House"
+        expect(shown(cleaned) == "Dingles Public House", "the cleaned place")
+        var nothing = raw
+        nothing.place = ""
+        expect(shown(nothing) == nil, "a place of nothing hides the line")
     }
 
     static func earlierTodayFoldsAndTodayAlwaysExists() {

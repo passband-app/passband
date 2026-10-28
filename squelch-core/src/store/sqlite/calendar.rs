@@ -649,7 +649,7 @@ impl SqliteStore {
 const EVENT_COLUMNS: &str = "e.calendar_id,c.summary,e.event_id,e.ical_uid,e.status,e.summary,
     e.location,e.starts_at,e.ends_at,e.start_timezone,e.organizer_email,e.self_response,
     e.transparent,e.html_link,e.updated_at,c.is_primary,c.color,c.access_role,e.color_id,
-    e.organizer_self,e.description,e.guests_truncated,e.organizer_unreadable";
+    e.organizer_self,e.description,e.guests_truncated,e.organizer_unreadable,e.from_gmail";
 
 /// One guest read from `email,name,response,is_organizer,is_self` starting
 /// at column `at`.
@@ -696,6 +696,7 @@ fn synced_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<(bool, SyncedE
                 start_timezone: r.get(9)?,
                 organizer_email: r.get(10)?,
                 organizer_unreadable: r.get(22)?,
+                from_gmail: r.get(23)?,
                 organizer_self: r.get(19)?,
                 self_response: response.as_deref().and_then(SelfResponse::parse),
                 transparent: r.get(12)?,
@@ -720,8 +721,8 @@ fn upsert_event(
         "INSERT INTO calendar_events(account_id,calendar_id,event_id,ical_uid,status,summary,location,
              starts_at,start_sort,ends_at,all_day,start_timezone,organizer_email,self_response,
              transparent,html_link,updated_at,color_id,organizer_self,description,guests_truncated,
-             organizer_unreadable)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+             organizer_unreadable,from_gmail)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
          ON CONFLICT(account_id,calendar_id,event_id) DO UPDATE SET
              ical_uid=excluded.ical_uid, status=excluded.status, summary=excluded.summary,
              location=excluded.location, starts_at=excluded.starts_at,
@@ -731,7 +732,7 @@ fn upsert_event(
              html_link=excluded.html_link, updated_at=excluded.updated_at,
              color_id=excluded.color_id, organizer_self=excluded.organizer_self,
              description=excluded.description, guests_truncated=excluded.guests_truncated,
-             organizer_unreadable=excluded.organizer_unreadable",
+             organizer_unreadable=excluded.organizer_unreadable, from_gmail=excluded.from_gmail",
         params![
             account,
             calendar_id,
@@ -755,6 +756,7 @@ fn upsert_event(
             row.description,
             row.guests_truncated,
             row.organizer_unreadable,
+            row.from_gmail,
         ],
     )?;
     // The guest list is replaced whole: what Google sent is what is held.

@@ -47,8 +47,9 @@ squelch-eval show <case-id> [--dataset DIR]
 squelch-eval sample --per-stratum N [--seed S] [--dataset DIR]
 squelch-eval init
 squelch-eval run --candidate NAME [--dataset DIR] [--reps R] [--concurrency C]
-                 [--sample N --seed S --floor F] [--fidelity exact|reconstructed|all]
-                 [--case ID ...] [--effort E] [--max-usd X] [--yes]
+                 [--sample N --seed S --floor F | --total N --seed S]
+                 [--fidelity exact|reconstructed|all] [--case ID ...] [--effort E]
+                 [--batch] [--max-usd X] [--yes]
 squelch-eval report [RUN ...] [--dataset DIR] [--baseline RUN] [--diff RUN]
                     [--reference RUN] [--texts N] [--no-text] [--cache-hit F] [--md FILE]
                     [--allow-repo-path] [--seed S]
@@ -64,6 +65,40 @@ squelch-eval adjudicate <case-id> --field F --verdict candidate|gold|either --ru
    same cases, because a sample is fixed by (dataset, N, seed).
 4. `report --baseline production --diff <cheaper>`, then `adjudicate` the
    disagreements where gold is wrong, then `report` again.
+
+The routine run, cheap enough to repeat after any prompt or model change:
+
+```sh
+squelch-eval run --candidate production --total 100 --seed 1 --batch --max-usd 5 --yes
+```
+
+`--total N` takes exactly N cases, spread as evenly across strata as their
+sizes allow (a stratum smaller than its share is taken whole and the rest
+goes to the others), each weighted `size / sampled` so weighted means still
+read as the mailbox's mix. A proportional `--sample` of 100 would spend most
+of it on the common strata and leave a handful of FYE or auth cases. The
+same (dataset, N, seed) always picks the same cases, so two candidates, or
+one candidate before and after a change, are paired.
+
+## Batch mode
+
+`--batch` (or `batch = true` in a candidate's table) sends every call
+through Anthropic's Message Batches API, at half of every price: input,
+output and cache. The agent loop is production's, unchanged. It calls a
+local gateway (`batch.rs`) that speaks the Messages API, holds each call,
+and once calls stop arriving for two seconds submits everything it holds as
+one batch, polls it until it ends, and hands each caller its own result. All
+cases start at once, so the first turns share one batch, the follow-up turns
+of cases that read evidence share a second, and so on: a typical run is two
+or three batches. A batch usually ends in minutes and can take up to a day;
+each turn waits up to six hours. A batch result that failed comes back with
+the status a live call would have had (a refused request is a 400,
+anything retryable a 5xx), so retries and error rows work as they do live.
+
+A batch run gets its own run directory (`<name>+batch`), so its half-price
+spend never mixes with a live run's. Anthropic candidates only. Because
+every case starts at once, `--max-usd` is checked before the run starts, not
+between cases; pair it with `--total` to bound the spend.
 
 ## The paid-call gate, the budget, and progress
 
@@ -155,8 +190,11 @@ makes applicable, and harm 10. The report groups them as below.
 | | `revisit_at` | the two times are within 24 hours | both have a revisit |
 | | `related_updates` | the sets of target threads match | either side has one |
 | | `rule_exceptions` | the sets of rule ids match | either side has one |
+| | `ends` | presence matches | gold has an `ends` |
+| | `done` | presence matches | gold has a `done` |
 | Security and push | `auth` | `is_auth()` matches | always |
 | | `auth_kinds` | the auth kind sets match | gold is auth |
+| | `auth_critical` | `auth.critical` matches | gold is an account change |
 | | `restricted` | `external_access.restricted` matches | always |
 | | `push` | `is_auth or importance >= 50` matches | always |
 | | `importance` | 1 minus the importance gap over 100 | always |
@@ -169,7 +207,7 @@ makes applicable, and harm 10. The report groups them as below.
 | | `action_fields` | share of facts per gold action that agree: paired at all, resolved, due, and the carried-forward id | gold has actions |
 | | `rank_delta` | lower is better: the difference in the model-set part of the FYE rank | both in FYE |
 | Records | `records` | the multiset of record kinds matches | gold has records |
-| | `record_fields` | share of exact facts that agree on paired records (bill merchant, amount, currency, due, autopay; receipt merchant, amount, currency; delivery carrier, tracking number, status, merchant, order refs; event start; institution) | gold has records |
+| | `record_fields` | share of exact facts that agree on paired records (bill merchant, amount, currency, due, autopay; receipt merchant, amount, currency; delivery carrier, tracking number, status, merchant, order refs; event start, end, a duration within 25% or 15 minutes of gold's, event kind, commitment, change, identity refs, likelihood band; institution) | gold has records |
 | Text | `summary_sim` | similarity of `summary` | text similarity on |
 | | `attention_summary_sim` | similarity of `attention.summary` | text similarity on |
 | | `push_text_sim` | mean similarity of push title and body | text similarity on |
@@ -190,7 +228,7 @@ or `co`, when equal or one contains the other.
 
 `harm` is one weighted cost per case: FYE miss 10 (needs_user) or 5, FYE
 false alarm 2, restricted miss 10, false restriction 1, auth miss 5, push
-miss 3, false push 2, Reading mismatch 1, record kinds 2, record facts up to
+miss 3, critical account-change miss 5, false critical 1, false push 2, Reading mismatch 1, record kinds 2, record facts up to
 1, kinds up to 0.5, a URL or credential in text 10, a login code
 disagreement 3, a gold action left unpaired 2 each (at most 4), model
 failure 10. The table lives in `score.rs`.

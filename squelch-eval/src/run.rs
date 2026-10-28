@@ -68,7 +68,22 @@ pub struct Candidate {
     pub cache_write_5m: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<f64>,
+    /// Send every call through the Message Batches API (`batch.rs`), at half
+    /// of every price above. Anthropic only. Set here or with `run --batch`;
+    /// a batch run gets a run directory of its own, so its costs never mix
+    /// with a live run's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub batch: bool,
 }
+
+/// The Batch API's discount on every token class, cache reads and writes
+/// included.
+pub const BATCH_PRICE_MULT: f64 = 0.5;
+
+/// How long one agent turn may wait in batch mode: a batch usually ends in
+/// minutes and may take up to a day; this is the per-turn ceiling the agent
+/// enforces itself (its whole-run deadline is capped at a day).
+pub const BATCH_TURN_TIMEOUT_SECS: u64 = 6 * 3600;
 
 impl Candidate {
     pub fn stage2_provider(&self) -> Stage2Provider {
@@ -100,6 +115,13 @@ impl Candidate {
         }
         if let Some(value) = self.cache_write_1h {
             prices.cache_write_1h = value;
+        }
+        if self.batch {
+            prices.input *= BATCH_PRICE_MULT;
+            prices.output *= BATCH_PRICE_MULT;
+            prices.cache_read *= BATCH_PRICE_MULT;
+            prices.cache_write_5m *= BATCH_PRICE_MULT;
+            prices.cache_write_1h *= BATCH_PRICE_MULT;
         }
         Some(prices)
     }
@@ -244,6 +266,73 @@ pub fn sample_cases(cases: &[Case], n: usize, seed: u64, floor: usize) -> Select
     Selection { picks, strata }
 }
 
+/// Exactly `n` cases (or every case, when there are fewer), spread as evenly
+/// as the strata allow: each stratum gets an equal share, capped at its size,
+/// and what a small stratum cannot use goes to the others. Each pick is
+/// weighted `size / sampled`, so a weighted mean reads as the mailbox's own
+/// mix. For a fixed budget this covers the rare, costly classes (FYE, auth,
+/// restricted) as well as the common ones, which a proportional sample would
+/// starve. Deterministic for (cases, n, seed), with the same per-stratum
+/// shuffle as [`sample_cases`].
+pub fn sample_total(cases: &[Case], n: usize, seed: u64) -> Selection {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, case) in cases.iter().enumerate() {
+        let stratum = case.tags.first().cloned().unwrap_or_else(|| "other".into());
+        groups.entry(stratum).or_default().push(index);
+    }
+    // Water-filling: hand out one case at a time to the stratum with the
+    // fewest so far that still has cases, ties to the larger stratum, then
+    // by name, so the allocation is deterministic.
+    let sizes: Vec<(String, usize)> = groups.iter().map(|(k, v)| (k.clone(), v.len())).collect();
+    let mut takes = vec![0usize; sizes.len()];
+    let budget = n.min(cases.len());
+    for _ in 0..budget {
+        let next = (0..sizes.len())
+            .filter(|&i| takes[i] < sizes[i].1)
+            .min_by(|&a, &b| {
+                takes[a]
+                    .cmp(&takes[b])
+                    .then(sizes[b].1.cmp(&sizes[a].1))
+                    .then(sizes[a].0.cmp(&sizes[b].0))
+            });
+        match next {
+            Some(i) => takes[i] += 1,
+            None => break,
+        }
+    }
+    let mut picks = Vec::new();
+    let mut strata = BTreeMap::new();
+    for (position, ((stratum, mut members), take)) in groups.into_iter().zip(takes).enumerate() {
+        let size = members.len();
+        if take == 0 {
+            strata.insert(
+                stratum,
+                StratumSample {
+                    size,
+                    sampled: 0,
+                    weight: 0.0,
+                },
+            );
+            continue;
+        }
+        members.sort_by_key(|&index| cases[index].id);
+        let stream = seed ^ (position as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        crate::SplitMix64::new(stream).shuffle(&mut members);
+        let weight = size as f64 / take as f64;
+        picks.extend(members.into_iter().take(take).map(|index| (index, weight)));
+        strata.insert(
+            stratum,
+            StratumSample {
+                size,
+                sampled: take,
+                weight,
+            },
+        );
+    }
+    picks.sort_by_key(|&(index, _)| cases[index].id);
+    Selection { picks, strata }
+}
+
 /// Summed over a `(case, rep)`'s calls.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageTotals {
@@ -365,6 +454,9 @@ pub struct RunOptions {
     pub concurrency: usize,
     /// `(n, seed)`.
     pub sample: Option<(usize, u64)>,
+    /// `(n, seed)`: exactly n cases, spread across the strata
+    /// ([`sample_total`]). Takes precedence over `sample`.
+    pub sample_total: Option<(usize, u64)>,
     /// Smallest per-stratum sample ([`SAMPLE_FLOOR`] by default).
     pub sample_floor: usize,
     pub fidelity: FidelityFilter,
@@ -394,10 +486,18 @@ pub struct RunSummary {
 }
 
 pub fn run_dir(dataset: &Path, name: &str, effort: Option<&str>) -> PathBuf {
-    let label = match effort {
+    run_dir_for(dataset, name, effort, false)
+}
+
+/// [`run_dir`], with `+batch` on a batch run's label.
+pub fn run_dir_for(dataset: &Path, name: &str, effort: Option<&str>, batch: bool) -> PathBuf {
+    let mut label = match effort {
         Some(effort) => format!("{name}@{effort}"),
         None => name.to_owned(),
     };
+    if batch {
+        label.push_str("+batch");
+    }
     dataset.join("runs").join(label)
 }
 
@@ -597,15 +697,28 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
         .filter(|case| options.fidelity.admits(case.fidelity))
         .filter(|case| options.cases.is_empty() || options.cases.contains(&case.id))
         .collect();
-    let selection = match options.sample {
-        Some((n, seed)) => sample_cases(&cases, n, seed, options.sample_floor),
-        None => Selection {
+    let selection = match (options.sample_total, options.sample) {
+        (Some((n, seed)), _) => sample_total(&cases, n, seed),
+        (None, Some((n, seed))) => sample_cases(&cases, n, seed, options.sample_floor),
+        (None, None) => Selection {
             picks: (0..cases.len()).map(|index| (index, 1.0)).collect(),
             strata: BTreeMap::new(),
         },
     };
     let effort = options.effort.clone().or(options.candidate.effort.clone());
-    let dir = run_dir(&options.dataset, &options.candidate_name, effort.as_deref());
+    let batch = options.candidate.batch;
+    if batch && options.candidate.provider != Provider::Anthropic {
+        bail!(
+            "batch mode is the Anthropic Message Batches API; {} is not an Anthropic candidate",
+            options.candidate_name
+        );
+    }
+    let dir = run_dir_for(
+        &options.dataset,
+        &options.candidate_name,
+        effort.as_deref(),
+        batch,
+    );
     let traces = dir.join(TRACES_DIR);
     crate::private_dir(&traces)?;
     let run_file = dir.join(RUN_FILE);
@@ -685,9 +798,16 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
         "concurrency": options.concurrency,
         "fidelity": options.fidelity,
         "cases": selection.picks.len(),
-        "sample": options.sample.map(|(n, seed)| json!({
-            "n": n, "seed": seed, "floor": options.sample_floor, "strata": selection.strata,
-        })),
+        "sample": match (options.sample_total, options.sample) {
+            (Some((n, seed)), _) => json!({
+                "total": n, "seed": seed, "strata": selection.strata,
+            }),
+            (None, Some((n, seed))) => json!({
+                "n": n, "seed": seed, "floor": options.sample_floor, "strata": selection.strata,
+            }),
+            (None, None) => Value::Null,
+        },
+        "batch": batch,
         "prompt_version": PROMPT_VERSION,
         "harness_git_sha": git_sha(),
         "started_at": started,
@@ -697,7 +817,40 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
     // Production's config. (The October Fireworks runs also sent the effort
     // to OpenAI-compatible providers as `reasoning_effort`; that switch is not
     // in production, so such a candidate runs without one.)
-    let config = AgentTriageConfig::default();
+    let mut config = AgentTriageConfig::default();
+    // Batch mode: every case starts at once so their first turns share a
+    // batch, the agent calls the local gateway instead of the provider, and a
+    // turn may wait as long as a batch takes.
+    let gateway = if batch {
+        let base = crate::batch::upstream_base(&url)?;
+        let gateway = crate::batch::start(
+            base,
+            reqwest::Client::new(),
+            if cfg!(test) {
+                crate::batch::Pacing {
+                    quiet: std::time::Duration::from_millis(100),
+                    poll: std::time::Duration::from_millis(10),
+                }
+            } else {
+                crate::batch::Pacing::default()
+            },
+        )
+        .await?;
+        config.agent.timeout_secs = BATCH_TURN_TIMEOUT_SECS;
+        eprintln!(
+            "batch mode: {} calls go through the Message Batches API at half price; results arrive when each batch ends",
+            pending.len()
+        );
+        Some(gateway)
+    } else {
+        None
+    };
+    let concurrency = if batch {
+        pending.len().max(1)
+    } else {
+        options.concurrency.max(1)
+    };
+    let url = gateway.as_ref().map(|g| g.url.clone()).unwrap_or(url);
     let shared = Shared {
         store: &store,
         data: &data,
@@ -716,7 +869,7 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
             .iter()
             .map(|&(index, weight, rep)| run_pair(&shared, &cases[index], weight, rep)),
     )
-    .buffer_unordered(options.concurrency.max(1));
+    .buffer_unordered(concurrency);
     let mut abort = None;
     let mut finished = 0;
     let mut skipped = 0;
@@ -1573,5 +1726,74 @@ mod tests {
         .unwrap();
         assert!(load_candidates(&root).is_err(), "a literal key is rejected");
         std::fs::remove_dir_all(root).unwrap();
+    }
+    /// A batch run: every case's turn goes out in one batch through the
+    /// gateway, rows land in a `+batch` run dir, and spend is at half price.
+    #[tokio::test]
+    async fn a_batch_run_sends_one_batch_and_prices_it_at_half() {
+        let fixture = fixture::build();
+        let outcome = export(&ExportOptions {
+            db: fixture.db.clone(),
+            out: fixture.dir.join("evals"),
+            name: "set".into(),
+        })
+        .unwrap();
+        let mock = Arc::new(fixture::BatchMock::default());
+        let (url, server) = fixture::serve_batches(mock.clone()).await;
+        let mut options = fixture::run_options(&outcome.dir, &url);
+        options.candidate.provider = Provider::Anthropic;
+        options.candidate.batch = true;
+        let summary = run(&options).await.unwrap();
+        server.abort();
+        assert_eq!((summary.selected, summary.ok, summary.failed), (4, 4, 0));
+        let batches = mock.batches.lock().unwrap();
+        assert_eq!(batches.len(), 1, "all first turns share one batch");
+        assert_eq!(batches[0].len(), 4);
+        assert!(batches[0][0]["params"].get("stream").is_none());
+        let dir = run_dir_for(&outcome.dir, "mock", None, true);
+        assert!(dir.ends_with("mock+batch"), "{}", dir.display());
+        let rows: Vec<ResultRow> = lines(&dir.join(RESULTS_FILE));
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r.status == "ok"));
+        let full = Candidate {
+            batch: false,
+            ..options.candidate.clone()
+        };
+        let (half, whole) = (options.candidate.prices().unwrap(), full.prices().unwrap());
+        assert_eq!(half.input * 2.0, whole.input);
+        assert_eq!(half.output * 2.0, whole.output);
+        let meta: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(RUN_FILE)).unwrap()).unwrap();
+        assert_eq!(meta["batch"], true);
+    }
+
+    #[test]
+    fn sample_total_spreads_evenly_and_weights_back_to_the_mix() {
+        let mut cases = Vec::new();
+        for (tag, count) in [("common", 50usize), ("fye", 3), ("auth", 7)] {
+            for _ in 0..count {
+                cases.push(synthetic(cases.len() as i64 + 1, tag));
+            }
+        }
+        let selection = sample_total(&cases, 20, 7);
+        assert_eq!(selection.picks.len(), 20);
+        let s = &selection.strata;
+        assert_eq!(
+            (s["fye"].sampled, s["auth"].sampled, s["common"].sampled),
+            (3, 7, 10)
+        );
+        assert_eq!(s["common"].weight, 5.0);
+        let weighted: f64 = selection.picks.iter().map(|&(_, w)| w).sum();
+        assert!(
+            (weighted - 60.0).abs() < 1e-9,
+            "weights sum to the mailbox size"
+        );
+        let again = sample_total(&cases, 20, 7);
+        assert_eq!(selection.picks, again.picks, "deterministic for a seed");
+        assert_eq!(
+            sample_total(&cases, 500, 7).picks.len(),
+            60,
+            "capped at every case"
+        );
     }
 }

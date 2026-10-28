@@ -910,11 +910,7 @@ pub fn validate_decision(
     {
         return fail("revisit_requires_reason");
     }
-    if decision
-        .revisit
-        .as_ref()
-        .is_some_and(|r| r.at <= now)
-    {
+    if decision.revisit.as_ref().is_some_and(|r| r.at <= now) {
         return fail("revisit_must_be_in_the_future");
     }
     if decision
@@ -1764,7 +1760,16 @@ mod tests {
             evidence: decision.attention.evidence.clone(),
             critical: false,
         };
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[], chrono::Utc::now()).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
         assert!(!decision.external_access.restricted);
     }
     /// A done carries why and where it was read, like a rule exception: one
@@ -1779,8 +1784,15 @@ mod tests {
                 location: "body".into(),
             }]
         };
-        let check =
-            |d: &MessageDecision| validate_decision(d, &BTreeSet::from([7]), &BTreeMap::new(), &[], chrono::Utc::now());
+        let check = |d: &MessageDecision| {
+            validate_decision(
+                d,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now(),
+            )
+        };
         for (reason, evidence) in [(" ", cited(7)), ("Over", vec![]), ("Over", cited(8))] {
             decision.done = Some(DoneRequest {
                 reason: reason.into(),
@@ -1867,17 +1879,41 @@ mod tests {
             reason: "Check later".into(),
         });
         assert_eq!(
-            validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[], chrono::Utc::now()),
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            ),
             Err("revisit_must_be_in_the_future".into())
         );
         decision.revisit.as_mut().unwrap().at = chrono::Utc::now() + chrono::Duration::hours(1);
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[], chrono::Utc::now()).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn unknown_evidence_and_unfetched_updates_fail() {
         let mut decision = valid();
         decision.attention.relevant_message_ids = vec![8];
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[], chrono::Utc::now()).is_err());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_err()
+        );
         decision = valid();
         decision.related_updates.push(RelatedAttentionUpdate {
             thread_id: "other".into(),
@@ -1885,7 +1921,16 @@ mod tests {
             attention: decision.attention.clone(),
             evidence: decision.attention.evidence.clone(),
         });
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[], chrono::Utc::now()).is_err());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_err()
+        );
     }
     /// A shipping email that never prints its order number: the model finds
     /// the number in the sender's history and cites THAT message. Any message a
@@ -1913,9 +1958,24 @@ mod tests {
             ],
         });
         let fetched = BTreeSet::from([7, 3]);
-        assert!(validate_decision(&decision, &fetched, &BTreeMap::new(), &[], chrono::Utc::now()).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &fetched,
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
         assert_eq!(
-            validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[], chrono::Utc::now()),
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            ),
             Err("record_requires_evidence".into())
         );
         let delivery = &decision_schema()["properties"]["records"]["items"]["anyOf"][2];
@@ -2013,7 +2073,16 @@ mod tests {
             evidence: decision.attention.evidence.clone(),
             critical: true,
         };
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[], chrono::Utc::now()).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
         normalize_decision(&mut decision);
         assert!(!decision.auth.critical);
         decision.auth.kinds = vec![AuthKind::LoginAlert, AuthKind::AccountChange];
@@ -2061,7 +2130,10 @@ mod tests {
         let sources = BTreeSet::from([source]);
         let none = BTreeMap::new();
         let rules: [i64; 0] = [];
-        assert_eq!(validate_decision(&dated, &sources, &none, &rules, chrono::Utc::now()), Ok(()));
+        assert_eq!(
+            validate_decision(&dated, &sources, &none, &rules, chrono::Utc::now()),
+            Ok(())
+        );
         // The agent writes a stated time as a LOCAL time with no offset, the
         // way it writes event starts. That is a valid `ends`.
         for naive in ["2026-10-31T23:59:00", "2026-10-31T23:59"] {

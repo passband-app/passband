@@ -47,6 +47,11 @@ enum Command {
         /// Stratified sample of about N cases, at least --floor per stratum.
         #[arg(long)]
         sample: Option<usize>,
+        /// Exactly N cases, spread as evenly as the strata allow and weighted
+        /// back to the mailbox's mix (the routine set: `--total 100`).
+        /// Overrides --sample.
+        #[arg(long)]
+        total: Option<usize>,
         /// Smallest per-stratum sample; raise it to take rare strata whole.
         #[arg(long, default_value_t = squelch_eval::run::SAMPLE_FLOOR)]
         floor: usize,
@@ -66,8 +71,14 @@ enum Command {
         yes: bool,
         /// Stop starting new cases once this run's observed spend (USD,
         /// earlier sessions included) reaches this. Needs a priced model.
+        /// A batch run starts every case at once, so the cap is checked
+        /// before it starts, not between cases.
         #[arg(long)]
         max_usd: Option<f64>,
+        /// Use the Message Batches API: half price, results when each batch
+        /// ends (minutes, up to a day). Anthropic candidates only.
+        #[arg(long)]
+        batch: bool,
     },
     /// Score runs against gold and compare them.
     Report {
@@ -174,6 +185,7 @@ async fn main() -> Result<()> {
             reps,
             concurrency,
             sample,
+            total,
             floor,
             seed,
             fidelity,
@@ -181,14 +193,16 @@ async fn main() -> Result<()> {
             effort,
             yes,
             max_usd,
+            batch,
         } => {
             let candidates = load_candidates(&root)?;
-            let Some(config) = candidates.get(&candidate).cloned() else {
+            let Some(mut config) = candidates.get(&candidate).cloned() else {
                 anyhow::bail!(
                     "no [candidate.{candidate}] in candidates.toml (have: {})",
                     candidates.keys().cloned().collect::<Vec<_>>().join(", ")
                 );
             };
+            config.batch |= batch;
             let dataset = resolve_dataset(&root, dataset.as_deref())?;
             let summary = run(&RunOptions {
                 dataset,
@@ -197,6 +211,7 @@ async fn main() -> Result<()> {
                 reps,
                 concurrency,
                 sample: sample.map(|n| (n, seed)),
+                sample_total: total.map(|n| (n, seed)),
                 sample_floor: floor,
                 fidelity,
                 cases,

@@ -4,6 +4,7 @@
 //! PRIVACY: a dataset is the owner's own mail. It lives under
 //! [`default_root`] (dirs 0700, files 0600) and never inside a repository.
 pub mod asof;
+pub mod batch;
 pub mod case;
 pub mod export;
 #[cfg(test)]

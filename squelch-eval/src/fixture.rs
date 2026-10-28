@@ -485,10 +485,12 @@ pub fn run_options(dataset: &std::path::Path, url: &str) -> RunOptions {
             cache_read: None,
             cache_write_5m: None,
             cache_write_1h: None,
+            batch: false,
         },
         reps: 1,
         concurrency: 2,
         sample: None,
+        sample_total: None,
         sample_floor: crate::run::SAMPLE_FLOOR,
         fidelity: FidelityFilter::Reconstructed,
         cases: Vec::new(),
@@ -497,4 +499,67 @@ pub fn run_options(dataset: &std::path::Path, url: &str) -> RunOptions {
         backoff: std::time::Duration::from_millis(1),
         max_usd: None,
     }
+}
+
+/// The Message Batches API on a loopback port, answering every request with
+/// a valid decision as an Anthropic `submit_triage_step` tool call. Records
+/// each batch's size.
+#[derive(Default)]
+pub struct BatchMock {
+    pub batches: Mutex<Vec<Vec<Value>>>,
+}
+
+/// Bind the batch mock; returns the candidate's Messages URL.
+pub async fn serve_batches(mock: Arc<BatchMock>) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::extract::{Path, State};
+    use axum::routing::{get, post};
+    async fn create(
+        State(mock): State<Arc<BatchMock>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        let mut batches = mock.batches.lock().unwrap();
+        batches.push(body["requests"].as_array().unwrap().clone());
+        let id = format!("b{}", batches.len() - 1);
+        axum::Json(json!({"id": id, "processing_status": "in_progress"}))
+    }
+    async fn status(
+        Path(id): Path<String>,
+        axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+        headers: axum::http::HeaderMap,
+    ) -> axum::Json<Value> {
+        let host = headers["host"].to_str().unwrap();
+        axum::Json(json!({"id": id, "processing_status": "ended",
+            "results_url": format!("http://{host}{}/results", uri.path())}))
+    }
+    async fn results(State(mock): State<Arc<BatchMock>>, Path(id): Path<String>) -> String {
+        let index: usize = id.trim_start_matches('b').parse().unwrap();
+        let requests = mock.batches.lock().unwrap()[index].clone();
+        requests
+            .iter()
+            .map(|r| {
+                let user = r["params"]["messages"][0]["content"].as_str().unwrap();
+                let id = serde_json::from_str::<Value>(user).unwrap()["context"]["message_id"]
+                    .as_i64()
+                    .unwrap();
+                let step = json!({"step": "finish", "decision": gold(id, "candidate", true)});
+                json!({"custom_id": r["custom_id"], "result": {"type": "succeeded", "message": {
+                    "type": "message", "role": "assistant", "model": r["params"]["model"],
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "tu", "name": "submit_triage_step",
+                        "input": {"result": step}}],
+                    "usage": {"input_tokens": 10, "output_tokens": 8, "cache_read_input_tokens": 2}}}})
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .route("/v1/messages/batches", post(create))
+        .route("/v1/messages/batches/{id}", get(status))
+        .route("/v1/messages/batches/{id}/results", get(results))
+        .with_state(mock);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, server)
 }

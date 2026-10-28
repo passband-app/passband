@@ -51,7 +51,9 @@ Checked in this order. The first one that fails is the hold reason.
 1. Not in a meeting.
 2. No meeting starting within `meeting_guard_mins` (default 15).
 3. Inside working hours in the owner's zone (`work_start_hour`..`work_end_hour`,
-   default 7 to 20; the zone is the one `owner_zone` already resolves).
+   default 7 to 20; the zone is the one `owner_zone` already resolves). Every
+   day of the week, weekends included on purpose: a weekend's busy calendar
+   events hold it exactly as a weekday's do.
 4. Under `daily_budget` banners since local midnight (default 4).
 5. The trigger is not paused by the owner's habits (below).
 6. At least one candidate is due.
@@ -161,7 +163,6 @@ Nothing else adapts yet.
 
 ## Known limits
 
-- **Weekends.** Working hours are hours only, every day of the week.
 - **A zone change re-fires a date-only due date.** "Due the 30th" resolves to
   17:00 in the owner's current zone; if the zone changes, the instant does too,
   and the once-per-due-date record no longer matches.

@@ -21,8 +21,12 @@ with that account's credential.
 The engine keeps **cadence, ingest, triage and cursor persistence**: when to
 poll, which folders in which order, what gets stored as sent or spam, what
 notifies, when the cursor commits. A source owns **listing, the change feed,
-fetching and cursor encoding**. Nothing in a source persists anything or
-decides policy.
+fetching and cursor encoding**. A source decides no policy, and the cursor
+stays the engine's to persist. What a source may keep is provider-private
+lookup state the engine never reads: the IMAP source records which folder and
+UID each message was last seen at (`imap_locations`, behind the narrow
+`MessageLocations` trait the store implements), because an IMAP stable id is a
+hash and cannot be turned back into a place to fetch from.
 
 `MailSource` is derived from what the engine actually asked Gmail for:
 

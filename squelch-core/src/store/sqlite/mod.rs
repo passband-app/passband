@@ -462,6 +462,7 @@ mod events;
 mod feedback;
 mod ghosts;
 pub mod groups;
+mod imap_locations;
 mod messages;
 mod migrate;
 mod notify;

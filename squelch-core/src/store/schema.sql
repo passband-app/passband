@@ -890,6 +890,27 @@ CREATE TABLE IF NOT EXISTS sync_cursor (
     updated_at TEXT NOT NULL
 );
 
+-- WHERE AN IMAP ACCOUNT'S MESSAGES ARE, private to the IMAP mail source
+-- (`crate::mail::imap::MessageLocations`): one row per (message, folder) the
+-- source has seen it in. `msg_id` is the stable id (`messages.gmail_msg_id`),
+-- a hash that cannot be turned back into a place to fetch from, hence this
+-- table. `message_id` is the normalized Message-ID TEXT, kept for the
+-- stale-location fallback (`SEARCH HEADER Message-ID`); NULL for mail without
+-- one. A row is a hint, never the truth: the source re-checks UIDVALIDITY and
+-- the UID on every use and drops rows that have gone stale. A Gmail account
+-- never has a row here. No foreign key: like `sync_cursor`, a row for a gone
+-- account is an orphan nothing reads.
+CREATE TABLE IF NOT EXISTS imap_locations (
+    account_id  INTEGER NOT NULL,
+    msg_id      TEXT NOT NULL,
+    folder      TEXT NOT NULL,
+    uidvalidity INTEGER NOT NULL,
+    uid         INTEGER NOT NULL,
+    message_id  TEXT,
+    seen_at     TEXT NOT NULL,
+    PRIMARY KEY(account_id, msg_id, folder)
+);
+
 -- GMAIL-SIDE INBOX UNREAD COUNTS (labels/INBOX messagesUnread/threadsUnread),
 -- refreshed once per sync cycle. One row per account, overwritten each fetch:
 -- this mirrors Gmail's current state, it is not a history. Sync's own tables

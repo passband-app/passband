@@ -2128,7 +2128,10 @@ fn ghost_view(
 /// Each ghost
 /// carries `matched_event` (`{calendar_id, id}` or null): a real event at the
 /// same start whose title matches ([`squelch_core::gcal::ghost_matches`]),
-/// computed here for display de-duplication and never stored.
+/// computed here for display de-duplication and never stored. Each event
+/// carries `place` once the small model has cleaned its location
+/// ([`squelch_core::gcal::place`]): the text the detail card shows in place
+/// of `location`, `""` when the location names no place. Absent until then.
 ///
 /// Defaults: `from` is a day ago and `to` is `from` plus the default window
 /// (so with neither, now-1d to now+90d). `state` is judged at the server's
@@ -2157,22 +2160,31 @@ pub async fn get_timeline(
         Some(calendar) => calendar.granted().await,
         None => false,
     };
-    let (ghosts, events, calendars, status) = store_call(&state, move |store, account_id| {
-        let ghosts = store.list_ghost_events(account_id, from, to)?;
-        if !granted {
-            return Ok((ghosts, Vec::new(), Vec::new(), Default::default()));
-        }
-        let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
-        let mut status: squelch_core::gcal::CalendarStatus = store.calendar_status(account_id)?;
-        status.truncated |= cut;
-        let calendars: Vec<_> = store
-            .calendar_calendars(account_id)?
-            .into_iter()
-            .filter(|c| c.selected)
-            .collect();
-        Ok((ghosts, events, calendars, status))
-    })
-    .await?;
+    let (ghosts, events, calendars, status, places) =
+        store_call(&state, move |store, account_id| {
+            let ghosts = store.list_ghost_events(account_id, from, to)?;
+            if !granted {
+                return Ok((
+                    ghosts,
+                    Vec::new(),
+                    Vec::new(),
+                    Default::default(),
+                    Default::default(),
+                ));
+            }
+            let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
+            let mut status: squelch_core::gcal::CalendarStatus =
+                store.calendar_status(account_id)?;
+            status.truncated |= cut;
+            let calendars: Vec<_> = store
+                .calendar_calendars(account_id)?
+                .into_iter()
+                .filter(|c| c.selected)
+                .collect();
+            let places = store.calendar_places(account_id)?;
+            Ok((ghosts, events, calendars, status, places))
+        })
+        .await?;
     // The display match, computed here and never stored, so it can never go
     // stale and never changes a ghost.
     let matched = squelch_core::gcal::match_ghosts(
@@ -2200,7 +2212,16 @@ pub async fn get_timeline(
         .unwrap_or_default();
     let events: Vec<_> = events
         .iter()
-        .map(|e| calendar_event_view(e, &account_email))
+        .map(|e| {
+            let mut view = calendar_event_view(e, &account_email);
+            // The card's place (gcal/place.rs), once the model has made one
+            // of this location: "" when it names no place. Absent until then,
+            // and the client shows `location`.
+            if let Some(place) = e.row.location.as_ref().and_then(|raw| places.get(raw)) {
+                view["place"] = json!(place.as_deref().unwrap_or(""));
+            }
+            view
+        })
         .collect();
     let calendars: Vec<_> = calendars
         .iter()
@@ -2242,7 +2263,9 @@ pub async fn get_timeline(
 /// hides them. `color` is the event's own colour or its calendar's
 /// (`#rrggbb`, or null when Google gave neither), `editable` the edit guard
 /// ([`squelch_core::gcal::SyncedEvent::editable`]) for `account_email`, and
-/// `description` laundered text of at most 2000 characters. `guests` is the
+/// `description` laundered text of at most 2000 characters (the timeline
+/// listing adds `place`, the card's cleaned location, beside it; see
+/// `get_timeline`). `guests` is the
 /// event's attendees as Google lists them (`{email, name, response,
 /// organizer, self}`, `response` one of `accepted` / `declined` /
 /// `tentative` / `pending`), at most 100 and `[]` when it has none;

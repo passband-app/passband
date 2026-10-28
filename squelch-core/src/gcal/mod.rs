@@ -35,6 +35,7 @@
 //! at [`MAX_GUESTS`] ([`client`]).
 
 pub mod client;
+pub mod place;
 pub mod sync;
 pub mod write;
 

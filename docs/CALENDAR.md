@@ -1142,7 +1142,13 @@ Read only (slice B). The only writes are the user's own, described under
   `organizer` and `self`, transparency, link and update time. Attachments,
   conference data and what a guest wrote when answering are never sent. The
   description (added in wave 3, which shows
-  it) is laundered and cut to 2000 characters as it is stored.
+  it) is laundered and cut to 2000 characters as it is stored, and Google's
+  own boilerplate on an event it created from mail ("To see detailed
+  information for automatically created events like this one, use the
+  official Google Calendar app.", "This event was created from an email you
+  received in Gmail.") is dropped with the link after it, so such an event
+  shows no notes. A row stored before this is rewritten by the next daily
+  full read.
   `calendarList.list` carries a mask of its own, which since wave 3 includes
   each calendar's `backgroundColor`, `colorId` and `accessRole`.
 - **Window.** 30 days back to 400 days ahead. The first read of a calendar is
@@ -1203,8 +1209,24 @@ Read only (slice B). The only writes are the user's own, described under
   titles are equal after lowercasing and collapsing whitespace, or one contains
   the other. Worked out when the timeline is listed, never stored: it hides a
   duplicate and changes no ghost.
+- **The card's place** (`gcal/place.rs`, 2026-10-28). A booking service
+  often writes its marketing into the location ("Dingles Public House, Tock is
+  now part of the Resy network. Explore even more of our dining network on").
+  After each pass that synced, up to 10 locations longer than 40 characters
+  with no answer yet (upcoming events first) go one at a time to the small
+  `notify` model, which returns the venue and its address when the text gives
+  one. Every word of the answer must be a word of the location, checked in
+  code; an answer that adds one is not believed and the location is kept. An
+  empty answer means the text names no place. Answers are stored per distinct
+  location text in `calendar_places` (so a weekly dinner costs one call),
+  pruned when no event holds the text, redone when `PROMPT_VERSION` changes,
+  billed under `calendar_place`, at most 100 calls a day. The timeline serves
+  it as `place` on each event once there is one (`""` for no place); the card
+  shows `place`, falling back to `location`, and the editor keeps reading and
+  writing `location`.
 - **Human door only.** Titles, places, organizers and links never reach an
-  agent route, a log line or a triage prompt. A log names a calendar by its
+  agent route, a log line or a triage prompt. The one exception is the card's
+  place above: the location string alone, to the small model. A log names a calendar by its
   position in the pass, never its id, which is usually an address.
 
 ### Creating and editing events (BUILT in wave 3)

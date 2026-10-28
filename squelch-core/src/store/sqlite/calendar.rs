@@ -2,11 +2,13 @@
 //! read, and each one's sync token and last outcome), `calendar_events`
 //! (the events in the synced window) and `calendar_event_guests` (each
 //! event's attendees, replaced whole with the event and deleted with it by a
-//! trigger). Written by the sync loop
+//! trigger), and `calendar_places` (the card's place made of each event
+//! location, [`crate::gcal::place`]). Written by the sync loop
 //! ([`crate::gcal::sync`]) and, one event at a time, by the human door after
 //! Google accepted the user's own create, edit or delete; read only by the
 //! human door. HUMAN DOOR ONLY: no agent route and no triage prompt reads
-//! either table.
+//! these tables. The one model that sees any of it is the card's place
+//! cleaner, handed a location string alone ([`crate::gcal::place`]).
 //!
 //! EVERY WRITE IS ONE SHORT TRANSACTION over data already in hand. The sync
 //! loop fetches a page, then hands it here; the store's one connection is
@@ -18,6 +20,7 @@
 //! UTC sort key, so the two listings apply one `[from, to)` rule, by start.
 use super::ghosts::{in_range, listing_order, sort_key};
 use super::*;
+use crate::gcal::place;
 use crate::gcal::{
     AccessRole, CalendarErrorKind, CalendarMeta, CalendarStatus, EventItem, EventRow, Guest,
     GuestResponse, MAX_EVENTS_PER_CALENDAR, MAX_GUESTS, PRIMARY, PageApplied, SelfResponse,
@@ -25,7 +28,7 @@ use crate::gcal::{
 };
 use crate::triage::ghost::EventTime;
 use chrono::FixedOffset;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Events one timeline listing returns at most: the ones NEAREST now, and the
 /// listing says when it cut.
@@ -553,6 +556,91 @@ impl SqliteStore {
             "DELETE FROM calendar_events WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3",
             params![account, calendar_id, event_id],
         )? > 0)
+    }
+
+    /// Locations that want a place ([`crate::gcal::place`]): longer than
+    /// [`place::MIN_CHARS`], held by an event on a shown calendar, and with no
+    /// answer under the current [`place::PROMPT_VERSION`]. Those with an
+    /// upcoming event first, soonest first, then the rest, latest first; at
+    /// most `limit`.
+    pub fn calendar_places_pending(
+        &self,
+        account: AccountId,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let now = sort_key(&EventTime::At(now.fixed_offset()));
+        let mut stmt = conn.prepare(
+            "SELECT e.location
+             FROM calendar_events e
+             JOIN calendar_calendars c ON c.account_id=e.account_id AND c.calendar_id=e.calendar_id
+             WHERE e.account_id=?1 AND c.selected=1 AND e.location IS NOT NULL
+               AND length(e.location) > ?3
+               AND NOT EXISTS (SELECT 1 FROM calendar_places p
+                               WHERE p.account_id=e.account_id AND p.raw=e.location
+                                 AND p.prompt_version=?4)
+             GROUP BY e.location
+             ORDER BY MIN(e.start_sort < ?2),
+                      MIN(CASE WHEN e.start_sort >= ?2 THEN e.start_sort END),
+                      MAX(e.start_sort) DESC
+             LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                account,
+                now,
+                place::MIN_CHARS as i64,
+                place::PROMPT_VERSION,
+                limit as i64
+            ],
+            |r| r.get::<_, String>(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Store the place made of a location: `None` when it names none.
+    pub fn calendar_place_put(
+        &self,
+        account: AccountId,
+        raw: &str,
+        place: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO calendar_places(account_id,raw,place,prompt_version,cleaned_at)
+             VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(account_id,raw) DO UPDATE SET place=excluded.place,
+                 prompt_version=excluded.prompt_version, cleaned_at=excluded.cleaned_at",
+            params![account, raw, place, place::PROMPT_VERSION, now.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the places of locations no stored event holds any more. How
+    /// many went.
+    pub fn calendar_places_prune(&self, account: AccountId) -> Result<usize> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM calendar_places
+             WHERE account_id=?1 AND NOT EXISTS (
+                 SELECT 1 FROM calendar_events e
+                 WHERE e.account_id=calendar_places.account_id AND e.location=calendar_places.raw)",
+            params![account],
+        )?)
+    }
+
+    /// Every stored place, by the location it was made from: `None` for a
+    /// location that names no place.
+    pub fn calendar_places(&self, account: AccountId) -> Result<HashMap<String, Option<String>>> {
+        let conn = self.lock()?;
+        let mut stmt =
+            conn.prepare("SELECT raw, place FROM calendar_places WHERE account_id=?1")?;
+        let rows = stmt.query_map(params![account], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
 

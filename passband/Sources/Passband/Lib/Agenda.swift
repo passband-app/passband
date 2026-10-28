@@ -363,7 +363,8 @@ enum Agenda {
             id: itemId(event),
             origin: .event(event),
             title: tidy(event.title) ?? "Untitled event",
-            location: tidy(event.location),
+            // The cleaned place when the daemon has one ("" hides it).
+            location: tidy(event.place ?? event.location),
             start: start.date,
             end: end,
             allDay: allDay,

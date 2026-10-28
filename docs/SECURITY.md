@@ -1238,14 +1238,18 @@ counted per category and written as at most one summary line per minute
 **Invariant.** Calendar data (event titles, places, descriptions, organizers,
 guests' addresses, names and answers, links, calendar names) is human-door data: served on `GET /client/timeline` (and
 in the answer to the user's own write) and nowhere else, never in a log line,
-never in a triage prompt. Nothing calendar-related is on `/mcp` or
+never in a triage prompt. ONE EXCEPTION, the owner's decision (2026-10-28): an
+event's location string, alone, goes to the configured provider's small
+(`notify`) model to be cut down to the place the card shows (see "The card's
+place" below). Nothing calendar-related is on `/mcp` or
 `/client/agent/*`. The daemon writes to a calendar only when the user creates,
 edits or deletes one event from the human door; nothing writes on its own. Google
 emails an event's guests only when such a write says `notify: true`; no other
 input, default or code path can ask for it.
 
 **Enforcement.**
-- **Three tables, human door only.** `calendar_calendars`, `calendar_events` and
+- **Four tables, human door only.** `calendar_calendars`, `calendar_events`,
+  `calendar_places` (the card's place per location text) and
   `calendar_event_guests` (an event's attendees, deleted with it by a trigger)
   (`squelch-core/src/store/sqlite/calendar.rs`) are written by the sync loop
   (`squelch-core/src/gcal/sync.rs`) and, one row at a time after Google accepted
@@ -1266,7 +1270,24 @@ input, default or code path can ask for it.
   name (laundered like a title), the answer and two flags are stored; past 100,
   Google sends the user's entry alone and the event is marked truncated.
   Its description is read (the app shows it): markup becomes text, each line is
-  laundered like a place, and it stops at 2000 characters.
+  laundered like a place, and it stops at 2000 characters. Google's own
+  boilerplate on an event it made from mail ("To see detailed information for
+  automatically created events like this one...") is dropped with its link
+  (`triage/ghost.rs:strip_google_boilerplate`).
+- **The card's place** (`gcal/place.rs`). After a pass that synced, the loop
+  sends up to 10 stored locations longer than 40 characters (upcoming first) to
+  the provider and `notify` model that already read the owner's mail, each on
+  its own, fenced as untrusted, with nothing else of the event: no title,
+  guests, notes, ids or account. The answer is laundered like a title and HELD
+  TO THE INPUT IN CODE: every word of it must be a word of the location
+  (`place::grounded`), so the model can only drop text, never add an address,
+  a link or anything a hostile location asked for; an answer that adds a word
+  is discarded and the location kept. Stored in `calendar_places` keyed by the
+  location text (one call per distinct text), pruned when no event holds it,
+  served on `GET /client/timeline` only, as `place` beside the untouched
+  `location`. At most 100 calls per account per day (attempts counted in
+  memory, spend in the usage ledger under `calendar_place`). No key, no call.
+  The location text is never logged.
 - **`html_link` is an allow-list** (`gcal/mod.rs:google_link`): https, a host that is
   `google.com` or ends in `.google.com`, no userinfo, at most 2048 characters.
   Anything else is dropped, because the client opens it.

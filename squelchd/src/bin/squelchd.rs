@@ -2506,7 +2506,11 @@ fn cmd_serve(
             creds,
             api_state.features().clone(),
         ) {
-            Ok(sync) => Some(sync),
+            // The card's places ride the same key and the notify model, like
+            // the sitrep headline. No key: locations are shown as they are.
+            Ok(sync) => {
+                Some(sync.with_places(squelch_core::gcal::place::PlaceClient::from_config(&config)))
+            }
             Err(e) => {
                 eprintln!(
                     "squelchd: calendar sync NOT started: its HTTP client could not be built: {e}"

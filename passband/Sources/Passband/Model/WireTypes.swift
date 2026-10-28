@@ -1730,7 +1730,13 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     var end: String?
     var all_day: Bool
     var start_timezone: String?
+    /// The location as Google holds it: what the editor shows and writes.
     var location: String?
+    /// The location cleaned by the daemon's small model for display (a
+    /// booking service's marketing cut away): what the card shows. "" when
+    /// the location names no place. Nil until the daemon has cleaned it, and
+    /// from an older daemon: the card shows `location`.
+    var place: String?
     var status: TimelineEventStatus?
     /// Nil when the user is not an attendee (their own event).
     var self_response: TimelineSelfResponse?

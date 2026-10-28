@@ -5595,3 +5595,166 @@ async fn every_refusal_before_google_names_its_code() {
     }
     assert!(writes(&w).is_empty(), "nothing reached Google");
 }
+
+// --- the card's place ---------------------------------------------------------
+
+/// A fake model that answers every call with `place`, counting the calls and
+/// keeping each request body.
+async fn spawn_place_model(place: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = bodies.clone();
+    let answer = json!({ "place": place }).to_string();
+    let body = json!({
+        "content": [{ "type": "text", "text": answer }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 200, "output_tokens": 8 }
+    })
+    .to_string();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let body = body.clone();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                seen.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), bodies)
+}
+
+/// After a pass, a booking service's location is cleaned once by the model
+/// and served as `place`, beside the untouched `location`; a short location
+/// makes no call and carries no `place`; and Google's own boilerplate never
+/// reaches `description`.
+#[tokio::test]
+async fn a_noisy_location_is_served_as_a_clean_place_and_boilerplate_notes_go() {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::gcal::place::{PlaceClient, USAGE_CATEGORY};
+    let w = world("place", GRANTED).await;
+    let tock = "Dingles Public House, Tock is now part of the Resy network. \
+                Explore even more of our dining network on";
+    let start = minute(Utc::now() + Duration::days(2));
+    let mut dinner = timed("evt-1", "Reservation at Dingles Public House", start, 60);
+    dinner["location"] = json!(tock);
+    dinner["description"] = json!(
+        "To see detailed information for automatically created events like this one, \
+         use the official Google Calendar app. https://g.co/calendar"
+    );
+    let mut again = timed("evt-2", "Dinner again", start + Duration::days(7), 60);
+    again["location"] = json!(tock);
+    let mut call = timed("evt-3", "Call", start + Duration::days(1), 30);
+    call["location"] = json!("Zoom");
+    w.google()
+        .full
+        .insert(PRIMARY.into(), vec![vec![dinner, again, call]]);
+
+    let (url, bodies) = spawn_place_model("Dingles Public House").await;
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap()
+    .with_places(Some(PlaceClient::new(
+        reqwest::Client::new(),
+        url,
+        "sk-test",
+        Stage2Provider::Anthropic,
+        "claude-haiku-4-5",
+        None,
+    )));
+    assert_eq!(sync.pass(Utc::now()).await, PassOutcome::Synced);
+
+    // Before the model has answered: no `place`, the location as it was.
+    let events = w.events().await;
+    assert!(events.iter().all(|e| e.get("place").is_none()));
+    assert_eq!(events[0]["location"], json!(tock));
+    assert_eq!(
+        events[0]["description"],
+        Value::Null,
+        "boilerplate is not notes"
+    );
+
+    sync.clean_places(Utc::now()).await;
+    // One call for the one long location, carrying it and nothing else of
+    // the event.
+    {
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("Tock is now part of the Resy network"));
+        assert!(!bodies[0].contains("Reservation at Dingles"));
+        assert!(!bodies[0].contains("Zoom"));
+    }
+    let events = w.events().await;
+    let by_id = |id: &str| events.iter().find(|e| e["id"] == id).unwrap().clone();
+    assert_eq!(by_id("evt-1")["place"], json!("Dingles Public House"));
+    assert_eq!(by_id("evt-1")["location"], json!(tock), "the editor's text");
+    assert_eq!(by_id("evt-2")["place"], json!("Dingles Public House"));
+    assert!(by_id("evt-3").get("place").is_none());
+    assert_eq!(by_id("evt-3")["location"], json!("Zoom"));
+
+    // Billed to its own category; asked once, not again.
+    let billed = w
+        .store
+        .list_usage_by_category(w.acct, 1)
+        .unwrap()
+        .into_iter()
+        .find(|(c, _)| c == USAGE_CATEGORY)
+        .map(|(_, days)| days.iter().map(|d| d.calls).sum::<u64>());
+    assert_eq!(billed, Some(1));
+    sync.clean_places(Utc::now()).await;
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+}
+
+/// A model answer that adds a word the location never had is not believed:
+/// the location is served as the place, unchanged.
+#[tokio::test]
+async fn a_place_answer_that_adds_a_word_keeps_the_location() {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::gcal::place::PlaceClient;
+    let w = world("place-added", GRANTED).await;
+    let noisy = "Harbor Tavern. Book your next table with us on our brand new app today";
+    let mut dinner = timed(
+        "evt-1",
+        "Dinner",
+        minute(Utc::now() + Duration::days(2)),
+        60,
+    );
+    dinner["location"] = json!(noisy);
+    w.google().full.insert(PRIMARY.into(), vec![vec![dinner]]);
+    let (url, _) = spawn_place_model("Harbor Tavern, 12 Water St").await;
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap()
+    .with_places(Some(PlaceClient::new(
+        reqwest::Client::new(),
+        url,
+        "sk-test",
+        Stage2Provider::Anthropic,
+        "claude-haiku-4-5",
+        None,
+    )));
+    assert_eq!(sync.pass(Utc::now()).await, PassOutcome::Synced);
+    sync.clean_places(Utc::now()).await;
+    assert_eq!(w.events().await[0]["place"], json!(noisy));
+}

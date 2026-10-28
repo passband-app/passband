@@ -2081,6 +2081,20 @@ AFTER DELETE ON calendar_events BEGIN
     WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
       AND event_id = OLD.event_id;
 END;
+-- The calendar card's PLACE for an event location (gcal/place.rs): what the
+-- small model made of `raw`, a location exactly as stored on calendar_events.
+-- `place` NULL means the text names no place, and the card shows none. Keyed
+-- by the text, so every event at one place shares one call. A row whose text
+-- no event holds any more is pruned after each batch. HUMAN DOOR ONLY, like
+-- the events it describes.
+CREATE TABLE IF NOT EXISTS calendar_places (
+    account_id     INTEGER NOT NULL,
+    raw            TEXT NOT NULL,
+    place          TEXT,
+    prompt_version TEXT NOT NULL,
+    cleaned_at     TEXT NOT NULL,
+    PRIMARY KEY(account_id, raw)
+);
 
 -- A CORRESPONDENT'S TIMEZONE (docs/CALENDAR.md §7), inferred at ingest and
 -- served on the contact card. HUMAN-DOOR ONLY. `addr` is COLLATE NOCASE in

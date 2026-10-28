@@ -48,6 +48,12 @@
 //! sync token, or in full over the window when it has none, Google answered
 //! 410, or its last full read is a day old (a sync token never carries an
 //! event that moves INTO the window as the window slides forward).
+//!
+//! AFTER A PASS THAT SYNCED, the card's places ([`super::place`]): up to
+//! [`place::PER_PASS`] locations still wanting one are cleaned by the small
+//! model, within [`place::DAILY_CAP`] calls a day, raced against shutdown
+//! like the pass. Only with a model configured ([`CalendarSync::with_places`]);
+//! a failure there is logged and changes nothing about the sync.
 
 use std::collections::HashSet;
 use std::hash::BuildHasher;
@@ -59,6 +65,7 @@ use futures::FutureExt;
 use tokio::sync::{Notify, watch};
 
 use super::client::{API_BASE, CalendarApi, CallError, EventsQuery};
+use super::place::{self, Cleaned, PlaceClient};
 use super::{
     CalendarErrorKind, CalendarMeta, MAX_CALENDARS, PRIMARY, StoredCalendar, read_calendar_entry,
     read_event, window,
@@ -66,7 +73,7 @@ use super::{
 use crate::credentials::CalendarCredentials;
 use crate::error::{CoreError, Result};
 use crate::features::{CALENDAR, Features};
-use crate::store::SqliteStore;
+use crate::store::{SqliteStore, Store};
 use crate::types::AccountId;
 
 /// How often a granted calendar is read.
@@ -152,6 +159,12 @@ pub struct CalendarSync {
     timing: Timing,
     /// The live hidden-feature set, asked at the top of every pass.
     features: Features,
+    /// The card's place cleaner, when a model is configured.
+    places: Option<PlaceClient>,
+    /// Place calls ATTEMPTED today, `(day, count)`. The ledger only learns
+    /// of calls the provider reported usage for, so a run of timeouts is
+    /// counted here; the higher of the two is what has been spent.
+    place_calls: std::sync::Mutex<(String, u32)>,
 }
 
 /// A credential failure as a kind: Google refusing the refresh token (or no
@@ -203,7 +216,16 @@ impl CalendarSync {
                 backoff_base: BACKOFF_BASE,
             },
             features,
+            places: None,
+            place_calls: std::sync::Mutex::new((String::new(), 0)),
         })
+    }
+
+    /// Clean the card's places after each pass that synced, with this client
+    /// (None: never).
+    pub fn with_places(mut self, client: Option<PlaceClient>) -> Self {
+        self.places = client;
+        self
     }
 
     /// TEST HOOK: no startup delay and every wait at `tick`.
@@ -241,6 +263,12 @@ impl CalendarSync {
                     return Ok(());
                 }
             };
+            if outcome == PassOutcome::Synced {
+                tokio::select! {
+                    () = self.clean_places(Utc::now()) => {}
+                    () = stopped(&mut shutdown) => return Ok(()),
+                }
+            }
             let (delay, quota) = match outcome {
                 PassOutcome::Disabled | PassOutcome::NotGranted => {
                     backoff = None;
@@ -327,6 +355,81 @@ impl CalendarSync {
         {
             eprintln!("squelch: calendar sync could not record a failure: {e}");
         }
+    }
+
+    /// Make the card's place of up to [`place::PER_PASS`] locations still
+    /// wanting one, then forget places no event holds. Public for tests.
+    /// Every failure is logged and dropped: the card shows the location as
+    /// it was, and a later pass asks again.
+    pub async fn clean_places(&self, now: DateTime<Utc>) {
+        let Some(client) = &self.places else { return };
+        let day = now.format("%Y-%m-%d").to_string();
+        let ledger_day = day.clone();
+        let pending = self
+            .db(move |s, a| {
+                let spent: u64 = s
+                    .list_usage_by_category(a, 1)?
+                    .into_iter()
+                    .filter(|(c, _)| c == place::USAGE_CATEGORY)
+                    .flat_map(|(_, days)| days)
+                    .filter(|d| d.day == ledger_day)
+                    .map(|d| d.calls)
+                    .sum();
+                Ok((s.calendar_places_pending(a, now, place::PER_PASS)?, spent))
+            })
+            .await;
+        let (pending, spent) = match pending {
+            Ok(read) => read,
+            Err(e) => {
+                eprintln!("squelch: calendar places could not be read: {e}");
+                return;
+            }
+        };
+        for raw in pending {
+            if !self.reserve_place_call(&day, spent) {
+                break;
+            }
+            let result = place::clean_place(client, &raw).await;
+            let place = match result.cleaned {
+                Cleaned::Place(place) => Some(Some(place)),
+                Cleaned::Nothing => Some(None),
+                Cleaned::Unsettled => None,
+            };
+            let day = day.clone();
+            let stored = self
+                .db(move |s, a| {
+                    if let Some(u) = result.usage {
+                        s.extract_bump_usage(a, &day, place::USAGE_CATEGORY, u.into())?;
+                    }
+                    if let Some(place) = place {
+                        s.calendar_place_put(a, &raw, place.as_deref(), now)?;
+                    }
+                    Ok(())
+                })
+                .await;
+            if let Err(e) = stored {
+                eprintln!("squelch: calendar place could not be stored: {e}");
+            }
+        }
+        if let Err(e) = self.db(|s, a| s.calendar_places_prune(a)).await {
+            eprintln!("squelch: calendar places could not be pruned: {e}");
+        }
+    }
+
+    /// Take one of today's [`place::DAILY_CAP`] place calls, counting the
+    /// ledger's `spent` as already taken. False when none is left.
+    fn reserve_place_call(&self, day: &str, spent: u64) -> bool {
+        let Ok(mut calls) = self.place_calls.lock() else {
+            return false;
+        };
+        if calls.0 != day {
+            *calls = (day.to_string(), 0);
+        }
+        if u64::from(calls.1).max(spent) >= u64::from(place::DAILY_CAP) {
+            return false;
+        }
+        calls.1 += 1;
+        true
     }
 
     /// One pass. Public for tests, which drive passes one at a time.

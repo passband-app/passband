@@ -25,6 +25,7 @@ mod smart_clear_guards;
 mod spam;
 mod specialists;
 mod support;
+mod sync_cursor;
 mod tracking;
 mod translations;
 mod triage_stages;

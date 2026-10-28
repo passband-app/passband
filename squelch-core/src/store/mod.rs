@@ -2173,6 +2173,43 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     fn set_sync_state(&self, account_id: AccountId, mailbox: &str, state: &SyncState)
     -> Result<()>;
 
+    /// Which kind of mailbox the account is (`accounts.provider`).
+    /// [`CoreError::NotFound`](crate::error::CoreError::NotFound) for an
+    /// unknown account, and an error for a provider this build does not know:
+    /// never a default, so an account a newer build set up is refused rather
+    /// than synced as the wrong kind.
+    fn account_provider(&self, account_id: AccountId) -> Result<crate::mail::MailProvider>;
+
+    /// The sync engine's change-feed cursor for the account, opaque, or `None`
+    /// before the first one is stored (a first run).
+    ///
+    /// A GMAIL ACCOUNT ADOPTS ITS LEGACY CURSOR, `sync_state` mailbox
+    /// `'history'`: an install upgraded from before this table has only that
+    /// row, and reading it as "no cursor" would re-run a whole first backfill.
+    /// When both rows exist (a rolled-back build kept advancing the legacy
+    /// one) the later historyId wins, so neither direction of a version change
+    /// steps the feed backwards.
+    fn sync_cursor(&self, account_id: AccountId) -> Result<Option<crate::mail::SyncCursor>>;
+
+    /// Store the account's change-feed cursor. For a Gmail account whose
+    /// cursor is a historyId, the legacy `sync_state` `'history'` row is
+    /// written in the same transaction, so a build from before this table
+    /// resumes from the same point instead of from wherever it last stopped.
+    fn set_sync_cursor(
+        &self,
+        account_id: AccountId,
+        cursor: &crate::mail::SyncCursor,
+    ) -> Result<()>;
+
+    /// Whether the account already stores the message the provider calls
+    /// `provider_msg_id`, in any tier.
+    ///
+    /// UNWIRED ON PURPOSE. When a source wires it, it goes on the INCREMENTAL
+    /// path only: the backfill and catch-up re-fetch mail already stored, and
+    /// that re-fetch is how a sanitizer change reaches `body_html`, which is
+    /// baked at ingest.
+    fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool>;
+
     /// The last Gmail INBOX unread counts the sync loop stored, or `None` when
     /// none were ever fetched (old DB, or every fetch so far has failed). `None`
     /// is NOT zero and callers must keep the distinction: zero unread is a real

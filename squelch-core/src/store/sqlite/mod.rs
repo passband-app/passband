@@ -475,6 +475,7 @@ mod search;
 mod senders;
 pub mod smart_clear;
 mod specialists;
+mod sync_cursor;
 #[cfg(test)]
 mod tests;
 mod tracking;
@@ -1595,6 +1596,26 @@ impl Store for SqliteStore {
         state: &SyncState,
     ) -> Result<()> {
         self.set_sync_state(account_id, mailbox, state)
+    }
+
+    fn account_provider(&self, account_id: AccountId) -> Result<crate::mail::MailProvider> {
+        self.account_provider(account_id)
+    }
+
+    fn sync_cursor(&self, account_id: AccountId) -> Result<Option<crate::mail::SyncCursor>> {
+        self.sync_cursor(account_id)
+    }
+
+    fn set_sync_cursor(
+        &self,
+        account_id: AccountId,
+        cursor: &crate::mail::SyncCursor,
+    ) -> Result<()> {
+        self.set_sync_cursor(account_id, cursor)
+    }
+
+    fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool> {
+        self.has_message(account_id, provider_msg_id)
     }
 
     fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>> {

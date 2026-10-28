@@ -2827,8 +2827,9 @@ final class AppStore {
     /// thread ids — so every one of them collides across accounts.
     ///
     /// Deliberately NOT wiped: `PreparedBodies` (keyed by a hash of the html
-    /// itself) and `ImageStore`'s files (keyed by sha256 of the url). Both are
-    /// content-addressed, so a cross-account hit is the same bytes. The image
+    /// itself), `ImageStore`'s files (keyed by sha256 of the url) and
+    /// `HeroDisk`'s thumbnails (sha256 of the hero url, plus a sender-address
+    /// index). All are content-addressed, so a cross-account hit is the same bytes. The image
     /// store's message-id PINS do go ambiguous across accounts, which
     /// mis-prioritises eviction and nothing else — accepted.
     private func wipeAccountCaches() {

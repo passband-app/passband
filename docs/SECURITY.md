@@ -175,6 +175,21 @@ refuses it before the handler is reached).
   per `Lib/ImageSniff.swift`, never svg), redirects re-guarded per hop, files named `sha256(url)`
   and a manifest holding **no URLs** — a directory listing the reader's mail URLs
   would be a readable index of their correspondence.
+- `Model/HeroCache.swift:HeroDisk` keeps the Reading cards' rendered 108px
+  thumbnails across launches and account switches, by the same rule: files named
+  `sha256(hero src)`, and an index from `sha256(lowercased sender address)` to the
+  last one that sender sent, holding **no URLs and no addresses**. Fetching it
+  still goes through `HeroBytes` (ephemeral, no cookies, empty referrer) behind
+  the remote-images pref, and painting from it is gated on the same pref.
+  **Residual risks, accepted:** the hashes are unsalted, so someone holding the
+  file can CONFIRM a guessed sender or url, though not list them; `ImageStore`
+  accepts the same exposure. The sender index trusts free-text `From`: a forged
+  mail that carries art can file that art under a real sender, and that sender's
+  card paints it on its first frame (and whenever its own fetch fails) until
+  their next real mail replaces it. It cannot ERASE a sender's art, because a
+  verdict of "no art" never unlinks; and it cannot outlast the real sender's
+  next resolve. Closing it would need the daemon to expose each message's
+  `auth_pass` to the client.
 - **`cid:` references are the local mirror of all this.** `Lib/CidImages.swift`
   matches each `<img src="cid:…">` against this message's own attachment rows by
   normalized Content-ID (§1 keeps the scheme so there is something to match) and

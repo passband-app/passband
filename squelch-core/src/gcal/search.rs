@@ -242,6 +242,9 @@ pub fn search(
     };
     let scored_events: Vec<(usize, SyncedEvent)> = event_rows
         .into_iter()
+        // A declined event is not on the owner's time; every client hides
+        // it, so serving it would make `total` count rows nobody draws.
+        .filter(|e| e.row.self_response != Some(super::SelfResponse::Declined))
         .filter(|e| query.in_bounds(instant(&e.row.start, &offset)))
         .map(|e| {
             let mut text: Vec<&str> = vec![

@@ -3577,9 +3577,15 @@ private struct StackCardSurface: View {
 private struct MessageSenderHeading: View {
     let sender: String
 
+    static let avatarSize: CGFloat = 24
+    static var gap: CGFloat { Space.scaled(9) }
+    /// Where the sender's NAME starts: the avatar and the gap after it. The
+    /// recipients line under the heading starts here too.
+    static var nameInset: CGFloat { avatarSize + gap }
+
     var body: some View {
-        HStack(spacing: Space.scaled(9)) {
-            Avatar(sender: sender, size: 24)
+        HStack(spacing: Self.gap) {
+            Avatar(sender: sender, size: Self.avatarSize)
             Text(SenderCache.resolved(sender).displayName)
                 .font(Typo.ui(13, weight: .semibold))
                 .foregroundStyle(Palette.ink)
@@ -3799,7 +3805,8 @@ private struct MessageCard: View, Equatable {
                 MessageRecipients(
                     message: message, previous: previousRecipients, me: me, compact: false
                 )
-                .padding(.leading, 25)
+                // On the sender name's x, in either density.
+                .padding(.leading, MessageSenderHeading.nameInset)
                 .layoutPriority(1)
                 Spacer(minLength: 0)
                 OpensLink(opens: opens, recipients: message.audience?.recipients, me: me)
@@ -4359,16 +4366,15 @@ private struct UnsubConfirm: View {
             ModalCard(width: 400) {
                 if mode == .ask {
                     Text("Unsubscribe from **\(senderName)**?")
-                        .font(Typo.ui(14))
+                        .font(Typo.modalTitle)
                         .foregroundStyle(Palette.ink)
                 } else {
                     Text("No unsubscribe link on this email. Block **\(senderName)** instead?")
-                        .font(Typo.ui(14))
+                        .font(Typo.modalTitle)
                         .foregroundStyle(Palette.ink)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                HStack(spacing: Space.s8) {
-                    Spacer()
+                ModalButtons {
                     Button("Cancel", action: onCancel)
                         .buttonStyle(.glass).disabled(busy)
                     Button(mode == .ask ? "Unsubscribe" : "Block sender", action: onConfirm)
@@ -4593,10 +4599,9 @@ private struct MessageRetriageConfirm: View {
                 // NO SUBTEXT. One email, no wait, nothing to warn about: the
                 // question is the whole dialog, exactly as it is for `u`.
                 Text("Re-triage this email?")
-                    .font(Typo.ui(14))
+                    .font(Typo.modalTitle)
                     .foregroundStyle(Palette.ink)
-                HStack(spacing: Space.s8) {
-                    Spacer(minLength: 0)
+                ModalButtons {
                     Button("Cancel", action: onCancel)
                         .buttonStyle(.glass).disabled(busy)
                     Button("Re-triage", action: onConfirm)

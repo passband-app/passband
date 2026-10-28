@@ -88,7 +88,7 @@ private struct AttachmentRow: View {
     }
 
     var body: some View {
-        HStack(spacing: Space.scaled(9)) {
+        HStack(spacing: AttachmentChip.gap) {
             tile
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.filename)
@@ -141,7 +141,7 @@ private struct AttachmentRow: View {
                 .accessibilityLabel("remove \(attachment.filename)")
             }
         }
-        .padding(Space.s6)
+        .padding(AttachmentChip.padding)
         .padding(.trailing, editable ? 0 : Space.s4)
         .background(
             RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
@@ -169,7 +169,7 @@ private struct AttachmentRow: View {
                     .scaledToFill()
             } else {
                 Image(systemName: glyph)
-                    .font(.system(size: 18, weight: .light))
+                    .font(AttachmentChip.glyph)
                     .foregroundStyle(Palette.inkFaintest)
             }
             if attachment.uploading {
@@ -178,12 +178,12 @@ private struct AttachmentRow: View {
                     .tint(Palette.accent)
             }
         }
-        .frame(width: 38, height: 38)
+        .frame(width: AttachmentChip.thumb, height: AttachmentChip.thumb)
         .background(
-            RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s6), style: .continuous)
+            RoundedRectangle(cornerRadius: AttachmentChip.thumbRadius, style: .continuous)
                 .fill(Palette.hairline.opacity(0.6))
         )
-        .clipShape(RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.s6), style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: AttachmentChip.thumbRadius, style: .continuous))
     }
 
     private var status: String {

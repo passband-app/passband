@@ -95,16 +95,18 @@ struct ScheduledRow: View {
                 .phoneRow(mark: mark(cells.stamp.tone), when: cells.when)
             }
         }
-
-        /// What state it is in, where a sent row shows who it went to.
-        private func mark(_ tone: ScheduledRowCopy.Tone) -> CompositionSummary<Text>.PhoneMark {
-            switch tone {
-            case .quiet: .init(symbol: "clock", tint: Palette.inkFaint)
-            case .busy: .init(symbol: "paperplane", tint: Palette.accent)
-            case .danger: .init(symbol: "exclamationmark", tint: Palette.danger)
-            }
-        }
     #endif
+
+    /// What state it is in, where a sent row shows who it went to. The tone
+    /// depends on the row's state only (never on the clock), so the Mac reads
+    /// it outside its TimelineView.
+    private func mark<T: View>(_ tone: ScheduledRowCopy.Tone) -> CompositionSummary<T>.Mark {
+        switch tone {
+        case .quiet: .init(symbol: "clock", tint: Palette.inkFaint)
+        case .busy: .init(symbol: "paperplane", tint: Palette.accent)
+        case .danger: .init(symbol: "exclamationmark", tint: Palette.danger)
+        }
+    }
 
     #if os(macOS)
         private var desktopGuts: some View {
@@ -130,6 +132,7 @@ struct ScheduledRow: View {
                         .foregroundStyle(color(cell.tone))
                 }
             }
+            .deskMark(mark(ScheduledRowCopy.trailing(row, now: .now).tone))
         }
     #endif
 

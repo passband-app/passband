@@ -79,7 +79,7 @@ struct UsageView: View {
 
     @ViewBuilder private var content: some View {
         if let series {
-            VStack(alignment: .leading, spacing: Space.s14) {
+            VStack(alignment: .leading, spacing: Space.s16) {
                 if !page.isLoading, let error = page.error {
                     Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                 }
@@ -88,7 +88,7 @@ struct UsageView: View {
                 mailCard(series)
                 signalCard(series)
                 spendCard(series)
-                HStack(alignment: .top, spacing: Space.s14) {
+                HStack(alignment: .top, spacing: Space.s16) {
                     categoryCard(series)
                     assistantCard.frame(width: Typo.measure(280))
                 }
@@ -126,7 +126,7 @@ struct UsageView: View {
 
     private func tiles(_ s: UsageSeries) -> some View {
         let versus = "vs prior \(s.days) days"
-        return HStack(alignment: .top, spacing: Space.s12) {
+        return HStack(alignment: .top, spacing: Space.s16) {
             StatTile(
                 label: "Received", value: UsageText.count(s.received),
                 delta: deltaLabel(s.receivedDelta, upIsGood: nil), versus: versus,
@@ -510,7 +510,7 @@ struct UsageView: View {
             .foregroundStyle(Palette.inkFaint.opacity(0.6))
             .lineStyle(StrokeStyle(lineWidth: 1))
             .annotation(
-                position: .trailing, alignment: .top, spacing: 8,
+                position: .trailing, alignment: .top, spacing: Space.s8,
                 overflowResolution: .init(x: .fit(to: .plot), y: .fit(to: .plot))
             ) { view }
     }
@@ -678,8 +678,9 @@ private struct StatTile: View {
                 Text(sub).font(Typo.micro).foregroundStyle(Palette.inkFaintest).lineLimit(1)
             }
         }
-        .padding(.horizontal, Space.s14)
-        .padding(.vertical, Space.s12)
+        // A standalone pane in the page's column, so it pads like one: its
+        // label sits on the same line as the cards' labels below it.
+        .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }

@@ -350,7 +350,7 @@ struct EmailsView: View {
     /// under it, or the first sent mail would read as one more scheduled one.
     @ViewBuilder private var scheduledGroup: some View {
         if !scheduled.isEmpty {
-            SentSectionLabel("scheduled", top: Space.s2)
+            SentSectionLabel("scheduled", first: true)
             ForEach(Array(scheduled.enumerated()), id: \.element.id) { i, row in
                 ScheduledRow(
                     row: row,
@@ -396,7 +396,7 @@ struct EmailsView: View {
                     }
                 #endif
             }
-            SentSectionLabel("sent", top: Space.s14)
+            SentSectionLabel("sent", first: false)
         }
     }
 
@@ -930,10 +930,10 @@ struct EmailsView: View {
 /// Padded by the rows' own padding, which puts the words on their text edge.
 private struct SentSectionLabel: View {
     let text: String
-    let top: CGFloat
-    init(_ text: String, top: CGFloat) {
+    let first: Bool
+    init(_ text: String, first: Bool) {
         self.text = text
-        self.top = top
+        self.first = first
     }
 
     var body: some View {
@@ -943,8 +943,9 @@ private struct SentSectionLabel: View {
             .textCase(.uppercase)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, Space.s12)
-            .padding(.top, top)
-            .padding(.bottom, Space.scaled(5))
+            // DayHeading's rhythm, so the two pages' labels sit alike.
+            .padding(.top, SectionLabelRhythm.top(first: first))
+            .padding(.bottom, SectionLabelRhythm.bottom)
     }
 }
 

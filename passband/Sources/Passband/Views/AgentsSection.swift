@@ -324,7 +324,7 @@ struct AgentsSection: View {
                     .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(chosen ? Palette.accent : Palette.inkFaint)
                     .frame(width: Space.scaled(18))
-                VStack(alignment: .leading, spacing: Space.scaled(2)) {
+                VStack(alignment: .leading, spacing: Space.s2) {
                     Text(level.title)
                         .font(Typo.ui(12, weight: .medium))
                         .foregroundStyle(chosen ? Palette.ink : Palette.inkDim)

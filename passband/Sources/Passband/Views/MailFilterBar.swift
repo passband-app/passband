@@ -229,8 +229,8 @@ struct DayHeading: View {
             #else
                 .padding(.horizontal, Space.scaled(11))
             #endif
-            .padding(.top, first ? Space.s4 : Space.s16)
-            .padding(.bottom, Space.scaled(5))
+            .padding(.top, SectionLabelRhythm.top(first: first))
+            .padding(.bottom, SectionLabelRhythm.bottom)
             #if !os(macOS)
                 // A plain List pins section headers; without a ground the
                 // rows would scroll visibly under the words.

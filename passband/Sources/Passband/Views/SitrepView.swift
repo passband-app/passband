@@ -199,7 +199,7 @@ struct SitrepView: View {
                 .scrollShadowRoom(topFade: Space.s14)
                 .padding(.horizontal, Space.page)
             } else {
-                HStack(alignment: .top, spacing: Space.scaled(18)) {
+                HStack(alignment: .top, spacing: Space.s16) {
                     // THE ONLY THING THAT SCROLLS WITH THE PAGE.
                     ScrollView(.vertical) {
                         VStack(spacing: Space.s16) {
@@ -223,7 +223,7 @@ struct SitrepView: View {
                     // instead of rubber-banding against nothing.
                     if !recordsEmpty {
                     ScrollView(.vertical) {
-                        VStack(spacing: Space.s14) {
+                        VStack(spacing: Space.s16) {
                             railZones
                         }
                         .padding(.top, Space.s14)
@@ -516,23 +516,13 @@ struct SitrepView: View {
 
     /// Shared by the button and by arrowing off the end of the collapsed list,
     /// so both openings look like the same gesture.
-    private static let expandAnimation: Animation = .smooth(duration: 0.28)
+    private static var expandAnimation: Animation { ZoneExpander.animation }
 
     private func expander(_ overflow: Int) -> some View {
-        Button {
+        ZoneExpander(overflow: overflow, expanded: cursor.expanded) {
             withAnimation(Self.expandAnimation) { cursor.expanded.toggle() }
-        } label: {
-            Text(cursor.expanded ? "show less" : "\(overflow) more")
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaint)
-                .padding(.horizontal, Space.scaled(11))
-                .padding(.vertical, Space.s4)
         }
-        .buttonStyle(.glass)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, Space.s6)
     }
-
 
     // MARK: - keymap
 
@@ -820,7 +810,7 @@ struct GreetingLine: View {
                 // Clickable past the glyph, but NOT past the line: a target
                 // taller than the label it sits beside would push the serif
                 // headline down by the height of a pencil nobody can see.
-                .padding(3)
+                .padding(Space.scaled(3))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -890,7 +880,7 @@ private struct DashHero: View {
     private var note: String? { standing.isEmpty ? empty?.note : nil }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Space.s2) {
             GreetingLine()
             Text(title)
                 .font(Typo.hero(38))
@@ -1073,7 +1063,7 @@ private struct AuthEyesRow: View {
                 )
                 .layoutPriority(3)
             }
-            .padding(.horizontal, Space.s10)
+            .padding(.horizontal, EyesRow.hPadding)
             .padding(.vertical, Space.scaled(7))
             .contentShape(Rectangle())
         }
@@ -1081,6 +1071,7 @@ private struct AuthEyesRow: View {
         .background {
             ObligationWash(index: index, cursor: cursor, hover: hover, tint: tone)
         }
+        .padding(.horizontal, -EyesRow.hPadding)
         .onHover { over in
             hover.on = over
             if over { cursor.hover(index) }
@@ -1091,6 +1082,14 @@ private struct AuthEyesRow: View {
 }
 
 // MARK: - obligation row
+
+/// A For-your-eyes row's inset. The row is then pulled back out by the same
+/// amount (DeskRow's idea), so its avatar sits on the zone title's line and
+/// the hover/selection wash spends the card's padding instead of indenting it.
+@MainActor
+private enum EyesRow {
+    static var hPadding: CGFloat { Space.s10 }
+}
 
 private struct ObligationRow: View {
     @Environment(AppStore.self) private var store
@@ -1170,7 +1169,7 @@ private struct ObligationRow: View {
                         .layoutPriority(3)
                 }
             }
-            .padding(.horizontal, Space.s10)
+            .padding(.horizontal, EyesRow.hPadding)
             .padding(.vertical, Space.scaled(7))
             .contentShape(Rectangle())
         }
@@ -1190,6 +1189,7 @@ private struct ObligationRow: View {
                     .padding(.vertical, Space.scaled(5))
             }
         }
+        .padding(.horizontal, -EyesRow.hPadding)
         .onHover { over in
             hover.on = over
             if over {
@@ -1646,7 +1646,7 @@ struct ZonePill: View {
                     .foregroundStyle(lit ? Palette.ink : Palette.inkDim)
                     .contentTransition(.opacity)
             }
-            .padding(.leading, lit && key != nil ? 3 : 8)
+            .padding(.leading, lit && key != nil ? Space.scaled(3) : Space.scaled(9))
             .padding(.trailing, Space.scaled(9))
             .padding(.vertical, Space.scaled(3))
             .background(

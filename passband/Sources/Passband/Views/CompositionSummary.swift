@@ -33,16 +33,21 @@ struct CompositionSummary<Trailing: View>: View {
     /// recipient then; an outbox row does (a fan-out, or bcc only), and says
     /// so through `ScheduledRowCopy.emptyRecipient`.
     var emptyTo = "no recipient"
-    #if !os(macOS)
-        /// What stands where a sent row has its recipient's avatar. Set (by
-        /// `phoneRow`) only on the Sent page's outbox, and its presence is
-        /// what turns this into the phone's two-line row: a drafts-page row
-        /// leaves it nil and keeps the shape below.
-        struct PhoneMark {
-            var symbol: String
-            var tint: Color
-        }
-        var phoneMark: PhoneMark?
+    /// What stands where a sent row has its recipient's avatar: a state
+    /// glyph in a tinted disc. Set only on the Sent page's outbox, so the
+    /// outbox's names start on the sent rows' name line below; a drafts-page
+    /// row leaves it nil and keeps its own shape.
+    struct Mark {
+        var symbol: String
+        var tint: Color
+    }
+    #if os(macOS)
+        /// The Mac's mark, in SentRow's 20pt avatar slot (`deskMark(_:)`).
+        var deskMark: Mark?
+    #else
+        /// Set (by `phoneRow`) only on the Sent page's outbox, and its
+        /// presence is what turns this into the phone's two-line row.
+        var phoneMark: Mark?
         /// "tomorrow 9am", under the words: the half of the outbox cell that
         /// does not fit on the name line (`ScheduledRowCopy.phoneCells`).
         var phoneWhen: String?
@@ -99,6 +104,18 @@ struct CompositionSummary<Trailing: View>: View {
                 // sent rows' line in either density.
                 .frame(width: MeterSlot.width(slotWidth), alignment: .trailing)
 
+            #if os(macOS)
+                if let deskMark {
+                    // SentRow's avatar slot: 20pt, then the row's 9pt gap,
+                    // so the outbox's names start where the sent rows' do.
+                    // Centered on line one (the name), not on its baseline.
+                    markDisc(deskMark, size: Self.deskMarkSize, glyph: 9)
+                        .alignmentGuide(.firstTextBaseline) { d in
+                            d[VerticalAlignment.center] + Typo.size(12) * 0.35
+                        }
+                }
+            #endif
+
             VStack(alignment: .leading, spacing: Space.s2) {
                 HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
                     who
@@ -110,6 +127,29 @@ struct CompositionSummary<Trailing: View>: View {
         }
     }
 
+    /// SentRow's avatar size on the Mac. A constant there too: the avatar
+    /// is an image, not room.
+    static var deskMarkSize: CGFloat { 20 }
+
+    /// The state glyph in its tinted disc, on either platform.
+    private func markDisc(_ mark: Mark, size: CGFloat, glyph: CGFloat) -> some View {
+        Image(systemName: mark.symbol)
+            .font(Typo.ui(glyph, weight: .semibold))
+            .foregroundStyle(mark.tint)
+            .frame(width: size, height: size)
+            .background(Circle().fill(mark.tint.opacity(0.14)))
+            .accessibilityHidden(true)
+    }
+
+    #if os(macOS)
+        /// The outbox row on the Mac: a state mark in the avatar slot.
+        func deskMark(_ mark: Mark) -> Self {
+            var row = self
+            row.deskMark = mark
+            return row
+        }
+    #endif
+
     // MARK: - phone
 
     #if !os(macOS)
@@ -118,21 +158,16 @@ struct CompositionSummary<Trailing: View>: View {
         /// a mark, who and the stamp, then the words at the row's full width.
         /// What is its own is the mark (a state, where a sent row has a
         /// person) and a third line for the time it goes or why it did not.
-        func phoneRow(mark: PhoneMark, when: String?) -> Self {
+        func phoneRow(mark: Mark, when: String?) -> Self {
             var row = self
             row.phoneMark = mark
             row.phoneWhen = when
             return row
         }
 
-        private func phoneBody(_ mark: PhoneMark) -> some View {
+        private func phoneBody(_ mark: Mark) -> some View {
             HStack(alignment: .top, spacing: PhoneRow.gap) {
-                Image(systemName: mark.symbol)
-                    .font(Typo.ui(11, weight: .semibold))
-                    .foregroundStyle(mark.tint)
-                    .frame(width: PhoneRow.mark, height: PhoneRow.mark)
-                    .background(Circle().fill(mark.tint.opacity(0.14)))
-                    .accessibilityHidden(true)
+                markDisc(mark, size: PhoneRow.mark, glyph: 11)
 
                 VStack(alignment: .leading, spacing: PhoneRow.lineGap) {
                     HStack(alignment: .firstTextBaseline, spacing: Space.s6) {

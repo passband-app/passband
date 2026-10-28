@@ -150,9 +150,16 @@ struct RecipientField<F: Hashable>: View {
                 // The whole header LINE takes the drop, label included: on a
                 // card the line is the field.
                 InlineFieldRow(label: label, accessory: accessory) { pillRow }
+                    // The line runs edge to edge of the card, so the cue is
+                    // inset off the card's edge and rounded concentric with
+                    // its corner rather than drawn flush against it.
                     .background(
-                        RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                        RoundedRectangle(
+                            cornerRadius: Radius.concentric(Radius.well, inset: Space.s4),
+                            style: .continuous
+                        )
                             .fill(Palette.accentSoft)
+                            .padding(Space.s4)
                             .opacity(dropTargeted ? 1 : 0)
                     )
                     .animation(.easeOut(duration: 0.12), value: dropTargeted)

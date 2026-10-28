@@ -218,7 +218,9 @@ struct SettingsView: View {
                     Text(card.section.label)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
-                        .padding(.leading, 2)
+                        // On the card's own text edge (SectionCard pads by
+                        // zonePadding), so crumb and card label share a line.
+                        .padding(.leading, Space.s16)
                     SettingsCardView(card: card, openPane: openPane)
                 }
             }
@@ -1505,6 +1507,8 @@ struct AssistantSection: View {
             text: $keyInput, editing: $editingKey
         )
         .onChange(of: keyInput) { _, _ in note = nil }
+        // The SettingsRow shape: what is true on the leading side, the
+        // control that changes it on the trailing one.
         HStack(spacing: Space.s10) {
             if busy {
                 Text("saving…").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -1513,10 +1517,6 @@ struct AssistantSection: View {
                 StatusDot(
                     color: Palette.positive,
                     label: "key set" + (status.provider.map { " · \($0.label)" } ?? ""))
-                Button("forget") { Task { await forgetKey() } }
-                    .buttonStyle(.plain)
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.danger)
             }
             switch note {
             case .ok(let text):
@@ -1525,6 +1525,13 @@ struct AssistantSection: View {
                 Text(text).font(Typo.micro).foregroundStyle(Palette.danger)
             case nil:
                 EmptyView()
+            }
+            Spacer(minLength: Space.s10)
+            if status.present {
+                Button("forget") { Task { await forgetKey() } }
+                    .buttonStyle(.plain)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.danger)
             }
         }
         SettingsHint(
@@ -1621,13 +1628,13 @@ struct AccountSection: View {
                 // set a flag into the void was worse than no button. Every other
                 // verb on this pane (rename, make active, remove) was already
                 // AccountManager and worked identically on both.
-                HStack(spacing: Space.s12) {
+                SettingsRow(
+                    title: "Another mailbox",
+                    detail: "One daemon per mailbox, each with its own rules and triage."
+                ) {
                     Button("Add Account…") { store.addAccountSheetOpen = true }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.accent)
-                    Text("one daemon per mailbox, each with its own rules and triage")
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
                 }
                 .padding(.top, Space.s4)
                 // WHAT SWITCHES THEM differs, so the hint does. The Mac has nine
@@ -1650,13 +1657,13 @@ struct AccountSection: View {
             // anybody who changes their mind comes here.
             if store.shareAvailable {
                 SectionCard(label: "Invites") {
-                    HStack(spacing: Space.s12) {
+                    SettingsRow(
+                        title: "Invite a friend",
+                        detail: "Your friends get an invite from your own address."
+                    ) {
                         Button("Share Passband…") { store.openShareSheet(from: .settings) }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.accent)
-                        Text("your friends get an invite from your own address")
-                            .font(Typo.micro)
-                            .foregroundStyle(Palette.inkFaintest)
                     }
                 }
             }
@@ -1666,7 +1673,10 @@ struct AccountSection: View {
             #if os(macOS)
                 if store.iosConnected == false {
                     SectionCard(label: "iPhone app") {
-                        HStack(spacing: Space.s12) {
+                        SettingsRow(
+                            title: "Passband for iPhone",
+                            detail: "In alpha on TestFlight."
+                        ) {
                             Button("Copy TestFlight Link") {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(
@@ -1674,9 +1684,6 @@ struct AccountSection: View {
                             }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.accent)
-                            Text("Passband for iPhone is in alpha on TestFlight")
-                                .font(Typo.micro)
-                                .foregroundStyle(Palette.inkFaintest)
                         }
                     }
                 }

@@ -169,7 +169,7 @@ struct AuthView: View {
             // A plain stack of three children; the rows' stack below is the
             // lazy one, so only the rows on screen are built and a page holding
             // hundreds of auth messages scrolls like one holding ten.
-            VStack(alignment: .leading, spacing: Space.s14) {
+            VStack(alignment: .leading, spacing: Space.s16) {
                 if let focus = d.focus {
                     FocusPanel(
                         meta: focus,
@@ -276,7 +276,7 @@ struct AuthView: View {
     // MARK: - rail
 
     private func rail(_ d: Derived) -> some View {
-        VStack(spacing: Space.s12) {
+        VStack(spacing: Space.s16) {
             VStack(alignment: .leading, spacing: Space.scaled(9)) {
                 AuthDecisionHeader(
                     open: d.openDecisions, cardCount: d.decisionCards.count,

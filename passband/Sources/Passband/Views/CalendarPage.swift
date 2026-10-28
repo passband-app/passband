@@ -67,10 +67,13 @@
         /// while the event pane is open: the detail is away until it closes.
         private var twoColumns: Bool {
             !store.eventPaneOpen
-                && pageWidth >= Self.listMeasure + Self.detailWidth + Space.scaled(18) + Space.scaled(44)
+                && pageWidth >= Self.listMeasure + Self.detailWidth + Self.columnGap + Space.scaled(44)
         }
         private static var listMeasure: CGFloat { Typo.measure(560) }
         private static var detailWidth: CGFloat { Typo.measure(340) }
+        /// The gutter between the agenda and its detail: the board's column
+        /// gap, so every two-column page splits the same way.
+        private static var columnGap: CGFloat { Space.s16 }
 
         /// The month's grid and its pane side by side: seven cells of about
         /// 78 points, and the column at the detail's own width (the pane
@@ -192,7 +195,7 @@
                     Spacer(minLength: 0)
                 } else {
                     ScrollViewReader { proxy in
-                        HStack(alignment: .top, spacing: Space.scaled(18)) {
+                        HStack(alignment: .top, spacing: Self.columnGap) {
                             ScrollView(.vertical) {
                                 agenda(
                                     days: days, next: next, selected: selected, now: now, cal: cal
@@ -908,7 +911,9 @@
                         .foregroundStyle(Palette.inkDim)
                         .lineLimit(1)
                 }
-                .padding(.horizontal, Space.s12)
+                // The rows' own inset, so the card's words sit on the page
+                // gutter with theirs (the column is inset `DeskRow.listInset`).
+                .padding(.horizontal, DeskRow.hPadding)
                 .padding(.vertical, Space.s10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(

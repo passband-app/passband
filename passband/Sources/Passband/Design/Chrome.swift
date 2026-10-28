@@ -169,6 +169,51 @@ enum DeskRow {
     static var vPadding: CGFloat { Space.s6 }
 }
 
+/// THE RHYTHM OF A SECTION LABEL INSIDE A LIST: the mail tab's day headings
+/// (`DayHeading`) and the Sent page's "scheduled" / "sent" groups
+/// (`SentSectionLabel`) are the same engraved label over a run of rows, so
+/// they take the same air: a little over the list's first one, a group's
+/// worth over every later one, and the same short drop to the rows.
+@MainActor
+enum SectionLabelRhythm {
+    static var firstTop: CGFloat { Space.s4 }
+    static var top: CGFloat { Space.s16 }
+    static var bottom: CGFloat { Space.scaled(5) }
+    static func top(first: Bool) -> CGFloat { first ? firstTop : top }
+}
+
+/// ONE FILE CHIP, measured once: the reader's attachment cards
+/// (`AttachmentStrip`), the composer's tray (`AttachmentTray`) and the
+/// outbox preview's read-only chips (`ScheduledPreview`) are the same object
+/// in three states, so they share the padding, the thumb and its corner,
+/// which runs concentric with the chip's `Radius.well` across that padding.
+@MainActor
+enum AttachmentChip {
+    static var padding: CGFloat { Space.s6 }
+    /// The tile. Holds an image or a glyph rather than text, but it sits
+    /// beside two lines of type, so it follows the spacing curve.
+    static var thumb: CGFloat { Space.scaled(38) }
+    static var thumbRadius: CGFloat { Radius.concentric(Radius.well, inset: padding) }
+    /// Tile to the words.
+    static var gap: CGFloat { Space.scaled(9) }
+    /// The document glyph standing in for a thumbnail.
+    static var glyph: Font { Typo.ui(18, weight: .light) }
+}
+
+/// THE SIDE PANEL'S BLEEDING LIST ROW: `DeskRow`'s arrangement on the panel
+/// gutter. The search hits, the sender block above them, the recent searches
+/// and the browse board are inset `listInset` and pad `hPadding`, so their
+/// words land on `Space.panel` (the panel title's edge) and the selection
+/// fill reaches out to the left of them.
+@MainActor
+enum PanelRow {
+    static var hPadding: CGFloat { Space.s10 }
+    static var listInset: CGFloat { Space.panel - hPadding }
+    /// One height for the rows on the hit grid (26pt avatar, then words):
+    /// the hits and the senders offered above them.
+    static var vPadding: CGFloat { Space.s10 }
+}
+
 // MARK: - rules
 
 /// The 0.5pt rule dividing a header from what it heads. Ink-side (see
@@ -393,6 +438,11 @@ struct GlassSegmented<T: Hashable>: View {
                 } label: {
                     Text(option.label)
                         .font(Typo.chip)
+                        // A segment is one word on one line. Squeezed, the
+                        // control should claim its width from the row, never
+                        // wrap a label ("Squelc / h" in the Sound picker).
+                        .lineLimit(1)
+                        .fixedSize()
                         .foregroundStyle(selection == option.value ? .white : Palette.ink)
                         .padding(.horizontal, Space.s12)
                         .padding(.vertical, Space.scaled(5))

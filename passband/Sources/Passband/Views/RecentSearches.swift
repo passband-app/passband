@@ -53,7 +53,10 @@ struct RecentSearches: View {
                             .truncationMode(.middle)
                         Spacer(minLength: Space.s8)
                     }
-                    .padding(.horizontal, Space.scaled(9))
+                    // The panel's row padding: the parent insets this list
+                    // `PanelRow.listInset`, so the words land on the panel
+                    // gutter, under the title and the section headers.
+                    .padding(.horizontal, PanelRow.hPadding)
                     .padding(.vertical, Space.scaled(7))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
@@ -65,7 +68,7 @@ struct RecentSearches: View {
                 )
             }
         }
-        .padding(Space.s4)
+        .padding(.vertical, Space.s4)
         .padding(.top, Space.s8)
         .contextMenu {
             Button("Clear recent searches", action: onClear)

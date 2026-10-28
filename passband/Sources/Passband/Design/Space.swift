@@ -56,6 +56,12 @@ enum Space {
     /// the same distance in from its corner.
     static var modal: CGFloat { scaled(18) }
 
+    /// THE SIDE-PANEL GUTTER: the edge a right-hand glass panel's title, its
+    /// fields, its row words and its footer share. Search / browse
+    /// (`SidePanel`) and the composer (`ComposePane`) are the same glass in
+    /// the same place, so they keep their words the same distance in.
+    static var panel: CGFloat { s16 }
+
     /// An off-ladder compact value on the same curve. For the tuned numbers
     /// the ladder would shift by a point; not a way around choosing a step.
     static func scaled(_ compact: CGFloat) -> CGFloat {

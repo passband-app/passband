@@ -25,6 +25,7 @@ use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
 use crate::gmail_budget::GmailBudget;
 use crate::mail::gmail::{GMAIL_QUOTA_RETRY_CAP, GmailSource, GmailSourceParts};
+use crate::mail::graph::{GRAPH_API_BASE, GraphSource, GraphSourceParts};
 use crate::mail::{
     Changes, ChangesError, FetchedMessage, Folder, Listing, MailProvider, MailSource, Placement,
     RawBody, SourceRefusals, SyncCursor, Urgency,
@@ -787,6 +788,9 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// [`GMAIL_API_BASE`] in production; the tests point it at a loopback mock so
     /// the walk/cursor rules are asserted on the wire rather than on a struct.
     api_base: String,
+    /// Graph base for an Outlook account's source. Always [`GRAPH_API_BASE`]
+    /// in production; test-only setter, for the reason `api_base` has none.
+    graph_api_base: String,
     /// THE ACCOUNT'S MAIL SOURCE, picked from its `provider` row and built ON
     /// FIRST USE, for the reason [`Self::notify_lane`] is: it holds clones of
     /// what the builders (`with_metrics`, `with_gmail_budget`) replace after
@@ -909,6 +913,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             gateway_answer_ms: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
+            graph_api_base: GRAPH_API_BASE.to_string(),
             profile_url: profile::PEOPLE_ME_URL.to_string(),
             source: std::sync::OnceLock::new(),
             last_cursor: std::sync::Mutex::new(None),
@@ -940,11 +945,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// a build that could be aimed at an arbitrary host would be a bearer-token
     /// exfiltration primitive.
     #[cfg(test)]
-    fn with_api_base(mut self, base: String) -> Self {
+    pub(crate) fn with_api_base(mut self, base: String) -> Self {
         // The profile fetch goes wherever Gmail goes: a mocked engine must not
         // be one poll tick away from a real request to Google. The mock has no
         // such route, which reads as "no profile", exactly like an old grant.
         self.profile_url = format!("{base}/people/me");
+        self.graph_api_base = base.clone();
         self.api_base = base;
         self
     }
@@ -1116,6 +1122,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
         let built: Arc<dyn MailSource> = match self.store.account_provider(self.account_id)? {
             MailProvider::Gmail => Arc::new(GmailSource::new(self.gmail_parts())),
+            MailProvider::Outlook => Arc::new(GraphSource::new(self.graph_parts())),
         };
         Ok(self.source.get_or_init(|| built).clone())
     }
@@ -1134,6 +1141,22 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             refusals: self.archive.refusals.clone(),
             api_base: self.api_base.clone(),
             quota_backoff: self.gmail_quota_backoff,
+            quota_retry_cap: self.gmail_quota_retry_cap,
+        }
+    }
+
+    /// What this engine's Outlook source is built from. The same HTTP client
+    /// (redirects refused) and the same refusal counters as Gmail's; Graph's
+    /// quota is Microsoft's per-mailbox throttle, so the Gmail budget does not
+    /// apply.
+    fn graph_parts(&self) -> GraphSourceParts<C> {
+        GraphSourceParts {
+            http: self.http.clone(),
+            creds: self.creds.clone(),
+            account_id: self.account_id,
+            metrics: self.metrics.clone(),
+            refusals: self.archive.refusals.clone(),
+            api_base: self.graph_api_base.clone(),
             quota_retry_cap: self.gmail_quota_retry_cap,
         }
     }
@@ -1226,6 +1249,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             "squelch: {} sync starting for <redacted account>",
             match source.provider() {
                 MailProvider::Gmail => "gmail REST",
+                MailProvider::Outlook => "outlook graph",
             }
         );
 
@@ -2307,6 +2331,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if let Ok(source) = self.source() {
             match source.provider() {
                 MailProvider::Gmail => self.refresh_profile().await,
+                // No Google profile for a Microsoft mailbox, and no Graph
+                // photo fetch yet: the client shows the initial.
+                MailProvider::Outlook => {}
             }
         }
         // BEFORE the walk, for the same reason: the sweep is purely local —
@@ -2394,6 +2421,25 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
     }
 
+    /// The ids of an incremental walk worth fetching. All of them for a
+    /// source whose change feed names only arrivals (Gmail); for one that also
+    /// names CHANGED mail (Graph's delta, on every read-state flip), only the
+    /// ids not already stored, so a poll on an account somebody reads in
+    /// another client does not re-download every message they opened. The
+    /// incremental path only: see [`MailSource::changes_report_updates`].
+    fn unstored_changes(&self, ids: &[String]) -> Result<Vec<String>> {
+        if ids.is_empty() || !self.source()?.changes_report_updates() {
+            return Ok(ids.to_vec());
+        }
+        let mut fresh = Vec::with_capacity(ids.len());
+        for id in ids {
+            if !self.store.has_message(self.account_id, id)? {
+                fresh.push(id.clone());
+            }
+        }
+        Ok(fresh)
+    }
+
     /// One incremental poll: THREE label-filtered `history.list` walks from the
     /// SAME start cursor, INBOX then SENT then SPAM, with the cursor committed
     /// ONCE at the end at the max historyId any walk observed.
@@ -2431,10 +2477,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             return Ok(false);
         }
         let (inbox_ids, inbox_cursor) = (inbox.ids, inbox.cursor);
-        if !inbox_ids.is_empty() {
+        let inbox_new = self.unstored_changes(&inbox_ids)?;
+        if !inbox_new.is_empty() {
             let n = self
                 .fetch_raw_and_ingest(
-                    &inbox_ids,
+                    &inbox_new,
                     Mailbox::Inbox,
                     IngestOrigin::Incremental,
                     Urgency::Live,
@@ -2468,7 +2515,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
         };
 
-        let sent_only = subtract_ids(sent_ids, &inbox_ids);
+        // A source whose feed names every change (Graph's delta) proves an
+        // idle mailbox the other way round from Gmail: both rounds empty.
+        let idle =
+            inbox_ids.is_empty() && sent_ids.is_empty() && self.source()?.changes_report_updates();
+        let sent_only = self.unstored_changes(&subtract_ids(sent_ids, &inbox_ids))?;
         if !sent_only.is_empty() {
             // `Incremental`, like the INBOX half: the silence guarantee for the
             // user's own mail is NOT the origin. It is, in order,
@@ -2506,7 +2557,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 .source()?
                 .merge_cursors(start, &inbox_cursor, &sent_cursor),
         )?;
-        Ok(true)
+        Ok(!idle)
     }
 
     /// Fresh catch-up: re-run the backfill-window INBOX fetch, then the SENT
@@ -4152,6 +4203,9 @@ fn synthesize_rfc822_headers(headers: &[(String, String)]) -> String {
 
 /// Type alias helper so callers can name the concrete rule slice.
 pub type Rules = Vec<SenderRule>;
+
+#[cfg(test)]
+mod outlook_tests;
 
 #[cfg(test)]
 mod tests {

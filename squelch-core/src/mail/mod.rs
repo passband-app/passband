@@ -11,6 +11,7 @@
 //! What stays Gmail-specific on purpose, and why, is in `docs/MAIL-PROVIDERS.md`.
 
 pub mod gmail;
+pub mod graph;
 
 use std::time::Duration;
 
@@ -25,10 +26,17 @@ use crate::error::{CoreError, Result};
 /// place it is read rather than a default somewhere downstream: a database
 /// written by a newer build (an `imap` account) and opened by this one must
 /// refuse that account, never sync it as Gmail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum MailProvider {
     /// Google's Gmail REST API, over OAuth.
+    #[default]
     Gmail,
+    /// Microsoft's Graph mail API (Outlook.com, Hotmail, Microsoft 365), over
+    /// OAuth: [`graph::GraphSource`].
+    Outlook,
 }
 
 impl MailProvider {
@@ -36,6 +44,7 @@ impl MailProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             MailProvider::Gmail => "gmail",
+            MailProvider::Outlook => "outlook",
         }
     }
 
@@ -44,6 +53,7 @@ impl MailProvider {
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "gmail" => Ok(MailProvider::Gmail),
+            "outlook" => Ok(MailProvider::Outlook),
             // The value is ours (a column default or a build's own write), so
             // echoing it is safe and is what makes the log line useful.
             other => Err(CoreError::InvalidInput(format!(
@@ -269,6 +279,21 @@ pub trait MailSource: Send + Sync {
     /// The provider's own (messages, threads) unread counts for the inbox.
     async fn inbox_unread(&self) -> Result<(i64, i64)>;
 
+    /// Does [`Self::changes`] report mail that CHANGED, not only mail that
+    /// arrived? Gmail's `messageAdded` history names a message once, when it
+    /// lands. Graph's delta names it again on every read-state flip, flag or
+    /// category edit, so on an account somebody reads elsewhere most of a
+    /// poll's ids are mail already stored.
+    ///
+    /// `true` makes the engine skip ids it already holds
+    /// ([`crate::store::Store::has_message`]) on the INCREMENTAL path only,
+    /// before any body is fetched. Never on a backfill or a catch-up: those
+    /// re-fetch stored mail on purpose, because that is how a sanitizer fix
+    /// reaches `body_html`, which is baked at ingest.
+    fn changes_report_updates(&self) -> bool {
+        false
+    }
+
     /// PARK UNTIL THE MAILBOX MAY HAVE CHANGED, or `max_wait` passes, whichever
     /// is first. The poll lane calls this between ticks, inside the same
     /// `select!` as the manual refresh and shutdown, so a source that can be
@@ -301,15 +326,14 @@ mod tests {
 
     #[test]
     fn a_provider_round_trips_through_its_stored_value() {
-        assert_eq!(
-            MailProvider::parse(MailProvider::Gmail.as_str()).unwrap(),
-            MailProvider::Gmail
-        );
+        for p in [MailProvider::Gmail, MailProvider::Outlook] {
+            assert_eq!(MailProvider::parse(p.as_str()).unwrap(), p);
+        }
     }
 
     #[test]
     fn an_unknown_provider_is_refused_not_defaulted() {
-        for stored in ["imap", "Gmail", "", " gmail"] {
+        for stored in ["imap", "Gmail", "Outlook", "", " gmail", "graph"] {
             assert!(
                 matches!(MailProvider::parse(stored), Err(CoreError::InvalidInput(_))),
                 "{stored:?} must not read as a provider"

@@ -4773,6 +4773,9 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
             )
             .with_budget(state.gmail_budget().cloned()),
         )),
+        MailProvider::Outlook => Err(writer_unavailable(CoreError::InvalidInput(
+            "outlook writes are not in this build yet".into(),
+        ))),
     }
 }
 

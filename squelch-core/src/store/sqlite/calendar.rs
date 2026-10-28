@@ -479,6 +479,79 @@ impl SqliteStore {
         Ok((near.into_iter().map(|(_, e)| e).collect(), truncated))
     }
 
+    /// Search candidates (docs/CALENDAR.md §10.1): every event of a
+    /// calendar being read whose text contains at least one of `needles`
+    /// (lowercase), each with its guests. The text is the title, place,
+    /// description, calendar name and, when `addresses` is set, the
+    /// organizer's and guests' addresses besides the guests' names. A
+    /// SUPERSET of the exact test in [`crate::gcal::search`], which runs on
+    /// what this returns: `instr` over ASCII-lowercased text finds every
+    /// needle a word test would, and more. No needles, no candidates.
+    pub fn calendar_search_candidates(
+        &self,
+        account: AccountId,
+        needles: &[String],
+        addresses: bool,
+    ) -> Result<Vec<SyncedEvent>> {
+        use rusqlite::types::Value;
+        if needles.is_empty() {
+            return Ok(Vec::new());
+        }
+        let people = if addresses {
+            "COALESCE(g.name,'')||' '||g.email"
+        } else {
+            "COALESCE(g.name,'')"
+        };
+        let organizer = if addresses {
+            "||' '||COALESCE(e.organizer_email,'')"
+        } else {
+            ""
+        };
+        let text = format!(
+            "lower(COALESCE(e.summary,'')||' '||COALESCE(e.location,'')||' '||
+                   COALESCE(e.description,'')||' '||COALESCE(c.summary,''){organizer}||' '||
+                   COALESCE((SELECT group_concat({people},' ') FROM calendar_event_guests g
+                             WHERE g.account_id=e.account_id AND g.calendar_id=e.calendar_id
+                               AND g.event_id=e.event_id),''))"
+        );
+        let mut bound = vec![Value::Integer(account)];
+        let any: Vec<String> = needles
+            .iter()
+            .map(|needle| {
+                bound.push(Value::Text(needle.clone()));
+                format!("instr(t.text,?{})>0", bound.len())
+            })
+            .collect();
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT * FROM (
+                 SELECT {EVENT_COLUMNS}, {text} AS text
+                 FROM calendar_events e
+                 JOIN calendar_calendars c ON c.account_id=e.account_id AND c.calendar_id=e.calendar_id
+                 WHERE e.account_id=?1 AND c.selected=1
+             ) t WHERE {}",
+            any.join(" OR ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut found: Vec<SyncedEvent> = stmt
+            .query_map(rusqlite::params_from_iter(bound), synced_event)?
+            .filter_map(|row| row.map(|r| r.map(|(_, e)| e)).transpose())
+            .collect::<std::result::Result<_, _>>()?;
+        let mut guests = conn.prepare_cached(
+            "SELECT email,name,response,is_organizer,is_self FROM calendar_event_guests
+             WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3 ORDER BY position",
+        )?;
+        for event in &mut found {
+            event.row.guests = guests
+                .query_map(
+                    params![account, event.calendar_id, event.row.event_id],
+                    |r| guest(r, 0),
+                )?
+                .collect::<std::result::Result<_, _>>()?;
+        }
+        Ok(found)
+    }
+
     /// One stored event of a calendar being read, with its calendar's name,
     /// colour and role. None when there is no such event, or its calendar is
     /// no longer read.

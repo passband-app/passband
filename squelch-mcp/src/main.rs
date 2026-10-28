@@ -139,6 +139,8 @@ async fn serve_http(addr: SocketAddr) -> anyhow::Result<()> {
         // Drafts and sending are offered by `squelchd serve`.
         None,
         archive_surfacing(),
+        // No feature flags or calendar grant here: no `search_calendar`.
+        Default::default(),
     )?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr().unwrap_or(addr);

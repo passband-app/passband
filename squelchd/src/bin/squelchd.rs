@@ -2298,6 +2298,13 @@ fn build_serve_router(
         Some(api_state.agent_mailer()),
         // And the human door's own archive settings: one depth, one poke.
         api_state.archive_surfacing(),
+        // The human door's own feature flags and calendar grant, so
+        // `search_calendar` is on exactly when the calendar routes are, and
+        // reads real events exactly when the timeline does.
+        squelch_mcp::CalendarDoor {
+            features: api_state.features().clone(),
+            credentials: api_state.calendar().cloned(),
+        },
     )?;
     // The latency histogram wraps BOTH doors, outermost, so the number it
     // records is everything the daemon did for the request including auth. It

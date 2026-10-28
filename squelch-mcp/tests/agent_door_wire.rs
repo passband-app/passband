@@ -155,6 +155,7 @@ fn seeded_door() -> axum::Router {
         &AgentDoorAuth::Open,
         None,
         Default::default(),
+        Default::default(),
     )
     .expect("router")
 }

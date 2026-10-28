@@ -27,7 +27,7 @@ use squelch_core::store::archive_surface::ArchiveSurfacing;
 use tokio_util::sync::CancellationToken;
 
 pub use auth::AgentDoorAuth;
-pub use server::SquelchServer;
+pub use server::{CalendarDoor, SquelchServer};
 
 /// Path the Streamable HTTP transport is mounted at; clients connect to
 /// `http://<addr>/mcp`. Shared so the MCP bin and `squelchd serve` agree.
@@ -56,6 +56,7 @@ fn streamable_http_service(
     cancellation: CancellationToken,
     mailer: Option<Arc<dyn AgentMailer>>,
     surfacing: ArchiveSurfacing,
+    calendar: CalendarDoor,
 ) -> anyhow::Result<SquelchHttpService> {
     // DNS-rebinding guard: rmcp defaults to loopback-only Host headers, which
     // 403s requests proxied by `tailscale serve` (Host: *.ts.net). Additive —
@@ -69,6 +70,7 @@ fn streamable_http_service(
         squelch_core::config::mcp_allowed_hosts(),
         mailer,
         surfacing,
+        calendar,
     )
 }
 
@@ -82,12 +84,14 @@ fn build_service(
     allowed_hosts: Vec<String>,
     mailer: Option<Arc<dyn AgentMailer>>,
     surfacing: ArchiveSurfacing,
+    calendar: CalendarDoor,
 ) -> anyhow::Result<SquelchHttpService> {
     let template = SquelchServer::new(store, account_email)?
         .with_shipment_policy(shipment_policy)
         .with_ranking_config(ranking)
         .with_mailer(mailer)
-        .with_archive_surfacing(surfacing);
+        .with_archive_surfacing(surfacing)
+        .with_calendar(calendar);
     Ok(StreamableHttpService::new(
         move || Ok(template.clone()),
         Arc::new(LocalSessionManager::default()),
@@ -130,6 +134,11 @@ fn build_service(
 /// refine poke and one wait. `Default::default()` (the standalone binary)
 /// reports no archive and never waits.
 ///
+/// `calendar` is what `search_calendar` needs from the host: the feature
+/// flags (the tool is listed and answers only while `calendar` is on) and the
+/// calendar grant (real events are read only while it holds).
+/// `CalendarDoor::default()` offers no calendar at all.
+///
 /// The returned router has no fallback, so it merges into one that does.
 #[allow(clippy::too_many_arguments)] // One door, and everything the host decides about it.
 pub fn agent_door_router(
@@ -141,6 +150,7 @@ pub fn agent_door_router(
     auth: &AgentDoorAuth,
     mailer: Option<Arc<dyn AgentMailer>>,
     surfacing: ArchiveSurfacing,
+    calendar: CalendarDoor,
 ) -> anyhow::Result<axum::Router> {
     use axum::routing::{any, get};
 
@@ -157,6 +167,7 @@ pub fn agent_door_router(
                 cancellation,
                 mailer,
                 surfacing,
+                calendar,
             )?;
             Ok(axum::Router::new().nest_service(MCP_PATH, service))
         }
@@ -179,6 +190,7 @@ pub fn agent_door_router(
                 allowed_hosts,
                 mailer,
                 surfacing,
+                calendar,
             )?;
             let state = auth::AuthLayerState::new(config, account_email);
             // `route_layer`, not `layer`: the guard wraps the MCP routes only,

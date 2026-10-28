@@ -819,8 +819,7 @@ fn gmail_slots(scopes: AuthScopes) -> Vec<CredentialKind> {
 
 /// Whether a Gmail run (plain `auth` or `--write`) should end by OFFERING
 /// the optional calendar consent, so a new self-host is asked for calendar at
-/// setup even while the `calendar` hidden feature is off (sync calls nothing
-/// until it is on). Offered only while no calendar credential is stored, so
+/// setup rather than on the Calendar page later. Offered only while no calendar credential is stored, so
 /// a repair run does not ask again, and never on `--calendar`, which is that
 /// consent already.
 ///
@@ -2497,15 +2496,7 @@ fn cmd_serve(
     // with its own backoff, never inside the Gmail sync loop: a calendar
     // failure of any kind must not fail or delay Gmail sync, triage or ingest.
     let calendar_sync = api_state.calendar().cloned().and_then(|creds| {
-        // The same live feature set the human door gates on: the loop asks it
-        // at every pass, so a flag flipped on the admin page reaches it with
-        // no restart.
-        match squelch_core::gcal::sync::CalendarSync::new(
-            store.clone(),
-            account_id,
-            creds,
-            api_state.features().clone(),
-        ) {
+        match squelch_core::gcal::sync::CalendarSync::new(store.clone(), account_id, creds) {
             Ok(sync) => Some(sync),
             Err(e) => {
                 eprintln!(

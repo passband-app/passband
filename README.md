@@ -42,7 +42,7 @@ The name comes from the radio control that mutes everything below a signal thres
 
 ```mermaid
 flowchart LR
-    G["Gmail REST API<br/>(gmail.readonly)"] -->|history.list poll| D[squelchd]
+    G["Gmail REST API<br/>(gmail.modify)"] -->|history.list poll| D[squelchd]
     D --> S[(SQLite)]
     S --> T["triage<br/>seal ➜ rules ➜ 2-stage LLM"]
     T --> M["/mcp<br/>agent door"]
@@ -304,7 +304,7 @@ The prerequisites, the five repo secrets, and what to do about a bad release tha
 
 ## Security posture
 
-- The sync credential is requested as `gmail.readonly`, and what holds the line is structural: sync and triage can only load the Read slot, ever. The write credential (`gmail.modify` + `gmail.send`) lives in a separate slot that is only reachable from the human door's action handlers, which require an explicit confirm flag, run an outbound secret scan on sends, and audit every attempt. (Google unions granted scopes across one project's consents, so the token in the Read slot may *carry* more than readonly after `auth --write` — which door can load which slot is the enforcement, not the token's scope list.)
+- Passband asks Google for one Gmail scope, `gmail.modify`, stored in separate Read and Write slots. What holds the line is structural: sync and triage can only load the Read slot, ever. The write credential (`gmail.modify` + `gmail.send`) lives in a separate slot that is only reachable from the human door's action handlers, which require an explicit confirm flag, run an outbound secret scan on sends, and audit every attempt. (Google unions granted scopes across one project's consents, so the token in the Read slot may *carry* more than readonly after `auth --write` — which door can load which slot is the enforcement, not the token's scope list.)
 - Auth emails (2FA codes, password resets, login alerts) are sealed at ingest and never appear in any MCP response, any LLM call, or any list endpoint. Revealing one takes an explicit authenticated request and writes an audit row.
 - Email content is treated as untrusted input everywhere. Tokens never appear in logs.
 - The console introduces no new credential type: its session cookie *is* an ordinary device token, HttpOnly and verified by the same check the bearer path runs, so a browser is one more paired device and `squelchd token revoke <id>` ends its session like any other. The pages ship no JavaScript and no external asset, and say so to the browser with a `default-src 'none'` CSP.

@@ -90,36 +90,38 @@ pub fn mcp_allowed_hosts() -> Vec<String> {
     hosts
 }
 
-/// The READ scope. This is all the sync daemon + triage ever REQUEST, and that
-/// much is a hard invariant, hence a `const`. See [`WRITE_SCOPES`] for the
-/// separate, opt-in action credential.
+/// THE ONE GMAIL SCOPE every consent requests (since 2026-10-27). Google
+/// describes it as "read, compose, and send emails": it covers reading,
+/// labels, archiving and sending, and not permanent deletion. One scope
+/// instead of three means one restricted permission on the consent screen
+/// and one to justify in verification. It is the only Gmail scope declared on
+/// the Cloud project's consent screen.
 ///
-/// What Google ISSUES is a different question. Grants are unioned per Cloud
-/// project: with incremental authorization an access token also covers every
-/// scope the user has already granted the project, even when those grants came
-/// from a different client. So once a user has run `squelchd auth --write`, the
-/// token behind the read credential carries modify+send too, and is capable of
-/// more than readonly however narrow the request was.
-///
-/// The consequence, stated plainly: token scope is defense in depth here, not
-/// the thing that enforces the two-door split. What enforces it is that the
-/// agent door exposes no write tools, that [`WRITE_SCOPES`] credentials are
-/// loaded only by human-door action handlers, and that sealed rows are absent
-/// from every serving query. See `docs/SECURITY.md` §4.
-pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
-
-/// The WRITE scopes: requested ONLY by `squelchd auth --write`, loaded ONLY by
-/// human-door action endpoints, never by sync/triage. Deliberately a separate
-/// constant from [`GMAIL_READONLY_SCOPE`] so the two can never be conflated.
+/// Token scope does not enforce the two-door split and never could: Google
+/// unions grants per Cloud project, so an access token covers every scope the
+/// user ever granted the project. What enforces it is that the agent door
+/// exposes no write tools, that the Write credential is loaded only by
+/// human-door action handlers, and that sealed rows are absent from every
+/// serving query. See `docs/SECURITY.md` §4.
 pub const GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
+
+/// The Gmail scopes a consent asks for: [`GMAIL_MODIFY_SCOPE`] alone.
+pub const GMAIL_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE];
+
+/// LEGACY, NEVER REQUESTED. Credentials minted before 2026-10-27 carry
+/// `gmail.readonly` (the old Read consent) and `gmail.send` (the old Write
+/// consent, beside modify). A stored or imported token is still accepted on
+/// them: `gmail.readonly` satisfies the Read slot. Nothing asks Google for
+/// either any more, and neither is declared on the consent screen.
+pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
 
-/// Convenience: the full set of scopes for the write credential.
-pub const WRITE_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE, GMAIL_SEND_SCOPE];
+/// What the WRITE credential needs: [`GMAIL_MODIFY_SCOPE`], which also sends.
+pub const WRITE_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE];
 
-/// The OPTIONAL calendar grant. Requested only by the hosted calendar consent
-/// (`/reconnect?calendar=1`, beside the three Gmail scopes) and by `squelchd
-/// auth --calendar`; never REQUIRED by any flow, so a person who unticks it at
+/// The OPTIONAL calendar grant. Requested by hosted signup, the hosted
+/// calendar consent (`/reconnect?calendar=1`, beside the Gmail scope) and
+/// `squelchd auth` (its optional calendar step, or `--calendar`); never REQUIRED by any flow, so a person who unticks it at
 /// Google keeps a working mailbox and simply has no calendar.
 ///
 /// "Calendar is granted" means a token's recorded scopes include

@@ -110,7 +110,8 @@ consent screen and seals the resulting grant into **both** credential slots — 
 for the sync loop, Write for human-door actions. The two-slot split is a code-path
 guarantee (sync never touches the Write slot), not a claim about two grants.
 The same screen also asks for `userinfo.profile` (name and photo), which is
-optional: the signup floor is the three Gmail scopes and nothing else.
+optional: the signup floor is `gmail.modify` and nothing else (the one Gmail
+scope since 2026-10-27; it replaced `gmail.readonly` + `gmail.modify` + `gmail.send`).
 
 The reason is that hosted has no second consent screen. Self-host can run
 `squelchd auth --write` later and get the action credential whenever it wants;

@@ -1,8 +1,9 @@
 //! Installed-app (Desktop) OAuth 2.0 for Gmail: PKCE consent URL -> loopback
 //! redirect on `127.0.0.1` -> code exchange, with `state` verified as a CSRF token.
-//! TWO-DOOR: one token per call, never both scope sets — [`AuthScopes::Read`] mints
-//! [`GMAIL_READONLY_SCOPE`], [`AuthScopes::Write`] mints [`WRITE_SCOPES`] for
-//! human-door actions. The code, tokens, and client secret are never logged.
+//! ONE GMAIL SCOPE: every Gmail consent asks for [`GMAIL_MODIFY_SCOPE`] alone,
+//! and `squelchd auth` stores that one token in both the Read and Write slots.
+//! The two-door split is which slot a code path loads, never token scope
+//! (`docs/SECURITY.md` §4). The code, tokens, and client secret are never logged.
 //!
 //! [`run_broker_flow`] is the same flow with the redirect landing on a consent
 //! broker (`docs/BROKER.md`) instead of a loopback listener, for hosts where no
@@ -31,8 +32,8 @@ pub use transfer::{
 };
 
 use crate::config::{
-    CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_READONLY_SCOPE, GOOGLE_PROFILE_SCOPE,
-    OAuthClientConfig, WRITE_SCOPES,
+    CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_MODIFY_SCOPE, GMAIL_READONLY_SCOPE, GMAIL_SCOPES,
+    GOOGLE_PROFILE_SCOPE, OAuthClientConfig, WRITE_SCOPES,
 };
 use crate::credentials::{CredentialKind, RefreshedToken, StoredToken};
 use crate::error::{CoreError, Result};
@@ -113,9 +114,10 @@ const MAX_RESPONSE_BODY: usize = 64 * 1024;
 /// Which scope set (and therefore which credential kind) to authorize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthScopes {
-    /// `gmail.readonly` — the Read credential.
+    /// The Read credential. Requests `gmail.modify` (the one Gmail scope);
+    /// a legacy `gmail.readonly` token still satisfies it.
     Read,
-    /// `gmail.modify` + `gmail.send` — the Write credential.
+    /// The Write credential: `gmail.modify`, which also sends.
     Write,
     /// `calendar.events` + `calendar.calendarlist.readonly` — the Calendar
     /// credential (`squelchd auth --calendar`), self-host only. The one scope
@@ -132,21 +134,30 @@ impl AuthScopes {
     /// [`AuthScopes::requested`].
     pub fn scopes(self) -> Vec<String> {
         match self {
-            AuthScopes::Read => vec![GMAIL_READONLY_SCOPE.to_string()],
+            AuthScopes::Read => GMAIL_SCOPES.iter().map(|s| s.to_string()).collect(),
             AuthScopes::Write => WRITE_SCOPES.iter().map(|s| s.to_string()).collect(),
             AuthScopes::Calendar => CALENDAR_SCOPES.iter().map(|s| s.to_string()).collect(),
         }
     }
 
-    /// The scopes a grant must COVER to be stored. The same as
-    /// [`AuthScopes::scopes`] for the two Gmail sets. For Calendar it is the
-    /// events scope alone: the calendar-list scope is wanted, not needed
-    /// (without it the primary calendar is still readable), so a person who
-    /// unticks only that box still gets a working calendar.
-    pub fn required(self) -> Vec<String> {
+    /// What a grant must COVER to be stored: one entry per requirement, and
+    /// any one of an entry's scopes satisfies it.
+    ///
+    /// - Read: `gmail.modify`, or a LEGACY `gmail.readonly` (credentials
+    ///   minted before 2026-10-27, and imports of them), which reads as well.
+    /// - Write: `gmail.modify`, which also sends. A legacy write token carried
+    ///   `gmail.send` beside it, so it passes too.
+    /// - Calendar: the events scope alone. The calendar-list scope is wanted,
+    ///   not needed (without it the primary calendar is still readable).
+    pub fn required(self) -> Vec<Vec<String>> {
+        let one = |s: &str| vec![s.to_string()];
         match self {
-            AuthScopes::Read | AuthScopes::Write => self.scopes(),
-            AuthScopes::Calendar => vec![CALENDAR_EVENTS_SCOPE.to_string()],
+            AuthScopes::Read => vec![vec![
+                GMAIL_MODIFY_SCOPE.to_string(),
+                GMAIL_READONLY_SCOPE.to_string(),
+            ]],
+            AuthScopes::Write => vec![one(GMAIL_MODIFY_SCOPE)],
+            AuthScopes::Calendar => vec![one(CALENDAR_EVENTS_SCOPE)],
         }
     }
 
@@ -191,8 +202,8 @@ impl AuthScopes {
     /// Human-readable label for prompts.
     pub fn label(self) -> &'static str {
         match self {
-            AuthScopes::Read => "read-only Gmail (gmail.readonly), plus your name and photo",
-            AuthScopes::Write => "Gmail modify + send (gmail.modify, gmail.send)",
+            AuthScopes::Read => "Gmail (gmail.modify), plus your name and photo",
+            AuthScopes::Write => "Gmail (gmail.modify)",
             AuthScopes::Calendar => {
                 "Google Calendar (calendar.events, calendar.calendarlist.readonly)"
             }
@@ -644,7 +655,8 @@ fn check_scope_grant(requested: AuthScopes, granted: Option<&[String]>) -> Resul
     let missing: Vec<String> = requested
         .required()
         .into_iter()
-        .filter(|want| !granted.iter().any(|got| got == want))
+        .filter(|any_of| !any_of.iter().any(|want| granted.contains(want)))
+        .filter_map(|any_of| any_of.into_iter().next())
         .collect();
     if missing.is_empty() {
         return Ok(());
@@ -1989,20 +2001,31 @@ mod tests {
         assert!(check_account_match("me@gmail.com", "").is_err());
     }
 
-    /// A half-granted consent is invisible afterwards: the credential stores and
-    /// refreshes like any other and only fails at the first send.
+    /// A grant without what the slot needs is refused and names it. A legacy
+    /// read-only grant cannot fill the Write slot: it would store, refresh,
+    /// and only fail at the first archive or send.
     #[test]
     fn a_partial_grant_is_refused_and_names_what_is_missing() {
-        let granted = vec![GMAIL_MODIFY_SCOPE.to_string()];
-        let err = check_scope_grant(AuthScopes::Write, Some(&granted))
+        let legacy_read = vec![GMAIL_READONLY_SCOPE.to_string()];
+        let err = check_scope_grant(AuthScopes::Write, Some(&legacy_read))
             .unwrap_err()
             .to_string();
-        assert!(err.contains(GMAIL_SEND_SCOPE), "{err}");
+        assert!(err.contains(GMAIL_MODIFY_SCOPE), "{err}");
         assert!(err.contains("nothing was stored"), "{err}");
 
-        // Read is not a subset of nothing, and a Write grant is not a Read one.
-        assert!(check_scope_grant(AuthScopes::Read, Some(&[])).is_err());
-        assert!(check_scope_grant(AuthScopes::Read, Some(&granted)).is_err());
+        // Nothing, or only the profile, covers neither Gmail slot.
+        for slot in [AuthScopes::Read, AuthScopes::Write] {
+            assert!(check_scope_grant(slot, Some(&[])).is_err());
+            let profile = vec![GOOGLE_PROFILE_SCOPE.to_string()];
+            assert!(check_scope_grant(slot, Some(&profile)).is_err());
+        }
+        // gmail.modify alone covers both: it reads, writes and sends.
+        let modify = vec![GMAIL_MODIFY_SCOPE.to_string()];
+        assert!(check_scope_grant(AuthScopes::Read, Some(&modify)).is_ok());
+        assert!(check_scope_grant(AuthScopes::Write, Some(&modify)).is_ok());
+        // gmail.send alone is not a mailbox.
+        let send = vec![GMAIL_SEND_SCOPE.to_string()];
+        assert!(check_scope_grant(AuthScopes::Read, Some(&send)).is_err());
     }
 
     #[test]
@@ -2029,8 +2052,22 @@ mod tests {
     #[test]
     fn the_profile_scope_is_requested_on_read_and_required_nowhere() {
         let asked = AuthScopes::Read.requested();
-        assert!(asked.contains(&GMAIL_READONLY_SCOPE.to_string()));
-        assert!(asked.contains(&GOOGLE_PROFILE_SCOPE.to_string()));
+        assert_eq!(
+            asked,
+            vec![
+                GMAIL_MODIFY_SCOPE.to_string(),
+                GOOGLE_PROFILE_SCOPE.to_string()
+            ]
+        );
+        // Neither legacy scope is ever requested again.
+        for set in [AuthScopes::Read, AuthScopes::Write, AuthScopes::Calendar] {
+            let asked = set.requested();
+            assert!(
+                !asked.contains(&GMAIL_READONLY_SCOPE.to_string()),
+                "{set:?}"
+            );
+            assert!(!asked.contains(&GMAIL_SEND_SCOPE.to_string()), "{set:?}");
+        }
         // The write consent is about actions; it does not re-ask who you are.
         assert_eq!(AuthScopes::Write.requested(), AuthScopes::Write.scopes());
 
@@ -2209,23 +2246,23 @@ mod tests {
         assert!(!err.contains('\u{1b}'), "escape survived: {err}");
     }
 
-    /// A hand-edited `kind` decides which slot a token lands in. The Read slot
-    /// holding a modify+send token is the two-door split gone, so the grant has
-    /// to cover the slot rather than the other way round.
+    /// A hand-edited `kind` decides which slot a token lands in, so the grant
+    /// has to cover the slot. A gmail.modify token covers both (the one Gmail
+    /// consent fills both); a LEGACY read-only token covers Read and never
+    /// Write, where it could not archive or send.
     #[test]
-    fn a_write_token_cannot_be_filed_in_the_read_slot() {
-        let err = judge(
-            "me@gmail.com",
-            CredentialKind::Read,
-            "me@gmail.com",
-            Some(write_grant()),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("wrong reach"), "{err}");
-        assert!(err.contains(GMAIL_READONLY_SCOPE), "{err}");
+    fn a_legacy_read_token_cannot_be_filed_in_the_write_slot() {
+        assert!(
+            judge(
+                "me@gmail.com",
+                CredentialKind::Read,
+                "me@gmail.com",
+                Some(write_grant()),
+            )
+            .is_ok(),
+            "a gmail.modify token reads"
+        );
 
-        // And the converse: a read token in the Write slot cannot send.
         let err = judge(
             "me@gmail.com",
             CredentialKind::Write,
@@ -2234,7 +2271,8 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains(GMAIL_SEND_SCOPE), "{err}");
+        assert!(err.contains("wrong reach"), "{err}");
+        assert!(err.contains(GMAIL_MODIFY_SCOPE), "{err}");
 
         // Each grant in its own slot is what a real export produces.
         assert!(
@@ -2666,12 +2704,24 @@ mod tests {
         );
         assert_eq!(
             AuthScopes::Calendar.required(),
-            vec![CALENDAR_EVENTS_SCOPE.to_string()]
+            vec![vec![CALENDAR_EVENTS_SCOPE.to_string()]]
         );
-        // The Gmail sets are unchanged: required is exactly requested.
+        // Both Gmail sets request gmail.modify alone; Read also accepts a
+        // legacy gmail.readonly token.
         for gmail in [AuthScopes::Read, AuthScopes::Write] {
-            assert_eq!(gmail.required(), gmail.scopes());
+            assert_eq!(gmail.scopes(), vec![GMAIL_MODIFY_SCOPE.to_string()]);
         }
+        assert_eq!(
+            AuthScopes::Read.required(),
+            vec![vec![
+                GMAIL_MODIFY_SCOPE.to_string(),
+                GMAIL_READONLY_SCOPE.to_string()
+            ]]
+        );
+        assert_eq!(
+            AuthScopes::Write.required(),
+            vec![vec![GMAIL_MODIFY_SCOPE.to_string()]]
+        );
 
         let events_only = vec![CALENDAR_EVENTS_SCOPE.to_string()];
         assert!(check_scope_grant(AuthScopes::Calendar, Some(&events_only)).is_ok());

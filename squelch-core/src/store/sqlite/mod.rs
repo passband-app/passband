@@ -658,7 +658,9 @@ impl WriteToken {
     pub(super) fn of(conn: &Connection) -> Result<Self> {
         Ok(Self {
             changes: conn.total_changes(),
-            data_version: conn.query_row("PRAGMA data_version", [], |r| r.get(0))?,
+            data_version: conn
+                .prepare_cached("PRAGMA data_version")?
+                .query_row([], |r| r.get(0))?,
         })
     }
 }

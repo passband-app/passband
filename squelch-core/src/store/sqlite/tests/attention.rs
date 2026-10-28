@@ -872,6 +872,14 @@ fn stats_reuse_the_inventory_until_something_is_written() {
 #[test]
 fn stats_see_a_write_by_another_process() {
     let (store, acct, dir) = file_store("stats-memo");
+    // Removed on every path out, a failed assertion included.
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = RemoveOnDrop(dir.clone());
     let since = Utc::now() - chrono::Duration::days(30);
     ingest_normal(&store, acct, "g1", "t1", Tier::Signal, 70, Utc::now());
     let before = store.stats(acct, since).unwrap();
@@ -881,8 +889,6 @@ fn stats_see_a_write_by_another_process() {
     drop(other);
 
     assert_eq!(store.stats(acct, since).unwrap().total, before.total + 1);
-    drop(store);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// What is reused is the account's own all-time inventory and nothing else:
@@ -991,6 +997,22 @@ fn band_counts_match_the_unwindowed_scan() {
         )
         .unwrap()
     };
+    // Every arm of the window admits rows no other arm does, so a branch
+    // missing from WINDOW_ROWS would show as a mismatch below.
+    let only = |arm: &str| -> i64 {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM triage t JOIN messages m ON m.id = t.message_id
+                 WHERE t.account_id = ?1 AND {arm}"
+            ),
+            params![acct, (now - chrono::Duration::days(7)).to_rfc3339()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(only("m.received_at < ?2 AND t.remind_at IS NOT NULL AND t.reminded_at IS NULL") > 0);
+    assert!(only("m.received_at < ?2 AND t.reminded_at IS NOT NULL AND t.remind_at IS NULL") > 0);
+    assert!(only("m.received_at >= ?2 AND t.remind_at IS NULL AND t.reminded_at IS NULL") > 0);
     let mut nonzero = false;
     for days in [1, 7, 30, 60, 100, 200, 10_000] {
         let expected = count(&scan, days);

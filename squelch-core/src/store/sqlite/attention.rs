@@ -91,10 +91,29 @@ pub(super) const AGENT_DONE_THREAD_SQL: &str = concat!(done_thread_sql!(), " AND
 /// thread — fires into a row that no band, no count and no page will ever show.
 ///
 /// Like [`STANDING_BAND`] it lives in ONE place because the list query and the
-/// header's count must agree row for row.
+/// header's count must agree row for row. [`WINDOW_ROWS`] is the same three
+/// arms as a set to drive a count from: AN ARM ADDED HERE NEEDS ITS BRANCH
+/// THERE, or the rows only it admits never reach it.
 pub(super) const WITHIN_WINDOW: &str = "(m.received_at >= ?2
             OR t.remind_at IS NOT NULL
             OR t.reminded_at IS NOT NULL)";
+
+/// The message ids [`WITHIN_WINDOW`] can admit for account `?1`, ONE BRANCH
+/// PER ARM, each from its own index: mail received since `?2`
+/// (`idx_messages_received`, covering), and rows with a reminder set or fired
+/// (the two partial reminder indexes, which `migrate` creates on every open
+/// with the columns they cover). A superset is all a driver needs, because
+/// the predicate itself is still applied, so `UNION ALL`: an id two arms
+/// admit twice counts once under the counts' own DISTINCT.
+/// `band_counts_match_the_unwindowed_scan` covers every arm.
+pub(super) const WINDOW_ROWS: &str = "SELECT id FROM messages INDEXED BY idx_messages_received
+              WHERE account_id = ?1 AND received_at >= ?2
+             UNION ALL
+             SELECT message_id FROM triage INDEXED BY idx_triage_remind_at
+              WHERE account_id = ?1 AND remind_at IS NOT NULL
+             UNION ALL
+             SELECT message_id FROM triage INDEXED BY idx_triage_reminded_at
+              WHERE account_id = ?1 AND reminded_at IS NOT NULL";
 
 /// The archive tier's exclusion from the human inventory, with the same
 /// exemption [`WITHIN_WINDOW`] gives: a reminder the user set on an archive
@@ -185,14 +204,12 @@ pub(super) const STANDING_BAND: &str = "(t.tier IN ('past_due','deadline')
 /// Standing is decided in the subquery, where the `m` join alias the shared
 /// expression is written against is still in scope.
 ///
-/// DRIVEN FROM THE WINDOW: `w` is exactly the rows [`WITHIN_WINDOW`] can
-/// admit, the account's mail received since `?2` (`idx_messages_received`,
-/// covering) and its rows with a reminder set or fired (the two partial
-/// reminder indexes), so the count reads a month of mail rather than every
-/// message in the store. Each is then one rowid probe of `triage` and
-/// `messages`, and the predicates the list shares with it apply unchanged,
-/// [`WITHIN_WINDOW`] included, so the narrowing cannot change a count
-/// (`band_counts_match_the_unwindowed_scan`).
+/// DRIVEN FROM THE WINDOW: `w` is [`WINDOW_ROWS`], the rows
+/// [`WITHIN_WINDOW`] can admit, so the count reads a month of mail rather
+/// than every message in the store. Each is then one rowid probe of `triage`
+/// and `messages`, and the predicates the list shares with it apply
+/// unchanged, [`WITHIN_WINDOW`] included, so the narrowing cannot change a
+/// count (`band_counts_match_the_unwindowed_scan`).
 pub(super) static BANDS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "SELECT
@@ -202,14 +219,7 @@ pub(super) static BANDS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::
              COUNT(DISTINCT CASE WHEN t.status = 'open' THEN tkey END)
          FROM (SELECT t.*, COALESCE(NULLIF(m.thread_id, ''), 'msg-' || m.id) AS tkey,
                       ({STANDING_BAND}) AS standing
-               FROM (SELECT id FROM messages INDEXED BY idx_messages_received
-                      WHERE account_id = ?1 AND received_at >= ?2
-                     UNION
-                     SELECT message_id FROM triage INDEXED BY idx_triage_remind_at
-                      WHERE account_id = ?1 AND remind_at IS NOT NULL
-                     UNION
-                     SELECT message_id FROM triage INDEXED BY idx_triage_reminded_at
-                      WHERE account_id = ?1 AND reminded_at IS NOT NULL) w
+               FROM ({WINDOW_ROWS}) w
                CROSS JOIN triage t ON t.message_id = w.id
                CROSS JOIN messages m ON m.id = t.message_id
                WHERE t.account_id = ?1

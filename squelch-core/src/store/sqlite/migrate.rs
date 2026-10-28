@@ -61,30 +61,55 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
     Ok(n as usize == tables.len())
 }
 
-/// Opens recorded before the probable-scanner classification existed are
-/// relabelled with today's classifier, so a scanner's fetch stops counting
-/// without waiting for a new one. Idempotent: only `unknown` rows are read, and
-/// a row the classifier still calls `unknown` is left alone. The table is
-/// small (capped per token, retired with its tracker), so this runs on every
-/// open of the store rather than behind a version flag.
+/// Every stored `unknown` and `scanner` open is relabelled with TODAY'S
+/// classifier, in BOTH directions: a scanner recorded before the label existed
+/// stops counting, and a person's open hidden by a marker that has since been
+/// removed comes back. `proxied` is left alone. Idempotent, one savepoint (one
+/// commit, not one per row), and only rows whose label changes are written.
+/// The table is small (capped per token, retired with its tracker), so this
+/// runs on every open of the store rather than behind a version flag.
 fn relabel_scanner_opens(conn: &Connection) -> Result<()> {
     if !has_columns(conn, "message_opens", &["user_agent", "classification"])? {
         return Ok(());
     }
-    let rows: Vec<(i64, String)> = {
+    let rows: Vec<(i64, Option<String>, String)> = {
         let mut stmt = conn.prepare(
-            "SELECT id, user_agent FROM message_opens
-             WHERE classification = 'unknown' AND user_agent IS NOT NULL",
+            "SELECT id, user_agent, classification FROM message_opens
+             WHERE classification IN ('unknown', 'scanner')",
         )?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?
     };
-    for (id, ua) in rows {
-        if crate::tracking::is_probable_scanner(&ua) {
-            conn.execute(
-                "UPDATE message_opens SET classification = ?1 WHERE id = ?2",
-                rusqlite::params![crate::store::OPEN_SCANNER, id],
-            )?;
+    let changes: Vec<(i64, &str)> = rows
+        .into_iter()
+        .filter_map(|(id, ua, was)| {
+            let now = crate::tracking::classify_user_agent(ua.as_deref());
+            // `proxied` is never written here: only these two labels move.
+            let now = if now == crate::store::OPEN_SCANNER {
+                crate::store::OPEN_SCANNER
+            } else {
+                crate::store::OPEN_UNKNOWN
+            };
+            (now != was).then_some((id, now))
+        })
+        .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch("SAVEPOINT relabel_scanner_opens")?;
+    let applied = changes.iter().try_for_each(|(id, label)| {
+        conn.execute(
+            "UPDATE message_opens SET classification = ?1 WHERE id = ?2",
+            rusqlite::params![label, id],
+        )
+        .map(|_| ())
+    });
+    match applied {
+        Ok(()) => conn.execute_batch("RELEASE relabel_scanner_opens")?,
+        Err(e) => {
+            let _ = conn
+                .execute_batch("ROLLBACK TO relabel_scanner_opens; RELEASE relabel_scanner_opens");
+            return Err(e.into());
         }
     }
     Ok(())

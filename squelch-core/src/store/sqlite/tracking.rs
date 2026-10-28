@@ -10,6 +10,11 @@ use super::*;
 /// bound resets at every drain, so it does not bound what accumulates here.
 pub const MAX_OPENS_PER_TOKEN: usize = 50;
 
+/// Probable-scanner rows kept per token, counted apart from
+/// [`MAX_OPENS_PER_TOKEN`]: a gateway that rescans on every reprocess must not
+/// spend the slots a person's open would land in.
+pub const MAX_SCANNER_OPENS_PER_TOKEN: usize = 5;
+
 /// How long after its send a tracker keeps collecting. A pixel URL lives in the
 /// recipient's mailbox for as long as the mail does, so without a window a
 /// years-old thread is still writing rows — and an open that far from the send
@@ -108,7 +113,9 @@ impl SqliteStore {
              SELECT ?1, ?3, ?4, ?5 FROM send_trackers
              WHERE token = ?1 AND account_id = ?2
                AND ?3 - created_at < ?7
-               AND (SELECT count(*) FROM message_opens WHERE token = ?1) < ?6",
+               AND (SELECT count(*) FROM message_opens
+                    WHERE token = ?1 AND (classification = ?8) = (?5 = ?8))
+                   < CASE WHEN ?5 = ?8 THEN ?9 ELSE ?6 END",
             params![
                 token,
                 account_id,
@@ -116,7 +123,9 @@ impl SqliteStore {
                 user_agent,
                 classification,
                 MAX_OPENS_PER_TOKEN as i64,
-                TRACKER_RETENTION_SECS
+                TRACKER_RETENTION_SECS,
+                crate::store::OPEN_SCANNER,
+                MAX_SCANNER_OPENS_PER_TOKEN as i64
             ],
         )?;
         Ok(n > 0)

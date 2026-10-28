@@ -51,8 +51,9 @@ private enum ReceiptCopy {
         "Fetched by Gmail's image proxy, which sometimes loads images before "
         + "the recipient reads the message."
     static let scannerCaveat =
-        "Probable scanners are security tools that load a message's images "
-        + "the moment it arrives. They are not counted as opens."
+        "Probable scanners are automated fetches, usually security tools that "
+        + "load a message's images the moment it arrives. They are not counted "
+        + "as opens."
 
     /// "3 opens", "1 open", or, when nothing but scanners fetched the pixel,
     /// "1 probable scanner": never a zero that hides what happened.

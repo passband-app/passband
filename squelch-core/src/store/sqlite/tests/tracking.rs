@@ -3,7 +3,9 @@
 
 use super::super::*;
 use super::support::*;
-use crate::store::sqlite::tracking::{MAX_OPENS_PER_TOKEN, TRACKER_RETENTION_SECS};
+use crate::store::sqlite::tracking::{
+    MAX_OPENS_PER_TOKEN, MAX_SCANNER_OPENS_PER_TOKEN, TRACKER_RETENTION_SECS,
+};
 
 /// A tracker + the sent message it points at, the shape every tracked send ends
 /// up in once its echo has landed.
@@ -317,17 +319,26 @@ fn deleting_a_tracker_does_not_cross_accounts() {
     assert!(store.tracked_message(mine, "tok-abc").unwrap().is_some());
 }
 
-/// Opens stored before the probable-scanner label existed are relabelled when
-/// the store opens, and the relabel leaves a person's open alone.
+/// Every stored `unknown` and `scanner` open is relabelled with today's
+/// classifier when the store opens, in BOTH directions, and `proxied` is never
+/// touched.
 #[test]
-fn stored_scanner_opens_are_relabelled_by_the_migration() {
+fn stored_opens_are_relabelled_both_ways_by_the_migration() {
     let (store, acct) = store();
     let message_id = tracked(&store, acct, "tok-scan");
     let bot = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0";
-    for ua in [bot, "Apple Mail/16.0"] {
+    for (ua, label) in [
+        // Recorded before the label existed: becomes a scanner.
+        (bot, "unknown"),
+        // A person's open hidden by a marker that has since been removed
+        // (okhttp was one, briefly): comes back.
+        ("okhttp/4.12.0", "scanner"),
+        ("Apple Mail/16.0", "unknown"),
+        ("… GoogleImageProxy", "proxied"),
+    ] {
         assert!(
             store
-                .record_open(acct, "tok-scan", 1_100, Some(ua), "unknown")
+                .record_open(acct, "tok-scan", 1_100, Some(ua), label)
                 .unwrap()
         );
     }
@@ -344,11 +355,48 @@ fn stored_scanner_opens_are_relabelled_by_the_migration() {
         .map(|o| (o.user_agent.unwrap(), o.classification))
         .collect();
     got.sort();
+    let want = |ua: &str, c: &str| (ua.to_string(), c.to_string());
     assert_eq!(
         got,
         vec![
-            ("Apple Mail/16.0".to_string(), "unknown".to_string()),
-            (bot.to_string(), "scanner".to_string()),
+            want("Apple Mail/16.0", "unknown"),
+            want(bot, "scanner"),
+            want("okhttp/4.12.0", "unknown"),
+            want("… GoogleImageProxy", "proxied"),
         ]
+    );
+}
+
+/// Scanners have their own small allowance per token: a gateway that rescans
+/// on every reprocess fills IT, and a person's open still lands afterwards.
+#[test]
+fn scanners_cannot_spend_a_persons_open_slots() {
+    let (store, acct) = store();
+    tracked(&store, acct, "tok-cap");
+    for i in 0..MAX_SCANNER_OPENS_PER_TOKEN + 10 {
+        let kept = store
+            .record_open(acct, "tok-cap", 1_100 + i as i64, Some("curl/8"), "scanner")
+            .unwrap();
+        assert_eq!(kept, i < MAX_SCANNER_OPENS_PER_TOKEN, "scanner row {i}");
+    }
+    for i in 0..MAX_OPENS_PER_TOKEN {
+        assert!(
+            store
+                .record_open(
+                    acct,
+                    "tok-cap",
+                    2_000 + i as i64,
+                    Some("Apple Mail/16.0"),
+                    "unknown"
+                )
+                .unwrap(),
+            "a person's open {i} still lands"
+        );
+    }
+    assert!(
+        !store
+            .record_open(acct, "tok-cap", 3_000, Some("Apple Mail/16.0"), "unknown")
+            .unwrap(),
+        "the person's cap still holds"
     );
 }

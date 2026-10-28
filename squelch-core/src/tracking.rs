@@ -116,9 +116,20 @@ pub fn classify_user_agent(user_agent: Option<&str>) -> &'static str {
 }
 
 /// Substrings (lowercase) that only automated fetchers put in a User-Agent:
-/// HTTP libraries, headless browsers, and self-declared bots.
+/// server-side HTTP libraries, headless browsers, and self-declared bots in the
+/// shapes they actually use (`Googlebot/2.1`, `(compatible; FooBot; +http…)`).
+///
+/// DELIBERATELY ABSENT: library defaults a phone app can send with a person
+/// behind it. `okhttp/` (Android image loaders such as Coil, and Glide on
+/// OkHttp), `Dalvik/`, `Java/` and `Apache-HttpClient/` (old Android
+/// networking) would each hide a real open in a native mail app. A bare `bot`
+/// is also out: it matches device and app names (CUBOT phones).
 const SCANNER_MARKERS: &[&str] = &[
-    "bot",
+    "bot/",
+    "bot;",
+    "bot)",
+    "bot.html",
+    "+http",
     "crawler",
     "spider",
     "headlesschrome",
@@ -129,10 +140,7 @@ const SCANNER_MARKERS: &[&str] = &[
     "curl/",
     "wget/",
     "go-http-client",
-    "java/",
-    "okhttp",
     "libwww-perl",
-    "apache-httpclient",
     "node-fetch",
     "axios/",
     "scrapy",
@@ -147,15 +155,12 @@ const SCANNER_MARKERS: &[&str] = &[
 /// - EdgeHTML 12 (`Edge/12.`), the 2015 Windows 10 launch browser. Nobody
 ///   reads mail in it; the string lives on as a security scanner's disguise
 ///   (seen on 2026-10-27 fetching a pixel the minute the mail was delivered).
-/// - Two `Mozilla/` tokens in one agent: a browser string with a second one
-///   glued on, which is a script assembling an agent, never a browser.
+///
+/// Changing this list is safe in both directions: the store relabels every
+/// stored `unknown` and `scanner` row with it on open.
 pub fn is_probable_scanner(user_agent: &str) -> bool {
-    // CUBOT is an Android phone maker whose model names ride in mail apps'
-    // agents; "bot" must not hide a person reading on one.
-    let ua = user_agent.to_ascii_lowercase().replace("cubot", "");
-    SCANNER_MARKERS.iter().any(|m| ua.contains(m))
-        || ua.contains("edge/12.")
-        || ua.matches("mozilla/").count() >= 2
+    let ua = user_agent.to_ascii_lowercase();
+    SCANNER_MARKERS.iter().any(|m| ua.contains(m)) || ua.contains("edge/12.")
 }
 
 /// One open as the relay reports it. `id` is the relay's own row id and the
@@ -510,11 +515,11 @@ mod tests {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0",
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)",
+            "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
             "python-requests/2.31.0",
             "curl/8.4.0",
             "Go-http-client/1.1",
-            "Java/17.0.2",
-            "okhttp/4.12.0",
         ] {
             assert_eq!(classify_user_agent(Some(ua)), OPEN_SCANNER, "{ua}");
         }
@@ -527,6 +532,12 @@ mod tests {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Thunderbird/128.4.0",
             "Apple Mail/16.0",
             "Mozilla/5.0 (Linux; Android 12; CUBOT KINGKONG 7) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0 Mobile Safari/537.36",
+            // A native Android mail app's image loader, with a person behind it.
+            "okhttp/4.12.0",
+            "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Build/AP2A.240805.005)",
+            "Java/17.0.2",
+            "Apache-HttpClient/UNAVAILABLE (java 1.4)",
+            "YahooMailProxy; https://help.yahoo.com/kb/yahoo-mail-proxy-SLN28749.html",
         ] {
             assert_eq!(classify_user_agent(Some(ua)), OPEN_UNKNOWN, "{ua}");
         }

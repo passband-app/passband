@@ -330,3 +330,33 @@ async fn an_unlinked_tracker_records_the_open_without_an_event() {
     );
     assert_eq!(store.message_opens(acct, message_id).unwrap().len(), 1);
 }
+
+/// A probable scanner collected off the relay is recorded and listed but wakes
+/// nobody; a person's open of the same message in the same page still does.
+#[tokio::test]
+async fn a_scanner_off_the_relay_is_recorded_without_an_event() {
+    let (base, relay) = spawn_relay().await;
+    let (store, acct, message_id) = seeded();
+    *relay.rows.lock().unwrap() = vec![row(
+        1,
+        "tok-1",
+        1_100,
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0",
+    )];
+    let poller = OpensPoller::for_test(store.clone() as Arc<dyn Store>, acct, &base)
+        .with_relay_auth(Some("relay-secret"));
+    let s = store.clone();
+    run_until(poller, move || cursor(&s, acct) == Some(1)).await;
+    let opens = store.message_opens(acct, message_id).unwrap();
+    assert_eq!(opens.len(), 1);
+    assert_eq!(opens[0].classification, "scanner");
+    assert!(store.events_after(acct, 0, 10).unwrap().is_empty());
+
+    // The person's open, next page: one event.
+    *relay.rows.lock().unwrap() = vec![row(2, "tok-1", 1_200, "Apple Mail/16.0")];
+    let poller = OpensPoller::for_test(store.clone() as Arc<dyn Store>, acct, &base)
+        .with_relay_auth(Some("relay-secret"));
+    let s = store.clone();
+    run_until(poller, move || cursor(&s, acct) == Some(2)).await;
+    assert_eq!(store.events_after(acct, 0, 10).unwrap().len(), 1);
+}

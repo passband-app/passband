@@ -19,7 +19,7 @@ without a human reading anything:
 
 Every open is stored with its user agent and a `classification`: `proxied` when
 the fetch came from a known image proxy, `scanner` when the agent marks it as a
-machine (an HTTP library, a headless browser, a self-declared bot, a retired
+machine (a server-side HTTP library, a headless browser, a self-declared bot, a retired
 browser string that only scanners still send), `unknown` otherwise. A
 `scanner` row is a **probable scanner**: listed in the opens popover, never
 counted as an open, and never notified. Security gateways fetch every image in

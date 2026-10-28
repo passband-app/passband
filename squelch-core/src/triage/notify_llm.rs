@@ -7,7 +7,7 @@ use crate::triage::llm::{self, ClassifyError, LlmOutcome, LlmRequest};
 use crate::triage::text::{Untrusted, neutralize, truncate_flagged};
 use serde::{Deserialize, Serialize};
 
-pub const PROMPT_VERSION: &str = "notification-v5";
+pub const PROMPT_VERSION: &str = "notification-v6";
 
 const ONE_LINE_RULES: &str =
     "ONE_LINE: one clear sentence, at most 120 characters. No leading label, em dash, or en dash.";
@@ -34,16 +34,26 @@ assess the message's actual meaning.
 Score notify_importance from 0 to 100 for whether this deserves an interruption now:";
 
 const IMPORTANCE_ANCHORS: &str = "\
-0-20: routine promotions, reading, or informational records. 21-49: useful information \
-that can wait. 50-74: a meaningful personal update or actionable request worth noticing \
-soon. 75-100: consequential or time-sensitive information worth interrupting for now.";
+0-20: routine promotions, reading, newsletters, or informational records. 21-39: an \
+automated notice that asks nothing of the recipient. 40-59: an automated notice the \
+recipient may want to act on, such as a permission request, a usage limit, a failed or \
+due payment, or an approval. 60-74: a person writing directly to the recipient, or an \
+actionable request worth noticing soon. 75-100: consequential or time-sensitive \
+information worth interrupting for now.
+
+Missing mail the recipient wanted costs far more than one extra notification. When torn \
+between two bands, choose the higher. A real person writing to the recipient (not a bulk \
+send or an automated system), especially a reply or follow-up that asks for an answer or \
+a decision, scores at least 60 even when that person is selling something: a sales rep, \
+recruiter, vendor, or marketplace agent following up one-to-one is correspondence, not \
+a promotion. A known contact writing personally scores at least 65.";
 
 const PROMPT_TAIL: &str = "\
 The full triage agent may notify later after gathering more context. Do not decide \
 placement, tier, or access restrictions. Known-contact history is evidence, not a score \
-floor. Sender preferences are strong user guidance; override only for a clear \
-consequence and explain why in reason. A sales promotion is normally reading, but its \
-actual relevance can vary. Do not mistake promotional urgency language for a real \
+floor for mass mail they send. Sender preferences are strong user guidance; override only for a clear \
+consequence and explain why in reason. A sales promotion sent in bulk is normally reading, \
+but its actual relevance can vary. Do not mistake promotional urgency language for a real \
 consequence. Write a short safe one_line for the phone's lock screen. NEVER include \
 codes, passwords, credential-bearing URLs, reset tokens, or other authentication secrets \
 in one_line or reason. For auth, describe the type of event without reproducing the \

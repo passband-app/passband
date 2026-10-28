@@ -261,7 +261,7 @@ fn dev_source_for(
 /// source under test does not observe itself.
 async fn inbox_seen_flags() -> Vec<bool> {
     let tcp = TcpStream::connect(("127.0.0.1", 10143)).await.unwrap();
-    let mut client = Client::new(Transport::Plain(tcp));
+    let mut client = Client::new(Transport::new(Stream::Plain(tcp), None));
     read_greeting(&mut client).await.unwrap();
     let mut s = client
         .login(DEV_USER, DEV_PASSWORD)
@@ -774,7 +774,7 @@ fn fresh_user(tag: &str) -> String {
 /// moves and rebuilds folders under the source's feet.
 async fn other_client(user: &str) -> ImapSession {
     let tcp = TcpStream::connect(("127.0.0.1", 10143)).await.unwrap();
-    let mut client = Client::new(Transport::Plain(tcp));
+    let mut client = Client::new(Transport::new(Stream::Plain(tcp), None));
     read_greeting(&mut client).await.unwrap();
     client
         .login(user, DEV_PASSWORD)
@@ -1537,4 +1537,183 @@ async fn a_server_that_goes_silent_under_idle_cannot_hold_the_wait() {
     assert!(took >= Duration::from_millis(900), "parked first: {took:?}");
     assert!(took < Duration::from_secs(2) + IDLE_GRACE, "{took:?}");
     server.abort();
+}
+
+// ---- scripted servers: timeouts, LOGIN failures, size caps ----------------
+
+/// What a scripted server does with one command line.
+enum Say {
+    Reply(String),
+    /// Hold the socket open and never answer again.
+    Silence,
+}
+
+/// A loopback IMAP server that greets (unless `greet` is false) and answers
+/// each command with `script(tag, COMMAND LINE UPPERCASED)`. Accepts any
+/// number of connections, one at a time. Returns the port and how many
+/// connections it took.
+async fn scripted_server(
+    greet: bool,
+    script: impl Fn(&str, &str) -> Say + Send + Sync + 'static,
+) -> (u16, Arc<AtomicU64>, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let count = accepted.clone();
+    let script = Arc::new(script);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            count.fetch_add(1, Ordering::Relaxed);
+            let script = script.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = sock.into_split();
+                let mut lines = BufReader::new(r).lines();
+                if !greet {
+                    std::future::pending::<()>().await;
+                }
+                w.write_all(b"* OK scripted\r\n").await.unwrap();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let (tag, cmd) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+                    match script(tag, &cmd.to_ascii_uppercase()) {
+                        Say::Reply(r) => {
+                            if w.write_all(r.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                        Say::Silence => std::future::pending::<()>().await,
+                    }
+                }
+            });
+        }
+    });
+    (port, accepted, task)
+}
+
+/// The usual answers to the login conversation, `None` for anything else.
+fn login_ok(tag: &str, cmd: &str) -> Option<String> {
+    if cmd.starts_with("LOGIN") {
+        Some(format!("{tag} OK logged in\r\n"))
+    } else if cmd.starts_with("CAPABILITY") {
+        Some(format!("* CAPABILITY IMAP4rev1\r\n{tag} OK done\r\n"))
+    } else if cmd.starts_with("LIST") {
+        Some(format!(
+            "* LIST () \"/\" INBOX\r\n* LIST (\\Sent) \"/\" Sent\r\n{tag} OK done\r\n"
+        ))
+    } else {
+        None
+    }
+}
+
+fn scripted_source(port: u16, password: &str) -> ImapSource {
+    ImapSource::new(
+        1,
+        ImapServer {
+            host: "127.0.0.1".into(),
+            port,
+            tls: ImapTls::Plain,
+            username: "u".into(),
+        },
+        ImapPassword::new(password),
+        mem(),
+        Arc::new(SourceRefusals::default()),
+    )
+    .unwrap()
+}
+
+fn short_timeouts() -> Timeouts {
+    Timeouts {
+        connect: Duration::from_millis(500),
+        login: Duration::from_millis(500),
+        stall: Duration::from_millis(300),
+    }
+}
+
+/// A SERVER THAT STOPS ANSWERING MID-COMMAND cannot hold the command session
+/// (security review 3): the command fails within the stall bound, the
+/// session is retired, and the next call logs in afresh.
+#[tokio::test]
+async fn a_server_that_goes_silent_mid_command_is_given_up_on() {
+    let (port, accepted, server) = scripted_server(true, |tag, cmd| match login_ok(tag, cmd) {
+        Some(r) => Say::Reply(r),
+        None => Say::Silence,
+    })
+    .await;
+    let src = scripted_source(port, "pw").with_timeouts(short_timeouts());
+    for round in 1..=2u64 {
+        let t = tokio::time::Instant::now();
+        let err = tokio::time::timeout(Duration::from_secs(5), src.inbox_unread())
+            .await
+            .expect("bounded")
+            .unwrap_err();
+        assert!(is_session_broken(&err), "{err}");
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        assert_eq!(src.connects(), round, "a new login each time");
+    }
+    assert_eq!(accepted.load(Ordering::Relaxed), 2);
+    server.abort();
+}
+
+/// A server that never greets, or never finishes the login, is bounded too.
+#[tokio::test]
+async fn a_server_that_never_greets_is_bounded_by_the_login_timeout() {
+    let (port, _, server) = scripted_server(false, |_, _| Say::Silence).await;
+    let src = scripted_source(port, "pw").with_timeouts(short_timeouts());
+    let t = tokio::time::Instant::now();
+    let err = src.check_login().await.unwrap_err();
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert!(is_session_broken(&err), "{err}");
+    server.abort();
+
+    // Greets, then sits on LOGIN.
+    let (port, _, server) = scripted_server(true, |_, _| Say::Silence).await;
+    let src = scripted_source(port, "pw").with_timeouts(short_timeouts());
+    let t = tokio::time::Instant::now();
+    assert!(src.check_login().await.is_err());
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    server.abort();
+}
+
+/// EVERY LOGIN FAILURE IS THE SAME FIXED LINE (security review 6): a `BAD`
+/// that echoes the command (the password with it) never reaches the error,
+/// and it counts as an auth refusal like a `NO`.
+#[tokio::test]
+async fn a_login_failure_of_any_kind_says_nothing_the_server_said() {
+    for reply in [
+        "BAD [PARSE] could not parse: LOGIN u hunter2-secret",
+        "NO [AUTHENTICATIONFAILED] hunter2-secret is wrong",
+    ] {
+        let reply = reply.to_string();
+        let (port, _, server) = scripted_server(true, move |tag, cmd| {
+            if cmd.starts_with("LOGIN") {
+                Say::Reply(format!("{tag} {reply}\r\n"))
+            } else {
+                Say::Reply(format!("{tag} OK\r\n"))
+            }
+        })
+        .await;
+        let refusals = Arc::new(SourceRefusals::default());
+        let src = ImapSource::new(
+            1,
+            ImapServer {
+                host: "127.0.0.1".into(),
+                port,
+                tls: ImapTls::Plain,
+                username: "u".into(),
+            },
+            ImapPassword::new("hunter2-secret"),
+            mem(),
+            refusals.clone(),
+        )
+        .unwrap();
+        let err = src.check_login().await.unwrap_err();
+        assert!(matches!(err, CoreError::Credential(_)), "{err:?}");
+        assert!(err.to_string().ends_with(LOGIN_REFUSED), "{err}");
+        assert!(!format!("{err:?}").contains("hunter2"));
+        assert_eq!(refusals.auth.load(Ordering::Relaxed), 1);
+        server.abort();
+    }
 }

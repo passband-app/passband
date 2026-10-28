@@ -175,9 +175,70 @@ impl std::fmt::Debug for ImapPassword {
 
 /// The one stream type the session runs over, whichever way it was secured.
 #[derive(Debug)]
-enum Transport {
+enum Stream {
     Plain(TcpStream),
     Tls(Box<TlsStream<TcpStream>>),
+}
+
+/// A [`Stream`] with a STALL TIMER (security review 3): while a read or a
+/// write is waiting, the server must make progress within `stall`, or the
+/// operation fails with `TimedOut`, which every command maps to a broken
+/// session. Progress is any byte read, or a write accepted, so a large FETCH
+/// over a slow link never trips it: only silence does. `None` for the IDLE
+/// connection, which is silent by design and bounded by its own deadline.
+struct Transport {
+    stream: Stream,
+    stall: Option<Duration>,
+    /// When the stream last moved (or the timer was first needed).
+    last_progress: tokio::time::Instant,
+    timer: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl std::fmt::Debug for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transport")
+            .field("stream", &self.stream)
+            .field("stall", &self.stall)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Transport {
+    fn new(stream: Stream, stall: Option<Duration>) -> Self {
+        Self {
+            stream,
+            stall,
+            last_progress: tokio::time::Instant::now(),
+            timer: None,
+        }
+    }
+
+    fn progressed(&mut self) {
+        self.last_progress = tokio::time::Instant::now();
+        self.timer = None;
+    }
+
+    /// The inner poll came back `Pending`: has the server been silent too
+    /// long? Arms the timer so this task is woken when it would be.
+    fn check_stall(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Error> {
+        let Some(stall) = self.stall else {
+            return Poll::Pending;
+        };
+        let due = self.last_progress + stall;
+        let timer = self
+            .timer
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(due)));
+        if timer.deadline() != due {
+            timer.as_mut().reset(due);
+        }
+        match timer.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the server stopped answering",
+            )),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 impl AsyncRead for Transport {
@@ -186,9 +247,17 @@ impl AsyncRead for Transport {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Transport::Plain(s) => Pin::new(s).poll_read(cx, buf),
-            Transport::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        let this = self.get_mut();
+        let polled = match &mut this.stream {
+            Stream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        };
+        match polled {
+            Poll::Pending => this.check_stall(cx).map(Err),
+            ready => {
+                this.progressed();
+                ready
+            }
         }
     }
 }
@@ -199,23 +268,76 @@ impl AsyncWrite for Transport {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            Transport::Plain(s) => Pin::new(s).poll_write(cx, buf),
-            Transport::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+        let this = self.get_mut();
+        let polled = match &mut this.stream {
+            Stream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+        };
+        match polled {
+            Poll::Pending => this.check_stall(cx).map(Err),
+            // A command going out starts the clock on its answer afresh.
+            ready => {
+                this.progressed();
+                ready
+            }
         }
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Transport::Plain(s) => Pin::new(s).poll_flush(cx),
-            Transport::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+        let this = self.get_mut();
+        let polled = match &mut this.stream {
+            Stream::Plain(s) => Pin::new(s).poll_flush(cx),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+        };
+        match polled {
+            Poll::Pending => this.check_stall(cx).map(Err),
+            ready => {
+                this.progressed();
+                ready
+            }
         }
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Transport::Plain(s) => Pin::new(s).poll_shutdown(cx),
-            Transport::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+        match &mut self.get_mut().stream {
+            Stream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
         }
     }
+}
+
+/// How long each step of the IMAP conversation may take (security review
+/// 3). Gmail's REST client has one 180 s timeout per request; IMAP has more
+/// steps, so each gets its own bound.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Timeouts {
+    /// TCP connect, and separately the TLS handshake.
+    pub connect: Duration,
+    /// Everything from the greeting through STARTTLS, LOGIN and CAPABILITY.
+    pub login: Duration,
+    /// The longest the command session's server may say nothing while a
+    /// command waits on it. A stall bound, not a total: a 64 MB FETCH at a
+    /// few hundred KB/s keeps moving and is never cut off, and a server that
+    /// has stopped answering is noticed in two minutes, not never.
+    pub stall: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(30),
+            login: Duration::from_secs(60),
+            stall: Duration::from_secs(120),
+        }
+    }
+}
+
+/// TCP keepalive on the socket, so a peer that vanished (a laptop that slept
+/// through a NAT timeout) is noticed by the kernel even under a long IDLE.
+fn set_keepalive(tcp: &TcpStream) {
+    let ka = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15));
+    // Best effort: a platform that refuses it still has the stall timer.
+    let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&ka);
 }
 
 type ImapSession = Session<Transport>;
@@ -865,7 +987,11 @@ pub struct ImapSource {
     idle_ahead_of: std::sync::Mutex<Option<SyncCursor>>,
     /// IDLE logins that succeeded, for the tests.
     idle_connects: AtomicU64,
+    timeouts: Timeouts,
 }
+
+/// The one thing a failed `LOGIN` ever says.
+const LOGIN_REFUSED: &str = "imap login refused: check the username and app password";
 
 const IDLE_UNKNOWN: u8 = 0;
 const IDLE_YES: u8 = 1;
@@ -992,13 +1118,25 @@ impl ImapSource {
             idle_conn: tokio::sync::Mutex::new(None),
             idle_ahead_of: std::sync::Mutex::new(None),
             idle_connects: AtomicU64::new(0),
+            timeouts: Timeouts::default(),
         })
     }
 
+    /// Shorter bounds, for the tests that wait on them.
+    #[cfg(test)]
+    pub(crate) fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
+        self.timeouts = timeouts;
+        self
+    }
+
     async fn connect_tcp(&self) -> Result<TcpStream> {
-        let tcp = TcpStream::connect((self.server.host.as_str(), self.server.port))
-            .await
-            .map_err(|e| net_err("tcp connect", e))?;
+        let tcp = tokio::time::timeout(
+            self.timeouts.connect,
+            TcpStream::connect((self.server.host.as_str(), self.server.port)),
+        )
+        .await
+        .map_err(|_| net_err("tcp connect", "timed out"))?
+        .map_err(|e| net_err("tcp connect", e))?;
         if self.server.tls == ImapTls::Plain {
             // Belt and braces for the one cleartext case: whatever the name
             // resolved to, the socket we are about to send a password over
@@ -1010,10 +1148,11 @@ impl ImapSource {
                 ));
             }
         }
+        set_keepalive(&tcp);
         Ok(tcp)
     }
 
-    async fn tls_wrap(&self, tcp: TcpStream) -> Result<Transport> {
+    async fn tls_wrap(&self, tcp: TcpStream) -> Result<Stream> {
         let name = ServerName::try_from(
             self.server
                 .host
@@ -1022,16 +1161,19 @@ impl ImapSource {
                 .to_string(),
         )
         .map_err(|e| net_err("tls server name", e))?;
-        let tls = TlsConnector::from(self.tls.clone())
-            .connect(name, tcp)
-            .await
-            .map_err(|e| net_err("tls handshake", e))?;
-        Ok(Transport::Tls(Box::new(tls)))
+        let tls = tokio::time::timeout(
+            self.timeouts.connect,
+            TlsConnector::from(self.tls.clone()).connect(name, tcp),
+        )
+        .await
+        .map_err(|_| net_err("tls handshake", "timed out"))?
+        .map_err(|e| net_err("tls handshake", e))?;
+        Ok(Stream::Tls(Box::new(tls)))
     }
 
     /// Open, secure and authenticate one connection, then resolve roles.
     async fn connect(&self) -> Result<Conn> {
-        let (mut session, caps) = self.open_session().await?;
+        let (mut session, caps) = self.open_session(Some(self.timeouts.stall)).await?;
         let roles = list_roles(&mut session).await?;
         self.connects.fetch_add(1, Ordering::Relaxed);
         Ok(Conn {
@@ -1045,14 +1187,22 @@ impl ImapSource {
     }
 
     /// Open, secure and authenticate one connection: the command session's
-    /// and the IDLE connection's shared first half.
-    async fn open_session(&self) -> Result<(ImapSession, Caps)> {
+    /// and the IDLE connection's shared first half. `stall` is the session's
+    /// stall timer ([`Transport`]); the login conversation is bounded by
+    /// [`Timeouts::login`] either way.
+    async fn open_session(&self, stall: Option<Duration>) -> Result<(ImapSession, Caps)> {
+        tokio::time::timeout(self.timeouts.login, self.open_session_unbounded(stall))
+            .await
+            .map_err(|_| broken_err("login", "the server did not finish logging in in time"))?
+    }
+
+    async fn open_session_unbounded(&self, stall: Option<Duration>) -> Result<(ImapSession, Caps)> {
         let tcp = self.connect_tcp().await?;
         let mut client = match self.server.tls {
-            ImapTls::Implicit => Client::new(self.tls_wrap(tcp).await?),
-            ImapTls::Plain => Client::new(Transport::Plain(tcp)),
+            ImapTls::Implicit => Client::new(Transport::new(self.tls_wrap(tcp).await?, stall)),
+            ImapTls::Plain => Client::new(Transport::new(Stream::Plain(tcp), stall)),
             ImapTls::StartTls => {
-                let mut plain = Client::new(Transport::Plain(tcp));
+                let mut plain = Client::new(Transport::new(Stream::Plain(tcp), stall));
                 read_greeting(&mut plain).await?;
                 plain
                     .run_command_and_check_ok("STARTTLS", None)
@@ -1061,10 +1211,10 @@ impl ImapSource {
                 // `into_inner` drops anything buffered after the tagged OK, so
                 // a response injected before the handshake is never read as
                 // if it came over TLS.
-                let Transport::Plain(tcp) = plain.into_inner() else {
+                let Stream::Plain(tcp) = plain.into_inner().stream else {
                     unreachable!("built over a plain transport above");
                 };
-                Client::new(self.tls_wrap(tcp).await?)
+                Client::new(Transport::new(self.tls_wrap(tcp).await?, stall))
             }
         };
         if self.server.tls != ImapTls::StartTls {
@@ -1072,15 +1222,15 @@ impl ImapSource {
         }
         let mut session = match client.login(&self.server.username, &self.password.0).await {
             Ok(s) => s,
-            Err((async_imap::error::Error::No(_), _)) => {
-                // The server's text is dropped: some servers echo the
-                // username, and none of it helps the user more than this.
+            Err(_) => {
+                // EVERY failure, whatever its kind (security review 6): the
+                // server's text is dropped (some echo the username, and a
+                // `BAD` may echo the whole command, password included), and
+                // it counts as a refusal. None of it helps the user more than
+                // this line does.
                 self.refusals.auth.fetch_add(1, Ordering::Relaxed);
-                return Err(CoreError::Credential(
-                    "imap login refused: check the username and app password".into(),
-                ));
+                return Err(CoreError::Credential(LOGIN_REFUSED.into()));
             }
-            Err((e, _)) => return Err(net_err("login", e)),
         };
         let caps = session
             .capabilities()
@@ -1921,7 +2071,7 @@ impl ImapSource {
         let mut session = match parked {
             Some(s) => s,
             None => {
-                let (s, caps) = self.open_session().await?;
+                let (s, caps) = self.open_session(None).await?;
                 if !caps.idle {
                     // No IDLE on this server: the default poll, for good.
                     drop(s);

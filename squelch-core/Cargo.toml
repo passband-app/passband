@@ -45,6 +45,13 @@ ammonia = "4"
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 webpki-roots = "1"
+# async-imap `log::trace!`s every line it writes and reads, the LOGIN line
+# (the password) and message bodies included. `max_level_debug` compiles every
+# trace call out at build time, and Cargo unifies features, so it holds for
+# every crate in any binary that links this one. Nothing in the workspace
+# reads trace-level `log` output (the hosted services' tracing-subscriber
+# filters default to info). Pinned by `mail::imap::tests::log_trace_is_compiled_out`.
+log = { version = "0.4", features = ["max_level_debug"] }
 sha2 = "0.10"
 # OS entropy for read-tracking tokens. Deliberately the raw syscall wrapper
 # rather than a PRNG crate: a tracking token is minted once and must be

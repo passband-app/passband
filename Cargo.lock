@@ -4938,6 +4938,7 @@ dependencies = [
  "hf-hub",
  "keyring-core",
  "libc",
+ "log",
  "mail-parser",
  "oauth2",
  "psl",

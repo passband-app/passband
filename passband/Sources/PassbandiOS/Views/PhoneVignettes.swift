@@ -41,6 +41,7 @@ extension PhoneVignette {
         case .messageSwipe: MessageSwipeScene.self
         case .clearStack: ClearStackPhoneScene.self
         case .remind: RemindScene.self
+        case .smartClear: SmartClearPhoneScene.self
         }
     }
 }
@@ -721,5 +722,220 @@ enum RemindScene: VignetteDrawing {
             glow.addFilter(.shadow(color: PhoneKit.remind.opacity(0.8), radius: 4))
             PhoneKit.glyph(&glow, "bell.fill", at: CGPoint(x: rect.maxX - 14, y: rect.minY + 9.5), size: 7.5, color: PhoneKit.remind)
         }
+    }
+}
+
+// MARK: - smart clear
+
+/// SMART CLEAR: Reading on the Sitrep, one sender's card under another, and
+/// three of them have run their course. Each says why with a small mark where
+/// its count would be: an offer that ended (a tag), an event that has happened
+/// (a calendar), an order that shipped (a parcel). The thumb taps the zone's
+/// pill, it works for a breath, and those three take their checks and go while
+/// the rest stay exactly where they were. Then the receipt rises from the
+/// bottom edge, where the phone's sits over the tab bar: a headline, a line
+/// per reason carrying the same mark, and Undo, its ring draining to say how
+/// long it lasts.
+///
+/// The Mac's scene of the same feature (`SmartClearScene`) on a phone's
+/// column, with its marks, and a thumb for its pointer.
+///
+/// The seam: the receipt goes down, and new mail rises into the gaps, drawn
+/// as the cards the loop began on.
+enum SmartClearPhoneScene: VignetteDrawing {
+    static let canvas = PhoneKit.canvas
+
+    /// The receipt up with its three lines, the gaps it accounts for.
+    static let posterTime: Double = 2.95
+
+    private enum Reason { case offer, event, parcel }
+    private struct Card {
+        let tint: Int
+        let name: CGFloat
+        let lines: (CGFloat, CGFloat)
+        let reason: Reason?
+    }
+
+    /// The expired ones are wherever they happen to be, not lined up for the
+    /// camera.
+    private static let cards: [Card] = [
+        Card(tint: 0, name: 46, lines: (128, 96), reason: nil),
+        Card(tint: 2, name: 34, lines: (112, 136), reason: .offer),
+        Card(tint: 1, name: 52, lines: (140, 84), reason: .event),
+        Card(tint: 2, name: 40, lines: (104, 124), reason: nil),
+        Card(tint: 0, name: 30, lines: (132, 100), reason: .parcel),
+    ]
+    private static let rowX: CGFloat = 12
+    private static let rowWidth: CGFloat = 196
+    private static let rowHeight: CGFloat = 28
+    private static let pitch: CGFloat = 32
+    private static let firstRow: CGFloat = 34
+    private static let pill = CGRect(x: 138, y: 10, width: 70, height: 16)
+    /// The receipt, the screen's width, sitting where the tab bar's edge is.
+    private static let receipt = CGRect(x: 12, y: 104, width: 196, height: 88)
+
+    // The beats: the Mac's, a touch later for the thumb's approach.
+    private static let tap: Double = 0.6
+    private static let checks: [Double] = [1.25, 1.37, 1.49]
+    private static let goneFrom: Double = 1.67
+    private static let receiptIn: Double = 1.98
+    private static let receiptOut: Double = 3.85
+    private static let refill: Double = 4.12
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+
+        // The zone's heading: its glyph, its name, how many senders.
+        PhoneKit.glyph(&ctx, "envelope.open", at: CGPoint(x: 19, y: 18), size: 7.5, color: VignettePalette.phosphor)
+        VignetteKit.bar(&ctx, CGRect(x: 28, y: 16.4, width: 40, height: 3.2), VignettePalette.ink.opacity(0.85))
+        let count = CGRect(x: 73, y: 13.5, width: 13, height: 9)
+        ctx.fill(Path(roundedRect: count, cornerRadius: 4.5), with: .color(VignettePalette.faint))
+        VignetteKit.bar(&ctx, CGRect(x: count.midX - 2, y: count.midY - 1.1, width: 4, height: 2.2), VignettePalette.dim)
+        drawPill(&ctx, t: t)
+
+        var expiredSeen = 0
+        for (index, card) in cards.enumerated() {
+            let origin = CGPoint(x: rowX, y: firstRow + CGFloat(index) * pitch)
+            guard card.reason != nil else {
+                drawCard(&ctx, card, at: origin, opacity: 1, dy: 0, check: 0)
+                continue
+            }
+            let at = checks[expiredSeen]
+            expiredSeen += 1
+            let check = ease(t, at, at + 0.14)
+            let gone = ease(t, goneFrom, goneFrom + 0.3)
+            let from = refill + 0.06 * Double(expiredSeen)
+            let back = ease(t, from, from + 0.34)
+            if gone < 1 {
+                drawCard(&ctx, card, at: origin, opacity: 1 - gone, dy: -6 * CGFloat(gone), check: check)
+            } else if back > 0 {
+                drawCard(&ctx, card, at: origin, opacity: back, dy: 8 * CGFloat(1 - back), check: 0)
+            }
+        }
+        drawReceipt(&ctx, t: t)
+
+        // The thumb, once on the pill.
+        let on = ease(t, tap - 0.34, tap - 0.18) * (1 - ease(t, tap + 0.22, tap + 0.4))
+        PhoneKit.touch(
+            &ctx, at: CGPoint(x: pill.midX + 4, y: pill.midY + 3), presence: on,
+            down: VignetteClock.press(t, at: tap))
+    }
+
+    /// The zone's pill: its check-stack glyph and its name, then the app's
+    /// spinner in the glyph's place while it tidies up.
+    private static func drawPill(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let pressed = VignetteClock.press(t, at: tap)
+        VignetteKit.pill(&ctx, pill, label: 36, labelX: pill.minX + 22, pressed: pressed)
+        let working = ease(t, tap + 0.12, tap + 0.22) - ease(t, checks[0] - 0.1, checks[0])
+        let mark = CGPoint(x: pill.minX + 12, y: pill.midY + CGFloat(pressed))
+        var glyph = ctx
+        glyph.opacity *= 1 - working
+        PhoneKit.glyph(
+            &glyph, "checkmark.rectangle.stack", at: mark, size: 7,
+            color: pressed > 0.5 ? Color.white : VignettePalette.phosphorHot)
+        VignetteKit.arc(
+            &ctx, center: mark, radius: 3.4, head: t * 1.6, sweep: 0.3, color: VignettePalette.phosphorHot,
+            lineWidth: 1, opacity: working)
+    }
+
+    /// The reason a card has run its course, as its mark.
+    private static func reasonMark(_ ctx: inout GraphicsContext, _ reason: Reason, center: CGPoint, size: CGFloat, color: Color) {
+        switch reason {
+        case .event: VignetteKit.calendarMark(&ctx, center: center, size: size, color: color)
+        case .offer: VignetteKit.tagMark(&ctx, center: center, size: size, color: color)
+        case .parcel: VignetteKit.parcelMark(&ctx, center: center, size: size, color: color)
+        }
+    }
+
+    /// One sender's card, after ReadingCard: a square hero on the left, the
+    /// name and its count across the top, two lines of summary under. An
+    /// expired card wears its reason where the count would be.
+    private static func drawCard(
+        _ ctx: inout GraphicsContext, _ card: Card, at origin: CGPoint, opacity: Double, dy: CGFloat, check: Double
+    ) {
+        guard opacity > 0.001 else { return }
+        var layer = ctx
+        layer.opacity *= opacity
+        layer.translateBy(x: 0, y: dy)
+        let rect = CGRect(origin: origin, size: CGSize(width: rowWidth, height: rowHeight))
+        PhoneKit.surface(&layer, rect, lit: check)
+        let hero = CGRect(x: rect.minX + 5, y: rect.minY + 5, width: 18, height: 18)
+        layer.fill(
+            Path(roundedRect: hero, cornerRadius: 4, style: .continuous),
+            with: .color(VignettePalette.avatar[card.tint].opacity(VignetteClock.mix(0.5, 0.28, check))))
+        let x = rect.minX + 30
+        VignetteKit.bar(
+            &layer, CGRect(x: x, y: rect.minY + 6.5, width: card.name, height: 3.2),
+            VignettePalette.ink.opacity(VignetteClock.mix(0.85, 0.4, check)))
+        VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 14, width: card.lines.0, height: 2.4), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: x, y: rect.minY + 19.5, width: card.lines.1, height: 2.4), VignettePalette.dim)
+        let corner = CGPoint(x: rect.maxX - 11, y: rect.minY + 8.5)
+        if let reason = card.reason {
+            reasonMark(&layer, reason, center: corner, size: 8, color: VignettePalette.ink.opacity(0.65 * (1 - check)))
+            VignetteKit.check(&layer, center: corner, size: 3.6, progress: check)
+        } else {
+            VignetteKit.bar(&layer, CGRect(x: rect.maxX - 17, y: rect.minY + 7.3, width: 10, height: 2.4), VignettePalette.dim)
+        }
+    }
+
+    /// The receipt, after SmartClearReceiptCard on a phone: its name, how many
+    /// went, from how many senders, a line per reason (the mark, a count, the
+    /// words), a rule, and Undo with its ring, draining.
+    private static func drawReceipt(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let arrive = ease(t, receiptIn, receiptIn + 0.34)
+        let leave = ease(t, receiptOut, receiptOut + 0.3)
+        guard arrive > 0, leave < 1 else { return }
+        // One layer, faded whole: parts faded one by one let the card under
+        // the receipt show through each of them in turn.
+        var outer = ctx
+        outer.opacity *= arrive * (1 - leave)
+        outer.translateBy(x: 0, y: 22 * CGFloat(1 - arrive) + 16 * CGFloat(leave))
+        outer.drawLayer { layer in drawReceiptBody(&layer, t: t) }
+    }
+
+    private static func drawReceiptBody(_ layer: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let shape = Path(roundedRect: receipt, cornerRadius: 12, style: .continuous)
+        var lifted = layer
+        lifted.addFilter(.shadow(color: Color.black.opacity(0.5), radius: 8, y: 2))
+        lifted.fill(shape, with: .color(VignettePalette.cap))
+        layer.stroke(shape, with: .color(Color.white.opacity(0.14)), lineWidth: 0.5)
+
+        let x = receipt.minX + 12
+        VignetteKit.check(&layer, center: CGPoint(x: x + 2.6, y: receipt.minY + 11), size: 2.6, progress: 1, opacity: 0.8)
+        VignetteKit.bar(&layer, CGRect(x: x + 9, y: receipt.minY + 9.8, width: 30, height: 2.4), VignettePalette.dim)
+        VignetteKit.bar(&layer, CGRect(x: x, y: receipt.minY + 18, width: 62, height: 5.4), VignettePalette.ink.opacity(0.9))
+        VignetteKit.bar(&layer, CGRect(x: x, y: receipt.minY + 27.5, width: 34, height: 2.4), VignettePalette.dim)
+
+        let reasons: [(Reason, CGFloat)] = [(.offer, 44), (.event, 56), (.parcel, 50)]
+        for (index, line) in reasons.enumerated() {
+            let from = receiptIn + 0.24 + 0.1 * Double(index)
+            var row = layer
+            row.opacity *= ease(t, from, from + 0.2)
+            let y = receipt.minY + 39 + CGFloat(index) * 9
+            reasonMark(&row, line.0, center: CGPoint(x: x + 3.5, y: y), size: 6.4, color: VignettePalette.phosphorHot)
+            VignetteKit.bar(&row, CGRect(x: x + 12, y: y - 1.4, width: 5, height: 2.8), VignettePalette.ink.opacity(0.85))
+            VignetteKit.bar(&row, CGRect(x: x + 20, y: y - 1.2, width: line.1, height: 2.4), VignettePalette.dim)
+        }
+
+        // The rule, then Undo: a soft capsule with its name and the ring
+        // that says how long it has left, and the quiet line after it.
+        layer.fill(
+            Path(CGRect(x: receipt.minX + 12, y: receipt.minY + 65, width: receipt.width - 24, height: 0.5)),
+            with: .color(VignettePalette.edge))
+        let undo = CGRect(x: x, y: receipt.minY + 70, width: 46, height: 13)
+        let capsule = Path(roundedRect: undo, cornerRadius: undo.height / 2, style: .continuous)
+        layer.fill(capsule, with: .color(VignettePalette.phosphor.opacity(0.18)))
+        layer.stroke(capsule, with: .color(VignettePalette.phosphor.opacity(0.4)), lineWidth: 0.6)
+        VignetteKit.bar(&layer, CGRect(x: undo.minX + 8, y: undo.midY - 1.3, width: 18, height: 2.6), VignettePalette.ink.opacity(0.9))
+        let ring = CGPoint(x: undo.maxX - 10, y: undo.midY)
+        let left = 1 - VignetteClock.ramp(t, receiptIn + 0.3, receiptOut + 0.3)
+        VignetteKit.ring(&layer, center: ring, radius: 3.2, progress: 1, color: Color.white.opacity(0.16), lineWidth: 1.1)
+        VignetteKit.ring(&layer, center: ring, radius: 3.2, progress: left, color: VignettePalette.phosphor, lineWidth: 1.1)
+        VignetteKit.bar(
+            &layer, CGRect(x: receipt.maxX - 12 - 54, y: undo.midY - 1.1, width: 54, height: 2.2),
+            VignettePalette.dim.opacity(0.7))
     }
 }

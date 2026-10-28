@@ -31,7 +31,7 @@ import Foundation
 /// `ReleaseVignette` is one: this file stays free of SwiftUI, and the walk
 /// maps each case to its scene (PassbandiOS/Views/PhoneVignettes.swift).
 enum PhoneVignette: String, CaseIterable, Sendable {
-    case chainReply, messageSwipe, clearStack, remind
+    case chainReply, messageSwipe, clearStack, remind, smartClear
 }
 
 /// One page of the walk: a thing the phone can now do, and how.
@@ -108,7 +108,7 @@ enum PhoneReleaseNotes {
                 PhoneFeature(
                     "Smart clear",
                     detail: "Tap smart clear on Reading to clear what has expired and what you never open. Undo puts all of it back.",
-                    symbol: "checkmark.rectangle.stack"),
+                    symbol: "checkmark.rectangle.stack", vignette: .smartClear),
                 PhoneFeature(
                     "Better agent search",
                     detail: "Type a question in Search and the agent looks through your mail for the answer, right above your results.",

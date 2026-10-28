@@ -97,7 +97,7 @@ pub fn render_email_html(source: &str) -> String {
                 events.push(Event::Html(
                     format!(
                         "<img src=\"cid:{token}\" alt=\"{}\" style=\"max-width:100%;height:auto\">",
-                        crate::gmail_write::escape_html(&alt)
+                        crate::write::mime::escape_html(&alt)
                     )
                     .into(),
                 ));

@@ -124,6 +124,14 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
     relabel_scanner_opens(conn)?;
     retire_preference_retriage(conn)?;
+    // The account's mail provider. 'gmail' on every pre-existing row, which is
+    // the honest reading: Gmail was the only provider this daemon ever had.
+    add_column_if_missing(
+        conn,
+        "accounts",
+        "provider",
+        "TEXT NOT NULL DEFAULT 'gmail'",
+    )?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
     add_column_if_missing(
         conn,

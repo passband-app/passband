@@ -115,17 +115,10 @@ forward the fixed port from your laptop:
 ssh -L 8847:127.0.0.1:8847 box
 ```
 
-On the box, READ credential only:
+On the box (one consent; its token fills both the Read and the Write slot):
 
 ```sh
 docker compose run --rm auth
-```
-
-Or READ + WRITE (two consent URLs, write first — what you want on a fresh box
-if you'll ever send/modify mail):
-
-```sh
-docker compose run --rm auth auth --write --headless --port 8847
 ```
 
 Open the printed `accounts.google.com` URL(s) in your laptop browser; the

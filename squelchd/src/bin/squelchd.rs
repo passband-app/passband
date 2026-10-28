@@ -534,8 +534,9 @@ fn spawn_statistics_refresh(store: Arc<SqliteStore>) {
 /// the statistics pass's early ticks, so the three never queue on the store
 /// mutex together.
 const HISTORY_RETENTION_AFTER_SECS: u64 = 1200;
-/// Then every six hours. A pass with nothing due reads one page and costs a
-/// millisecond or two; six hours rather than a day because the timer counts
+/// Then every six hours. A pass with nothing due reads up to the window, a
+/// page or a few, and costs a millisecond or two; six hours rather than a day
+/// because the timer counts
 /// time awake (a laptop that sleeps most of the day would stretch "daily"
 /// into days) and starts over on every restart.
 const HISTORY_RETENTION_EVERY_SECS: u64 = 6 * 3600;
@@ -555,23 +556,28 @@ fn spawn_history_retention(store: Arc<SqliteStore>) {
             tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             wait = HISTORY_RETENTION_EVERY_SECS;
             let store = store.clone();
-            match tokio::task::spawn_blocking(move || store.prune_history(chrono::Utc::now())).await
-            {
-                Ok(Ok(pruned)) if pruned == Default::default() => {}
-                // Counts only.
-                Ok(Ok(pruned)) => eprintln!(
+            let Ok((pruned, outcome)) =
+                tokio::task::spawn_blocking(move || store.prune_history(chrono::Utc::now())).await
+            else {
+                eprintln!("squelchd: history retention pass panicked");
+                continue;
+            };
+            // Counts only, and the pages committed before any error count.
+            if pruned != Default::default() {
+                eprintln!(
                     "squelchd: history retention removed {} run record(s) and {} notification \
                      assessment(s) older than {} days, and slimmed {} kept revisit answer(s)",
                     pruned.runs,
                     pruned.assessments,
                     squelch_core::store::sqlite::HISTORY_RETENTION_DAYS,
                     pruned.runs_trimmed,
-                ),
-                Ok(Err(e)) => {
-                    eprintln!("squelchd: history retention pass failed (retrying in an hour): {e}");
-                    wait = HISTORY_RETENTION_RETRY_SECS;
-                }
-                Err(_) => eprintln!("squelchd: history retention pass panicked"),
+                );
+            }
+            if let Err(e) = outcome {
+                eprintln!(
+                    "squelchd: history retention pass stopped short (retrying in an hour): {e}"
+                );
+                wait = HISTORY_RETENTION_RETRY_SECS;
             }
         }
     });

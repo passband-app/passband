@@ -6091,7 +6091,8 @@ mod tests {
                 pruned_at.to_rfc3339()
             ),
         );
-        let pruned = store.prune_history(pruned_at).unwrap();
+        let (pruned, outcome) = store.prune_history(pruned_at);
+        outcome.unwrap();
         assert_eq!((pruned.runs, pruned.runs_trimmed), (1, 1));
         let mut moved = zoned_flight("ZIPAIR ZG24", &["ZG24QX7"]);
         if let RecordProposal::Event { end, .. } = &mut moved.records[0] {

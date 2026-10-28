@@ -56,6 +56,13 @@ fn ids(store: &SqliteStore, table: &str) -> Vec<i64> {
         .collect()
 }
 
+/// A pass that must succeed: what it did.
+fn prune(store: &SqliteStore, now: DateTime<Utc>) -> HistoryPruned {
+    let (pruned, outcome) = store.prune_history(now);
+    outcome.unwrap();
+    pruned
+}
+
 fn metadata(store: &SqliteStore, run: i64) -> String {
     store
         .lock()
@@ -125,7 +132,7 @@ fn history_retention_keeps_the_window_and_the_newest_revisit_answer() {
     // A clock that ran ahead stamped this one; it is no reason to stop.
     let future_assessment = assessment(&store, other, theirs, &ago(now, -30));
 
-    let pruned = store.prune_history(now).unwrap();
+    let pruned = prune(&store, now);
     assert_eq!(
         pruned,
         HistoryPruned {
@@ -161,7 +168,7 @@ fn history_retention_keeps_the_window_and_the_newest_revisit_answer() {
     );
 
     // A second pass the same day finds nothing.
-    assert_eq!(store.prune_history(now).unwrap(), HistoryPruned::default());
+    assert_eq!(prune(&store, now), HistoryPruned::default());
 }
 
 /// A first pass on a store with a long history clears it a page at a time,
@@ -183,7 +190,7 @@ fn history_retention_clears_a_backlog_and_never_inside_the_window() {
     let old_after_recent = run(&store, ingest, "applied", &ago(now, 300));
     let today = run(&store, ingest, "applied", &ago(now, 0));
 
-    let pruned = store.prune_history(now).unwrap();
+    let pruned = prune(&store, now);
     assert_eq!(pruned.runs, rows as u64 + 1, "{old_after_future} gone");
     assert_eq!(
         ids(&store, "agent_triage_runs"),
@@ -195,7 +202,7 @@ fn history_retention_clears_a_backlog_and_never_inside_the_window() {
     // future-stamped run is still younger than the window and stays.
     let later = now + Duration::days(HISTORY_RETENTION_DAYS) + Duration::hours(12);
     let fresh = run(&store, ingest, "applied", &later.to_rfc3339());
-    assert_eq!(store.prune_history(later).unwrap().runs, 3);
+    assert_eq!(prune(&store, later).runs, 3);
     assert_eq!(ids(&store, "agent_triage_runs"), vec![future, fresh]);
 }
 
@@ -211,7 +218,7 @@ fn history_retention_deletes_a_page_at_a_time() {
     let rows = 2 * PRUNE_CHUNK_ROWS + PRUNE_CHUNK_ROWS / 2;
     backlog(&store, acct, ingest, message, rows, &ago(now, 200));
     run(&store, ingest, "applied", &ago(now, 0));
-    let cutoff = store.retention_cutoff(&RUNS, now).unwrap().to_rfc3339();
+    let cutoff = (now - Duration::days(HISTORY_RETENTION_DAYS)).to_rfc3339();
     let now_text = now.to_rfc3339();
     let mut steps = Vec::new();
     let mut after = 0;
@@ -227,51 +234,71 @@ fn history_retention_deletes_a_page_at_a_time() {
     assert_eq!(steps, vec![full, full, full / 2]);
 }
 
-/// The window ends at the newest row when the clock reads later than that:
-/// a pass on a clock that jumped a year ahead deletes nothing the real window
-/// holds, and an idle account keeps its last 90 days of activity.
+/// The clock is trusted: a pass on a clock a year ahead takes everything
+/// it says is old, except the row something decides on. The newest answered
+/// revisit stays whatever its age, and so the revisit pass never pays twice
+/// for a wrong clock.
 #[test]
-fn history_retention_measures_the_window_from_the_newest_row() {
+fn a_clock_far_ahead_never_takes_the_kept_answer() {
     let (store, acct) = store();
     let now = Utc::now();
     let message = ingest_normal(&store, acct, "g-clk", "t-clk", Tier::Signal, 50, now);
     let ingest = job(&store, acct, message, "ingest");
-    let gone = run(&store, ingest, "applied", &ago(now, 120));
-    let kept = run(&store, ingest, "applied", &ago(now, 60));
-    let newest = run(&store, ingest, "applied", &ago(now, 0));
-    // Each table's window ends at its own newest row: ten days ago here.
-    let old_assessment = assessment(&store, acct, message, &ago(now, 105));
-    let kept_old_assessment = assessment(&store, acct, message, &ago(now, 95));
-    let kept_assessment = assessment(&store, acct, message, &ago(now, 10));
+    let ask = job(
+        &store,
+        acct,
+        message,
+        &format!("revisit:event_ended:{}", ago(now, 2)),
+    );
+    let answer = run(&store, ask, "applied", &ago(now, 1));
+    run(&store, ingest, "applied", &ago(now, 0));
+    assessment(&store, acct, message, &ago(now, 0));
 
     let ahead = now + Duration::days(365);
     assert_eq!(
-        store.prune_history(ahead).unwrap(),
+        prune(&store, ahead),
         HistoryPruned {
             runs: 1,
+            runs_trimmed: 1,
+            assessments: 1,
+        }
+    );
+    assert_eq!(ids(&store, "agent_triage_runs"), vec![answer]);
+}
+
+/// Best effort: a table that fails does not hold the other back, the error
+/// comes back, and the pages committed before it still count.
+#[test]
+fn a_failing_table_does_not_hold_the_other_back() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let message = ingest_normal(&store, acct, "g-err", "t-err", Tier::Signal, 50, now);
+    let ingest = job(&store, acct, message, "ingest");
+    run(&store, ingest, "applied", &ago(now, 200));
+    assessment(&store, acct, message, &ago(now, 200));
+    let kept = assessment(&store, acct, message, &ago(now, 0));
+    store.execute_batch_for_test(
+        "CREATE TEMP TRIGGER no_run_deletes BEFORE DELETE ON agent_triage_runs
+         BEGIN SELECT RAISE(FAIL, 'injected'); END;",
+    );
+
+    let (pruned, outcome) = store.prune_history(now);
+    assert!(outcome.is_err());
+    assert_eq!(
+        pruned,
+        HistoryPruned {
+            runs: 0,
             runs_trimmed: 0,
             assessments: 1,
         }
     );
-    assert_eq!(
-        ids(&store, "agent_triage_runs"),
-        vec![kept, newest],
-        "{gone}"
-    );
-    assert_eq!(
-        ids(&store, "notification_assessments"),
-        vec![kept_old_assessment, kept_assessment],
-        "{old_assessment}"
-    );
+    assert_eq!(ids(&store, "notification_assessments"), vec![kept]);
 }
 
 #[test]
 fn history_retention_on_empty_tables_is_a_no_op() {
     let (store, _) = store();
-    assert_eq!(
-        store.prune_history(Utc::now()).unwrap(),
-        HistoryPruned::default()
-    );
+    assert_eq!(prune(&store, Utc::now()), HistoryPruned::default());
 }
 
 /// Every step seeks by rowid and none scans a table, so a pass costs what it

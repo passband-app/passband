@@ -50,8 +50,6 @@ pub struct HistoryPruned {
 /// the delete and trim take `?2` the id the page stops before and `?3` the
 /// cutoff.
 pub(super) struct Pruning {
-    /// The newest row's timestamp, by id.
-    newest: &'static str,
     /// The next page above `?1` by rowid: its last id, the first id inside
     /// the window, and how many rows it held.
     pub(super) page: &'static str,
@@ -66,11 +64,17 @@ pub(super) struct Pruning {
 /// the committing transaction, so the window starts at the first row inside
 /// it and everything below is older. Walking up from the bottom a page at a
 /// time finds that row without an index on the timestamp, and each pass's
-/// walk is short: once one has run, the rows below the window are a few
-/// hours' worth and the answers kept below. A row stamped after now (a clock
-/// that ran ahead, then was corrected) is not the window's start: taken for
-/// it, it would stop every pass at itself until the clock caught up. It is
-/// walked past, and kept by the delete's own timestamp check.
+/// walk is short: once one has run, what lies below the window is a few
+/// hours' worth of rows and the slimmed answers kept there, a hundred bytes
+/// each.
+///
+/// A row stamped after now is not taken for the window's start. That is a
+/// clock that ran ahead and was corrected, and taken for the start it would
+/// stop every pass at itself, and the pruning with it, until the real clock
+/// caught up with the wrong one. It is walked past, and kept by the delete's
+/// own timestamp check. The price is paid only while the clock reads behind
+/// rows already stored: a pass then walks up to the first row it can place
+/// in the window, deleting nothing that is not old by its own stamp.
 ///
 /// THE DELETE rechecks every row's own timestamp, so nothing inside the window
 /// goes, whatever order a clock that stepped back stored it in. It keeps a
@@ -82,7 +86,6 @@ pub(super) struct Pruning {
 /// costs a hundred bytes rather than its 1-3 KB, however many messages have
 /// one.
 pub(super) const RUNS: Pruning = Pruning {
-    newest: "SELECT completed_at FROM agent_triage_runs ORDER BY id DESC LIMIT 1",
     page: "SELECT MAX(id),
             MIN(CASE WHEN julianday(completed_at) >= julianday(?2)
                       AND julianday(completed_at) <= julianday(?3) THEN id END),
@@ -117,7 +120,6 @@ pub(super) const RUNS: Pruning = Pruning {
 /// out of order; the delete's own timestamp check is what keeps the window
 /// whole, here as for runs.
 pub(super) const ASSESSMENTS: Pruning = Pruning {
-    newest: "SELECT assessed_at FROM notification_assessments ORDER BY id DESC LIMIT 1",
     page: "SELECT MAX(id),
             MIN(CASE WHEN julianday(assessed_at) >= julianday(?2)
                       AND julianday(assessed_at) <= julianday(?3) THEN id END),
@@ -142,74 +144,68 @@ pub(super) struct PageStep {
 
 impl SqliteStore {
     /// Delete run diagnostics and fast-lane assessments older than
-    /// [`HISTORY_RETENTION_DAYS`], for every account.
+    /// [`HISTORY_RETENTION_DAYS`] before `now`, for every account: what it
+    /// did, and the first error if it stopped short.
     ///
-    /// The window ends at `now`, or at the newest stored row's own time when
-    /// that is earlier: a pass on a clock that jumped ahead, before anything
-    /// was stamped with it, then deletes nothing the real window holds, and
-    /// an account idle for longer than the window keeps its last 90 days of
-    /// activity.
+    /// THE CLOCK IS TRUSTED, as the shredder trusts it with mail: a clock far
+    /// ahead deletes diagnostics early. Never a decision, and never the one
+    /// row something decides on (a message's newest answered revisit), which
+    /// is kept whatever its age.
     ///
-    /// A page of [`PRUNE_CHUNK_ROWS`] at a time, one transaction and one hold
-    /// of the mutex each. The pages freed go to SQLite's freelist and are
-    /// reused by later writes, so the file stops growing for this history
+    /// A page of [`PRUNE_CHUNK_ROWS`] at a time, one write transaction and
+    /// one hold of the mutex each. The pages freed go to SQLite's freelist and
+    /// are reused by later writes, so the file stops growing for this history
     /// rather than shrinking: the store is not `auto_vacuum`, and a `VACUUM`
     /// rewrites the whole file under the write lock.
     ///
     /// Off the open path and on a timer, like
     /// [`refresh_statistics`](Self::refresh_statistics) (`spawn_history_retention`
-    /// in squelchd). Both tables are tried even when the first fails, so a
-    /// busy file does not hold the other back, and the first error is
-    /// returned after.
-    pub fn prune_history(&self, now: DateTime<Utc>) -> Result<HistoryPruned> {
-        let runs = self.prune_table(&RUNS, now);
-        let assessments = self.prune_table(&ASSESSMENTS, now);
-        let (runs_deleted, runs_trimmed) = runs?;
-        Ok(HistoryPruned {
-            runs: runs_deleted,
-            runs_trimmed,
-            assessments: assessments?.0,
-        })
-    }
-
-    /// The cutoff for one table: [`HISTORY_RETENTION_DAYS`] before `now` or
-    /// before its newest row, whichever is earlier.
-    pub(super) fn retention_cutoff(
-        &self,
-        table: &Pruning,
-        now: DateTime<Utc>,
-    ) -> Result<DateTime<Utc>> {
-        let newest: Option<String> = self
-            .lock()?
-            .prepare_cached(table.newest)?
-            .query_row([], |r| r.get(0))
-            .optional()?;
-        let end = newest
-            .and_then(|at| DateTime::parse_from_rfc3339(&at).ok())
-            .map_or(now, |at| at.with_timezone(&Utc).min(now));
-        Ok(end - chrono::Duration::days(HISTORY_RETENTION_DAYS))
+    /// in squelchd), and best effort: both tables are tried even when the
+    /// first fails, so a busy file does not hold the other back, and the
+    /// counts include the pages committed before an error.
+    pub fn prune_history(&self, now: DateTime<Utc>) -> (HistoryPruned, Result<()>) {
+        let cutoff = (now - chrono::Duration::days(HISTORY_RETENTION_DAYS)).to_rfc3339();
+        let now = now.to_rfc3339();
+        let mut pruned = HistoryPruned::default();
+        let runs = self.prune_table(&RUNS, &cutoff, &now, |step| {
+            pruned.runs += step.deleted;
+            pruned.runs_trimmed += step.trimmed;
+        });
+        let assessments = self.prune_table(&ASSESSMENTS, &cutoff, &now, |step| {
+            pruned.assessments += step.deleted;
+        });
+        (pruned, runs.and(assessments))
     }
 
     /// Walk one table up from the bottom a page at a time until a page
-    /// reaches the window or the end: (deleted, trimmed).
-    fn prune_table(&self, table: &Pruning, now: DateTime<Utc>) -> Result<(u64, u64)> {
-        let cutoff = self.retention_cutoff(table, now)?.to_rfc3339();
-        let now = now.to_rfc3339();
-        let (mut deleted, mut trimmed, mut after) = (0, 0, 0);
+    /// reaches the window or the end, reporting each committed page.
+    fn prune_table(
+        &self,
+        table: &Pruning,
+        cutoff: &str,
+        now: &str,
+        mut committed: impl FnMut(PageStep),
+    ) -> Result<()> {
+        let mut after = 0;
         loop {
-            let step = self.prune_page(table, after, &cutoff, &now)?;
-            deleted += step.deleted;
-            trimmed += step.trimmed;
+            let step = self.prune_page(table, after, cutoff, now)?;
+            committed(step);
             match step.next {
                 Some(next) => after = next,
-                None => return Ok((deleted, trimmed)),
+                None => return Ok(()),
             }
             std::thread::sleep(PAGE_PAUSE);
         }
     }
 
     /// One page above `after`: its old rows deleted (or trimmed, where kept),
-    /// in one transaction under one hold of the mutex.
+    /// in one write transaction under one hold of the mutex.
+    ///
+    /// IMMEDIATE, so the write lock is taken before the page is read: a
+    /// deferred read that another process's commit overtook could not be
+    /// upgraded, and would fail at once rather than wait out the busy
+    /// timeout. Plain `prepare`, not the statement cache: these run a few
+    /// times every six hours, and would only push hot statements out of it.
     pub(super) fn prune_page(
         &self,
         table: &Pruning,
@@ -218,9 +214,9 @@ impl SqliteStore {
         now: &str,
     ) -> Result<PageStep> {
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let (last, window, seen): (Option<i64>, Option<i64>, i64) = tx
-            .prepare_cached(table.page)?
+            .prepare(table.page)?
             .query_row(params![after, cutoff, now, PRUNE_CHUNK_ROWS], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
@@ -229,12 +225,10 @@ impl SqliteStore {
         };
         let before = window.unwrap_or(last + 1);
         let deleted = tx
-            .prepare_cached(table.delete)?
+            .prepare(table.delete)?
             .execute(params![after, before, cutoff])? as u64;
         let trimmed = match table.trim {
-            Some(trim) => tx
-                .prepare_cached(trim)?
-                .execute(params![after, before, cutoff])? as u64,
+            Some(trim) => tx.prepare(trim)?.execute(params![after, before, cutoff])? as u64,
             None => 0,
         };
         tx.commit()?;

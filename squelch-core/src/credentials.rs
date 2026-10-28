@@ -1668,14 +1668,29 @@ pub fn store_imap_password_backend(
         CredentialBackend::Keyring => keyring_entry(&slot)?
             .set_password(&token.to_json()?)
             .map_err(|e| CoreError::Credential(format!("writing keyring entry: {e}"))),
-        CredentialBackend::File => {
-            let identity = age_identity_from_env()?;
-            update_credentials_file(credentials_path, identity.as_ref(), |file| {
-                file.slots.insert(slot, token);
-            })
-            .map(|_| ())
-        }
+        CredentialBackend::File => store_imap_password_file_with(
+            credentials_path,
+            account_email,
+            password,
+            age_identity_from_env()?.as_ref(),
+        ),
     }
+}
+
+/// The file half of [`store_imap_password_backend`] against an explicit
+/// identity (resolved once by the caller, as [`store_token_file_with`] is).
+fn store_imap_password_file_with(
+    path: &Path,
+    account_email: &str,
+    password: &str,
+    identity: Option<&AgeIdentity>,
+) -> Result<()> {
+    let slot = imap_slot(account_email);
+    let token = imap_password_token(password);
+    update_credentials_file(path, identity, |file| {
+        file.slots.insert(slot, token);
+    })
+    .map(|_| ())
 }
 
 /// An IMAP account's app password from the configured backend.
@@ -1701,11 +1716,32 @@ pub fn load_imap_password_backend(
             }
         },
         CredentialBackend::File => {
-            let file = CredentialsFile::read(credentials_path, age_identity_from_env()?.as_ref())?;
-            file.slots.get(&slot).cloned().ok_or_else(missing)?
+            return load_imap_password_file_with(
+                credentials_path,
+                account_email,
+                age_identity_from_env()?.as_ref(),
+            );
         }
     };
     Ok(stored.access_token)
+}
+
+/// The file half of [`load_imap_password_backend`] against an explicit
+/// identity.
+fn load_imap_password_file_with(
+    path: &Path,
+    account_email: &str,
+    identity: Option<&AgeIdentity>,
+) -> Result<String> {
+    let file = CredentialsFile::read(path, identity)?;
+    file.slots
+        .get(&imap_slot(account_email))
+        .map(|t| t.access_token.clone())
+        .ok_or_else(|| {
+            CoreError::Credential(format!(
+                "no IMAP password stored for {account_email} (run `squelchd auth --imap`)"
+            ))
+        })
 }
 
 /// Build a [`CredentialStore`] trait object bound to `kind` for the
@@ -2967,35 +3003,50 @@ mod tests {
     /// An IMAP password lands sealed in its own slot beside the OAuth ones,
     /// leaves them alone, and reads back.
     #[test]
+    ///
+    /// Against an explicit identity, NOT by setting `SQUELCH_CRED_AGE_IDENTITY`:
+    /// the env is process-wide, and the `file_store_*` tests that write
+    /// plaintext and read it back (without `ENV_LOCK`) failed when a write
+    /// landed sealed while the var was set and the read ran after it was unset.
     fn an_imap_password_is_sealed_in_its_own_slot() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let (identity_path, _identity) = identity_file("imap-password");
-        // SAFETY: guarded by ENV_LOCK, and unset again below.
-        unsafe { std::env::set_var(CRED_AGE_IDENTITY_ENV, &identity_path) };
+        let (identity_path, identity) = identity_file("imap-password");
+        let id = Some(&identity);
         let path = tmp_path("imap-password");
         let tok = sealed_token("access", "refresh");
-        store_token_file(&path, "you@x.com", CredentialKind::Read, &tok).unwrap();
-        store_imap_password_backend(CredentialBackend::File, &path, "you@x.com", "app-pw-123")
-            .unwrap();
+        store_token_file_with(&path, "you@x.com", CredentialKind::Read, &tok, id).unwrap();
+        store_imap_password_file_with(&path, "you@x.com", "app-pw-123", id).unwrap();
         let on_disk = std::fs::read(&path).unwrap();
         assert!(is_age_file(&on_disk), "sealed");
         assert!(!String::from_utf8_lossy(&on_disk).contains("app-pw-123"));
         assert_eq!(
-            load_imap_password_backend(CredentialBackend::File, &path, "you@x.com").unwrap(),
+            load_imap_password_file_with(&path, "you@x.com", id).unwrap(),
             "app-pw-123"
         );
         assert_eq!(
-            load_token_file(&path, "you@x.com", CredentialKind::Read).unwrap(),
+            load_token_file_with(&path, "you@x.com", CredentialKind::Read, id).unwrap(),
             tok
         );
-        let missing = load_imap_password_backend(CredentialBackend::File, &path, "other@x.com")
+        let missing = load_imap_password_file_with(&path, "other@x.com", id)
             .unwrap_err()
             .to_string();
         assert!(missing.contains("squelchd auth --imap"), "{missing}");
-        // SAFETY: guarded by ENV_LOCK.
-        unsafe { std::env::remove_var(CRED_AGE_IDENTITY_ENV) };
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&identity_path);
+    }
+
+    /// The public pair round-trips through the file backend. It reads the
+    /// env, so it holds `ENV_LOCK` against the tests that set it.
+    #[test]
+    fn an_imap_password_round_trips_through_the_file_backend() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let path = tmp_path("imap-password-plain");
+        store_imap_password_backend(CredentialBackend::File, &path, "you@x.com", "app-pw-9")
+            .unwrap();
+        assert_eq!(
+            load_imap_password_backend(CredentialBackend::File, &path, "you@x.com").unwrap(),
+            "app-pw-9"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

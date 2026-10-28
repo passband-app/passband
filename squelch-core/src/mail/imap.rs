@@ -875,6 +875,13 @@ const IDLE_NO: u8 = 2;
 /// may drop a client idle for 30 minutes, so under that with room to spare.
 const IDLE_REISSUE: Duration = Duration::from_secs(25 * 60);
 
+/// How long past its deadline an IDLE wait may run to finish cleanly (the
+/// `DONE` exchange that keeps the connection for the next wait). Past it the
+/// wait gives up on the connection and returns: a server can hold a socket
+/// open and say nothing (Dovecot does, after INBOX is deleted under an IDLE),
+/// and nothing about that may hold the poll lane.
+const IDLE_GRACE: Duration = Duration::from_secs(10);
+
 impl std::fmt::Debug for ImapSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImapSource")
@@ -1866,9 +1873,22 @@ impl MailSource for ImapSource {
             tokio::time::sleep_until(deadline).await;
             return;
         }
-        match self.idle_until(cursor, deadline).await {
-            Ok(()) => {}
-            Err(e) => {
+        // BOUNDED HOWEVER THE SERVER BEHAVES: every step of the wait (login,
+        // EXAMINE, IDLE, DONE) is a read that a silent server never answers.
+        // Timing out drops the session with the future, which is the
+        // cancel-safe path `idle_until` is built for; the next wait logs in
+        // afresh.
+        match tokio::time::timeout_at(deadline + IDLE_GRACE, self.idle_until(cursor, deadline))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Err(_) => {
+                eprintln!(
+                    "squelch: imap idle got no answer from the server by the end of the wait; \
+                     reconnecting next tick"
+                );
+            }
+            Ok(Err(e)) => {
                 // Sit out the rest of the wait: a server that is down or
                 // refusing is asked again next tick, never in a loop. The
                 // error is about the transport, never the password.

@@ -1410,3 +1410,131 @@ async fn live_a_killed_idle_connection_sleeps_out_the_wait_and_never_spins() {
     assert!(t.elapsed() >= Duration::from_millis(1900));
     assert_eq!(src.idle_connects(), 2);
 }
+
+fn doveadm(args: &[&str]) {
+    let out = std::process::Command::new("docker")
+        .args(["exec", "squelch-imap-dev", "doveadm"])
+        .args(args)
+        .output()
+        .expect("docker exec");
+    assert!(
+        out.status.success(),
+        "doveadm {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Found by the step 4 end-to-end run: deleting INBOX under a parked IDLE
+/// left Dovecot holding the connection open and silent, so the wait never
+/// came back (the daemon's poll lane sat in it until a manual refresh). The
+/// wait is bounded by `max_wait` however the server behaves.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_wait_returns_by_its_deadline_when_inbox_is_deleted_under_idle() {
+    const WAIT: Duration = Duration::from_secs(15);
+    let user = fresh_user("delinbox");
+    let mut other = other_client(&user).await;
+    append(
+        &mut other,
+        INBOX,
+        &mail(Some("doomed@x.org"), "doomed"),
+        None,
+    )
+    .await;
+    let (src, _) = live(&user);
+    let cursor = src.current_cursor().await.unwrap();
+    let src = Arc::new(src);
+    let waiter = {
+        let (src, cursor) = (src.clone(), cursor.clone());
+        tokio::spawn(async move {
+            let t = tokio::time::Instant::now();
+            src.wait_for_change(Some(&cursor), WAIT).await;
+            t.elapsed()
+        })
+    };
+    // Past `imap_hibernate_timeout` (5s on the bed): the parked IDLE has been
+    // handed to imap-hibernate, and the delete wakes it into a process that
+    // cannot reopen INBOX. That is the silent connection.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    doveadm(&["mailbox", "delete", "-u", &user, INBOX]);
+    let took = tokio::time::timeout(WAIT + IDLE_GRACE * 2, waiter)
+        .await
+        .expect("the wait came back")
+        .unwrap();
+    assert!(
+        took < WAIT + IDLE_GRACE + Duration::from_secs(1),
+        "{took:?}"
+    );
+    // The next wait still works once INBOX is back.
+    doveadm(&["mailbox", "create", "-u", &user, INBOX]);
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(Some(&cursor), Duration::from_secs(30))
+        .await;
+    assert!(
+        t.elapsed() < Duration::from_secs(5) + IDLE_GRACE,
+        "{:?}",
+        t.elapsed()
+    );
+    let _ = other.logout().await;
+}
+
+/// No Dovecot needed: a server that answers the login and the EXAMINE, says
+/// `+ idling`, and then never says anything again (not even to `DONE`), the
+/// way the bed's imap-hibernate does once INBOX is deleted. The wait still
+/// comes back by its deadline plus [`IDLE_GRACE`].
+#[tokio::test]
+async fn a_server_that_goes_silent_under_idle_cannot_hold_the_wait() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let (r, mut w) = sock.into_split();
+        let mut lines = BufReader::new(r).lines();
+        w.write_all(b"* OK silent test server\r\n").await.unwrap();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let (tag, cmd) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+            let cmd = cmd.to_ascii_uppercase();
+            let reply = if cmd.starts_with("CAPABILITY") {
+                format!("* CAPABILITY IMAP4rev1 IDLE\r\n{tag} OK done\r\n")
+            } else if cmd.starts_with("EXAMINE") {
+                format!(
+                    "* 0 EXISTS\r\n* OK [UIDVALIDITY 7] ok\r\n* OK [UIDNEXT 1] ok\r\n\
+                     {tag} OK [READ-ONLY] done\r\n"
+                )
+            } else if cmd.starts_with("IDLE") {
+                // Then silence, DONE included, with the socket held open.
+                w.write_all(b"+ idling\r\n").await.unwrap();
+                std::future::pending::<()>().await;
+                unreachable!()
+            } else {
+                format!("{tag} OK done\r\n")
+            };
+            w.write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    let src = ImapSource::new(
+        1,
+        ImapServer {
+            host: "127.0.0.1".into(),
+            port,
+            tls: ImapTls::Plain,
+            username: "u".into(),
+        },
+        ImapPassword::new("pw"),
+        mem(),
+        Arc::new(SourceRefusals::default()),
+    )
+    .unwrap();
+    let t = tokio::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(1) + IDLE_GRACE * 2,
+        src.wait_for_change(None, Duration::from_secs(1)),
+    )
+    .await
+    .expect("the wait is bounded");
+    let took = t.elapsed();
+    assert!(took >= Duration::from_millis(900), "parked first: {took:?}");
+    assert!(took < Duration::from_secs(2) + IDLE_GRACE, "{took:?}");
+    server.abort();
+}

@@ -131,8 +131,9 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             guard let event else {
                 return self.deliver(Self.badged(fallback, count: count))
             }
-            self.deliver(
-                Self.badged(Self.content(for: event, accountId: route.accountId), count: count))
+            let content = await Self.withSender(
+                Self.content(for: event, accountId: route.accountId), event: event)
+            self.deliver(Self.badged(content, count: count))
         }
         // Published after launch, so an expiry in between could not cancel
         // it: if the handler is already spent, cancel the fetch here instead.
@@ -259,6 +260,20 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         case .threadBanner: return threadContent(for: event, accountId: accountId)
         case .authSignal(let kind): return authContent(kind: kind, event: event, accountId: accountId)
         }
+    }
+
+    /// An ordinary mail banner re-dressed as a communication notification, so
+    /// the sender's avatar leads and Passband's icon is the badge (see
+    /// SenderAvatar). Not for auth banners, which lead with the kind of event
+    /// rather than who sent it, and not for a read receipt, whose "sender" is
+    /// the account's own address.
+    private static func withSender(_ content: UNNotificationContent, event: Event) async
+        -> UNNotificationContent
+    {
+        guard case .threadBanner = EventBanner.routing(for: event), event.kind != .opened,
+            !event.sender.isEmpty
+        else { return content }
+        return await SenderAvatar.communication(content, sender: event.sender, name: content.title)
     }
 
     /// AUTH MAIL. The phone cannot poll in the background, so this push is the

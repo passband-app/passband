@@ -11267,8 +11267,10 @@ mod tests {
         use crate::store::agent_triage::AgentTriageStore;
         for (status, retry_after, lo, hi) in [
             (StatusCode::TOO_MANY_REQUESTS, Some("7"), 6, 23),
-            // No number from the provider: the first failure retries at once.
-            (StatusCode::TOO_MANY_REQUESTS, None, -1, 0),
+            // No number from the provider: a 429 is most often a limit the
+            // host's tenants share, so it starts short and spread; a server
+            // error retries at once.
+            (StatusCode::TOO_MANY_REQUESTS, None, 14, 30),
             (StatusCode::SERVICE_UNAVAILABLE, None, -1, 0),
             (StatusCode::FORBIDDEN, None, 284, 300),
         ] {
@@ -11389,12 +11391,10 @@ mod tests {
         )
         .await;
         let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
-        assert!(
-            (-1..=0).contains(&wait),
-            "first rung retries at once: {wait}s"
-        );
+        // A 429 skips the immediate rung: 15 s and spread, then climbing.
+        assert!((14..=30).contains(&wait), "first rung: stood off {wait}s");
         assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
-        for rung in [15, 30, 60, 120, 240, 285, 285] {
+        for rung in [30, 60, 120, 240, 285, 285] {
             // The previous cooldown has lapsed: this probe is admitted.
             engine.agent_retry_after.store(0, Ordering::Relaxed);
             let job = claim();
@@ -11464,10 +11464,22 @@ mod tests {
         )
         .await;
         assert!(dropped.is_err(), "the run was still in flight");
-        // Handed back at once, due after the retry ladder's wait for the
-        // attempt it took, which for the first attempt is no wait at all.
+        // Handed back at once, due after the local ladder's wait for the
+        // attempt it took: not re-run on the spot, so a crash loop does not
+        // re-bill a long run straight away.
+        assert!(
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), lease)
+                .unwrap()
+                .is_none()
+        );
         let again = store
-            .claim_agent_job(account, "investigation", Utc::now(), lease)
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                lease,
+            )
             .unwrap()
             .expect("handed back the moment the run was dropped");
         assert_eq!(again.id, id);
@@ -11570,7 +11582,7 @@ mod tests {
             generation: hours_ago,
             at: Utc::now(),
         };
-        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        let (_, wait) = engine.open_cooldown(asked, false, false, start, true);
         assert!((7..=22).contains(&wait), "the provider's number: {wait}s");
         assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
         // A continuing episode: its last cooldown lapsed moments before
@@ -11586,7 +11598,7 @@ mod tests {
             generation: lapsed,
             at: Utc::now(),
         };
-        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        let (_, wait) = engine.open_cooldown(asked, false, false, start, true);
         assert!((119..=135).contains(&wait), "the fifth rung: {wait}s");
         assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 5);
         // And a probe that itself ran long before failing is still that
@@ -11601,7 +11613,7 @@ mod tests {
             generation: lapsed,
             at: DateTime::from_timestamp(lapsed + 1, 0).unwrap(),
         };
-        let (_, wait) = engine.open_cooldown(asked, false, start, true);
+        let (_, wait) = engine.open_cooldown(asked, false, false, start, true);
         assert!((119..=135).contains(&wait), "still the fifth rung: {wait}s");
     }
 
@@ -11621,7 +11633,7 @@ mod tests {
                 generation: engine.agent_last_cooldown_end.load(Ordering::Relaxed),
                 at: Utc::now(),
             };
-            let (_, wait) = engine.open_cooldown(None, false, start, false);
+            let (_, wait) = engine.open_cooldown(None, false, false, start, false);
             assert!(
                 (rung - 1..=rung + 15).contains(&wait),
                 "rung {rung}: stood off {wait}s"
@@ -12299,8 +12311,7 @@ mod tests {
         let mut engine = engine(store, account, "http://127.0.0.1:1");
         engine.stage2_llm = Some(llm);
         engine.config.triage.agent.concurrency = 4;
-        // A lapsed cooldown is never the first strike: that one retries at
-        // once and opens none. This is the probe after it.
+        // The probe after an immediate retry: one strike already taken.
         engine.agent_throttle_strikes.store(1, Ordering::Relaxed);
         engine
             .agent_retry_after

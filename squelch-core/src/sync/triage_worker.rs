@@ -614,10 +614,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// lane's rung. The end returned is the account's: a longer cooldown a
     /// sibling opened wins, and the job is deferred to that, not to this
     /// failure's own.
+    ///
+    /// A 429 (`throttled`) never takes the immediate first rung: with no
+    /// `retry-after` it is most often a rate limit the tenants of one host
+    /// share, and every one of them retrying in the same instant would walk
+    /// straight back into it. It starts at the second rung, jittered.
     pub(super) fn open_cooldown(
         &self,
         retry_after: Option<std::time::Duration>,
         rejected: bool,
+        throttled: bool,
         start: JobStart,
         investigation: bool,
     ) -> (DateTime<Utc>, i64) {
@@ -653,7 +659,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let seconds = if rejected {
             throttle_cooldown_secs(None, u32::MAX, outage, jitter)
         } else {
-            throttle_cooldown_secs(retry_after, strikes, outage, jitter)
+            // One rung up the ladder, so its waits climb 15, 30, 60 ... from
+            // the first. A provider's own number is still believed as is.
+            let rung = if throttled && retry_after.is_none() {
+                strikes.saturating_add(1)
+            } else {
+                strikes
+            };
+            throttle_cooldown_secs(retry_after, rung, outage, jitter)
         };
         let until = now + ChronoDuration::seconds(seconds as i64);
         let previous = self
@@ -737,7 +750,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
             // `until` is the account's stand-off, a sibling's longer one
             // included: the job is deferred to what will actually admit it.
-            let (until, wait) = self.open_cooldown(error.retry_after, rejected, start, !access);
+            let throttled = error.kind == "http_429";
+            let (until, wait) =
+                self.open_cooldown(error.retry_after, rejected, throttled, start, !access);
             eprintln!(
                 "squelch: triage provider unavailable ({}); queued work retained, retrying in {}s",
                 error.kind, wait
@@ -865,8 +880,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// verdict, not `max_attempts` tries at it. Two in a row with nothing
     /// answered since the first are as likely the provider's slow quarter
     /// hour as the message, and a job failed for that needs a person to
-    /// re-triage it; the ordinary attempts, with their growing waits, leave
-    /// it pending and mostly outlast the incident (deadlines never pause the
+    /// re-triage it; the ordinary attempts leave it pending, and with each
+    /// run's own deadline between them, waits at most five minutes apart
+    /// still span a slow spell of several minutes (deadlines never pause the
     /// account, see `is_provider_outage`). "Answered since" is the
     /// account's one flag: raised when an investigation answers (this run's
     /// own earlier turn included), lowered by every timeout, never raised
@@ -891,7 +907,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
         let timed_out_twice = answered_since_last_timeout
             && job.last_error.as_deref() == Some(crate::triage::agent::AGENT_TIMEOUT);
-        let next = next_attempt_wait(job.attempts, self.config.triage.agent.max_attempts);
+        let next = next_attempt_wait(
+            job.attempts,
+            self.config.triage.agent.max_attempts,
+            !is_local_failure(code),
+        );
         let wait = match next {
             Some(wait) if !crate::triage::llm::is_content_refusal(code) && !timed_out_twice => wait,
             _ => {
@@ -1133,12 +1153,36 @@ pub(super) fn immediate_then_doubling_secs(base: u64, step: u32, cap: u64) -> u6
 /// The longest any LLM retry waits: the retry ladder's cap.
 pub(super) const RETRY_CEILING_SECS: u64 = 300;
 
-/// A job's wait before its next attempt, after `attempts` of them: at once
-/// after the first, then 15 s, 30 s, 60 s, ... up to five minutes. The
-/// retry's wait, and the hand-back's. A rescue push rides on these jobs, so
-/// a blip must not hold one for minutes.
+/// A job's wait before its next attempt after a failed MODEL call, after
+/// `attempts` of them: at once after the first, then 15 s, 30 s, 60 s, ...
+/// up to five minutes. A rescue push rides on these jobs, so a blip must not
+/// hold one for minutes.
 pub(super) fn retry_backoff_secs(attempts: u32) -> u64 {
     immediate_then_doubling_secs(15, attempts.saturating_sub(1), RETRY_CEILING_SECS)
+}
+
+/// The wait after a failure that is not the model's (the store was busy, the
+/// context changed under the run, a run was dropped at shutdown): 30 s, 60 s,
+/// 120 s, ... up to an hour. A busy store or a crash loop is not helped by
+/// retrying at once, and a job must not spend its attempts in seconds on one.
+pub(super) fn local_retry_backoff_secs(attempts: u32) -> u64 {
+    doubling_backoff_secs(15, attempts, 3600)
+}
+
+/// The failures [`local_retry_backoff_secs`] spaces out: the store's and the
+/// worker's own, never a model call's.
+pub(super) fn is_local_failure(code: &str) -> bool {
+    matches!(
+        code,
+        "context_unavailable"
+            | "budget_unavailable"
+            | "context_changed"
+            | "commit_failed"
+            | "notify_context_unavailable"
+            | "notify_decision_unavailable"
+            | "notify_completion_unavailable"
+            | "notify_store_unavailable"
+    )
 }
 
 /// The second rung of the cooldown after a throttle (429) or a server error
@@ -1249,7 +1293,7 @@ impl<S: AgentTriageStore> Drop for ClaimGuard<'_, S> {
         if !self.armed {
             return;
         }
-        match next_attempt_wait(self.job.attempts, self.max_attempts) {
+        match next_attempt_wait(self.job.attempts, self.max_attempts, false) {
             None => {
                 self.metrics.record_agent(AgentVerdict::Failed);
                 let _ = self.store.fail_agent_job(self.job, INTERRUPTED);
@@ -1274,13 +1318,24 @@ impl<S: AgentTriageStore> Drop for ClaimGuard<'_, S> {
 
 /// What a job that has made `attempts` of its `max_attempts` gets next:
 /// the wait before another, on the ladder, or `None` when the allowance is
-/// spent. The one rule the retry and the hand-back share.
-pub(super) fn next_attempt_wait(attempts: i64, max_attempts: u32) -> Option<ChronoDuration> {
+/// spent. The one rule the retry and the hand-back share. `model` picks the
+/// ladder: a failed model call's (at once, then up to five minutes) or a
+/// local failure's (see [`local_retry_backoff_secs`]).
+pub(super) fn next_attempt_wait(
+    attempts: i64,
+    max_attempts: u32,
+    model: bool,
+) -> Option<ChronoDuration> {
     if attempts >= i64::from(max_attempts) {
         return None;
     }
     let attempts = u32::try_from(attempts).unwrap_or(u32::MAX);
-    Some(ChronoDuration::seconds(retry_backoff_secs(attempts) as i64))
+    let secs = if model {
+        retry_backoff_secs(attempts)
+    } else {
+        local_retry_backoff_secs(attempts)
+    };
+    Some(ChronoDuration::seconds(secs as i64))
 }
 /// The `last_error` of a job failed by [`ClaimGuard`]: dropped on its last
 /// allowed attempt.
@@ -1467,6 +1522,27 @@ mod cooldown_tests {
             throttle_cooldown_secs(None, 1, CEILING, 999),
             THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS
         );
+    }
+
+    /// A failed model call is retried at once, then on a ladder capped at
+    /// five minutes; a local failure (a busy store, a dropped run) keeps the
+    /// long ladder, so it cannot spend a job's attempts in seconds.
+    #[test]
+    fn model_failures_retry_at_once_and_local_ones_wait() {
+        let model: Vec<i64> = (1..=7)
+            .map(|n| next_attempt_wait(n, 99, true).unwrap().num_seconds())
+            .collect();
+        assert_eq!(model, [0, 15, 30, 60, 120, 240, 300]);
+        let local: Vec<i64> = (1..=4)
+            .map(|n| next_attempt_wait(n, 99, false).unwrap().num_seconds())
+            .collect();
+        assert_eq!(local, [30, 60, 120, 240]);
+        assert_eq!(next_attempt_wait(6, 99, false).unwrap().num_seconds(), 960);
+        assert_eq!(next_attempt_wait(6, 6, true), None);
+        assert!(is_local_failure("context_unavailable"));
+        assert!(is_local_failure("notify_store_unavailable"));
+        assert!(!is_local_failure("transport"));
+        assert!(!is_local_failure(crate::triage::agent::AGENT_TIMEOUT));
     }
 
     /// The jitter is drawn from the clock's milliseconds and the account,

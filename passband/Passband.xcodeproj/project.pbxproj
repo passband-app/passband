@@ -369,6 +369,7 @@
 		A6CB53E5B34860DF8BF9C0A1 /* CalendarStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B9D79CC76B3D485EB9AE5B6 /* CalendarStore.swift */; };
 		A6F7ADCEE7CF788F562C7C3E /* Passband.icon in Resources */ = {isa = PBXBuildFile; fileRef = C9CC93E238228B2BA4D4569A /* Passband.icon */; };
 		A732156E23983D6ECFC3AC79 /* SearchFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1F37AFE6C968BF66760A5B /* SearchFetch.swift */; };
+		A78A7E1C90FB703C03DEFBFF /* RenotifyBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89D7AEFD2BA6E628127F2999 /* RenotifyBanner.swift */; };
 		A78D4F389EC912DA2EA1D7F7 /* CompositionSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = E076DAB13B2768EAD01C88F3 /* CompositionSummary.swift */; };
 		AA1FDE44601AF70AA151D912 /* AttachmentStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D14DE02E72E63FE53D5C8D /* AttachmentStrip.swift */; };
 		AAA858868EA8B291080277ED /* Trackers.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEFA34554013DFB615774309 /* Trackers.swift */; };
@@ -529,6 +530,7 @@
 		EF23C4EDACBC4D1216F580D5 /* RulesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE9B2C6A8850905B874A1ED /* RulesView.swift */; };
 		EF8070354878658FCF5E2F91 /* OnboardingRehearsal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DF678C76B26CD5A3ACF5691 /* OnboardingRehearsal.swift */; };
 		F00C440AC22798EDD3FD9AD6 /* DaySweep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EC8BFB0040505D1C9345B9C /* DaySweep.swift */; };
+		F094ACB4825A38A463D2778D /* RenotifyBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89D7AEFD2BA6E628127F2999 /* RenotifyBanner.swift */; };
 		F19396496FB9FFA6061B7E1A /* Raster.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4382469FC056D0CD54B22F3 /* Raster.swift */; };
 		F1FF61C094DEFA61E3BB3114 /* SmartClearReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = A97E96827F6F661BD0999CFE /* SmartClearReceipt.swift */; };
 		F203E4786137371093270AB6 /* MinimapGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EF8CFFF47055FF070BD9E8F /* MinimapGeometry.swift */; };
@@ -767,6 +769,7 @@
 		8860DE0FE5AA0366C7BE9922 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
 		88C38163197CC12C0A08950C /* RulePatternSuggest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulePatternSuggest.swift; sourceTree = "<group>"; };
 		89A44DCD12D99794B8DF43B0 /* AuthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthView.swift; sourceTree = "<group>"; };
+		89D7AEFD2BA6E628127F2999 /* RenotifyBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenotifyBanner.swift; sourceTree = "<group>"; };
 		8A5B932C525F604FE718F360 /* DiscoveryCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryCopy.swift; sourceTree = "<group>"; };
 		8DAF25E856CCAD8284AAA131 /* AttachmentKinds.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentKinds.swift; sourceTree = "<group>"; };
 		8DE74D8B3ADCEED239B127A1 /* TestFlightNudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestFlightNudge.swift; sourceTree = "<group>"; };
@@ -1185,6 +1188,7 @@
 				5512C13F456F49B6DF7B182B /* Pairing.swift */,
 				C8FEC7748EC1ECECE6897237 /* PracticeTourStep.swift */,
 				C55A9C1397111BDFCF947158 /* RehearsalAPI.swift */,
+				89D7AEFD2BA6E628127F2999 /* RenotifyBanner.swift */,
 				3DD43DBA7248BE2CB133F428 /* RetriageRun.swift */,
 				A31EE886D87910F0348A94AB /* SitrepPoller.swift */,
 				E645BA6EC9A8686D95460095 /* SubjectText.swift */,
@@ -1732,6 +1736,7 @@
 				24B9C76ED25930D29752DBC9 /* ReleaseVignettes.swift in Sources */,
 				2E55F517D48F9CE4E5882C21 /* RemindPalette.swift in Sources */,
 				39B48BCF60CA5737C7088687 /* RemindTimes.swift in Sources */,
+				F094ACB4825A38A463D2778D /* RenotifyBanner.swift in Sources */,
 				346B6C45B35972DC0A41FD9C /* RetriageModal.swift in Sources */,
 				D950DAEE748237F8D4002E11 /* RetriageRun.swift in Sources */,
 				60753017D3F0F1ACA0080D4B /* RevealPanel.swift in Sources */,
@@ -1997,6 +2002,7 @@
 				1B5E5602E42CC14034AFB544 /* ReleaseVignettes.swift in Sources */,
 				C7AF257F381B402E8C1F1839 /* RemindPalette.swift in Sources */,
 				C8B62E16CC9F5AE6DA3B774E /* RemindTimes.swift in Sources */,
+				A78A7E1C90FB703C03DEFBFF /* RenotifyBanner.swift in Sources */,
 				CF0065AF30C9FC626811FF50 /* RetriageModal.swift in Sources */,
 				8C7DC76677CBEE6FB72CE8F8 /* RetriageRun.swift in Sources */,
 				7613233831674BFA6CE84C42 /* RevealPanel.swift in Sources */,

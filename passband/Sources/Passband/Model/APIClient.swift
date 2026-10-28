@@ -493,6 +493,15 @@ actor APIClient {
         return try await perform(req).0
     }
 
+    /// Report a tap on smart re-notify banner `batch`, naming the message it
+    /// opened. Fire and forget, like `markThreadOpened`. A 404 is an answer,
+    /// not a failure: the feature is off for this mailbox, the daemon predates
+    /// it, or the banner has been pruned.
+    func reportRenotifyOpened(batch: Int, messageId: Int) async {
+        struct Body: Encodable { let message_id: Int }
+        try? await postNoContent("/client/renotify/\(batch)/opened", body: Body(message_id: messageId))
+    }
+
     /// Tell the daemon a thread was OPENED. Fire and forget: it is a ledger
     /// write with nothing to show for it, and a failed one costs a rounding
     /// error in a statistic, never anything the user sees.

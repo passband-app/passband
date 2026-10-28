@@ -359,6 +359,13 @@ final class EventStream {
             // an arrival is, so the store decides what a draft in a mailbox
             // that is not on screen means.
             AppStore.shared.openAgentDraft(signal, accountId: accountId)
+        } else if let renotify = RenotifySignal.parse(frame.data) {
+            // A smart re-notify (RenotifyBanner.swift): no id, no cursor, and
+            // not an event, so neither `ToldEvents` nor the backlog rule
+            // applies. A late one (a lid opened long after the daemon chose
+            // the moment) is dropped by the open_draft freshness rule.
+            guard renotify.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
+            Notifier.shared.postRenotify(renotify, accountId: accountId)
         } else if let id = frame.id.flatMap({ Int($0) }) {
             // An undecodable frame still ADVANCES the cursor, mirroring the
             // server's pump: otherwise one malformed row replays on every

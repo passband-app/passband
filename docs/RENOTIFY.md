@@ -107,6 +107,31 @@ It is not a second `events` row. That table is one row per message ever
 (`UNIQUE(message_id)`), and the phone's push path reads it. A banner is only
 recorded when a Mac was listening to receive it.
 
+## The Mac app
+
+`passband/Sources/Passband/Model/RenotifyBanner.swift` (the frame and the
+copy) and the re-notify half of `EventBanner.swift` (the tap), posted by
+`Notifier.postRenotify` from `EventStream`.
+
+- **Freshness.** A frame whose `at` is more than a minute off the Mac's clock
+  is dropped, the same rule as `open_draft` (`AgentOpenSignal.freshFor`). The
+  daemon has already recorded it as fired, so a dropped frame counts as an
+  ignored banner.
+- **Copy.** One message keeps its first banner's title (the sender) with a
+  reminder framing: "Still waiting: ..." or, for `reason: deadline`, "Due
+  tomorrow: ...", "Due Friday: ...", "Past due: ...", read in the Mac's own
+  calendar. Several are one banner, "N emails still need you", naming up to
+  two senders, with a deadline leading the body. Only a deadline chimes.
+- **Identity.** The request id is `passband.renotify.<account>.<batch>`, and
+  the userInfo has no event id. So it never replaces the first banner, and
+  `ToldEvents` never swallows it. The backlog rule reads an `Event`, which
+  this is not.
+- **Tap.** Opens the first message (`thread_opened` with `source:
+  notification`) in the banner's account, switching to it if needed, then
+  posts `/opened` with that `message_id`. Errors, including a 404, are
+  ignored.
+- **Analytics.** `renotify_shown` and `renotify_opened` (docs/ANALYTICS.md).
+
 ## Tracking
 
 `renotify_batches` is one row per banner, and `renotify_items` holds the
@@ -125,18 +150,12 @@ Nothing else adapts yet.
 
 ## Not built yet
 
-- **The Mac app.** It needs to show a banner for the `renotify` frame: one
-  message reads like its original banner, several read as "N emails still need
-  you". A tap should open the thread and post `/opened`. A frame whose `at` is
-  stale should be dropped, like `open_draft`. It also needs its own
-  notification identity so `ToldEvents` does not swallow it, and the
-  cold-launch backlog rule must not apply to it.
 - **The model layer.** A fast model that ranks or declines within what `plan`
   allows, fed the habit summary. The rules stay authoritative.
 - **Deeper per-owner tuning.** Moving the meeting-end delay and the working
   window toward the hours this owner responds in.
-- **PostHog.** Aggregate `renotify_fired` / `renotify_opened` from the app,
-  inside the `docs/ANALYTICS.md` vocabulary.
+- **A filtered inbox for a digest.** A tap on "3 emails still need you"
+  opens the first (highest-ranked) message, not a view of all three.
 - **The phone.** v1 is Mac only.
 - **Retrying a held arrival.** A client-online pass held for working hours or
   the budget is not tried again later. One held for a meeting gets its chance

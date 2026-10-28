@@ -4964,6 +4964,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "libc",
+ "serde_json",
  "squelch-api",
  "squelch-core",
  "squelch-mcp",

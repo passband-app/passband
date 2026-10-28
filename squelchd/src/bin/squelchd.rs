@@ -4466,4 +4466,183 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.split_whitespace().count(), 1);
     }
+
+    // -----------------------------------------------------------------------
+    // The agent door's writes, end to end: the real daemon router, the real
+    // send pipeline (ApiState::agent_mailer), and MCP over the wire. The
+    // halves are tested apart (squelch-mcp with a recording mailer,
+    // squelch-api's mailer called directly); this is the one place both run
+    // together, as an agent meets them. SECURITY.md §4c and §5.
+    // -----------------------------------------------------------------------
+
+    fn ingest_for_agent(store: &SqliteStore, account: AccountId, word: &str) -> i64 {
+        use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
+        let now = chrono::Utc::now();
+        let raw = RawFetched {
+            account_id: account,
+            gmail_msg_id: format!("m-{word}"),
+            gmail_thread_id: Some(format!("t-{word}")),
+            raw: format!(
+                "From: Pat <pat@example.com>\r\nTo: {AGENT_ACCOUNT}\r\nSubject: About {word}\r\nDate: {}\r\n\r\nNotes on {word}.",
+                now.to_rfc2822()
+            )
+            .into_bytes(),
+            internal_date: Some(now),
+            is_sent: false,
+            is_spam: false,
+            account_addr: AGENT_ACCOUNT.into(),
+        };
+        let message = ingest_with_rules(&raw, &Default::default(), now, &[], |_| false);
+        store.ingest_message(&message).expect("ingest")
+    }
+
+    /// Finish every queued agent job, restricting the messages in `restricted`.
+    fn assess_for_agent(store: &SqliteStore, account: AccountId, restricted: &[i64]) {
+        use squelch_core::store::agent_triage::{AgentCommitOutcome, AgentTriageStore as _};
+        use squelch_core::triage::decision::MessageDecision;
+        while let Some(job) = ["triage", "access"].into_iter().find_map(|kind| {
+            store
+                .claim_agent_job(account, kind, chrono::Utc::now(), 120)
+                .expect("claim")
+        }) {
+            let context = store.load_agent_context(&job).expect("context");
+            let mut decision = MessageDecision {
+                summary: "A meaningful update".into(),
+                ..Default::default()
+            };
+            decision.external_access.restricted = restricted.contains(&job.message_id);
+            decision.attention.show_in_fye = true;
+            decision.attention.summary = "An update worth reading".into();
+            decision.attention.relevant_message_ids = vec![job.message_id];
+            let sources = vec![context.message.source.clone()];
+            assert_eq!(
+                store
+                    .commit_agent_decision(&job, &context, &decision, &sources)
+                    .expect("commit"),
+                AgentCommitOutcome::Applied
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_agent_doors_writes_keep_their_guards_through_the_real_pipeline() {
+        use serde_json::json;
+        use squelch_core::agent_write::AgentWriteAccess;
+        use squelch_mcp::testing::wire::{Session, refused};
+
+        let (store, account, _m, app) = serve_router(&squelch_mcp::AgentDoorAuth::Open);
+        let visible = ingest_for_agent(&store, account, "lighthouse");
+        let restricted = ingest_for_agent(&store, account, "vaultcode");
+        assess_for_agent(&store, account, &[restricted]);
+
+        let read_only = [
+            "get_deadlines",
+            "get_inbox_updates",
+            "get_reading",
+            "get_shipments",
+            "get_thread",
+            "list_sender_rules",
+            "search_mail",
+            "set_sender_rule",
+        ];
+        let tools = |extra: &[&str]| {
+            let mut t: Vec<String> = read_only
+                .iter()
+                .chain(extra)
+                .map(|s| s.to_string())
+                .collect();
+            t.sort();
+            t
+        };
+
+        // An owner who never opened the setting: drafts, never sending.
+        let mut session = Session::open(app.clone(), "localhost", None).await;
+        assert_eq!(
+            session.tool_names().await,
+            tools(&["create_draft", "open_draft"])
+        );
+
+        // A reply to restricted mail is refused with the same answer as a
+        // message that does not exist, and the restricted text stays out.
+        for target in [restricted, 999_999] {
+            let (text, reply) = session
+                .tool(
+                    "create_draft",
+                    json!({"body": "Sounds good.", "reply_to_message_id": target}),
+                )
+                .await;
+            assert!(refused(&reply), "reply to {target}: {text}");
+            assert!(text.contains("not found"), "{text}");
+            assert!(!text.contains("vaultcode"), "{text}");
+        }
+        // Control: a reply to allowed mail is drafted, addressed to its sender.
+        let (text, reply) = session
+            .tool(
+                "create_draft",
+                json!({"body": "Sounds good.", "reply_to_message_id": visible}),
+            )
+            .await;
+        assert!(!refused(&reply), "control: {text}");
+        let (text, reply) = session
+            .tool(
+                "send_email",
+                json!({"body": "x", "to": "a@example.com", "subject": "x", "human_approved": true}),
+            )
+            .await;
+        assert!(
+            refused(&reply),
+            "send_email is not offered at drafts: {text}"
+        );
+
+        // Sending allowed: the outbound guard still blocks a secret anywhere
+        // in the composition, with no override, and never echoes it.
+        AgentWriteAccess::Send
+            .save(store.as_ref(), account)
+            .expect("save level");
+        let mut session = Session::open(app.clone(), "localhost", None).await;
+        assert_eq!(
+            session.tool_names().await,
+            tools(&["create_draft", "open_draft", "send_email"])
+        );
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        for (field, value) in [
+            ("subject", format!("keys {key}")),
+            ("body", format!("use {key}")),
+        ] {
+            let mut args = json!({
+                "body": "hello", "to": "a@example.com", "subject": "hello", "human_approved": true
+            });
+            args[field] = json!(value);
+            let (text, reply) = session.tool("send_email", args).await;
+            assert!(refused(&reply), "{field}: {text}");
+            assert!(
+                text.contains("outbound guard blocked"),
+                "{field}: refused by the guard, not a missing credential: {text}"
+            );
+            assert!(
+                !text.contains(key),
+                "{field}: the guard echoed the secret: {text}"
+            );
+        }
+        // The guard's audit rows say what was blocked, never the secret.
+        let audit = store.list_audit(account, 100).expect("audit");
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.detail.as_deref() == Some("blocked:guard")),
+            "control: the blocks were audited: {audit:?}"
+        );
+        for entry in &audit {
+            let row = format!("{:?} {:?} {:?}", entry.action, entry.target, entry.detail);
+            assert!(!row.contains(key), "audit row carries the secret: {row}");
+        }
+
+        let (text, reply) = session
+            .tool(
+                "send_email",
+                json!({"body": "Sounds good.", "reply_to_message_id": restricted, "human_approved": true}),
+            )
+            .await;
+        assert!(refused(&reply) && text.contains("not found"), "{text}");
+    }
 }

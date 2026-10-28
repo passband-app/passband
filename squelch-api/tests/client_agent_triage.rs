@@ -869,3 +869,82 @@ async fn only_the_human_door_promotes_an_archive_row() {
     assert!(response.status().is_success(), "{}", response.status());
     assert!(!archived(), "promoted by the owner's re-triage");
 }
+
+/// SECURITY.md §4: the owner's own seal (`external_access` corrected to
+/// restricted by hand) closes every agent route the access check's verdict
+/// does, on mail the check had ALLOWED. The control half proves the same row
+/// was visible on each route first, so an empty answer means the seal, not a
+/// route that never serves anything.
+#[tokio::test]
+async fn an_owner_sealed_message_leaves_every_agent_route() {
+    // The row's text, its receipt record, and `assess`'s decision wording:
+    // whichever of them a route serves.
+    const MARKERS: [&str; 4] = ["kingfisher", "Example", "Review receipt", "A receipt"];
+    let h = harness(|_, _| {});
+    let id = h
+        .store
+        .upsert_message(&msg(
+            h.acct,
+            "sealable",
+            "seal-thread",
+            "Order kingfisher",
+            "Your kingfisher order shipped",
+        ))
+        .unwrap();
+    assess(&h, id, false);
+
+    let get = |url: String| {
+        let app = h.app.clone();
+        async move {
+            let response = app.oneshot(authed("GET", &url)).await.unwrap();
+            let status = response.status();
+            (status, body_json(response).await.to_string())
+        }
+    };
+    let routes = || {
+        [
+            "/client/agent/thread/seal-thread".to_owned(),
+            format!("/client/agent/triage/{id}"),
+            "/client/agent/search?q=kingfisher".to_owned(),
+            "/client/agent/feed?destination=fye".to_owned(),
+            "/client/agent/feed?destination=reading".to_owned(),
+            "/client/agent/records?kind=receipts".to_owned(),
+        ]
+    };
+
+    for url in routes() {
+        let (status, body) = get(url.clone()).await;
+        assert_eq!(status, StatusCode::OK, "control {url}: {body}");
+        assert!(
+            MARKERS.iter().any(|m| body.contains(m)),
+            "control {url} serves the allowed row: {body}"
+        );
+    }
+
+    h.store
+        .correct_agent_triage(
+            h.acct,
+            id,
+            "external_access",
+            &serde_json::json!(true),
+            Utc::now(),
+        )
+        .unwrap();
+
+    for url in routes() {
+        let (status, body) = get(url.clone()).await;
+        assert!(
+            status == StatusCode::NOT_FOUND || status == StatusCode::OK,
+            "{url}: {status}"
+        );
+        assert!(
+            !MARKERS.iter().any(|m| body.contains(m)),
+            "{url} still serves owner-sealed mail: {body}"
+        );
+    }
+
+    // The human door still opens it: the seal is about agents only.
+    let (status, body) = get(format!("/client/v2/messages/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("kingfisher"), "{body}");
+}

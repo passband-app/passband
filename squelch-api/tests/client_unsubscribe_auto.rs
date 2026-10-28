@@ -555,3 +555,38 @@ async fn a_second_press_while_running_does_not_start_a_second_job() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(hits(&h), vec!["GET /done "], "one job, one fetch");
 }
+
+/// SECURITY.md §7: the audit log records the sender and the verdict, never
+/// the unsubscribe URL, which carries the recipient's own token (anyone
+/// holding it can act for them at the sender). Checked on a run that
+/// redirects, submits a form and finishes, so every audit write on the way
+/// is covered, not only the final one.
+#[tokio::test]
+async fn the_unsubscribe_link_and_its_token_stay_out_of_the_audit_log() {
+    let (site, _h) = sender_site().await;
+    let secret = "rcpt7Q2xWm9TokEn";
+    let run = mount(
+        &Setup::page(format!("{site}/confirm?u={secret}&list=weekly")),
+        None,
+    );
+    ask(&run, true).await;
+    let row = settled(&run).await;
+    assert_eq!(row.status.as_deref(), Some("done"), "{row:?}");
+
+    let audit = run.store.list_audit(run.acct, 100).unwrap();
+    assert!(
+        audit.iter().any(|e| e.action == "unsubscribe_result"),
+        "control: the result was audited: {audit:?}"
+    );
+    for entry in &audit {
+        let text = format!("{:?} {:?} {:?}", entry.action, entry.target, entry.detail);
+        assert!(
+            !text.contains(secret),
+            "audit row carries the token: {text}"
+        );
+        assert!(
+            !text.contains("/confirm"),
+            "audit row carries the URL: {text}"
+        );
+    }
+}

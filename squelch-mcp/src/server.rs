@@ -1827,16 +1827,50 @@ mod tests {
         let has = |server: &SquelchServer, tool: &str| {
             server.offered_tool_names().iter().any(|n| n == tool)
         };
+        // Exact sets, not counts: a tool that archives, labels, deletes or
+        // unsubscribes swapped in for one of these would keep the count.
+        // SECURITY.md §4c: the door reads, files sender rules, and at most
+        // drafts or sends, at the owner's level. Nothing else.
+        let names = |server: &SquelchServer| {
+            let mut n: Vec<String> = server.offered_tool_names();
+            n.sort();
+            n
+        };
+        let read_only = [
+            "get_deadlines",
+            "get_inbox_updates",
+            "get_reading",
+            "get_shipments",
+            "get_thread",
+            "list_sender_rules",
+            "search_mail",
+            "set_sender_rule",
+        ];
+        let with = |extra: &[&str]| {
+            let mut n: Vec<String> = read_only
+                .iter()
+                .chain(extra)
+                .map(|s| s.to_string())
+                .collect();
+            n.sort();
+            n
+        };
         let (none, _) = writing_server(AgentWriteAccess::None, RecordingMailer::default());
         assert!(!has(&none, "create_draft") && !has(&none, "send_email"));
-        assert_eq!(none.offered_tool_names().len(), 8);
+        assert_eq!(names(&none), with(&[]));
 
         let (drafts, _) = writing_server(AgentWriteAccess::Drafts, RecordingMailer::default());
         assert!(has(&drafts, "create_draft") && !has(&drafts, "send_email"));
         assert!(has(&drafts, "open_draft") && !has(&none, "open_draft"));
 
+        assert_eq!(names(&drafts), with(&["create_draft", "open_draft"]));
+
         let (send, _) = writing_server(AgentWriteAccess::Send, RecordingMailer::default());
         assert!(has(&send, "create_draft") && has(&send, "send_email"));
+        assert_eq!(
+            names(&send),
+            with(&["create_draft", "open_draft", "send_email"])
+        );
 
         // The level alone is not enough: a door with no pipeline behind it
         // offers neither, whatever the store says.

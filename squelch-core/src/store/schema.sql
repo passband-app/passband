@@ -2143,6 +2143,37 @@ AFTER DELETE ON calendar_events BEGIN
       AND event_id = OLD.event_id;
 END;
 
+-- CALENDAR SEARCH (docs/CALENDAR.md §10.1): a word index over the synced
+-- events, for the search box, the assistant and Agent MCP. `calendar_search_keys`
+-- gives each event a stable integer id, because `calendar_events` has none (an
+-- implicit rowid can be renumbered by VACUUM), and that id is the FTS rowid.
+-- Written in ONE place, `upsert_event`, inside the event's own transaction and
+-- after its guests; deleted with the event by the trigger below, whichever path
+-- deletes it. `people` is guest names, `addresses` the organizer's and guests'
+-- addresses: the agent door's queries never name that column. A store opened
+-- with the two out of step (an older daemon wrote events) is reindexed at open.
+CREATE TABLE IF NOT EXISTS calendar_search_keys (
+    id          INTEGER PRIMARY KEY,
+    account_id  INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    UNIQUE(account_id, calendar_id, event_id)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS calendar_search_fts USING fts5(
+    title, place, notes, people, addresses,
+    tokenize = 'porter unicode61', prefix = '2 3'
+);
+CREATE TRIGGER IF NOT EXISTS calendar_search_follows_event
+AFTER DELETE ON calendar_events BEGIN
+    DELETE FROM calendar_search_fts WHERE rowid IN (
+        SELECT id FROM calendar_search_keys
+        WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+          AND event_id = OLD.event_id);
+    DELETE FROM calendar_search_keys
+    WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+      AND event_id = OLD.event_id;
+END;
+
 -- A CORRESPONDENT'S TIMEZONE (docs/CALENDAR.md §7), inferred at ingest and
 -- served on the contact card. HUMAN-DOOR ONLY. `addr` is COLLATE NOCASE in
 -- the column itself, so the key, the index and every comparison agree that

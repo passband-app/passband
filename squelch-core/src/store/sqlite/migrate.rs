@@ -848,6 +848,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // must not turn this into a failed open.
     rebuild_fts_if_stale(conn)?;
 
+    // ---- CALENDAR SEARCH'S INDEX OUT OF STEP ------------------------------
+    //
+    // Events written before the index existed, or by an older daemon since.
+    reindex_calendar_search_if_stale(conn)?;
+
     // Re-launder every stored institution through the extractor's OWN sanitizer,
     // which grew a shape check after a model returned a valid-looking JSON object
     // whose institution ran from a correct bank name straight into this crate's
@@ -1970,6 +1975,49 @@ pub(super) fn retire_records_destination(conn: &Connection) -> Result<()> {
             false,
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Rebuild calendar search's index (schema.sql, CALENDAR SEARCH) when it does
+/// not hold exactly one row per stored event: events stored before it
+/// existed, or written by an older daemon that does not keep it. Three counts
+/// on an index-backed table each; a rebuild is one INSERT ... SELECT per
+/// table, and the store holds at most a few thousand events per calendar.
+pub(super) fn reindex_calendar_search_if_stale(conn: &Connection) -> Result<()> {
+    let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    let events = count("SELECT COUNT(*) FROM calendar_events")?;
+    let keys = count(
+        "SELECT COUNT(*) FROM calendar_search_keys k JOIN calendar_events e
+           ON e.account_id=k.account_id AND e.calendar_id=k.calendar_id AND e.event_id=k.event_id",
+    )?;
+    let all_keys = count("SELECT COUNT(*) FROM calendar_search_keys")?;
+    let indexed = count("SELECT COUNT(*) FROM calendar_search_fts")?;
+    if events == keys && keys == all_keys && all_keys == indexed {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM calendar_search_fts", [])?;
+    tx.execute("DELETE FROM calendar_search_keys", [])?;
+    tx.execute(
+        "INSERT INTO calendar_search_keys(account_id,calendar_id,event_id)
+         SELECT account_id,calendar_id,event_id FROM calendar_events",
+        [],
+    )?;
+    tx.execute(
+        "INSERT INTO calendar_search_fts(rowid,title,place,notes,people,addresses)
+         SELECT k.id, e.summary, e.location, e.description,
+                COALESCE((SELECT group_concat(g.name,' ') FROM calendar_event_guests g
+                          WHERE g.account_id=e.account_id AND g.calendar_id=e.calendar_id
+                            AND g.event_id=e.event_id AND g.name IS NOT NULL),''),
+                trim(COALESCE(e.organizer_email,'')||' '||
+                     COALESCE((SELECT group_concat(g.email,' ') FROM calendar_event_guests g
+                               WHERE g.account_id=e.account_id AND g.calendar_id=e.calendar_id
+                                 AND g.event_id=e.event_id),''))
+         FROM calendar_search_keys k JOIN calendar_events e
+           ON e.account_id=k.account_id AND e.calendar_id=k.calendar_id AND e.event_id=k.event_id",
+        [],
+    )?;
     tx.commit()?;
     Ok(())
 }

@@ -8,6 +8,7 @@
 //! substring superset), and the exact word test runs here.
 use super::{SyncedEvent, match_ghosts};
 use crate::owner_clock::OwnerClock;
+use crate::store::EventMatch;
 use crate::store::{SqliteStore, parse_search_query};
 use crate::triage::ghost::EventTime;
 use crate::types::{AccountId, GhostEvent, GhostUserState};
@@ -192,8 +193,44 @@ fn upcoming(
     }
 }
 
+/// What ordering reads of a hit.
+pub trait Timed {
+    fn start(&self) -> &EventTime;
+    fn end(&self) -> Option<EventTime>;
+}
+
+impl Timed for CalendarHit {
+    fn start(&self) -> &EventTime {
+        CalendarHit::start(self)
+    }
+    fn end(&self) -> Option<EventTime> {
+        CalendarHit::end(self)
+    }
+}
+
+/// A hit before its event's full row is read.
+enum Pending {
+    Event(EventMatch),
+    Ghost(GhostEvent),
+}
+
+impl Timed for Pending {
+    fn start(&self) -> &EventTime {
+        match self {
+            Self::Event(e) => &e.start,
+            Self::Ghost(g) => &g.start,
+        }
+    }
+    fn end(&self) -> Option<EventTime> {
+        match self {
+            Self::Event(e) => e.end,
+            Self::Ghost(g) => g.effective_end().map(|e| e.end),
+        }
+    }
+}
+
 /// Upcoming hits first, soonest first, then past hits, most recent first.
-pub fn order(hits: &mut [CalendarHit], now: DateTime<Utc>, today: NaiveDate, offset: &FixedOffset) {
+pub fn order<T: Timed>(hits: &mut [T], now: DateTime<Utc>, today: NaiveDate, offset: &FixedOffset) {
     hits.sort_by_cached_key(|hit| {
         let at = instant(hit.start(), offset);
         let ahead = upcoming(hit.start(), hit.end().as_ref(), now, today);
@@ -230,41 +267,20 @@ pub fn search(
     let needles = query.needles();
     let agent = audience == Audience::Agent;
 
-    let event_rows: Vec<SyncedEvent> = if events {
-        match &needles {
-            Some(needles) => store.calendar_search_candidates(account, needles, !agent)?,
-            // Non-ASCII: every row is a candidate (an empty needle is in
-            // every text).
-            None => store.calendar_search_candidates(account, &[String::new()], !agent)?,
-        }
+    // Events come from the word index, already counted: only those with
+    // every term, or all but one, can be kept below.
+    let floor = query.terms.len().saturating_sub(1).max(1);
+    let scored_events: Vec<EventMatch> = if events {
+        store.calendar_search_events(account, &query.terms, !agent, floor)?
     } else {
         Vec::new()
-    };
-    let scored_events: Vec<(usize, SyncedEvent)> = event_rows
-        .into_iter()
-        // A declined event is not on the owner's time; every client hides
-        // it, so serving it would make `total` count rows nobody draws.
-        .filter(|e| e.row.self_response != Some(super::SelfResponse::Declined))
-        .filter(|e| query.in_bounds(instant(&e.row.start, &offset)))
-        .map(|e| {
-            let mut text: Vec<&str> = vec![
-                e.row.summary.as_deref().unwrap_or(""),
-                e.row.location.as_deref().unwrap_or(""),
-                e.row.description.as_deref().unwrap_or(""),
-                e.calendar_name.as_deref().unwrap_or(""),
-            ];
-            for g in &e.row.guests {
-                text.push(g.name.as_deref().unwrap_or(""));
-                if !agent {
-                    text.push(&g.email);
-                }
-            }
-            if !agent {
-                text.push(e.row.organizer_email.as_deref().unwrap_or(""));
-            }
-            (query.matched(&text), e)
-        })
-        .collect();
+    }
+    .into_iter()
+    // A declined event is not on the owner's time; every client hides it, so
+    // serving it would make `total` count rows nobody draws.
+    .filter(|e| !e.declined)
+    .filter(|e| query.in_bounds(instant(&e.start, &offset)))
+    .collect();
 
     let far = chrono::Duration::days(365 * 20);
     let from = (now - far).fixed_offset();
@@ -302,15 +318,10 @@ pub fn search(
 
     let best = scored_events
         .iter()
-        .map(|(m, _)| *m)
+        .map(|e| e.matched)
         .chain(scored_ghosts.iter().map(|(m, _)| *m))
         .max()
         .unwrap_or(0);
-    let kept_events: Vec<SyncedEvent> = scored_events
-        .into_iter()
-        .filter(|(m, _)| query.keeps(*m, best))
-        .map(|(_, e)| e)
-        .collect();
     let kept_ghosts: Vec<GhostEvent> = scored_ghosts
         .into_iter()
         .filter(|(m, _)| query.keeps(*m, best))
@@ -320,7 +331,7 @@ pub fn search(
     // A ghost the timeline would draw as a real event is that event: drop it
     // when it matches one of the account's events at its start, whether or
     // not that event matched the query.
-    let mut hits: Vec<CalendarHit> = Vec::new();
+    let mut pending: Vec<Pending> = Vec::new();
     for ghost in kept_ghosts {
         let twin = events && {
             let pad = chrono::Duration::days(2);
@@ -330,13 +341,43 @@ pub fn search(
             match_ghosts([(ghost.title.as_str(), &ghost.start)], &near)[0].is_some()
         };
         if !twin {
-            hits.push(CalendarHit::Ghost(ghost));
+            pending.push(Pending::Ghost(ghost));
         }
     }
-    hits.extend(kept_events.into_iter().map(CalendarHit::Event));
-    order(&mut hits, now, today, &offset);
-    let total = hits.len();
-    hits.truncate(limit.clamp(1, MAX_LIMIT));
+    pending.extend(
+        scored_events
+            .into_iter()
+            .filter(|e| query.keeps(e.matched, best))
+            .map(Pending::Event),
+    );
+    order(&mut pending, now, today, &offset);
+    let total = pending.len();
+    pending.truncate(limit.clamp(1, MAX_LIMIT));
+
+    // Full rows, and guests, for the page served only.
+    let keys: Vec<i64> = pending
+        .iter()
+        .filter_map(|p| match p {
+            Pending::Event(e) => Some(e.key),
+            Pending::Ghost(_) => None,
+        })
+        .collect();
+    let mut rows: std::collections::HashMap<i64, SyncedEvent> = store
+        .calendar_events_by_key(account, &keys)?
+        .into_iter()
+        .collect();
+    {
+        let mut served: Vec<&mut SyncedEvent> = rows.values_mut().collect();
+        store.calendar_fill_guests(account, &mut served)?;
+    }
+    // An event deleted between the two reads is dropped from the page.
+    let hits: Vec<CalendarHit> = pending
+        .into_iter()
+        .filter_map(|p| match p {
+            Pending::Event(e) => rows.remove(&e.key).map(CalendarHit::Event),
+            Pending::Ghost(g) => Some(CalendarHit::Ghost(g)),
+        })
+        .collect();
     Ok(CalendarHits { hits, total })
 }
 

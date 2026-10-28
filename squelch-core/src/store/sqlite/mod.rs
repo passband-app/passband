@@ -488,6 +488,7 @@ pub use self::agent_triage::{
     ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_BUDGET_KEY, ARCHIVE_ACCESS_OUTSTANDING_MAX,
     ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
 };
+pub use self::calendar::EventMatch;
 use self::migrate::migrate;
 pub use self::retention::{HISTORY_RETENTION_DAYS, HistoryPruned};
 pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};

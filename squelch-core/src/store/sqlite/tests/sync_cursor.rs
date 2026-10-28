@@ -290,3 +290,27 @@ fn an_outlook_cursor_lives_only_in_sync_cursor() {
     assert_eq!(store.sync_cursor(acct).unwrap(), Some(c));
     assert_eq!(legacy(&store, acct), None);
 }
+
+/// A stored spam or archive-tier row is not "stored" to the incremental skip:
+/// a move into the inbox must re-ingest it so the upsert can heal the row.
+#[test]
+fn has_message_reads_spam_and_archive_rows_as_absent() {
+    let (store, acct) = store();
+    triaged(acct, "s-1", "t-1").ingest(&store);
+    triaged(acct, "a-1", "t-2").ingest(&store);
+    {
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "UPDATE messages SET is_spam = 1 WHERE gmail_msg_id = 's-1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE messages SET is_archive = 1 WHERE gmail_msg_id = 'a-1'",
+            [],
+        )
+        .unwrap();
+    }
+    assert!(!store.has_message(acct, "s-1").unwrap());
+    assert!(!store.has_message(acct, "a-1").unwrap());
+}

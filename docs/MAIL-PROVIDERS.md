@@ -188,10 +188,19 @@ Rules that hold on every request:
 **Changed mail, not just new mail.** Graph's delta names a message again on
 every read-state flip or flag. `MailSource::changes_report_updates` (default
 `false`, Gmail unchanged) makes the engine's INCREMENTAL walk skip ids it
-already stores (`Store::has_message`), before any body is fetched; never on a
+already stores as live mail (`Store::has_message`: a spam or archive-tier row
+reads as absent, so a move from Junk into the inbox re-ingests and heals),
+before any body is fetched; never on a
 backfill or catch-up, which re-fetch on purpose (`body_html` is baked at
-ingest). For such a source a walk whose two rounds are both empty reports the
-mailbox idle, so the poll lane's idle ladder still works.
+ingest). For such a source a walk whose two rounds saw no entry at all
+(`Changes::saw_changes`, removals included, since deleting unread mail moves
+the count) reports the mailbox idle, so the poll lane's idle ladder works.
+Every request also asks `odata.maxpagesize=100`: delta rounds otherwise page
+10 at a time.
+
+**Sent is who wrote it.** `Placement.in_sent` is Sent Items OR a `From` equal
+to the account address, because Exchange's Sent Items does not follow a
+message the user files elsewhere the way Gmail's SENT label does.
 
 **Self-addressed mail** is two Exchange items (the Inbox copy and the Sent
 Items copy) with different ids, so it is two rows: one visible, one neutral
@@ -295,5 +304,16 @@ decides every endpoint, scope set and identity check:
 11. **The account check** trusts `/me` `mail`, which a tenant admin sets.
 12. **A label edit can half-apply**: the read/flag PATCH lands, then the
     archive move fails. Retrying is safe.
-13. **Copy says Gmail** in the door's errors ("Gmail is pacing this
+13. **Listings page by `nextLink`**, likely `$skip`-based: mail deleted or
+    moved out during a window listing can shift a never-touched message out
+    of the pages. Ids only, so the window is short; the archive walk does not
+    look back.
+14. **`MailboxNotEnabledForRESTAPI`** may arrive as a 404, which reads as an
+    expired cursor (a catch-up, then a generic failure) rather than the
+    named reason.
+15. **The two copies of a self-addressed message** share a
+    `conversationId`, so the thread reader may show it twice.
+16. **The re-ingest drill** (SECURITY.md §1) for an Outlook account deletes
+    the `sync_cursor` row, not the legacy `sync_state` `'history'` row.
+17. **Copy says Gmail** in the door's errors ("Gmail is pacing this
     mailbox") and audit details (`failed:gmail`).

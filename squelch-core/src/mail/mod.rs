@@ -202,6 +202,12 @@ pub struct Changes {
     /// start cursor, in any folder: the engine may then skip its other walks.
     /// `false` is "changed, or cannot tell".
     pub mailbox_unchanged: bool,
+    /// The round reported ANY change to the folder, removals included (mail
+    /// deleted or moved out, which names no id to fetch but can move the
+    /// unread count). Read only for a source whose feed names every change
+    /// ([`MailSource::changes_report_updates`]): two rounds with this
+    /// `false` are an idle mailbox.
+    pub saw_changes: bool,
 }
 
 /// Why a [`MailSource::changes`] walk could not run.

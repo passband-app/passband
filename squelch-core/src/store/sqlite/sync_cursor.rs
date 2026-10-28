@@ -98,7 +98,8 @@ impl SqliteStore {
     pub(super) fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool> {
         let conn = self.lock()?;
         Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ?1 AND gmail_msg_id = ?2)",
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ?1 AND gmail_msg_id = ?2
+                AND is_spam = 0 AND is_archive = 0)",
             params![account_id, provider_msg_id],
             |r| r.get(0),
         )?)

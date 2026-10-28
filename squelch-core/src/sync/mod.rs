@@ -1154,6 +1154,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             http: self.http.clone(),
             creds: self.creds.clone(),
             account_id: self.account_id,
+            account_email: self.account_email.clone(),
             metrics: self.metrics.clone(),
             refusals: self.archive.refusals.clone(),
             api_base: self.graph_api_base.clone(),
@@ -2492,7 +2493,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if inbox.ids.is_empty() && inbox.mailbox_unchanged {
             return Ok(false);
         }
-        let (inbox_ids, inbox_cursor) = (inbox.ids, inbox.cursor);
+        let (inbox_ids, inbox_cursor, inbox_saw) = (inbox.ids, inbox.cursor, inbox.saw_changes);
         let inbox_new = self.unstored_changes(&inbox_ids)?;
         if !inbox_new.is_empty() {
             let n = self
@@ -2520,8 +2521,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // unit, neither of which `UNIQUE` collapses. It re-reads the ledger
         // first for exactly this path (`Store::notify_decision_exists`), so a
         // re-walk costs one indexed probe per message and still changes nothing.
-        let (sent_ids, sent_cursor) = match self.changes(start, Folder::Sent).await {
-            Ok(walk) => (walk.ids, walk.cursor),
+        let (sent_ids, sent_cursor, sent_saw) = match self.changes(start, Folder::Sent).await {
+            Ok(walk) => (walk.ids, walk.cursor, walk.saw_changes),
             // An expired historyId is not a SENT-specific failure: the cursor
             // itself is gone and only a catch-up can recover it.
             Err(CoreError::NotFound) => return Err(CoreError::NotFound),
@@ -2533,8 +2534,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
         // A source whose feed names every change (Graph's delta) proves an
         // idle mailbox the other way round from Gmail: both rounds empty.
-        let idle =
-            inbox_ids.is_empty() && sent_ids.is_empty() && self.source()?.changes_report_updates();
+        let idle = !inbox_saw && !sent_saw && self.source()?.changes_report_updates();
         let sent_only = self.unstored_changes(&subtract_ids(sent_ids, &inbox_ids))?;
         if !sent_only.is_empty() {
             // `Incremental`, like the INBOX half: the silence guarantee for the

@@ -52,7 +52,9 @@ struct St {
 struct Mock(Arc<Mutex<St>>);
 
 fn note(st: &mut St, headers: &HeaderMap, what: String) {
-    if headers.get("prefer").and_then(|v| v.to_str().ok()) != Some(PREFER_IMMUTABLE_IDS) {
+    if headers.get("prefer").and_then(|v| v.to_str().ok())
+        != Some(&*format!("{PREFER_IMMUTABLE_IDS}, odata.maxpagesize=100"))
+    {
         st.without_prefer.push(what.clone());
     }
     st.seen.push(what);
@@ -232,6 +234,7 @@ fn source(base: &str) -> GraphSource<FixedToken> {
             .unwrap(),
         creds: Arc::new(FixedToken),
         account_id: 1,
+        account_email: "Me@Outlook.com".into(),
         metrics: SyncMetrics::new(),
         refusals: Arc::new(SourceRefusals::default()),
         api_base: base.to_string(),
@@ -575,4 +578,46 @@ async fn headers_are_rendered_from_the_structured_fields() {
 fn ids_are_encoded_as_one_path_segment() {
     assert_eq!(path_segment("AAk/ALg+AA=="), "AAk%2FALg%2BAA%3D%3D");
     assert_eq!(path_segment("plain-id_1.2~"), "plain-id_1.2~");
+}
+
+#[tokio::test]
+async fn the_users_own_mail_is_sent_wherever_it_is_filed() {
+    let (m, src) = setup().await;
+    {
+        let mut st = m.0.lock().unwrap();
+        st.raw
+            .insert("own".into(), b"Subject: mine\r\n\r\nx".to_vec());
+        st.meta.insert(
+            "own".into(),
+            json!({"id": "own", "parentFolderId": "F-archive",
+                   "from": {"emailAddress": {"address": "me@outlook.com"}}}),
+        );
+    }
+    let msg = src.fetch_raw("own", Urgency::Background).await.unwrap();
+    assert_eq!(
+        msg.placement,
+        Placement {
+            in_inbox: false,
+            in_sent: true
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_round_of_only_removals_is_a_change_with_nothing_to_fetch() {
+    let (m, src) = setup().await;
+    m.0.lock().unwrap().delta.insert(
+        "inbox".into(),
+        VecDeque::from([Delta::Page {
+            ids: vec![],
+            removed: vec!["gone"],
+            more: false,
+        }]),
+    );
+    let start = src.current_cursor().await.unwrap();
+    let ch = src.changes(&start, Folder::Inbox).await.unwrap();
+    assert!(ch.ids.is_empty());
+    assert!(ch.saw_changes, "a deleted unread message moves the count");
+    let ch = src.changes(&ch.cursor, Folder::Inbox).await.unwrap();
+    assert!(!ch.saw_changes);
 }

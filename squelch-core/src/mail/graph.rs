@@ -199,6 +199,8 @@ struct MessageMeta {
     received_date_time: Option<String>,
     #[serde(default)]
     parent_folder_id: Option<String>,
+    #[serde(default)]
+    from: Option<Recipient>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,6 +334,8 @@ pub(crate) struct GraphSourceParts<C: CredentialStore + ?Sized> {
     pub http: reqwest::Client,
     pub creds: Arc<C>,
     pub account_id: AccountId,
+    /// The mailbox's own address: mail From it is the user's own.
+    pub account_email: String,
     pub metrics: Arc<SyncMetrics>,
     pub refusals: Arc<SourceRefusals>,
     /// Always [`GRAPH_API_BASE`] outside the tests.
@@ -345,6 +349,7 @@ pub struct GraphSource<C: CredentialStore + ?Sized> {
     http: reqwest::Client,
     creds: Arc<C>,
     account_id: AccountId,
+    account_email: String,
     metrics: Arc<SyncMetrics>,
     refusals: Arc<SourceRefusals>,
     api_base: String,
@@ -358,6 +363,7 @@ impl<C: CredentialStore + ?Sized> GraphSource<C> {
             http: parts.http,
             creds: parts.creds,
             account_id: parts.account_id,
+            account_email: parts.account_email,
             metrics: parts.metrics,
             refusals: parts.refusals,
             api_base: parts.api_base,
@@ -414,7 +420,12 @@ impl<C: CredentialStore + ?Sized> GraphSource<C> {
         self.http
             .get(url)
             .bearer_auth(token)
-            .header("Prefer", PREFER_IMMUTABLE_IDS)
+            // Delta rounds page by this preference alone (their default is
+            // 10); a list's `$top` already says the same.
+            .header(
+                "Prefer",
+                format!("{PREFER_IMMUTABLE_IDS}, odata.maxpagesize={PAGE_SIZE}"),
+            )
             .send()
             .await
             .map_err(|e| {
@@ -714,8 +725,10 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GraphSource<C> {
             })?
             .to_string();
         let mut ids = Vec::new();
+        let mut saw_changes = false;
         let delta = loop {
             let page: Page<MessageEntry> = self.get_json(&url, Urgency::Live).await?;
+            saw_changes |= !page.value.is_empty();
             ids.extend(
                 page.value
                     .into_iter()
@@ -744,6 +757,7 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GraphSource<C> {
             cursor: start.with_link(folder, delta).encode(),
             // One folder's round says nothing about the other's.
             mailbox_unchanged: false,
+            saw_changes,
         })
     }
 
@@ -774,7 +788,7 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GraphSource<C> {
         let base = format!("{}/me/messages/{}", self.api_base, path_segment(id));
         let meta: MessageMeta = self
             .get_json(
-                &format!("{base}?$select=id,conversationId,receivedDateTime,parentFolderId"),
+                &format!("{base}?$select=id,conversationId,receivedDateTime,parentFolderId,from"),
                 urgency,
             )
             .await?;
@@ -787,12 +801,24 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GraphSource<C> {
         };
         // Placement needs the folder ids; a failure to learn them reports
         // nothing, which hands the decision to the listing's folder.
+        // SENT IS WHO WROTE IT, wherever it is filed now. Gmail's SENT label
+        // follows a message into any folder; Exchange's Sent Items does not,
+        // so the user's own mail filed in Archive or a folder of theirs is
+        // recognised by its From.
+        let from_me = meta
+            .from
+            .as_ref()
+            .and_then(|r| r.email_address.address.as_deref())
+            .is_some_and(|a| a.trim().eq_ignore_ascii_case(self.account_email.trim()));
         let placement = match (&meta.parent_folder_id, self.folder_ids().await) {
             (Some(parent), Ok(f)) => Placement {
                 in_inbox: *parent == f.inbox,
-                in_sent: *parent == f.sent,
+                in_sent: *parent == f.sent || from_me,
             },
-            _ => Placement::default(),
+            _ => Placement {
+                in_inbox: false,
+                in_sent: from_me,
+            },
         };
         Ok(FetchedMessage {
             id: if meta.id.is_empty() {

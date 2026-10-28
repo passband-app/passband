@@ -32,7 +32,9 @@ struct Mock(Arc<Mutex<St>>);
 impl Mock {
     fn note(&self, h: &HeaderMap, what: String) {
         let mut st = self.0.lock().unwrap();
-        if h.get("prefer").and_then(|v| v.to_str().ok()) != Some(PREFER_IMMUTABLE_IDS) {
+        if h.get("prefer").and_then(|v| v.to_str().ok())
+            != Some(&*format!("{PREFER_IMMUTABLE_IDS}, odata.maxpagesize=100"))
+        {
             st.unpreferred += 1;
         }
         st.seen.push(what);

@@ -48,6 +48,7 @@ type SquelchHttpService = StreamableHttpService<SquelchServer, LocalSessionManag
 /// `shipment_policy` is the operator's `[carriers]` listing policy, and the
 /// caller must pass the SAME value it gave `ApiState::with_shipment_policy`: the
 /// agent door's package list is supposed to match the human door's.
+#[allow(clippy::too_many_arguments)] // One door, and everything the host decides about it.
 fn streamable_http_service(
     store: Arc<SqliteStore>,
     account_email: &str,

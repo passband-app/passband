@@ -211,7 +211,7 @@ impl Timed for CalendarHit {
 /// A hit before its event's full row is read.
 enum Pending {
     Event(EventMatch),
-    Ghost(GhostEvent),
+    Ghost(Box<GhostEvent>),
 }
 
 impl Timed for Pending {
@@ -341,7 +341,7 @@ pub fn search(
             match_ghosts([(ghost.title.as_str(), &ghost.start)], &near)[0].is_some()
         };
         if !twin {
-            pending.push(Pending::Ghost(ghost));
+            pending.push(Pending::Ghost(Box::new(ghost)));
         }
     }
     pending.extend(
@@ -375,7 +375,7 @@ pub fn search(
         .into_iter()
         .filter_map(|p| match p {
             Pending::Event(e) => rows.remove(&e.key).map(CalendarHit::Event),
-            Pending::Ghost(g) => Some(CalendarHit::Ghost(g)),
+            Pending::Ghost(g) => Some(CalendarHit::Ghost(*g)),
         })
         .collect();
     Ok(CalendarHits { hits, total })

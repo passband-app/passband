@@ -1985,6 +1985,19 @@ pub(super) fn retire_records_destination(conn: &Connection) -> Result<()> {
 /// on an index-backed table each; a rebuild is one INSERT ... SELECT per
 /// table, and the store holds at most a few thousand events per calendar.
 pub(super) fn reindex_calendar_search_if_stale(conn: &Connection) -> Result<()> {
+    // A partial store (an old schema mid-upgrade, a test fixture) has nothing
+    // to index, or nowhere to put it.
+    if !tables_exist(
+        conn,
+        &[
+            "calendar_events",
+            "calendar_event_guests",
+            "calendar_search_keys",
+            "calendar_search_fts",
+        ],
+    )? {
+        return Ok(());
+    }
     let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
     let events = count("SELECT COUNT(*) FROM calendar_events")?;
     let keys = count(

@@ -8,25 +8,35 @@
 // replaces a board repainted on an account switch.
 //
 // WHAT IS KEPT is `PersistedBoard`: the bands, the calendar and shipment zones,
-// the stats, the hero's headline, the head of each mail page, and when the
-// daemon last answered for them. WHAT IS NEVER KEPT is not in that type at
-// all, so no code path can write it: the sealed list (login codes), an auth
-// row from any band or page (`AttentionUpdate.isAuthRow`: its preview can be
-// the code itself), and the money zones, banking and receipts. Those repaint
-// from the network.
+// the stats, the hero's headline, the head of each mail page, when the daemon
+// last answered for them, and the ids (ids only) of the threads that hold auth
+// mail, so the prefetch fence stands before the sealed list is fetched again.
 //
-// THE SAME PROTECTIONS AS THE SAVED CHATS (QuestionChats.swift), because this
-// is mail content too: subjects, senders, the triage's one-line summaries.
-// Application Support, excluded from backup, written atomically on one serial
-// queue, on the Mac readable by the owner alone (0600 in a 0700 directory),
-// on the phone under complete file protection, so it is unreadable while the
-// device is locked (a launch then simply waits for the network, as before).
-// Its contents are never logged. One file per account; it goes when the
-// account is removed (`forget`), and when the same daemon is connected again
-// with credentials that may open a different mailbox (`discard`). A board the
-// daemon last answered for more than `PersistedBoard.maxAge` ago is not
-// painted, and its file is deleted on the read that finds it so. See
-// docs/SECURITY.md §6.
+// WHAT IS NEVER KEPT. The sealed list and the money zones (banking, receipts)
+// have no field at all. AUTH MAIL is kept out by every signal there is for it,
+// because a row's preview can be the code itself: the row's own decision
+// (`auth_kinds`, which only the feed's rows carry), its zone (`placement`
+// "auth", which the mail pages' rows carry), and the threads the store already
+// fences (`AppStore.authThreadIds`: the sealed list and the bands' decisions).
+// Every row of a thread any of those names goes, from every band, page and
+// zone. A mail-page row triage has not placed yet goes too: it is the newest
+// mail, which is exactly where a code that just arrived sits, and nothing has
+// said yet whether it is one. The rules run on the way in and again on the way
+// back out, so a file written any other way still cannot paint auth mail.
+//
+// THE SAME PROTECTIONS AS THE SAVED CHATS (`PrivateFile`), because this is mail
+// content too: subjects, senders, the triage's one-line summaries. Application
+// Support, excluded from backup, written atomically on one serial queue, on
+// the Mac readable by the owner alone (0600 in a 0700 directory), on the phone
+// under complete file protection, so it is unreadable while the device is
+// locked (a launch then simply waits for the network, as before). Its contents
+// are never logged. One file per account; it goes when the account is removed
+// (`forget`), when the same daemon is connected again or re-validated with
+// credentials that may open a different mailbox (`discard`), and when the
+// daemon refuses the saved credentials. A board the daemon last answered for
+// more than `PersistedBoard.maxAge` ago is not painted and is deleted: by the
+// read that finds it so, or by the launch sweep (`sweep`), which also deletes
+// the boards of accounts no longer on this install. See docs/SECURITY.md §6.
 
 import Foundation
 import os
@@ -59,34 +69,37 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     /// The head of each mail page, keyed by `MailMode`'s raw value.
     var mailPages: [String: [AttentionUpdate]]
     var mailKeyset: Bool
+    /// The threads that hold auth mail, sorted: what `ThreadPrefetch` refuses
+    /// from the moment this board is painted. Ids, never content.
+    var authThreads: [String]
     /// When the daemon last answered for this board: what the stale banner
     /// dates the board from, and what ages it out.
     var lastRefresh: Date
 
-    /// A board to keep, with every auth row taken out of the bands and the
-    /// pages on the way in.
+    /// A board to keep, with the auth mail taken out (see the file header).
+    /// `authThreads` is the store's own fence; the rows' own signals add to
+    /// it.
     init(
         standing: [AttentionUpdate], new: [AttentionUpdate], open: [AttentionUpdate],
         totalCount: Int?, stats: StoreStats?, fyeHeadline: String?, fyeHeadlineKey: String?,
         calendar: [CalendarUpdate], shipments: [Shipment],
-        mailPages: [String: [AttentionUpdate]], mailKeyset: Bool, lastRefresh: Date
+        mailPages: [String: [AttentionUpdate]], mailKeyset: Bool,
+        authThreads: Set<String>, lastRefresh: Date
     ) {
-        self.standing = Self.withoutAuth(standing)
-        self.new = Self.withoutAuth(new)
-        self.open = Self.withoutAuth(open)
+        self.standing = standing
+        self.new = new
+        self.open = open
         self.totalCount = totalCount
         self.stats = stats
         self.fyeHeadline = fyeHeadline
         self.fyeHeadlineKey = fyeHeadlineKey
         self.calendar = calendar
         self.shipments = shipments
-        self.mailPages = mailPages.mapValues(Self.withoutAuth)
+        self.mailPages = mailPages
         self.mailKeyset = mailKeyset
+        self.authThreads = authThreads.sorted()
         self.lastRefresh = lastRefresh
-    }
-
-    static func withoutAuth(_ rows: [AttentionUpdate]) -> [AttentionUpdate] {
-        rows.filter { !$0.isAuthRow }
+        withoutAuthMail()
     }
 
     /// Whether this board may be painted at `now`.
@@ -96,6 +109,51 @@ struct PersistedBoard: Codable, Sendable, Equatable {
             && now.timeIntervalSince(lastRefresh) < Self.maxAge
     }
 
+    // MARK: - the auth rules
+
+    /// Auth mail by the row's own word: its decision's kinds (feed rows) or
+    /// its zone (mail-page rows).
+    static func isAuthMail(_ row: AttentionUpdate) -> Bool {
+        row.isAuthRow || row.placement == "auth"
+    }
+
+    /// A band row is kept unless it is auth mail or in a fenced thread.
+    static func keepsBandRow(_ row: AttentionUpdate, fence: Set<String>) -> Bool {
+        !isAuthMail(row) && !fence.contains(row.thread_id)
+    }
+
+    /// A mail-page row also needs a zone: one triage has not placed yet may be
+    /// a code that just arrived.
+    static func keepsPageRow(_ row: AttentionUpdate, fence: Set<String>) -> Bool {
+        row.placement != nil && keepsBandRow(row, fence: fence)
+    }
+
+    /// Take every auth row out, and every row of a thread that holds one,
+    /// from the bands, the pages and the zones. The headline goes with any
+    /// band row taken out: it was written about the band as it stood, and
+    /// may be about the mail just removed.
+    private mutating func withoutAuthMail() {
+        var fence = Set(authThreads)
+        var rows = standing + new + open
+        for page in mailPages.values { rows += page }
+        for row in rows where Self.isAuthMail(row) { fence.insert(row.thread_id) }
+        fence.remove("")
+        authThreads = fence.sorted()
+        let before = standing.count
+        standing = standing.filter { Self.keepsBandRow($0, fence: fence) }
+        new = new.filter { Self.keepsBandRow($0, fence: fence) }
+        open = open.filter { Self.keepsBandRow($0, fence: fence) }
+        mailPages = mailPages.mapValues { $0.filter { Self.keepsPageRow($0, fence: fence) } }
+        calendar = calendar.filter { card in !(card.thread_id.map { fence.contains($0) } ?? false) }
+        shipments = shipments.filter { card in !(card.thread_id.map { fence.contains($0) } ?? false) }
+        if standing.count != before {
+            fyeHeadline = nil
+            fyeHeadlineKey = nil
+        }
+    }
+
+    // MARK: - bytes
+
     static func encode(_ board: PersistedBoard) throws -> Data {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
@@ -103,19 +161,16 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     }
 
     /// The board in `data`, if it may be painted at `now`. nil for a file that
-    /// does not decode, is another version, or is stale. Auth rows are taken
-    /// out again on the way back in, so a file written by anything else still
-    /// cannot put one on screen from disk.
+    /// does not decode, is another version, or is stale. The auth rules run
+    /// again on the way back in, so a file written by anything else still
+    /// cannot put auth mail on screen from disk.
     static func decode(_ data: Data, now: Date) -> PersistedBoard? {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         guard var board = try? decoder.decode(PersistedBoard.self, from: data),
             board.isFresh(now: now)
         else { return nil }
-        board.standing = withoutAuth(board.standing)
-        board.new = withoutAuth(board.new)
-        board.open = withoutAuth(board.open)
-        board.mailPages = board.mailPages.mapValues(withoutAuth)
+        board.withoutAuthMail()
         return board
     }
 }
@@ -143,6 +198,13 @@ enum BoardFile {
         directory.appendingPathComponent("board-\(id.uuidString).json")
     }
 
+    /// The account a board file belongs to, from its name; nil for anything
+    /// else in the directory.
+    static func account(ofFileNamed name: String) -> UUID? {
+        guard name.hasPrefix("board-"), name.hasSuffix(".json") else { return nil }
+        return UUID(uuidString: String(name.dropFirst("board-".count).dropLast(".json".count)))
+    }
+
     /// The board kept for `id`, if there is one that may be painted now. A
     /// file that is there but stale, of another version, or corrupt is
     /// deleted: nothing will ever paint it. One that cannot be read at all
@@ -157,7 +219,8 @@ enum BoardFile {
     }
 
     /// Keep `board` for `id`. Encoded and written on the queue, off the main
-    /// actor. `wait`: return only once it is on disk (the Mac quitting).
+    /// actor. `wait`: return only once it is on disk (quitting, or the phone
+    /// going to the background, where the process may never run again).
     static func save(
         _ board: PersistedBoard, account id: UUID, wait: Bool = false,
         in directory: URL = BoardFile.directory()
@@ -185,6 +248,35 @@ enum BoardFile {
         queue.async { remove(url) }
     }
 
+    /// Delete every board nothing will paint: those of accounts not in
+    /// `accounts`, and those written longer ago than a board may be painted
+    /// (a board is written after the answer it is dated by, so one written
+    /// that long ago is at least that stale). Run at launch, so the board of
+    /// an account nobody opens does not outlive its week.
+    static func sweep(
+        keeping accounts: Set<UUID>, now: Date = Date(), in directory: URL = BoardFile.directory()
+    ) {
+        queue.async {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            for name in names {
+                guard let id = account(ofFileNamed: name) else { continue }
+                let url = directory.appendingPathComponent(name)
+                let written =
+                    (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate]
+                    as? Date
+                let stale = written.map { now.timeIntervalSince($0) >= PersistedBoard.maxAge } ?? false
+                if stale || !accounts.contains(id) { remove(url) }
+            }
+        }
+    }
+
+    /// Returns once everything queued before it has run. For the tests.
+    static func settle() async {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume() }
+        }
+    }
+
     // MARK: - on the queue
 
     private static func read(_ url: URL, now: Date) -> PersistedBoard? {
@@ -200,25 +292,7 @@ enum BoardFile {
     private static func write(_ board: PersistedBoard, to url: URL, in directory: URL, account id: UUID) {
         guard !forgotten.withLock({ $0.contains(id) }) else { return }
         do {
-            let data = try PersistedBoard.encode(board)
-            var dir = directory
-            #if os(macOS)
-                try FileManager.default.createDirectory(
-                    at: dir, withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o700])
-                try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
-            #else
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            #endif
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            try? dir.setResourceValues(values)
-            #if os(iOS)
-                try data.write(to: url, options: [.atomic, .completeFileProtection])
-            #else
-                try data.write(to: url, options: .atomic)
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            #endif
+            try PrivateFile.write(PersistedBoard.encode(board), to: url, in: directory)
         } catch {
             log.error("board not written: \(error.localizedDescription, privacy: .public)")
         }
@@ -232,11 +306,14 @@ enum BoardFile {
 /// Launch to the first board on screen, as one Instruments interval: "first
 /// board" under Points of Interest, the client measurement
 /// docs/PERFORMANCE.md §4 asks for. Begun when the store is made and ended
-/// once, by whichever paints first: the board from disk, or the first pull to
-/// land. Its end message says which, so one build measures both launches (a
-/// launch with no board kept is the network's).
+/// once, by whichever comes first: the board painted from disk, the first
+/// pull to land, or a gate (no board at all, so not a sample). Its end
+/// message says which, so one build measures both kinds of launch (one with
+/// no board kept is the network's).
 @MainActor
 enum LaunchSignpost {
+    enum Outcome { case disk, network, gate }
+
     private static let signposter = OSSignposter(
         subsystem: "app.passband.client", category: .pointsOfInterest)
     private static var interval: OSSignpostIntervalState?
@@ -248,13 +325,13 @@ enum LaunchSignpost {
         interval = signposter.beginInterval("first board")
     }
 
-    static func end(fromDisk: Bool) {
+    static func end(_ outcome: Outcome) {
         guard let state = interval else { return }
         interval = nil
-        if fromDisk {
-            signposter.endInterval("first board", state, "from disk")
-        } else {
-            signposter.endInterval("first board", state, "from the network")
+        switch outcome {
+        case .disk: signposter.endInterval("first board", state, "from disk")
+        case .network: signposter.endInterval("first board", state, "from the network")
+        case .gate: signposter.endInterval("first board", state, "no board, a gate")
         }
     }
 }

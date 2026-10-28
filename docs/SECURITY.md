@@ -922,19 +922,31 @@ the call goes out.
   paints before the daemon answers
   (`passband/Sources/Passband/Lib/BoardFile.swift`): the bands' rows (subject,
   sender, the triage's one-line summary and preview), the calendar and shipment
-  cards, the stats, the hero's headline and the head of each mail page. It is
-  kept exactly as the saved chats are: one file per account under Application
-  Support's `Passband/Boards`, excluded from backup, written atomically, 0600 in a
-  0700 directory on the Mac, complete file protection on the phone, contents never
-  logged. NEVER on disk, because the persisted type has no place for them: the
-  sealed list, any row whose decision names an auth kind (its preview can be the
-  code), and the banking and receipt cards. Rows are filtered on the way in and
-  again on the way back out, so a file written any other way still cannot paint
-  one. A board the daemon last answered for more than a week ago is not painted
-  and its file is deleted; the file goes when the account is removed, when the
-  same daemon is connected again (the credentials may open another mailbox), and
-  when the daemon refuses the saved credentials at launch. Never written for the
-  practice inbox, or for a board the daemon has not yet confirmed this session.
+  cards, the stats, the hero's headline, the head of each mail page, and the ids
+  (ids only) of the threads that hold auth mail, so the prefetch fence is up
+  before the sealed list is fetched again. It is written through the same code
+  as the saved chats (`PrivateFile.swift`): one file per account under
+  Application Support's `Passband/Boards`, excluded from backup, written
+  atomically, 0600 in a 0700 directory on the Mac, complete file protection on
+  the phone, contents never logged. NEVER on disk: the sealed list and the
+  banking and receipt cards, which the persisted type has no place for, and
+  auth mail by every signal there is for it, since a preview can be the code. A
+  row goes when its decision names an auth kind (feed rows), when its zone is
+  `auth` (mail-page rows, which carry no decision), or when its thread is one
+  the store fences (the sealed list, the bands' auth rows), and every other row,
+  card and page entry of that thread goes with it. So does a mail-page row
+  triage has not placed yet: the newest mail is where a code that just arrived
+  sits. The rules run on the way in and again on the way back out, so a file
+  written any other way still cannot paint auth mail. Only what the daemon has
+  answered for this session is written: never a board still repainted from
+  disk or a switch, never a zone or page that has not loaded since. A board the
+  daemon last answered for more than a week ago is not painted and is deleted,
+  by the read that finds it or by the launch sweep, which also deletes the
+  board of every account no longer on the install. The file goes when the
+  account is removed, when the same daemon is connected again or re-validated
+  in Settings (the credentials may open another mailbox), and when the daemon
+  refuses the saved credentials at launch. Never written for the practice
+  inbox.
 
 **What a maintainer must not break.**
 - **Prompt injection is the standing threat, and the gate is the answer to it.**

@@ -234,6 +234,7 @@ run_suite board-file \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/PrivateFile.swift \
   Sources/Passband/Lib/BoardFile.swift \
   Tests/BoardFileTests.swift
 

@@ -27,6 +27,10 @@ struct MailRow: View {
     let onHover: () -> Void
     let onOpen: () -> Void
 
+    /// The list's column widths, measured once by the list (`MailColumnsReader`)
+    /// so every row draws the same sender column. Nil outside a measured list.
+    @Environment(\.mailColumns) private var columns
+
     /// The mail's own subject, when the daemon sent one that says something
     /// the one-liner does not. A summary that IS the subject (an untriaged
     /// row's fallback) would otherwise print twice.
@@ -103,64 +107,26 @@ struct MailRow: View {
 
                 Avatar(sender: update.senderString, size: 20)
 
+                // ONE WIDTH FOR EVERY ROW, picked from the list's width rather
+                // than flexed per row: a per-row width would start each subject
+                // at a different x.
                 Text(SenderCache.resolved(update.senderString).displayName)
                     .font(Typo.ui(12.5, weight: emphasized ? .semibold : .regular))
                     .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
                     .lineLimit(1)
-                    .frame(width: Typo.measure(168), alignment: .leading)
+                    .frame(width: columns?.name ?? MailColumns.wideName, alignment: .leading)
 
-                // THE COLUMN THAT CARRIES THE ROW, so it is the last to give
-                // way: a floor and a priority over the chips beside it, which
-                // otherwise ate it whole in a narrow window.
+                // THE COLUMN THAT CARRIES THE ROW, flexible down to a small
+                // floor. The floor is what the trailing marks must leave it:
+                // past that they give way (`trailing`), never the row's width.
                 middle(subject: subject, gist: gist)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(minWidth: Typo.measure(140), maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: MailColumns.subjectFloor, maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(1)
 
                 HStack(spacing: Space.scaled(7)) {
-                    if update.matched_rule != nil {
-                        Image(systemName: "wand.and.stars")
-                            .font(Typo.ui(10))
-                            .foregroundStyle(Palette.inkFaint)
-                            .help("matched a sender rule")
-                            .accessibilityLabel("matched a sender rule")
-                    }
-                    if update.hasPendingReminder {
-                        Chip(
-                            text: Fmt.remindChip(update.remind_at), tone: Palette.accent,
-                            symbol: "bell.fill")
-                    }
-                    // Kept on finished mail too, quietly: the Deadlines lens
-                    // lists it, and a row that matches with no visible reason
-                    // reads as a mistake.
-                    if let chip {
-                        Chip(
-                            text: chip.text,
-                            tone: finished
-                                ? Palette.inkFaintest : chip.overdue ? Palette.danger : Palette.warn,
-                            filled: chip.overdue && !finished)
-                    }
-                    if update.hasAttachments {
-                        Image(systemName: "paperclip")
-                            .font(Typo.ui(11))
-                            .foregroundStyle(Palette.inkFaint)
-                            .accessibilityLabel("has attachments")
-                    }
-                    // Left of the pill, so a selected row's hint never pushes
-                    // the pill out of line with the rows around it.
-                    if selected, let verbHint {
-                        Text(verbHint)
-                            .font(Typo.mono(9))
-                            .foregroundStyle(Palette.inkFaintest)
-                    }
-                    // THE SITREP ZONE, as a pill HUGGING ITS TEXT and right
-                    // aligned against the fixed time column, so the pills'
-                    // right edges line up down the list and every point a
-                    // short name does not use goes to the summary instead.
-                    if let zone = SitrepZone(update.placement) {
-                        PlacementPill(zone: zone, muted: finished)
-                    }
+                    trailing(selected: selected, chip: chip)
                     // ARRIVAL ONLY. A daemon that does not send `received_at`
                     // has no arrival to print, and its listing time (every
                     // backfilled row reading "11:41 AM") is worse than none.
@@ -175,11 +141,105 @@ struct MailRow: View {
                 }
                 .layoutPriority(3)
             }
+            // LEADING-ANCHORED. Should the fixed columns alone ever outgrow a
+            // very narrow list, the row clips on the right like every other
+            // row instead of being centred (each by its own overflow, which
+            // staggered the meters and avatars down the list).
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         }
         // No edge bar on the selected row: ListRow's fill already marks it,
         // and a one-sided stripe on a rounded row bends into an arc. Finished
         // rows are dimmed by INK alone, never opacity, which took their faint
         // text under a readable contrast.
+    }
+
+    /// The marks by the time, in the room the subject's floor leaves them.
+    /// The first arrangement that fits wins, so a row gives up the least
+    /// useful marks first: the verb hint, then the reminder's words (its bell
+    /// stays), then the zone pill, then everything but the deadline. Every
+    /// arrangement hugs the time column, so whichever one a row ends up with,
+    /// the pills' and times' right edges still line up down the list.
+    @ViewBuilder
+    private func trailing(selected: Bool, chip: Fmt.DeadlineChip?) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Space.scaled(7)) {
+                marks(chip: chip, reminderWords: true)
+                // Left of the pill, so a selected row's hint never pushes
+                // the pill out of line with the rows around it.
+                if selected, let verbHint {
+                    Text(verbHint)
+                        .font(Typo.mono(9))
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+                pill
+            }
+            HStack(spacing: Space.scaled(7)) {
+                marks(chip: chip, reminderWords: false)
+                pill
+            }
+            HStack(spacing: Space.scaled(7)) {
+                marks(chip: chip, reminderWords: false)
+            }
+            HStack(spacing: Space.scaled(7)) {
+                deadline(chip)
+            }
+            // Nothing at all: a real zero-size leaf, so the last resort
+            // always fits.
+            Color.clear.frame(width: 0, height: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func marks(chip: Fmt.DeadlineChip?, reminderWords: Bool) -> some View {
+        if update.matched_rule != nil {
+            Image(systemName: "wand.and.stars")
+                .font(Typo.ui(10))
+                .foregroundStyle(Palette.inkFaint)
+                .help("matched a sender rule")
+                .accessibilityLabel("matched a sender rule")
+        }
+        if update.hasPendingReminder {
+            if reminderWords {
+                Chip(
+                    text: Fmt.remindChip(update.remind_at), tone: Palette.accent,
+                    symbol: "bell.fill")
+            } else {
+                Image(systemName: "bell.fill")
+                    .font(Typo.ui(9, weight: .semibold))
+                    .foregroundStyle(Palette.accent)
+                    .help(Fmt.remindChip(update.remind_at))
+                    .accessibilityLabel(Fmt.remindChip(update.remind_at))
+            }
+        }
+        deadline(chip)
+        if update.hasAttachments {
+            Image(systemName: "paperclip")
+                .font(Typo.ui(11))
+                .foregroundStyle(Palette.inkFaint)
+                .accessibilityLabel("has attachments")
+        }
+    }
+
+    /// Kept on finished mail too, quietly: the Deadlines lens lists it, and a
+    /// row that matches with no visible reason reads as a mistake.
+    @ViewBuilder
+    private func deadline(_ chip: Fmt.DeadlineChip?) -> some View {
+        if let chip {
+            Chip(
+                text: chip.text,
+                tone: finished
+                    ? Palette.inkFaintest : chip.overdue ? Palette.danger : Palette.warn,
+                filled: chip.overdue && !finished)
+        }
+    }
+
+    /// THE SITREP ZONE, as a pill HUGGING ITS TEXT and right aligned against
+    /// the fixed time column, so the pills' right edges line up down the list
+    /// and every point a short name does not use goes to the summary instead.
+    @ViewBuilder private var pill: some View {
+        if let zone = SitrepZone(update.placement) {
+            PlacementPill(zone: zone, muted: finished)
+        }
     }
 
     /// The left gutter: a check on finished mail, the importance meter on the
@@ -198,6 +258,58 @@ struct MailRow: View {
                     update.importance >= 70
                         ? "high importance" : update.importance >= 40 ? "medium importance" : "low importance")
         }
+    }
+}
+
+/// THE MAIL LIST'S COLUMN WIDTHS, decided ONCE from the list's width and
+/// handed to every row, because a column only lines up if every row draws it
+/// at the same width. A narrow list (the compose pane open beside it) takes a
+/// narrower sender column; the subject flexes to its floor; the trailing marks
+/// give way per row (`MailRow.trailing`) without moving any column edge.
+struct MailColumns: Equatable {
+    /// The sender column.
+    var name: CGFloat
+
+    /// The sender column with room to spare: the list's usual width.
+    @MainActor static var wideName: CGFloat { Typo.measure(168) }
+    /// What the subject keeps before the trailing marks start giving way.
+    @MainActor static var subjectFloor: CGFloat { Typo.measure(64) }
+
+    /// The columns for a list `width` wide. The rows' words run from the page
+    /// gutter on both sides (`DeskRow.listInset` + `DeskRow.hPadding` =
+    /// `Space.page`), so the row's own width is the list's less two gutters.
+    @MainActor static func fitting(listWidth width: CGFloat) -> MailColumns {
+        let row = width - Space.page * 2
+        if row >= Typo.measure(640) { return MailColumns(name: wideName) }
+        if row >= Typo.measure(460) { return MailColumns(name: Typo.measure(128)) }
+        return MailColumns(name: Typo.measure(104))
+    }
+}
+
+private struct MailColumnsKey: EnvironmentKey {
+    static let defaultValue: MailColumns? = nil
+}
+
+extension EnvironmentValues {
+    /// The mail list's measured columns, nil outside one.
+    var mailColumns: MailColumns? {
+        get { self[MailColumnsKey.self] }
+        set { self[MailColumnsKey.self] = newValue }
+    }
+}
+
+/// Measures the mail list and hands its rows `MailColumns`. A view of its own
+/// so a window resize re-runs THIS body, not the page's: `content` is built
+/// once by the caller and only the environment value changes, and only when
+/// the list crosses a width step.
+struct MailColumnsReader<Content: View>: View {
+    @ViewBuilder let content: Content
+    @State private var width: CGFloat = 0
+
+    var body: some View {
+        content
+            .environment(\.mailColumns, width > 0 ? MailColumns.fitting(listWidth: width) : nil)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 }
 

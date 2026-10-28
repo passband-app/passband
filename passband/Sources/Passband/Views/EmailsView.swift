@@ -450,6 +450,14 @@ struct EmailsView: View {
 
     #if os(macOS)
         private var desktopList: some View {
+            // Measured as a whole so every mail row draws the same columns
+            // (`MailColumns`): narrower ones beside the compose pane.
+            MailColumnsReader {
+                desktopScroller
+            }
+        }
+
+        private var desktopScroller: some View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 1) {

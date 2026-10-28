@@ -913,7 +913,12 @@ private struct ReadingHero: View {
                 // the neutral well when sampling failed — which must stay
                 // distinguishable from a white sample.
                 .background(hero.fill ?? Palette.canvas.opacity(0.7))
-                .clipShape(RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: Space.scaled(9)), style: .continuous))
+                // DELIBERATE exception to `Radius.concentric`: the image takes
+                // the CARD's own radius rather than the ~2pt a concentric curve
+                // 9pt inside would give. A near-square thumbnail read as a
+                // pasted-in photo; one that echoes the card's corner reads as
+                // part of the card, which is the look we want here.
+                .clipShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         } else {
             // Zero in BOTH axes: a zero-height-only placeholder would still
             // collect the HStack's spacing and indent the text.

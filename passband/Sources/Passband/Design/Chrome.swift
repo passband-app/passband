@@ -212,6 +212,15 @@ enum PanelRow {
     /// One height for the rows on the hit grid (26pt avatar, then words):
     /// the hits and the senders offered above them.
     static var vPadding: CGFloat { Space.s10 }
+
+    /// THE SEARCH HITS' OWN ENVELOPE, roomier than the rest: the selection
+    /// fill sits ON the panel gutter (the search field's edge) and the words
+    /// a full `hitPadding` inside it. The hits carry a relevance bar ahead of
+    /// the avatar (`HitRow`), and on the tighter `listInset`/`hPadding` grid
+    /// the bar, avatar and name ran into each other. Bar at gutter + s4,
+    /// avatar at gutter + s16, name 36 past that.
+    static var hitInset: CGFloat { Space.panel }
+    static var hitPadding: CGFloat { Space.s16 }
 }
 
 // MARK: - rules

@@ -351,6 +351,13 @@ struct SearchView: View {
                         ForEach(Array(senders.enumerated()), id: \.element.id) { i, sender in
                             SenderRow(
                                 sender: sender, selected: i == senderIndex,
+                                // The rule under a row gives way to the
+                                // selection fill on either side of it.
+                                // The last one's neighbour is the first hit
+                                // (or that hit's header).
+                                ruled: i != senderIndex && i + 1 != senderIndex
+                                    && !(i == senders.count - 1
+                                        && (store.search.index == 0 || header(above: 0) != nil)),
                                 // Tab takes the armed row, or the first.
                                 tabTakes: i == max(0, senderIndex)
                             ) { show(sender) }
@@ -362,7 +369,11 @@ struct SearchView: View {
                         // so opening a hit costs the results nothing.
                         HitRow(
                             hit: hit, terms: terms,
-                            selected: i == store.search.index, expanded: expanded
+                            selected: i == store.search.index, expanded: expanded,
+                            // No rule against the selection fill, above or
+                            // below it, and none under a row a header follows.
+                            ruled: i != store.search.index && i + 1 != store.search.index
+                                && header(above: i + 1) == nil
                         ) {
                             store.search.index = i
                             senderIndex = -1
@@ -383,11 +394,11 @@ struct SearchView: View {
                     if loadingMore { BandNote("loading more…") }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                // `PanelRow`: inset, and the rows pad the rest of the way to
-                // the gutter. Beside the expanded band the band column is the
-                // margin, so the fill sits just off it.
-                .padding(.leading, expanded && bandMounted ? Space.s4 : PanelRow.listInset)
-                .padding(.trailing, PanelRow.listInset)
+                // `PanelRow.hitInset`: the fill on the panel gutter, the
+                // words `hitPadding` inside it. Beside the expanded band the
+                // band column is the margin, so the fill sits just off it.
+                .padding(.leading, expanded && bandMounted ? Space.s8 : PanelRow.hitInset)
+                .padding(.trailing, PanelRow.hitInset)
                 .padding(.bottom, Space.s14)
             }
             .onAppear {
@@ -426,8 +437,9 @@ struct SearchView: View {
             .tracking(1)
             .foregroundStyle(Palette.inkDim)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // Inside the list's inset, so on the rows' word edge.
-            .padding(.horizontal, PanelRow.hPadding)
+            // Inside the list's inset, so on the rows' word edge (the
+            // avatars' leading edge).
+            .padding(.horizontal, PanelRow.hitPadding)
             .padding(.top, Space.s14)
             .padding(.bottom, Space.s6)
     }
@@ -825,6 +837,8 @@ struct SearchView: View {
 private struct SenderRow: View {
     let sender: SenderHit
     let selected: Bool
+    /// Draws the rule under the row (`HitRule`).
+    let ruled: Bool
     /// This is the row Tab would take, so it is the one that says so.
     let tabTakes: Bool
     let onShow: () -> Void
@@ -838,9 +852,10 @@ private struct SenderRow: View {
         // hoverFill off: this list never washed on hover, and the keys, not
         // the pointer, walk it.
         ListRow(
-            selected: selected, hPadding: PanelRow.hPadding, vPadding: PanelRow.vPadding,
+            selected: selected, hPadding: PanelRow.hitPadding, vPadding: PanelRow.vPadding,
             hoverFill: false, action: onShow
         ) { _, _ in
+            // One line, so centred alignment IS the name's line.
             HStack(spacing: Space.s10) {
                 // Sender strings are email-derived: rendered as Text only,
                 // never as markup.
@@ -867,9 +882,19 @@ private struct SenderRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .overlay(alignment: .bottom) { if ruled { HitRule() } }
         .accessibilityElement(children: .combine)
         .accessibilityHint("Shows all mail from this sender, newest first")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// THE RULE BETWEEN RESULTS, under the avatar-and-words column: it starts on
+/// the avatars' edge and stops on the dates', so it never runs into the
+/// relevance bar or past the selection fill's rounded corners.
+private struct HitRule: View {
+    var body: some View {
+        Hairline().padding(.horizontal, PanelRow.hitPadding)
     }
 }
 
@@ -878,23 +903,32 @@ private struct HitRow: View {
     let terms: [String]
     let selected: Bool
     let expanded: Bool
+    /// Draws the rule under the row (`HitRule`).
+    var ruled = true
     let onOpen: () -> Void
 
     var body: some View {
+        // Read here: the guide's closure is not main-actor isolated.
+        let nameLine = Typo.size(12) * 0.35
         // The shared row envelope (see SenderRow), on the same grid.
         ListRow(
-            selected: selected, hPadding: PanelRow.hPadding, vPadding: PanelRow.vPadding,
+            selected: selected, hPadding: PanelRow.hitPadding, vPadding: PanelRow.vPadding,
             hoverFill: false, action: onOpen
         ) { _, _ in
-            HStack(alignment: .top, spacing: Space.s10) {
+            // The avatar sits on the SENDER'S LINE, its centre on the name,
+            // not centred on the two-line row nor hung from its top edge.
+            HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
                 Avatar(sender: hit.from_name.map { "\($0) <\(hit.from_addr)>" } ?? hit.from_addr,
                        size: 26)
-                    .padding(.top, 1)
+                    .alignmentGuide(.firstTextBaseline) { d in
+                        d[VerticalAlignment.center] + nameLine
+                    }
                     .accessibilityHidden(true)
                 columns
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .overlay(alignment: .bottom) { if ruled { HitRule() } }
         .overlay(alignment: .leading) {
             if hit.is_done == false {
                 RoundedRectangle(cornerRadius: 1)

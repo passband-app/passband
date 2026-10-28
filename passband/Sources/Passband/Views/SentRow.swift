@@ -222,6 +222,9 @@ struct SentRow: View {
                 }
                 .layoutPriority(3)
             }
+            // Leading-anchored, like MailRow: a row that outgrows a very
+            // narrow list clips on the right rather than centring.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         }
     #endif
 }

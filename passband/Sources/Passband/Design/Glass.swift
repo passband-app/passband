@@ -305,7 +305,10 @@ extension View {
 ///
 /// THE RULES EVERY MODAL FOLLOWS, so two dialogs never disagree about where
 /// their words start or which button is the yes:
-///   - Words sit `Space.modal` in from the glass on every side.
+///   - Words sit `Space.modal` in from the glass on every side. An
+///     EDITORIAL card may ask for more through `padding` (the guide's
+///     boundary card takes `Space.s32`): one deliberate number on the card,
+///     never a second padding stacked inside it.
 ///   - A utility dialog's title is `Typo.modalTitle`. An EDITORIAL card (the
 ///     guide's boundary card, What's New, the keymap, the inbox summary) may
 ///     keep a serif display title, because it is a page, not a question.
@@ -316,13 +319,15 @@ extension View {
 struct ModalCard<Content: View, Edge: View>: View {
     var width: CGFloat = 460
     var tint: Color? = Palette.glassTint
+    /// Words in from the glass. `Space.modal` for a dialog; nil means that.
+    var padding: CGFloat? = nil
     @ViewBuilder var content: Content
     @ViewBuilder var bottomEdge: Edge
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: Space.s12) { content }
-                .padding(Space.modal)
+                .padding(padding ?? Space.modal)
             bottomEdge
         }
             // A MEASURE ON THE MAC, A CEILING ON THE PHONE. Every card in this app
@@ -348,11 +353,12 @@ struct ModalCard<Content: View, Edge: View>: View {
 
 extension ModalCard where Edge == EmptyView {
     init(
-        width: CGFloat = 460, tint: Color? = Palette.glassTint,
+        width: CGFloat = 460, tint: Color? = Palette.glassTint, padding: CGFloat? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.width = width
         self.tint = tint
+        self.padding = padding
         self.content = content()
         self.bottomEdge = EmptyView()
     }

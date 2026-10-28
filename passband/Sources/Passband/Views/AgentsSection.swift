@@ -238,11 +238,11 @@ struct AgentsSection: View {
         }
         .buttonStyle(.plain)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(active ? Palette.accentSoft : Palette.canvas.opacity(0.5))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(active ? Palette.accent.opacity(0.5) : Palette.hairline, lineWidth: active ? 1 : 0.75)
         )
         .accessibilityLabel(kind.name)
@@ -324,7 +324,7 @@ struct AgentsSection: View {
                     .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(chosen ? Palette.accent : Palette.inkFaint)
                     .frame(width: Space.scaled(18))
-                VStack(alignment: .leading, spacing: Space.scaled(2)) {
+                VStack(alignment: .leading, spacing: Space.s2) {
                     Text(level.title)
                         .font(Typo.ui(12, weight: .medium))
                         .foregroundStyle(chosen ? Palette.ink : Palette.inkDim)
@@ -345,11 +345,11 @@ struct AgentsSection: View {
         }
         .buttonStyle(.plain)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(chosen ? Palette.accentSoft : Palette.canvas.opacity(0.5))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(chosen ? Palette.accent.opacity(0.4) : Palette.hairline, lineWidth: 0.75)
         )
         .accessibilityLabel("\(level.title). \(level.detail)")
@@ -668,7 +668,7 @@ private struct BrandButtonStyle: ButtonStyle {
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
         return configuration.label
             .font(Typo.ui(12, weight: .semibold))
             .foregroundStyle(ink)
@@ -707,11 +707,11 @@ private struct CodeBlock: View {
         .padding(.horizontal, Space.s12)
         .padding(.vertical, Space.s8)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.canvas.opacity(0.75))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
         )
     }

@@ -96,7 +96,7 @@ private struct ContactCard: View {
             actions
         }
         .padding(Space.s14)
-        .frame(width: 320, alignment: .leading)
+        .frame(width: Typo.measure(320), alignment: .leading)
         .task(id: who.address) { await load() }
     }
 

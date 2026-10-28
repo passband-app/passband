@@ -22,8 +22,9 @@
 // and no link: the setup is a paste into an agent on this Mac or the
 // person's own, and the pane has every agent's snippet.
 //
-// A FIXED COMPOSITION like the iPhone ad: every size is a literal on purpose,
-// none follows the density setting, and the card is the iPhone ad's footprint.
+// A FIXED COMPOSITION like the iPhone ad: every size is a literal, an
+// `AdCard` constant or `fixed:` type on purpose, none follows the density
+// setting, and the card is the iPhone ad's footprint.
 // NOT MODAL, bottom-RIGHT, and NO `.defaultAction`: an unbidden card does not
 // get to own Return.
 
@@ -40,8 +41,7 @@ struct AgentNudgeModal: View {
                 if opened { store.openSettings(.agents) }
                 Analytics.capture("agent_nudge_closed", ["opened": opened])
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            .adCardPlacement()
         }
     }
 }
@@ -119,7 +119,7 @@ private struct AgentAdCard: View {
                     .font(Typo.hero(25, fixed: true))
                     .foregroundStyle(Palette.ink)
                 Text("Claude, OpenClaw, Hermes Agent and others can read your triaged inbox. Ask yours what needs you.")
-                    .font(.system(size: 12))
+                    .font(Typo.ui(12, fixed: true))
                     .foregroundStyle(Palette.inkDim)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -131,10 +131,10 @@ private struct AgentAdCard: View {
                     HStack(spacing: 6) {
                         Text("Connect an agent")
                         Image(systemName: "arrow.right")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(Typo.ui(10, weight: .bold, fixed: true))
                             .offset(x: hovering ? 2 : 0)
                     }
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Typo.ui(12, weight: .semibold, fixed: true))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
@@ -146,13 +146,11 @@ private struct AgentAdCard: View {
                 .help("Open Settings, Agents")
 
                 Text("Settings  ›  Agents")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(Typo.ui(10, weight: .medium, fixed: true))
                     .foregroundStyle(Palette.inkFaintest)
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 16)
-        .padding(.bottom, 18)
+        .adWordsPadding()
     }
 
     /// THE SEAL, as a feature rather than fine print: sign-in codes and
@@ -164,27 +162,27 @@ private struct AgentAdCard: View {
         HStack(alignment: .center, spacing: 11) {
             VStack(spacing: 3) {
                 Text("CODE")
-                    .font(.system(size: 6.5, weight: .bold).width(.expanded))
+                    .font(Typo.ui(6.5, weight: .bold, fixed: true).width(.expanded))
                     .tracking(0.5)
                     .foregroundStyle(Palette.inkFaint)
                 Text("••••••")
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .font(Typo.ui(11, weight: .bold, design: .monospaced, fixed: true))
                     .tracking(-0.5)
                     .foregroundStyle(Palette.ink)
             }
             .frame(width: 50, height: 38)
-            .background(Palette.ink.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background(Palette.ink.opacity(0.05), in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
             .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Sign-in codes stay sealed.")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Typo.ui(12, weight: .semibold, fixed: true))
                     .foregroundStyle(Palette.ink)
                 Text("Codes and password reset links never reach your agent. They stay in Passband.")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(Typo.ui(10, weight: .medium, fixed: true))
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
             }

@@ -428,7 +428,7 @@ struct ConnectView: View {
             #else
                 .frame(maxWidth: 440)
             #endif
-            .passbandGlass(.pane, cornerRadius: 24, tint: Palette.glassTintStrong)
+            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong)
             .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
     }
 
@@ -736,7 +736,7 @@ struct ConnectView: View {
                     .font(Typo.mono(13))
                     .padding(.horizontal, Space.s10)
                     .padding(.vertical, Space.scaled(7))
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas))
+                    .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas))
             }
             .padding(Space.s16)
         }
@@ -948,7 +948,7 @@ struct ConnectView: View {
         }
         .padding(Space.s14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
+        .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas.opacity(0.3)))
     }
 
     private var pairForm: some View {
@@ -1310,8 +1310,8 @@ private struct WelcomeActions: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+            .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas.opacity(0.3)))
+            .overlay(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
 
             if let retrySaved {
                 Button(retrying ? "Trying saved connection…" : "Try saved connection again", action: retrySaved)
@@ -1404,8 +1404,8 @@ struct SavedConnectionWait: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+        .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas.opacity(0.3)))
+        .overlay(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
     }
 }
 
@@ -1518,8 +1518,8 @@ private struct SetupStep: View {
                 }
                 .padding(.horizontal, Space.scaled(9))
                 .padding(.vertical, Space.s6)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas.opacity(0.9)))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.hairline, lineWidth: 0.75))
+                .background(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).fill(Palette.canvas.opacity(0.9)))
+                .overlay(RoundedRectangle(cornerRadius: Radius.well, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 0.75))
                 .padding(.top, Space.s2)
             }
         }
@@ -1624,12 +1624,18 @@ private struct RigSlot<Field: View>: View {
 /// unreadable.
 struct Field<Content: View>: View {
     let label: String
+    /// A search field: capsule, not well (see `fieldWell`).
+    var capsule = false
+    /// The words' inset from the well's edge, when a field must put them on
+    /// a line of its surroundings' (the search panel's hit edge). Nil is the
+    /// well's own.
+    var inset: CGFloat? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.scaled(5)) {
             FieldLabel(label)
-            content.fieldWell()
+            content.fieldWell(capsule: capsule, inset: inset)
         }
     }
 }
@@ -1649,20 +1655,28 @@ struct FieldLabel: View {
 }
 
 extension View {
-    func fieldWell() -> some View {
+    /// `capsule` is for SEARCH fields, which take the capsule the segmented
+    /// controls and filter pills beside them wear (see `Radius`). A field that
+    /// holds a value (a name, an address, a key) keeps the well's corner.
+    /// `inset` overrides how far in the words sit (nil: the shape's own).
+    @ViewBuilder
+    func fieldWell(capsule: Bool = false, inset: CGFloat? = nil) -> some View {
+        if capsule {
+            wellChrome(Capsule(style: .continuous), inset: inset ?? Space.s12)
+        } else {
+            wellChrome(
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous), inset: inset ?? Space.s10)
+        }
+    }
+
+    private func wellChrome<S: InsettableShape>(_ shape: S, inset: CGFloat) -> some View {
         self
             .font(Typo.ui(13))
             .foregroundStyle(Palette.ink)
-            .padding(.horizontal, Space.s10)
+            .padding(.horizontal, inset)
             .padding(.vertical, Space.s8)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Palette.canvas.opacity(0.9))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
-            )
+            .background(shape.fill(Palette.canvas.opacity(0.9)))
+            .overlay(shape.strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
     }
 }
 

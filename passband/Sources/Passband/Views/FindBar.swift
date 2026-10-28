@@ -89,14 +89,14 @@ struct ReaderFindBar: View {
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(Typo.ui(10, weight: .semibold))
-                    .frame(width: 20, height: 20)
+                    .frame(width: Space.scaled(20), height: Space.scaled(20))
                     .contentShape(Rectangle())
             }
             .buttonStyle(.textAction)
             .help("close (Esc)")
             .accessibilityLabel("close find")
         }
-        .padding(.leading, Space.scaled(12))
+        .padding(.leading, Space.s12)
         .padding(.trailing, Space.s6)
         .padding(.vertical, Space.s4)
         // OPAQUE, not glass: the bar floats over the top of the mail, where a
@@ -115,7 +115,7 @@ struct ReaderFindBar: View {
         Button { find.step(delta) } label: {
             Image(systemName: symbol)
                 .font(Typo.ui(10, weight: .semibold))
-                .frame(width: 20, height: 20)
+                .frame(width: Space.scaled(20), height: Space.scaled(20))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.textAction)

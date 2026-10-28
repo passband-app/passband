@@ -130,7 +130,7 @@ enum MeterSlot {
     enum PhoneRow {
         static var hPadding: CGFloat { Space.s12 }
         static var vPadding: CGFloat { Space.scaled(9) }
-        static let radius: CGFloat = 10
+        static let radius: CGFloat = Radius.well
         /// The screen's side margin, which a zone title, a day heading and a
         /// row's own words all line up on.
         static let gutter: CGFloat = 16
@@ -149,6 +149,86 @@ enum MeterSlot {
         static var stamp: Font { Typo.num(11) }
     }
 #endif
+
+/// THE MAC'S BLEEDING LIST ROW, the desktop twin of `PhoneRow`. A list whose
+/// selection fill reaches past its words (the mail tab's rows, the rules and
+/// groups pages, the audit ledger, the calendar agenda) lands those words on
+/// the page gutter in two parts that have to add up: the list is inset
+/// `listInset`, the row pads `hPadding`, and the fill reaches out into the
+/// inset to the left of the text. Headings and notes inside such a list pad
+/// by `hPadding` too, which is what puts them on the same line as the rows.
+///
+/// Not fenced to macOS: several of those rows compile into the phone target
+/// (`MailRow` among them, never mounted there), so the numbers exist on both.
+@MainActor
+enum DeskRow {
+    static var listInset: CGFloat { Space.page - hPadding }
+    static var hPadding: CGFloat { Space.s12 }
+    /// The mail tab's row height, which `MailRow`, `UpdateRow`, `SentRow` and
+    /// `ScheduledRow` share so the page keeps its rhythm between modes.
+    static var vPadding: CGFloat { Space.s6 }
+}
+
+/// THE RHYTHM OF A SECTION LABEL INSIDE A LIST: the mail tab's day headings
+/// (`DayHeading`) and the Sent page's "scheduled" / "sent" groups
+/// (`SentSectionLabel`) are the same engraved label over a run of rows, so
+/// they take the same air: a little over the list's first one, a group's
+/// worth over every later one, and the same short drop to the rows.
+@MainActor
+enum SectionLabelRhythm {
+    static var firstTop: CGFloat { Space.s4 }
+    static var top: CGFloat { Space.s16 }
+    static var bottom: CGFloat { Space.scaled(5) }
+    static func top(first: Bool) -> CGFloat { first ? firstTop : top }
+}
+
+/// ONE FILE CHIP, measured once: the reader's attachment cards
+/// (`AttachmentStrip`), the composer's tray (`AttachmentTray`) and the
+/// outbox preview's read-only chips (`ScheduledPreview`) are the same object
+/// in three states, so they share the padding, the thumb and its corner,
+/// which runs concentric with the chip's `Radius.well` across that padding
+/// and never goes squarer than `Radius.chip` (`Radius.image`).
+@MainActor
+enum AttachmentChip {
+    static var padding: CGFloat { Space.s6 }
+    /// The tile. Holds an image or a glyph rather than text, but it sits
+    /// beside two lines of type, so it follows the spacing curve.
+    static var thumb: CGFloat { Space.scaled(38) }
+    static var thumbRadius: CGFloat { Radius.image(in: Radius.well, inset: padding) }
+    /// Tile to the words.
+    static var gap: CGFloat { Space.scaled(9) }
+    /// The document glyph standing in for a thumbnail.
+    static var glyph: Font { Typo.ui(18, weight: .light) }
+}
+
+/// THE SIDE PANEL'S BLEEDING LIST ROWS, in two envelopes.
+///
+/// THE SEARCH PANEL'S TEXT EDGE is `hitInset + hitPadding` (panel + s16): the
+/// search field's words (its capsule pads `hitPadding`), the recent searches,
+/// the section headers, the sender block and the hits' avatars all start
+/// there, and their selection fills sit on the panel gutter (`hitInset`), the
+/// field capsule's own edge. One edge, so typing does not move the column.
+///
+/// THE BROWSE BOARD keeps `DeskRow`'s tighter arrangement: inset `listInset`,
+/// padded `hPadding`, words on `Space.panel` with the fill reaching out past
+/// them.
+@MainActor
+enum PanelRow {
+    static var hPadding: CGFloat { Space.s10 }
+    static var listInset: CGFloat { Space.panel - hPadding }
+    /// One height for the rows on the hit grid (26pt avatar, then words):
+    /// the hits and the senders offered above them.
+    static var vPadding: CGFloat { Space.s10 }
+
+    /// THE SEARCH HITS' OWN ENVELOPE, roomier than the rest: the selection
+    /// fill sits ON the panel gutter (the search field's edge) and the words
+    /// a full `hitPadding` inside it. The hits carry a relevance bar ahead of
+    /// the avatar (`HitRow`), and on the tighter `listInset`/`hPadding` grid
+    /// the bar, avatar and name ran into each other. Bar at gutter + s4,
+    /// avatar at gutter + s16, name 36 past that.
+    static var hitInset: CGFloat { Space.panel }
+    static var hitPadding: CGFloat { Space.s16 }
+}
 
 // MARK: - rules
 
@@ -284,9 +364,9 @@ struct KeyHintBar: View {
             }
             Spacer()
         }
-        // 22 is the page gutter RoutedHeader sets its title on, so the hints
-        // start under the title; scaled rather than snapped to keep that line.
-        .padding(.horizontal, Space.scaled(22))
+        // The page gutter RoutedHeader sets its title on, so the hints start
+        // under the title.
+        .padding(.horizontal, Space.page)
         .padding(.vertical, Space.s10)
         .overlay(alignment: .top) { Hairline() }
     }
@@ -340,7 +420,7 @@ struct SectionCard<Content: View>: View {
         }
         .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 }
 
@@ -374,6 +454,11 @@ struct GlassSegmented<T: Hashable>: View {
                 } label: {
                     Text(option.label)
                         .font(Typo.chip)
+                        // A segment is one word on one line. Squeezed, the
+                        // control should claim its width from the row, never
+                        // wrap a label ("Squelc / h" in the Sound picker).
+                        .lineLimit(1)
+                        .fixedSize()
                         .foregroundStyle(selection == option.value ? .white : Palette.ink)
                         .padding(.horizontal, Space.s12)
                         .padding(.vertical, Space.scaled(5))
@@ -467,5 +552,72 @@ extension View {
         #else
             self
         #endif
+    }
+}
+
+// MARK: - toasts
+
+/// THE TOAST VOCABULARY: one inset, one corner, one material and one shadow for
+/// everything that floats in a corner of the window (the toast and undo stack,
+/// the unsubscribe tray, the violation notice, the smart clear receipt, the
+/// update card). They stack beside each other, so a card that padded or lifted
+/// itself differently read as a different kind of thing in the same pile.
+///
+/// Computed, not stored: the insets follow the density setting.
+@MainActor
+enum ToastMetrics {
+    static var hPadding: CGFloat { Space.s12 }
+    static var vPadding: CGFloat { Space.s10 }
+    /// How far a corner toast, the unsubscribe tray and the update card float
+    /// in from the window's bottom (and right) edge, so the floating things
+    /// pinned to an edge sit off it by the same air.
+    static var edge: CGFloat { Space.scaled(18) }
+    // The corner is `Radius.toast`, read directly.
+}
+
+extension View {
+    /// A corner toast's inset and glass. `interactive` for a toast that is
+    /// itself the button (the toast and undo pills). Padding is applied here,
+    /// so call it on the bare content.
+    func toastSurface(tint: Color? = Palette.glassTintStrong, interactive: Bool = false) -> some View {
+        self
+            .padding(.horizontal, ToastMetrics.hPadding)
+            .padding(.vertical, ToastMetrics.vPadding)
+            .toastGlass(tint: tint, interactive: interactive)
+    }
+
+    /// The glass and shadow alone, for a toast whose padding has to sit inside
+    /// a button label or before a frame (the toast stack's pills, the update
+    /// card's max width). Pair it with `ToastMetrics`' insets.
+    func toastGlass(tint: Color? = Palette.glassTintStrong, interactive: Bool = false) -> some View {
+        self
+            .passbandGlass(
+                .pane, cornerRadius: Radius.toast, tint: tint, interactive: interactive)
+            .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
+    }
+}
+
+// MARK: - hero pill
+
+/// The pill set on a phosphor hero, naming what is new: What's New's strip and
+/// the ad cards wear the same one. White on a dark capsule with the brand's
+/// blue edge, so it survives both the scene's night and its paper.
+///
+/// `fixed` for a fixed composition (the ad cards), where nothing follows the
+/// density; otherwise the type and padding scale with it. The caller places
+/// it (its inset from the hero's corner).
+struct HeroPill: View {
+    let text: String
+    var fixed = false
+
+    var body: some View {
+        Text(text)
+            .font(Typo.ui(9, weight: .bold, fixed: fixed).width(.expanded))
+            .tracking(0.6)
+            .foregroundStyle(.white.opacity(0.92))
+            .padding(.horizontal, fixed ? 9 : Space.scaled(9))
+            .padding(.vertical, fixed ? 5 : Space.scaled(5))
+            .background(.black.opacity(0.32), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color(hex: 0x82BAF5).opacity(0.45), lineWidth: 0.5))
     }
 }

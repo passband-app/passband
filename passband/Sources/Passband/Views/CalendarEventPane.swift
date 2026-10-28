@@ -124,7 +124,10 @@
                     // A write out, or one in doubt: the draft stays in view
                     // as it was sent, and nothing in it takes typing.
                     .disabled(!state.fieldsEditable)
-                    .padding(.horizontal, Space.scaled(18))
+                    // The composer's edges (`ComposeEdge`): the card on the
+                    // panel gutter, the header's and footer's words on the
+                    // card's text line.
+                    .padding(.horizontal, ComposeEdge.card)
                     .padding(.vertical, Space.s14)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 footer(problem: problem, plan: plan)
@@ -194,7 +197,7 @@
                     .foregroundStyle(Palette.inkFaintest)
                 Spacer()
             }
-            .padding(.horizontal, Space.scaled(18))
+            .padding(.horizontal, ComposeEdge.text)
             .padding(.vertical, Space.scaled(13))
             .overlay(alignment: .bottom) { Hairline() }
         }
@@ -245,11 +248,11 @@
             // Near-opaque, like every input well: a translucent card over a
             // busy wallpaper leaves typed text unreadable.
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.65))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         }
 
@@ -309,7 +312,7 @@
                 }
                 // The tags sit a little above the label's text line, so the
                 // first row of them centres on it.
-                .padding(.vertical, -Space.scaled(2))
+                .padding(.vertical, -Space.s2)
             } else {
                 Menu {
                     ForEach(list) { c in
@@ -427,7 +430,7 @@
             _ placeholder: String, _ keyPath: WritableKeyPath<EventDraft, String>, _ field: Field, width: CGFloat,
             fills: TitleField? = nil, promptTone: Color = Palette.inkFaintest
         ) -> some View {
-            let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
             let inferred = fills.map { draft.titleRead.filled[$0] != nil } ?? false
             return TextField("", text: bind(keyPath, hand: fills), prompt: Text(placeholder).foregroundStyle(promptTone))
                 .textFieldStyle(.plain)
@@ -729,7 +732,7 @@
                     verbs(problem: problem, plan: plan)
                 }
             }
-            .padding(.horizontal, Space.scaled(18))
+            .padding(.horizontal, ComposeEdge.text)
             .padding(.vertical, Space.s12)
             .overlay(alignment: .top) { Hairline() }
         }
@@ -1238,7 +1241,7 @@
                 }
                 .padding(.leading, Space.s8)
                 .padding(.trailing, Space.scaled(3))
-                .padding(.vertical, Space.scaled(2))
+                .padding(.vertical, Space.s2)
                 .overlay(
                     shape.strokeBorder(
                         focused ? Palette.accent.opacity(0.7) : Palette.inkFaint.opacity(0.55),
@@ -1328,7 +1331,7 @@
                     }
                     .buttonStyle(.plain)
                     .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                             .fill(i == picker.highlight ? Palette.accentSoft : .clear)
                     )
                     .accessibilityAddTraits(i == picker.highlight ? .isSelected : [])

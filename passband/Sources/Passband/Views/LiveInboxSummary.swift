@@ -81,7 +81,7 @@ struct LiveInboxSummary: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(Space.s14)
-        .background(color.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
+        .background(color.opacity(0.07), in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(count) \(label)")
     }

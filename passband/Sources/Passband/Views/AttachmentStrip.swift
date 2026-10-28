@@ -251,22 +251,22 @@ private struct AttachmentCard: View {
     private var glyph: String { pdf ? "doc.richtext" : "doc" }
 
     var body: some View {
-        HStack(spacing: Space.scaled(9)) {
+        HStack(spacing: AttachmentChip.gap) {
             ZStack {
                 if let source = AttachmentStrip.tileSource(attachment) {
                     ThumbTile(attachment: attachment, source: source, glyph: glyph)
                 } else {
                     Image(systemName: glyph)
-                        .font(.system(size: 18, weight: .light))
+                        .font(AttachmentChip.glyph)
                         .foregroundStyle(Palette.inkFaintest)
                 }
             }
-            .frame(width: 38, height: 38)
+            .frame(width: AttachmentChip.thumb, height: AttachmentChip.thumb)
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: AttachmentChip.thumbRadius, style: .continuous)
                     .fill(Palette.hairline.opacity(0.6))
             )
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: AttachmentChip.thumbRadius, style: .continuous))
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.filename)
@@ -290,9 +290,9 @@ private struct AttachmentCard: View {
                 .help("download \(attachment.filename)")
             }
         }
-        .padding(Space.s8)
+        .padding(AttachmentChip.padding)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering ? 0.7 : 0.4))
         )
         .opacity(stored ? 1 : 0.55)
@@ -385,9 +385,9 @@ private struct InlineImage: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: Self.maxHeight, alignment: .leading)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                             .strokeBorder(Palette.hairline, lineWidth: 1)
                     )
                     .contentShape(Rectangle())
@@ -404,7 +404,7 @@ private struct InlineImage: View {
             case .blank?:
                 EmptyView()
             case nil:
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.hairline.opacity(0.4))
                     .frame(height: Self.placeholderHeight)
                     .overlay(ProgressView().controlSize(.small))

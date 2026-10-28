@@ -47,7 +47,9 @@ struct SpamNotice: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, Space.scaled(13))
+        // The mail rows' own padding: the box sits on their fill edge, so this
+        // puts the icon on their text edge, the page gutter.
+        .padding(.horizontal, Space.s12)
         .padding(.vertical, Space.scaled(9))
         // Outline, no fill. Every filled card in this app is filled in a
         // SEMANTIC colour (warnSoft, dangerSoft, lockSoft) and means something
@@ -55,7 +57,7 @@ struct SpamNotice: View {
         // and a semantic one would be a lie. A hairline says "this is a caption
         // about the page" and stops there.
         .overlay(
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 1)
         )
         .accessibilityElement(children: .combine)

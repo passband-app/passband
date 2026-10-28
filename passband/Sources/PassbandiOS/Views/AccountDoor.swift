@@ -69,7 +69,7 @@ struct AccountSwitcher: View {
         }
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 
     private func row(_ account: AccountRecord, isActive: Bool) -> some View {
@@ -158,7 +158,7 @@ struct AccountPicker: View {
                     }
                 }
                 .padding(.vertical, 4)
-                .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+                .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
@@ -175,7 +175,7 @@ struct AccountPicker: View {
             AccountDoor.shared.pane = .page
         }
         .padding(.vertical, 4)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 12)

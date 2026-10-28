@@ -65,6 +65,7 @@ struct CalendarZone: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(RecordRowStyle())
+                            .recordRowBleed()
                             .modifier(CalendarSeenMarker(account: accountScope, item: c.id))
                             .warmsThreadOnHover(c.thread_id)
                         }
@@ -330,7 +331,7 @@ private struct ShipmentCard: View {
         .padding(Space.scaled(9))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering && target != nil ? 0.85 : 0.5))
         )
         .contentShape(Rectangle())
@@ -530,24 +531,13 @@ struct BankingZone: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
+                        .recordRowBleed()
                         .warmsThreadOnHover(r.thread_id)
                     }
                     if inWindow.count > Self.collapsed {
-                        Button {
-                            expanded.toggle()
-                        } label: {
-                            Text(
-                                expanded
-                                    ? "Show fewer"
-                                    : "Show \(inWindow.count - Self.collapsed) more"
-                            )
-                            .font(Typo.rowSub)
-                            .foregroundStyle(Palette.inkFaintest)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, Space.scaled(5))
-                            .contentShape(Rectangle())
+                        ZoneExpander(overflow: inWindow.count - Self.collapsed, expanded: expanded) {
+                            withAnimation(ZoneExpander.animation) { expanded.toggle() }
                         }
-                        .buttonStyle(RecordRowStyle())
                     }
                 }
             }
@@ -614,6 +604,7 @@ struct ReceiptsZone: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
+                        .recordRowBleed()
                         .warmsThreadOnHover(r.thread_id)
                     }
                 }
@@ -705,20 +696,11 @@ struct ReadingZone: View {
         }
     }
 
-    /// For-your-eyes' expander, so the two zones fold the same way.
+    /// The board's one expander, so every zone folds the same way.
     private func expander(_ overflow: Int) -> some View {
-        Button {
-            withAnimation(.smooth(duration: 0.28)) { expanded.toggle() }
-        } label: {
-            Text(expanded ? "show less" : "\(overflow) more")
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaint)
-                .padding(.horizontal, Space.scaled(11))
-                .padding(.vertical, Space.s4)
+        ZoneExpander(overflow: overflow, expanded: expanded) {
+            withAnimation(ZoneExpander.animation) { expanded.toggle() }
         }
-        .buttonStyle(.glass)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, Space.s10)
     }
 }
 
@@ -824,14 +806,14 @@ private struct ReadingCard: View {
             .padding(Space.scaled(9))
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(
                         sender.isContent
                             ? Palette.readingContent.opacity(hovering ? 1 : 0.8)
                             : Palette.hairline.opacity(hovering ? 0.85 : 0.5))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(
                         sender.rule != nil ? Palette.accent.opacity(0.35) : .clear,
                         lineWidth: 1)
@@ -931,7 +913,12 @@ private struct ReadingHero: View {
                 // the neutral well when sampling failed — which must stay
                 // distinguishable from a white sample.
                 .background(hero.fill ?? Palette.canvas.opacity(0.7))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                // DELIBERATE exception to `Radius.concentric`: the image takes
+                // the CARD's own radius rather than the ~2pt a concentric curve
+                // 9pt inside would give. A near-square thumbnail read as a
+                // pasted-in photo; one that echoes the card's corner reads as
+                // part of the card, which is the look we want here.
+                .clipShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         } else {
             // Zero in BOTH axes: a zero-height-only placeholder would still
             // collect the HStack's spacing and indent the text.
@@ -1108,7 +1095,34 @@ struct EmptyNote: View {
     }
 }
 
-/// A record row: no chrome at rest, a soft wash on hover.
+/// THE BOARD'S ONE "N MORE" FOLD: For your eyes, Reading and Billing all
+/// open and close their overflow with this, so the three read as the same
+/// gesture. A quiet glass pill on the leading edge, lowercase like the rest
+/// of the board's small print. The caller owns the state and the animation.
+struct ZoneExpander: View {
+    let overflow: Int
+    let expanded: Bool
+    let action: () -> Void
+
+    /// Shared so a button press and arrowing off the end open the same way.
+    static let animation: Animation = .smooth(duration: 0.28)
+
+    var body: some View {
+        Button(action: action) {
+            Text(expanded ? "show less" : "\(overflow) more")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .padding(.horizontal, Space.scaled(11))
+                .padding(.vertical, Space.s4)
+        }
+        .buttonStyle(.glass)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, Space.s8)
+    }
+}
+
+/// A record row: no chrome at rest, a soft wash on hover. The wash is the
+/// board's one row hover (the For-your-eyes rows paint the same tone).
 struct RecordRowStyle: ButtonStyle {
     @State private var hovering = false
 
@@ -1126,8 +1140,8 @@ struct RecordRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(hovering ? Palette.accentSoft.opacity(0.7) : .clear)
+                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                    .fill(hovering ? Palette.hairline.opacity(SelectionTone.hover) : .clear)
             )
             .opacity(configuration.isPressed ? 0.7 : 1)
             .onHover { hovering = $0 }
@@ -1135,6 +1149,13 @@ struct RecordRowStyle: ButtonStyle {
 }
 
 extension View {
+    /// A sitrep record row pulled out by its own inset (DeskRow's idea): the
+    /// words land on the zone title's line and the hover wash spends the
+    /// card's padding instead of indenting the text.
+    func recordRowBleed() -> some View {
+        padding(.horizontal, -RecordRowStyle.hPadding)
+    }
+
     /// The pointer resting on a record is the likeliest next click: cache its
     /// thread and, a beat later, render its newest message, as a board row
     /// does (SitrepView's row hover). Without it a record opened cold.

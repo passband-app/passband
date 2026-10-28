@@ -700,9 +700,10 @@ struct ThreadViewer: View {
                 }
                 .buttonStyle(.textAction)
             }
-            // These metrics match every other page's bar: the reader's rule
-            // ends on the line the rail's top edge is cut to.
-            .padding(.horizontal, Space.s24)
+            // These metrics match every other page's bar: the page gutter,
+            // and the reader's rule ends on the line the rail's top edge is
+            // cut to.
+            .padding(.horizontal, Space.page)
             .frame(height: TopBar.height)
             .overlay(alignment: .bottom) { Hairline() }
         #else
@@ -1809,7 +1810,7 @@ struct ThreadViewer: View {
             .padding(.top, Space.s4)
         }
         .padding(Space.scaled(38))
-        .passbandGlass(.pane, cornerRadius: 22, tint: down ? Palette.warnSoft : Palette.dangerSoft)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: down ? Palette.warnSoft : Palette.dangerSoft)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -3577,9 +3578,15 @@ private struct StackCardSurface: View {
 private struct MessageSenderHeading: View {
     let sender: String
 
+    static let avatarSize: CGFloat = 24
+    static var gap: CGFloat { Space.scaled(9) }
+    /// Where the sender's NAME starts: the avatar and the gap after it. The
+    /// recipients line under the heading starts here too.
+    static var nameInset: CGFloat { avatarSize + gap }
+
     var body: some View {
-        HStack(spacing: Space.scaled(9)) {
-            Avatar(sender: sender, size: 24)
+        HStack(spacing: Self.gap) {
+            Avatar(sender: sender, size: Self.avatarSize)
             Text(SenderCache.resolved(sender).displayName)
                 .font(Typo.ui(13, weight: .semibold))
                 .foregroundStyle(Palette.ink)
@@ -3799,7 +3806,8 @@ private struct MessageCard: View, Equatable {
                 MessageRecipients(
                     message: message, previous: previousRecipients, me: me, compact: false
                 )
-                .padding(.leading, 25)
+                // On the sender name's x, in either density.
+                .padding(.leading, MessageSenderHeading.nameInset)
                 .layoutPriority(1)
                 Spacer(minLength: 0)
                 OpensLink(opens: opens, recipients: message.audience?.recipients, me: me)
@@ -3949,7 +3957,7 @@ private struct MessageCard: View, Equatable {
                 // The same corner the web frame clips itself to, so a plain
                 // reply and an html one are the same shape on the same side.
                 .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(
                             !chat
                                 ? Color.clear
@@ -4132,7 +4140,7 @@ private struct StyleRadio: View {
         .background(alignment: axis == .vertical ? .top : .leading) { highlight }
         .animation(.smooth(duration: 0.32), value: style)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(0.5)))
         // Same gate as `b` (see `chooseStyle`): the pin is permanent, and there
         // is nothing to answer about until the thread on screen is this one.
@@ -4146,7 +4154,7 @@ private struct StyleRadio: View {
                 .font(Typo.ui(axis == .horizontal ? 13 : 12, weight: .semibold))
                 .foregroundStyle(style == value ? .white : Palette.inkDim)
                 .frame(width: slot, height: slot)
-                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: pad), style: .continuous))
         }
         .buttonStyle(.plain)
         .help(help)
@@ -4162,7 +4170,7 @@ private struct StyleRadio: View {
             .frame(width: slot, height: slot)
             .glassEffect(
                 .regular.tint(Palette.accent.opacity(0.55)),
-                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                in: RoundedRectangle(cornerRadius: Radius.concentric(Radius.well, inset: pad), style: .continuous)
             )
             // Sits over the active slot — an interactive material would eat
             // that option's clicks.
@@ -4359,16 +4367,15 @@ private struct UnsubConfirm: View {
             ModalCard(width: 400) {
                 if mode == .ask {
                     Text("Unsubscribe from **\(senderName)**?")
-                        .font(Typo.ui(14))
+                        .font(Typo.modalTitle)
                         .foregroundStyle(Palette.ink)
                 } else {
                     Text("No unsubscribe link on this email. Block **\(senderName)** instead?")
-                        .font(Typo.ui(14))
+                        .font(Typo.modalTitle)
                         .foregroundStyle(Palette.ink)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                HStack(spacing: Space.s8) {
-                    Spacer()
+                ModalButtons {
                     Button("Cancel", action: onCancel)
                         .buttonStyle(.glass).disabled(busy)
                     Button(mode == .ask ? "Unsubscribe" : "Block sender", action: onConfirm)
@@ -4468,8 +4475,8 @@ private struct StackDoneHold: View {
             }
             .padding(.horizontal, Space.scaled(28))
             .padding(.vertical, Space.s24)
-            .passbandGlass(.pane, cornerRadius: 24, tint: Palette.glassTint)
-            .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
+            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTint)
+            .overlayShadow()
             #if !os(macOS)
                 // THE MIDDLE OF THE SCREEN, not of what the bars leave: the
                 // navigation bar is taller than the home indicator's strip,
@@ -4593,10 +4600,9 @@ private struct MessageRetriageConfirm: View {
                 // NO SUBTEXT. One email, no wait, nothing to warn about: the
                 // question is the whole dialog, exactly as it is for `u`.
                 Text("Re-triage this email?")
-                    .font(Typo.ui(14))
+                    .font(Typo.modalTitle)
                     .foregroundStyle(Palette.ink)
-                HStack(spacing: Space.s8) {
-                    Spacer(minLength: 0)
+                ModalButtons {
                     Button("Cancel", action: onCancel)
                         .buttonStyle(.glass).disabled(busy)
                     Button("Re-triage", action: onConfirm)
@@ -4811,8 +4817,8 @@ private final class LandingHold {
             }
             .padding(.horizontal, Space.scaled(11))
             .padding(.vertical, Space.scaled(9))
-            .glassEffect(.regular, in: .rect(cornerRadius: 11))
-            .overlay { FlowBorder(radius: 11, moving: !reduceMotion) }
+            .glassEffect(.regular, in: .rect(cornerRadius: Radius.toast))
+            .overlay { FlowBorder(radius: Radius.toast, moving: !reduceMotion) }
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(

@@ -107,12 +107,6 @@ struct SitrepView: View {
     /// the comfortable rail's extra width moves the breakpoint with it.
     private static var railBreakpoint: CGFloat { Typo.measure(654) + railWidth }
 
-    /// The page's side margin for everything above the two columns: the
-    /// column's own 24 plus the 4 a ClearNote is inset by, as a sum of two
-    /// steps so the hero and the banners stay on that inset line in either
-    /// density (a scaled 28 lands two points off it in comfortable).
-    private static var gutter: CGFloat { Space.s24 + Space.s4 }
-
     /// The records rail. On the spacing curve rather than the type's: a rail
     /// row is a name beside two chips and an amount, and it is the chips'
     /// padding that grows. Held at 306, comfortable left the name no room at
@@ -152,13 +146,13 @@ struct SitrepView: View {
             // arrived actually looks.
             if store.gmailDisconnected {
                 GmailDisconnectedBanner()
-                    .padding(.horizontal, Self.gutter)
+                    .padding(.horizontal, Space.page)
                     .padding(.top, Space.s14)
             } else if case let status = store.syncStatus, status.showsBanner {
                 // Throttled, erroring, catching up, or triage held: the same
                 // slot, because it answers the same question.
                 SyncStatusBanner(status: status)
-                    .padding(.horizontal, Self.gutter)
+                    .padding(.horizontal, Space.page)
                     .padding(.top, Space.s14)
             }
             // THE HERO STAYS PUT. It sits above BOTH columns, so it cannot scroll
@@ -181,7 +175,7 @@ struct SitrepView: View {
                 // a reader of them.
                 empty: store.sitrep.standing.isEmpty ? emptyHero : nil)
                 .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
-                .padding(.horizontal, Self.gutter)
+                .padding(.horizontal, Space.page)
                 .padding(.bottom, Space.scaled(18))
 
             if pageWidth < Self.railBreakpoint {
@@ -203,9 +197,9 @@ struct SitrepView: View {
                 }
                 .scrollIndicators(.hidden)
                 .scrollShadowRoom(topFade: Space.s14)
-                .padding(.horizontal, Space.s24)
+                .padding(.horizontal, Space.page)
             } else {
-                HStack(alignment: .top, spacing: Space.scaled(18)) {
+                HStack(alignment: .top, spacing: Space.s16) {
                     // THE ONLY THING THAT SCROLLS WITH THE PAGE.
                     ScrollView(.vertical) {
                         VStack(spacing: Space.s16) {
@@ -229,7 +223,7 @@ struct SitrepView: View {
                     // instead of rubber-banding against nothing.
                     if !recordsEmpty {
                     ScrollView(.vertical) {
-                        VStack(spacing: Space.s14) {
+                        VStack(spacing: Space.s16) {
                             railZones
                         }
                         .padding(.top, Space.s14)
@@ -244,7 +238,7 @@ struct SitrepView: View {
                     .tourTarget(.records)
                     }
                 }
-                .padding(.horizontal, Space.s24)
+                .padding(.horizontal, Space.page)
             }
         }
         // The window shell draws the scene (it runs under the rail and the
@@ -368,7 +362,6 @@ struct SitrepView: View {
                 .tourTarget(.eyes)
         } else if isClear {
             ClearNote()
-                .padding(.horizontal, Space.s4)
                 .transition(.opacity)
         }
         // Empty reading still stands beside a live For-your-eyes (a zone that
@@ -462,7 +455,7 @@ struct SitrepView: View {
                 }
             #endif
         }
-        .padding(.horizontal, Space.s24)
+        .padding(.horizontal, Space.page)
         // THE TOP BAR. The wordmark sits on the traffic lights' line rather than
         // under it, which is why this is a fixed height and not padding: the
         // rail beside it starts at the same line, and the two only read as one
@@ -523,23 +516,13 @@ struct SitrepView: View {
 
     /// Shared by the button and by arrowing off the end of the collapsed list,
     /// so both openings look like the same gesture.
-    private static let expandAnimation: Animation = .smooth(duration: 0.28)
+    private static var expandAnimation: Animation { ZoneExpander.animation }
 
     private func expander(_ overflow: Int) -> some View {
-        Button {
+        ZoneExpander(overflow: overflow, expanded: cursor.expanded) {
             withAnimation(Self.expandAnimation) { cursor.expanded.toggle() }
-        } label: {
-            Text(cursor.expanded ? "show less" : "\(overflow) more")
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaint)
-                .padding(.horizontal, Space.scaled(11))
-                .padding(.vertical, Space.s4)
         }
-        .buttonStyle(.glass)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, Space.s6)
     }
-
 
     // MARK: - keymap
 
@@ -827,7 +810,7 @@ struct GreetingLine: View {
                 // Clickable past the glyph, but NOT past the line: a target
                 // taller than the label it sits beside would push the serif
                 // headline down by the height of a pencil nobody can see.
-                .padding(3)
+                .padding(Space.scaled(3))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -897,7 +880,7 @@ private struct DashHero: View {
     private var note: String? { standing.isEmpty ? empty?.note : nil }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Space.s2) {
             GreetingLine()
             Text(title)
                 .font(Typo.hero(38))
@@ -974,7 +957,7 @@ private struct DashHero: View {
             }
             .buttonStyle(.plain)
             .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                     .fill(Palette.hairline.opacity(hovering ? 0.7 : 0))
             }
             // Our own hint rather than `.help`: the system tooltip waits most
@@ -991,11 +974,11 @@ private struct DashHero: View {
                 .padding(.horizontal, Space.scaled(7))
                 .padding(.vertical, Space.s4)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                         .fill(Palette.canvas)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                         .strokeBorder(Palette.hairline, lineWidth: 0.5)
                 )
                 .fixedSize()
@@ -1080,7 +1063,7 @@ private struct AuthEyesRow: View {
                 )
                 .layoutPriority(3)
             }
-            .padding(.horizontal, Space.s10)
+            .padding(.horizontal, EyesRow.hPadding)
             .padding(.vertical, Space.scaled(7))
             .contentShape(Rectangle())
         }
@@ -1088,6 +1071,7 @@ private struct AuthEyesRow: View {
         .background {
             ObligationWash(index: index, cursor: cursor, hover: hover, tint: tone)
         }
+        .padding(.horizontal, -EyesRow.hPadding)
         .onHover { over in
             hover.on = over
             if over { cursor.hover(index) }
@@ -1098,6 +1082,14 @@ private struct AuthEyesRow: View {
 }
 
 // MARK: - obligation row
+
+/// A For-your-eyes row's inset. The row is then pulled back out by the same
+/// amount (DeskRow's idea), so its avatar sits on the zone title's line and
+/// the hover/selection wash spends the card's padding instead of indenting it.
+@MainActor
+private enum EyesRow {
+    static var hPadding: CGFloat { Space.s10 }
+}
 
 private struct ObligationRow: View {
     @Environment(AppStore.self) private var store
@@ -1177,7 +1169,7 @@ private struct ObligationRow: View {
                         .layoutPriority(3)
                 }
             }
-            .padding(.horizontal, Space.s10)
+            .padding(.horizontal, EyesRow.hPadding)
             .padding(.vertical, Space.scaled(7))
             .contentShape(Rectangle())
         }
@@ -1197,6 +1189,7 @@ private struct ObligationRow: View {
                     .padding(.vertical, Space.scaled(5))
             }
         }
+        .padding(.horizontal, -EyesRow.hPadding)
         .onHover { over in
             hover.on = over
             if over {
@@ -1239,7 +1232,7 @@ private struct ObligationWash: View {
     let hover: RowHover
     let tint: Color
 
-    private static let radius: CGFloat = 9
+    private static let radius: CGFloat = Radius.row
 
     /// Short-circuits exactly as it did on the row: with the keyboard idle
     /// `cursor.index` is never read, so the index write every hover performs
@@ -1385,7 +1378,9 @@ struct FlowLayout: Layout {
 
         /// The brand's phosphor blue, the P7 trace's own colour.
         private static let phosphor = Color(hex: 0x82BAF5)
-        private static let width: CGFloat = 360
+        /// A measure: the card holds a headline and three stats, so it widens
+        /// with its type.
+        private static var width: CGFloat { Typo.measure(360) }
 
         private var tally: String {
             var parts: [String] = []
@@ -1437,15 +1432,18 @@ struct FlowLayout: Layout {
                         .frame(maxWidth: .infinity)
                     }
                 }
-                .padding(.horizontal, Space.scaled(22))
+                // An EDITORIAL card's own inset (see `ModalCard`): roomier
+                // than `Space.modal`, one step on the ladder for the sides
+                // and foot alike.
+                .padding(.horizontal, Space.s24)
                 .padding(.top, Space.scaled(18))
-                .padding(.bottom, Space.scaled(22))
+                .padding(.bottom, Space.s24)
             }
             .frame(width: Self.width)
             // The strong tint: the stats sit over a busy board, and the
             // board's rows bled through the lighter one.
-            .passbandGlass(.pane, cornerRadius: 22, tint: Palette.glassTintStrong)
-            .shadow(color: .black.opacity(0.32), radius: 40, y: 18)
+            .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong)
+            .overlayShadow()
         }
 
         /// The phosphor strip, the lock beam, and the ring and check over it.
@@ -1509,7 +1507,10 @@ struct FlowLayout: Layout {
             }
             .frame(height: 140)
             .frame(maxWidth: .infinity)
-            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, topTrailingRadius: 22))
+            // Full bleed at the card's top, so it rounds WITH the card: the
+            // card's own radius, not a near miss that leaves glass slivers.
+            .clipShape(UnevenRoundedRectangle(
+                topLeadingRadius: Radius.modal, topTrailingRadius: Radius.modal))
         }
 
         private func stat(_ n: Int, _ name: String) -> some View {
@@ -1649,7 +1650,7 @@ struct ZonePill: View {
                     .foregroundStyle(lit ? Palette.ink : Palette.inkDim)
                     .contentTransition(.opacity)
             }
-            .padding(.leading, lit && key != nil ? 3 : 8)
+            .padding(.leading, lit && key != nil ? Space.scaled(3) : Space.scaled(9))
             .padding(.trailing, Space.scaled(9))
             .padding(.vertical, Space.scaled(3))
             .background(

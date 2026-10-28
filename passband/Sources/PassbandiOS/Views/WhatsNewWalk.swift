@@ -276,7 +276,7 @@ struct WhatsNewWalk: View {
     /// The cold open's foot: where you are on the left, how to move on the
     /// right.
     private var controls: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: Space.s16) {
             HStack(spacing: 6) {
                 ForEach(pages.indices, id: \.self) { index in
                     Capsule().fill(page == index ? Palette.accent : Palette.hairlineStrong)

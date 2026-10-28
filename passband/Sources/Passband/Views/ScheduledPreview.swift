@@ -109,7 +109,8 @@ struct ScheduledPreview: View {
                 .buttonStyle(.textAction)
                 .help("close; it stays scheduled")
             }
-            .padding(.horizontal, Space.s24)
+            // The page gutter, as on every other page's bar.
+            .padding(.horizontal, Space.page)
             .frame(height: TopBar.height)
             .overlay(alignment: .bottom) { Hairline() }
         }
@@ -303,13 +304,13 @@ private struct ScheduledFileChip: View {
     }
 
     var body: some View {
-        HStack(spacing: Space.scaled(9)) {
+        HStack(spacing: AttachmentChip.gap) {
             Image(systemName: glyph)
-                .font(Typo.ui(16, weight: .light))
+                .font(AttachmentChip.glyph)
                 .foregroundStyle(Palette.inkFaintest)
-                .frame(width: Space.scaled(32), height: Space.scaled(32))
+                .frame(width: AttachmentChip.thumb, height: AttachmentChip.thumb)
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: AttachmentChip.thumbRadius, style: .continuous)
                         .fill(Palette.hairline.opacity(0.6)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(file.filename)
@@ -323,10 +324,10 @@ private struct ScheduledFileChip: View {
             }
             .frame(maxWidth: Typo.measure(170), alignment: .leading)
         }
-        .padding(Space.s6)
+        .padding(AttachmentChip.padding)
         .padding(.trailing, Space.s4)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.hairline.opacity(0.4)))
         .accessibilityElement(children: .combine)
     }

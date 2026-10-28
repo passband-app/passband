@@ -31,8 +31,7 @@
                 ModalCard(width: wording.tell == nil ? 380 : 460) {
                     DeleteQuestion(wording: wording)
                     EventStub(event: ask.event)
-                    HStack(spacing: Space.s8) {
-                        Spacer(minLength: 0)
+                    ModalButtons {
                         Button("Keep it") { store.cancelDeleteEvent() }
                             .buttonStyle(.glass)
                         if let tell = wording.tell {
@@ -138,7 +137,7 @@
             }
             .padding(.horizontal, Space.s10)
             .padding(.vertical, Space.scaled(7))
-            .background(Palette.hairline.opacity(0.6), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(Palette.hairline.opacity(0.6), in: RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
         }
     }
 
@@ -163,7 +162,7 @@
                     .frame(maxWidth: Typo.measure(200), alignment: .leading)
             }
             .padding(.horizontal, Space.s8)
-            .padding(.vertical, Space.scaled(4))
+            .padding(.vertical, Space.s4)
             .background(Capsule().fill(inks.fill.opacity(selected ? 1 : 0)))
             .overlay(
                 Capsule().strokeBorder(

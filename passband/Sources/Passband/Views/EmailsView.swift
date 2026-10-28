@@ -190,8 +190,15 @@ struct EmailsView: View {
             // The sentence answers "who put this here", and that question is
             // asked at row 40 as readily as at row 1.
             if mode == .spam {
+                // On the list's inset, the edge the rows' selection fill
+                // reaches: its outline lines up with the fill and its words
+                // with the rows' (SpamNotice pads by the rows' own padding).
                 SpamNotice()
-                    .padding(.horizontal, Space.scaled(18))
+                    #if os(macOS)
+                        .padding(.horizontal, DeskRow.listInset)
+                    #else
+                        .padding(.horizontal, Space.scaled(18))
+                    #endif
                     .padding(.top, Space.s10)
             }
             if mode == .inbox {
@@ -343,7 +350,7 @@ struct EmailsView: View {
     /// under it, or the first sent mail would read as one more scheduled one.
     @ViewBuilder private var scheduledGroup: some View {
         if !scheduled.isEmpty {
-            SentSectionLabel("scheduled", top: Space.s2)
+            SentSectionLabel("scheduled", first: true)
             ForEach(Array(scheduled.enumerated()), id: \.element.id) { i, row in
                 ScheduledRow(
                     row: row,
@@ -389,7 +396,7 @@ struct EmailsView: View {
                     }
                 #endif
             }
-            SentSectionLabel("sent", top: Space.s14)
+            SentSectionLabel("sent", first: false)
         }
     }
 
@@ -443,6 +450,14 @@ struct EmailsView: View {
 
     #if os(macOS)
         private var desktopList: some View {
+            // Measured as a whole so every mail row draws the same columns
+            // (`MailColumns`): narrower ones beside the compose pane.
+            MailColumnsReader {
+                desktopScroller
+            }
+        }
+
+        private var desktopScroller: some View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 1) {
@@ -469,7 +484,10 @@ struct EmailsView: View {
                             olderMailFooter
                         }
                     }
-                    .padding(.horizontal, Space.scaled(18))
+                    // The rows' fill edge. Their padding carries the words the
+                    // rest of the way to the page gutter, and every heading and
+                    // note in here pads by the same amount to meet them.
+                    .padding(.horizontal, DeskRow.listInset)
                     .padding(.vertical, Space.s10)
                 }
                 // Follow the KEYBOARD selection only. Both pages key their rows
@@ -737,8 +755,9 @@ struct EmailsView: View {
             RetriageButton()
         }
         // These metrics must match the sitrep masthead's: every page's bar ends
-        // on the line the rail's top edge is cut to.
-        .padding(.horizontal, Space.s24)
+        // on the line the rail's top edge is cut to, and its words start on the
+        // page gutter.
+        .padding(.horizontal, Space.page)
         .frame(height: TopBar.height)
         .overlay(alignment: .bottom) { Hairline() }
     }
@@ -916,13 +935,13 @@ struct EmailsView: View {
 }
 
 /// A group heading inside the Sent list, in the drafts page's section style.
-/// Its 11pt inset puts the words on the rows' text edge.
+/// Padded by the rows' own padding, which puts the words on their text edge.
 private struct SentSectionLabel: View {
     let text: String
-    let top: CGFloat
-    init(_ text: String, top: CGFloat) {
+    let first: Bool
+    init(_ text: String, first: Bool) {
         self.text = text
-        self.top = top
+        self.first = first
     }
 
     var body: some View {
@@ -931,9 +950,10 @@ private struct SentSectionLabel: View {
             .foregroundStyle(Palette.inkFaint)
             .textCase(.uppercase)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Space.scaled(11))
-            .padding(.top, top)
-            .padding(.bottom, Space.scaled(5))
+            .padding(.horizontal, Space.s12)
+            // DayHeading's rhythm, so the two pages' labels sit alike.
+            .padding(.top, SectionLabelRhythm.top(first: first))
+            .padding(.bottom, SectionLabelRhythm.bottom)
     }
 }
 

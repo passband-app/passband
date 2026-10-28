@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// The intro and its stage share one edge: the gutter every first-run screen
+/// keeps from the window (wide) or the phone's screen (narrow).
+@MainActor
+enum IntroMetrics {
+    static func gutter(wide: Bool) -> CGFloat { wide ? Space.scaled(44) : Space.s24 }
+}
+
 /// A user-paced introduction, shared by first connection and the isolated
 /// rehearsal. The illustrated messages are examples, never account data.
 struct OnboardingIntroView: View {
@@ -98,14 +105,14 @@ struct OnboardingIntroView: View {
                     // set the story down on the crest of the nearest bands,
                     // where the body line was unreadable; capped, it stays in
                     // the dark sky the top gradient keeps for it.
-                    Spacer(minLength: 24)
+                    Spacer(minLength: Space.s24)
                         .frame(maxHeight: wide ? .infinity : 40)
                     story(wide: wide)
-                        .frame(maxWidth: wide ? 480 : .infinity, alignment: .leading)
-                    Spacer(minLength: wide ? 24 : 260)
+                        .frame(maxWidth: wide ? Typo.measure(480) : .infinity, alignment: .leading)
+                    Spacer(minLength: wide ? Space.s24 : 260)
                     controls
                 }
-                .padding(wide ? 44 : 24)
+                .padding(IntroMetrics.gutter(wide: wide))
             }
         }
     }
@@ -115,12 +122,12 @@ struct OnboardingIntroView: View {
         GeometryReader { geometry in
             let wide = geometry.size.width >= 820
             ScrollView {
-                VStack(alignment: .leading, spacing: wide ? 40 : 24) {
+                VStack(alignment: .leading, spacing: wide ? Space.scaled(40) : Space.s24) {
                     masthead
                         .modifier(IntroEntrance(delay: 0, distance: 4))
 
                     if wide {
-                        HStack(alignment: .center, spacing: 44) {
+                        HStack(alignment: .center, spacing: Space.scaled(44)) {
                             story(wide: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             mailIllustration
@@ -136,7 +143,7 @@ struct OnboardingIntroView: View {
 
                     controls
                 }
-                .padding(wide ? 44 : 24)
+                .padding(IntroMetrics.gutter(wide: wide))
                 .frame(maxWidth: 1060)
                 .frame(minHeight: geometry.size.height, alignment: .center)
                 .frame(maxWidth: .infinity)
@@ -157,8 +164,8 @@ struct OnboardingIntroView: View {
     }
 
     private func story(wide: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: Space.scaled(22)) {
+            VStack(alignment: .leading, spacing: Space.scaled(18)) {
                 if organized {
                     Text("Know what needs you.")
                         .font(Typo.hero(wide ? 49 : 36))
@@ -228,8 +235,8 @@ struct OnboardingIntroView: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 16) {
-            HStack(spacing: 6) {
+        HStack(spacing: Space.s16) {
+            HStack(spacing: Space.s6) {
                 ForEach(0..<2) { index in
                     Capsule().fill(page == index ? Palette.accent : Palette.hairlineStrong)
                         .frame(width: page == index ? 24 : 8, height: 5)
@@ -284,7 +291,7 @@ struct OnboardingIntroView: View {
             .keyboardShortcut(.defaultAction)
             #endif
         }
-        .padding(.bottom, 24)
+        .padding(.bottom, Space.s24)
     }
 }
 
@@ -419,7 +426,7 @@ struct IntroStage<Content: View, Footer: View>: View {
     var body: some View {
         GeometryReader { geometry in
             let wide = geometry.size.width >= 820
-            let inset: CGFloat = wide ? 44 : 24
+            let inset = IntroMetrics.gutter(wide: wide)
             ZStack(alignment: .topLeading) {
                 if SquelchScene.shared.isUnavailable {
                     IntroFallbackGlow()
@@ -430,7 +437,7 @@ struct IntroStage<Content: View, Footer: View>: View {
                 }
                 ScrollView {
                     content(wide)
-                        .frame(maxWidth: wide ? columnWidth : .infinity, alignment: .leading)
+                        .frame(maxWidth: wide ? Typo.measure(columnWidth) : .infinity, alignment: .leading)
                         .padding(.horizontal, inset)
                         // On a phone the column shares the screen's width
                         // with the waves, and a tall step (the guide, a form)
@@ -450,7 +457,7 @@ struct IntroStage<Content: View, Footer: View>: View {
                         // here it is in the dark sky the top scrim keeps for
                         // it, as the intro's story is. A window is always wide
                         // and keeps the centered column beside the scene.
-                        .padding(.top, wide ? 0 : 24)
+                        .padding(.top, wide ? 0 : Space.s24)
                         .frame(
                             maxWidth: .infinity, minHeight: wide ? geometry.size.height : 0,
                             alignment: wide ? .leading : .topLeading)
@@ -569,7 +576,7 @@ private struct IntroMailCard: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(organized ? mail.color : Palette.inkDim)
                 .frame(width: 35, height: 35)
-                .background((organized ? mail.color : Palette.inkDim).opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
+                .background((organized ? mail.color : Palette.inkDim).opacity(0.09), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
                     Text(mail.sender)
@@ -590,8 +597,8 @@ private struct IntroMailCard: View {
         }
         .padding(16)
         .frame(height: 76)
-        .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: 17))
-        .overlay(RoundedRectangle(cornerRadius: 17).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+        .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 17, style: .continuous).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         .shadow(color: .black.opacity(organized ? 0.07 : 0.12), radius: organized ? 12 : 20, y: 8)
     }
 }

@@ -136,7 +136,7 @@ struct AuthView: View {
                 mainColumn(d)
                 rail(d)
             }
-            .padding(.horizontal, Space.scaled(22))
+            .padding(.horizontal, Space.page)
             .padding(.vertical, Space.s16)
         }
         .keyBindings(.modal, bindings)
@@ -169,7 +169,7 @@ struct AuthView: View {
             // A plain stack of three children; the rows' stack below is the
             // lazy one, so only the rows on screen are built and a page holding
             // hundreds of auth messages scrolls like one holding ten.
-            VStack(alignment: .leading, spacing: Space.s14) {
+            VStack(alignment: .leading, spacing: Space.s16) {
                 if let focus = d.focus {
                     FocusPanel(
                         meta: focus,
@@ -276,7 +276,7 @@ struct AuthView: View {
     // MARK: - rail
 
     private func rail(_ d: Derived) -> some View {
-        VStack(spacing: Space.s12) {
+        VStack(spacing: Space.s16) {
             VStack(alignment: .leading, spacing: Space.scaled(9)) {
                 AuthDecisionHeader(
                     open: d.openDecisions, cardCount: d.decisionCards.count,
@@ -293,7 +293,7 @@ struct AuthView: View {
             }
             .zonePadding()
             .frame(maxWidth: .infinity, alignment: .leading)
-            .passbandGlass(.pane, cornerRadius: 18, tint: Palette.lockSoft.opacity(0.7))
+            .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.lockSoft.opacity(0.7))
 
             ShredderCard()
         }
@@ -433,7 +433,7 @@ private struct FocusPanel: View {
         }
         .zonePadding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 20, tint: Palette.lockSoft.opacity(0.8))
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.lockSoft.opacity(0.8))
     }
 
     private var digits: some View {
@@ -445,11 +445,11 @@ private struct FocusPanel: View {
                         .foregroundStyle(Palette.ink)
                         .frame(width: Space.scaled(40), height: Space.scaled(52))
                         .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .fill(Palette.lockSoft)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .strokeBorder(Palette.lock.opacity(0.35), lineWidth: 1))
                 }
             } else {
@@ -459,7 +459,7 @@ private struct FocusPanel: View {
                         .foregroundStyle(Palette.inkFaintest)
                         .frame(width: Space.scaled(40), height: Space.scaled(52))
                         .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .fill(Palette.hairline.opacity(0.5)))
                 }
             }
@@ -548,7 +548,7 @@ private struct AuthRow: View {
 
     var body: some View {
         ListRow(
-            selected: selected, cornerRadius: 8, tint: Palette.lock,
+            selected: selected, cornerRadius: Radius.row, tint: Palette.lock,
             hPadding: Space.s10, vPadding: Space.s6, action: onSelect
         ) { _, _ in
             HStack(spacing: Space.scaled(9)) {
@@ -688,7 +688,7 @@ private struct ShredderCard: View {
                 }
                 .zonePadding()
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+                .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
             }
         }
         .task { await load() }

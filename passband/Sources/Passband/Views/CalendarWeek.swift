@@ -59,7 +59,7 @@
                             .frame(maxWidth: twoPanes ? paneWidth : .infinity, maxHeight: .infinity, alignment: .top)
                     }
                 }
-                .padding(.horizontal, Space.scaled(22))
+                .padding(.horizontal, Space.page)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
@@ -110,7 +110,7 @@
                 let drafting = store.eventPaneOpen
                 // The hours fill the height there is, between the month
                 // column's own floor and ceiling; past the floor they scroll.
-                let room = visibleHeight - nightHeight - Space.s6 - Space.scaled(20)
+                let room = visibleHeight - nightHeight - Space.s6 - Space.s20
                 let pph = min(Space.scaled(44), max(Space.scaled(20), floor(room / CGFloat(MonthGrid.dayHours))))
                 VStack(alignment: .leading, spacing: 0) {
                     heads(col: col, gutter: gutter)
@@ -118,7 +118,7 @@
                     ScrollView(.vertical) {
                         hours(col: col, pph: pph, drafting: drafting)
                             .padding(.top, Space.s6)
-                            .padding(.bottom, Space.scaled(20))
+                            .padding(.bottom, Space.s20)
                             .frame(width: width, alignment: .topLeading)
                     }
                     .scrollBounceBehavior(.basedOnSize)
@@ -285,7 +285,7 @@
         let action: () -> Void
 
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
             Button(action: action) {
                 HStack(alignment: .center, spacing: Space.s2) {
                     Text(label.weekday)

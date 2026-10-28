@@ -60,8 +60,9 @@ struct SettingsView: View {
                 // RULES AND GROUPS ARE WHOLE PAGES, moved here off the rail with
                 // their own scrollers and their own key bar along the bottom.
                 // They take the height like the ledger and none of the pane's
-                // padding: each already sets its rows on the page gutter, and a
-                // key bar inset on both sides reads as a card with no card.
+                // padding: each already sets its rows' words on the page gutter
+                // (the same line the card panes' borders sit on), and a key bar
+                // inset on both sides reads as a card with no card.
                 if pagePane {
                     pane(prefs.settingsSection)
                         .padding(.top, Space.s8)
@@ -72,7 +73,7 @@ struct SettingsView: View {
                         }
                 } else if fullHeightPane {
                     pane(prefs.settingsSection)
-                        .padding(.horizontal, Space.scaled(22))
+                        .padding(.horizontal, Space.page)
                         .padding(.vertical, Space.scaled(18))
                         .frame(
                             maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -85,7 +86,11 @@ struct SettingsView: View {
                                 pane(prefs.settingsSection)
                             }
                         }
-                        .padding(.horizontal, Space.scaled(22))
+                        // ONE EDGE FOR EVERY SUB-PAGE: a card's border here, and
+                        // on Rules and Groups the rows' words (they inset
+                        // themselves through `DeskRow`), both on the page
+                        // gutter in from the pane's edge.
+                        .padding(.horizontal, Space.page)
                         .padding(.vertical, Space.scaled(18))
                         // 720 IS A READING MEASURE, not a layout habit: a
                         // column of labelled switches stops being scannable
@@ -213,7 +218,9 @@ struct SettingsView: View {
                     Text(card.section.label)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
-                        .padding(.leading, 2)
+                        // On the card's own text edge (SectionCard pads by
+                        // zonePadding), so crumb and card label share a line.
+                        .padding(.leading, Space.s16)
                     SettingsCardView(card: card, openPane: openPane)
                 }
             }
@@ -248,7 +255,7 @@ struct SettingsView: View {
                     Rectangle()
                         .fill(Palette.hairline)
                         .frame(height: 0.5)
-                        .padding(.horizontal, Space.scaled(11))
+                        .padding(.horizontal, DeskRow.hPadding)
                         .padding(.vertical, Space.s8)
                 }
                 ForEach(group, id: \.self) { section in
@@ -258,7 +265,11 @@ struct SettingsView: View {
             Spacer()
         }
         .frame(width: Typo.measure(158))
-        .padding(.horizontal, Space.s12)
+        // THE COLUMN STARTS ON THE PAGE GUTTER, the line the "Settings" title
+        // above it is set on. The rows' fill reaches out into this inset and
+        // their padding carries the icons, the search glass and the rule
+        // between the two groups the rest of the way: `DeskRow`'s two halves.
+        .padding(.horizontal, DeskRow.listInset)
         .padding(.vertical, Space.scaled(18))
     }
 
@@ -274,6 +285,9 @@ struct SettingsView: View {
         [.account, .rules, .groups],
         [.general, .mail, .assistant, .agents, .privacy, .audit],
     ]
+
+    /// The fixed icon slot a nav row and the search field both lead with.
+    private static var iconSlot: CGFloat { Space.scaled(18) }
 
     private func navRow(_ section: SettingsSection) -> some View {
         // Nothing is selected while a search is up, because nothing IS: the
@@ -293,19 +307,19 @@ struct SettingsView: View {
                 // lines and the column stops reading as a column.
                 Image(systemName: section.symbol)
                     .font(Typo.ui(12, weight: .medium))
-                    .frame(width: Space.scaled(18))
+                    .frame(width: Self.iconSlot)
                 Text(section.label)
                     .font(Typo.ui(12, weight: .medium))
             }
                 .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Space.scaled(9))
+                .padding(.horizontal, DeskRow.hPadding)
                 .padding(.vertical, Space.s6)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                 .fill(active ? Palette.accentSoft : .clear)
         )
     }
@@ -315,10 +329,13 @@ struct SettingsView: View {
     /// and answers it better: the panes are a filing system somebody else
     /// chose, and this one takes the word you already had.
     private var search: some View {
-        HStack(spacing: Space.s6) {
+        // The nav rows' slot, gap and padding, so the glass is centred over
+        // their icons and the placeholder starts where their labels do.
+        HStack(spacing: Space.s8) {
             Image(systemName: "magnifyingglass")
                 .font(Typo.ui(11, weight: .medium))
                 .foregroundStyle(Palette.inkFaintest)
+                .frame(width: Self.iconSlot)
             TextField("search settings", text: $query)
                 .textFieldStyle(.plain)
                 .font(Typo.ui(12))
@@ -345,14 +362,15 @@ struct SettingsView: View {
                 .help("Clear")
             }
         }
-        .padding(.horizontal, Space.s8)
+        .padding(.horizontal, DeskRow.hPadding)
         .padding(.vertical, Space.s6)
+        // A search field, so a capsule like the mail search (`fieldWell`).
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            Capsule(style: .continuous)
                 .fill(Palette.canvas.opacity(0.65))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            Capsule(style: .continuous)
                 .strokeBorder(
                     searchFocused ? Palette.accent.opacity(0.55) : Palette.hairlineStrong,
                     lineWidth: 0.75)
@@ -630,6 +648,12 @@ struct SearchSortPicker: View {
 ///
 /// STACKED ON THE PHONE. A 390pt line cannot hold a name and a four-way
 /// segmented control side by side, so the control drops under its label there.
+///
+/// AND ON A NARROW MAC CARD (the composer open beside Settings): side by side
+/// only while the label keeps `labelFloor` next to the control, otherwise the
+/// phone's arrangement. Stacked, a control still wider than the card (the
+/// Sound picker's five segments) scrolls sideways inside it rather than run
+/// out past the pane, where the page clips it.
 struct SettingsRow<Control: View>: View {
     let title: String
     var detail: String?
@@ -637,16 +661,32 @@ struct SettingsRow<Control: View>: View {
 
     var body: some View {
         #if os(iOS)
-            VStack(alignment: .leading, spacing: Space.s8) {
-                label
-                control
-            }
+            stacked(control)
         #else
-            HStack(alignment: .center, spacing: Space.scaled(18)) {
-                label
-                control
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: Space.scaled(18)) {
+                    // The fit test asks the label for its floor, not its
+                    // one-line width: a long detail line wraps beside the
+                    // control, as it always did, rather than stack the row.
+                    label
+                        .frame(minWidth: 0, idealWidth: Self.labelFloor, maxWidth: .infinity, alignment: .leading)
+                    control
+                }
+                stacked(
+                    ScrollView(.horizontal, showsIndicators: false) { control }
+                        .scrollBounceBehavior(.basedOnSize, axes: .horizontal))
             }
         #endif
+    }
+
+    /// The least a label keeps beside its control before the row stacks.
+    @MainActor private static var labelFloor: CGFloat { Typo.measure(120) }
+
+    private func stacked(_ control: some View) -> some View {
+        VStack(alignment: .leading, spacing: Space.s8) {
+            label
+            control
+        }
     }
 
     private var label: some View {
@@ -764,7 +804,7 @@ private struct DensityTile: View {
     /// grew with the setting, both pictures would change size on every flip and
     /// the comparison between them would be of two different windows.
     private static let size = CGSize(width: 156, height: 92)
-    private static let radius: CGFloat = 10
+    private static let radius: CGFloat = Radius.well
 
     private static let sample: [(name: String, line: String)] = [
         ("Maya Okafor", "Lunch on Thursday?"),
@@ -1250,11 +1290,11 @@ struct SignatureSection: View {
                 .frame(height: Space.scaled(140))
                 .padding(Space.s8)
                 .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .fill(Palette.canvas.opacity(0.65))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                         .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         }
         .frame(maxWidth: .infinity)
@@ -1490,6 +1530,8 @@ struct AssistantSection: View {
             text: $keyInput, editing: $editingKey
         )
         .onChange(of: keyInput) { _, _ in note = nil }
+        // The SettingsRow shape: what is true on the leading side, the
+        // control that changes it on the trailing one.
         HStack(spacing: Space.s10) {
             if busy {
                 Text("saving…").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -1498,10 +1540,6 @@ struct AssistantSection: View {
                 StatusDot(
                     color: Palette.positive,
                     label: "key set" + (status.provider.map { " · \($0.label)" } ?? ""))
-                Button("forget") { Task { await forgetKey() } }
-                    .buttonStyle(.plain)
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.danger)
             }
             switch note {
             case .ok(let text):
@@ -1510,6 +1548,13 @@ struct AssistantSection: View {
                 Text(text).font(Typo.micro).foregroundStyle(Palette.danger)
             case nil:
                 EmptyView()
+            }
+            Spacer(minLength: Space.s10)
+            if status.present {
+                Button("forget") { Task { await forgetKey() } }
+                    .buttonStyle(.plain)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.danger)
             }
         }
         SettingsHint(
@@ -1606,13 +1651,13 @@ struct AccountSection: View {
                 // set a flag into the void was worse than no button. Every other
                 // verb on this pane (rename, make active, remove) was already
                 // AccountManager and worked identically on both.
-                HStack(spacing: Space.s12) {
+                SettingsRow(
+                    title: "Another mailbox",
+                    detail: "One daemon per mailbox, each with its own rules and triage."
+                ) {
                     Button("Add Account…") { store.addAccountSheetOpen = true }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.accent)
-                    Text("one daemon per mailbox, each with its own rules and triage")
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
                 }
                 .padding(.top, Space.s4)
                 // WHAT SWITCHES THEM differs, so the hint does. The Mac has nine
@@ -1635,13 +1680,13 @@ struct AccountSection: View {
             // anybody who changes their mind comes here.
             if store.shareAvailable {
                 SectionCard(label: "Invites") {
-                    HStack(spacing: Space.s12) {
+                    SettingsRow(
+                        title: "Invite a friend",
+                        detail: "Your friends get an invite from your own address."
+                    ) {
                         Button("Share Passband…") { store.openShareSheet(from: .settings) }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.accent)
-                        Text("your friends get an invite from your own address")
-                            .font(Typo.micro)
-                            .foregroundStyle(Palette.inkFaintest)
                     }
                 }
             }
@@ -1651,7 +1696,10 @@ struct AccountSection: View {
             #if os(macOS)
                 if store.iosConnected == false {
                     SectionCard(label: "iPhone app") {
-                        HStack(spacing: Space.s12) {
+                        SettingsRow(
+                            title: "Passband for iPhone",
+                            detail: "In alpha on TestFlight."
+                        ) {
                             Button("Copy TestFlight Link") {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(
@@ -1659,9 +1707,6 @@ struct AccountSection: View {
                             }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.accent)
-                            Text("Passband for iPhone is in alpha on TestFlight")
-                                .font(Typo.micro)
-                                .foregroundStyle(Palette.inkFaintest)
                         }
                     }
                 }
@@ -1748,7 +1793,7 @@ struct CredentialsEditor: View {
         }
         .padding(Space.s12)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.canvas.opacity(0.5))
         )
         .onAppear {

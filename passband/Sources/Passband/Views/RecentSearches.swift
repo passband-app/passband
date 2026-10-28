@@ -53,19 +53,23 @@ struct RecentSearches: View {
                             .truncationMode(.middle)
                         Spacer(minLength: Space.s8)
                     }
-                    .padding(.horizontal, Space.scaled(9))
+                    // The hits' row padding: the parent insets this list
+                    // `PanelRow.hitInset`, so the words land on the panel's
+                    // text edge, under the field's words and where the hits'
+                    // avatars will start.
+                    .padding(.horizontal, PanelRow.hitPadding)
                     .padding(.vertical, Space.scaled(7))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                         .fill(i == armed ? Palette.accentSoft : .clear)
                 )
             }
         }
-        .padding(Space.s4)
+        .padding(.vertical, Space.s4)
         .padding(.top, Space.s8)
         .contextMenu {
             Button("Clear recent searches", action: onClear)

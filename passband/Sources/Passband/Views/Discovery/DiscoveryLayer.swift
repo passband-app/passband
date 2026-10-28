@@ -130,7 +130,7 @@ struct DiscoveryLayer: View {
                 momentCard(set)
             }
         }
-        .padding(20)
+        .padding(Space.s20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.5, dampingFraction: 0.84), value: presenter.moment)
         // THE MOMENT IS THE BOARD'S. It only arrives on the sitrep, and a
@@ -214,7 +214,7 @@ private struct DiscoveryMomentHost: View {
             // still is the frame that explains the gesture, and a loop caught
             // mid-way (a stack already cleared) is an empty box.
             DiscoveryMoment(set: set, live: live && hovering)
-                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Radius.pane, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

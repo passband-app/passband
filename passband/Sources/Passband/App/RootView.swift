@@ -75,7 +75,7 @@ struct RootView: View {
         // the reason it will not pair.
         .overlay(alignment: .bottom) {
             UpdateAlert()
-                .padding(.bottom, Space.scaled(18))
+                .padding(.bottom, ToastMetrics.edge)
         }
         // ADD ACCOUNT — the same form as the gate, over a working app. Hung on
         // the whole shell rather than on any one surface: it is raised from
@@ -917,7 +917,7 @@ struct RoutedHeader<Trailing: View>: View {
             Spacer(minLength: Space.s8)
             trailing
         }
-        .padding(.horizontal, Space.scaled(22))
+        .padding(.horizontal, Space.page)
         // THE BAR'S HEIGHT, not this header's own padding: it sits in the window
         // strip beside the traffic lights, and the rail's top edge is cut to the
         // same line. A header that set its own height would break that join.

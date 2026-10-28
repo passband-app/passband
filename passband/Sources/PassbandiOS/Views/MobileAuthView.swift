@@ -193,7 +193,7 @@ struct MobileAuthView: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .passbandGlass(.pane, cornerRadius: 18, tint: Palette.lockSoft.opacity(0.7))
+            .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.lockSoft.opacity(0.7))
         }
     }
 
@@ -231,7 +231,7 @@ struct MobileAuthView: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.lock.opacity(0.12))
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.lock.opacity(0.12))
     }
 
     /// The desktop `reveal(_:)`, verbatim in shape: code kinds resolve to digits,
@@ -275,7 +275,7 @@ struct AuthRow: View {
 
     var body: some View {
         ListRow(
-            selected: false, cornerRadius: 10, tint: Palette.lock, hPadding: 10, vPadding: 8,
+            selected: false, cornerRadius: PhoneRow.radius, tint: Palette.lock, hPadding: 10, vPadding: 8,
             hoverFill: false, action: onReveal
         ) { _, _ in
             HStack(spacing: 10) {

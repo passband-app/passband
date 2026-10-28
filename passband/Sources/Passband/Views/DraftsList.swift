@@ -82,10 +82,12 @@ struct DraftsList: View {
                             }
                         }
                     }
-                    // 7 + the row's own 11 puts every row's text on the
-                    // header's 18pt edge. Written as the difference so the
-                    // two still meet in comfortable, where neither is 7 or 11.
-                    .padding(.horizontal, Space.scaled(18) - Space.scaled(11))
+                    // This inset + the row's own padding puts every row's
+                    // text on the composer's text edge (`ComposeEdge.text`),
+                    // where the header's title and the compose card's words
+                    // sit. Written as the difference so the two still meet
+                    // in comfortable.
+                    .padding(.horizontal, ComposeEdge.text - DraftRow.hPadding)
                     .padding(.vertical, Space.s10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -139,7 +141,7 @@ struct DraftsList: View {
         Text(text)
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
-            .padding(.horizontal, Space.scaled(11))
+            .padding(.horizontal, DraftRow.hPadding)
             .padding(.vertical, Space.s6)
     }
 
@@ -163,7 +165,7 @@ struct DraftsList: View {
                 KeyHint("esc", returning ? "back" : "close")
                 Spacer()
             }
-            .padding(.horizontal, Space.scaled(18))
+            .padding(.horizontal, ComposeEdge.text)
             .padding(.vertical, Space.s12)
             .overlay(alignment: .top) { Hairline() }
         }
@@ -252,9 +254,11 @@ private struct DraftRow: View {
     let onOpen: () -> Void
     let onDelete: () -> Void
 
+    static var hPadding: CGFloat { Space.scaled(11) }
+
     var body: some View {
         ListRow(
-            selected: selected && !inert, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.s6,
+            selected: selected && !inert, cornerRadius: Radius.row, hPadding: Self.hPadding, vPadding: Space.s6,
             hoverFill: !inert,
             onHoverChange: inert ? nil : { if $0 { onHover() } },
             action: {

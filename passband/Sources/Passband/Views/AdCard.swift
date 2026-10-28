@@ -3,8 +3,10 @@
 // same object in the same corner: the glass card, the live P7 phosphor hero
 // fading into it, the pill naming what is new, the ✕.
 //
-// A FIXED COMPOSITION, so nothing here follows the density setting: every
-// size is a literal on purpose (see TestFlightNudgeModal's header).
+// A FIXED COMPOSITION, so nothing inside the card follows the density setting:
+// every size is a literal or an `AdCard` constant, and type is `fixed:`, on
+// purpose (see TestFlightNudgeModal's header). Only the margin to the window
+// corner (`adCardPlacement`) is room, and follows it.
 //
 // Only one ad is ever up at a time (each one's `othersShowing`), which is why
 // they can share `PhosphorScene.card`: its canvas follows the one view drawing
@@ -15,7 +17,37 @@ import SwiftUI
 enum AdCard {
     static let width: CGFloat = 340
     static let heroHeight: CGFloat = 196
-    static let cornerRadius: CGFloat = 20
+    static let cornerRadius: CGFloat = Radius.modal
+    /// THE HERO'S ONE INSET: the pill and the ✕ sit this far in from the
+    /// card's top corners, so the two controls share an edge (the ✕ used to
+    /// sit 2pt closer to the corner than the pill).
+    static let heroInset: CGFloat = 12
+    /// The words under the hero: one text edge for every ad.
+    static let wordsHorizontal: CGFloat = 18
+    static let wordsTop: CGFloat = 16
+    static let wordsBottom: CGFloat = 18
+    /// Between the words' blocks (headline, feature, call to action), and
+    /// between a headline and its line. The agent ad runs tighter on purpose
+    /// to hold its extra line in the same footprint.
+    static let wordsGap: CGFloat = 14
+    static let headlineGap: CGFloat = 6
+}
+
+extension View {
+    /// The ad family's words padding, so every ad's copy starts on one edge.
+    func adWordsPadding() -> some View {
+        padding(.horizontal, AdCard.wordsHorizontal)
+            .padding(.top, AdCard.wordsTop)
+            .padding(.bottom, AdCard.wordsBottom)
+    }
+
+    /// The bottom-right corner an ad card is set in: the same margin the
+    /// discovery moment keeps. The margin is ROOM, so it follows the density;
+    /// the card inside it does not.
+    func adCardPlacement() -> some View {
+        padding(Space.s20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+    }
 }
 
 /// The card itself: glass, its shadow, and the arrival from the corner.
@@ -84,7 +116,7 @@ struct AdCloseButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "xmark")
-                .font(.system(size: 10, weight: .bold))
+                .font(Typo.ui(10, weight: .bold, fixed: true))
                 .foregroundStyle(.white.opacity(0.9))
                 .frame(width: 24, height: 24)
                 .background(.black.opacity(0.35), in: Circle())
@@ -92,24 +124,19 @@ struct AdCloseButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .padding(10)
+        .padding(AdCard.heroInset)
         .help("Close")
         .accessibilityLabel("Close")
     }
 }
 
+/// The ad's pill: the shared `HeroPill` (What's New wears it too), at the
+/// composition's fixed size and on the hero's one inset.
 struct AdPill: View {
     let text: String
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 9, weight: .bold).width(.expanded))
-            .tracking(0.6)
-            .foregroundStyle(.white.opacity(0.92))
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(.black.opacity(0.32), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color(hex: 0x82BAF5).opacity(0.45), lineWidth: 0.5))
-            .padding(12)
+        HeroPill(text: text, fixed: true)
+            .padding(AdCard.heroInset)
     }
 }

@@ -183,7 +183,7 @@ private struct OpensDetail: View {
             }
         }
         .padding(Space.s14)
-        .frame(width: 300, alignment: .leading)
+        .frame(width: Typo.measure(300), alignment: .leading)
     }
 
     /// WHOSE OPENS THESE ARE, as far as the pixel can say. One pixel rides in

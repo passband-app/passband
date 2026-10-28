@@ -15,13 +15,17 @@ struct PracticeProductTour: View {
 
     private var tour: TourController { store.tour }
     private var step: PracticeTourStep { tour.practiceStep }
-    private let cardWidth: CGFloat = 390
+    /// The card holds a paragraph, so its width is a measure: it widens with
+    /// its type instead of wrapping more lines in comfortable.
+    private var cardWidth: CGFloat { Typo.measure(390) }
+    /// The card's distance from the board's edges (and from the rail).
+    private var cardMargin: CGFloat { Space.scaled(18) }
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
                 ForEach(Array(ringRects.enumerated()), id: \.offset) { _, ring in
-                    RoundedRectangle(cornerRadius: 16)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(Palette.accent, lineWidth: 2)
                         .shadow(color: Palette.accent.opacity(0.25), radius: 14)
                         .frame(width: ring.width, height: ring.height)
@@ -39,7 +43,7 @@ struct PracticeProductTour: View {
                 if store.ruleEditor == nil {
                     guideCard
                         .id(step)
-                        .frame(width: min(cardWidth, max(240, geometry.size.width - 32)))
+                        .frame(width: min(cardWidth, max(240, geometry.size.width - 2 * Space.s16)))
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
                         .offset(cardOrigin(in: geometry.size))
                         .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
@@ -149,9 +153,9 @@ struct PracticeProductTour: View {
             .font(Typo.micro)
         }
         .padding(Space.s20)
-        .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: 20))
+        .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: Radius.modal, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20).strokeBorder(Palette.accent.opacity(0.24))
+            RoundedRectangle(cornerRadius: Radius.modal, style: .continuous).strokeBorder(Palette.accent.opacity(0.24))
         }
         .shadow(color: .black.opacity(0.22), radius: 24, y: 10)
     }
@@ -324,8 +328,8 @@ struct PracticeProductTour: View {
     /// toast. Chasing the highlight made it the thing people looked at, and
     /// the thing they clicked was its Skip step button.
     private func cardRect(in size: CGSize) -> CGRect {
-        let width = min(cardWidth, max(240, size.width - 32))
-        let margin: CGFloat = 18
+        let width = min(cardWidth, max(240, size.width - 2 * Space.s16))
+        let margin = cardMargin
         let maxX = max(margin, size.width - width - margin)
         let maxY = max(margin, size.height - cardHeight - margin)
         // The toast follows density, so it is taller in comfortable; the

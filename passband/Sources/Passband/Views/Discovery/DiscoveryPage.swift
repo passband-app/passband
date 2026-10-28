@@ -61,7 +61,7 @@ struct DiscoveryPage: View {
 
     /// The column's widest measure: a name and a line, read in one glance.
     static let column: CGFloat = 520
-    private static let gutter: CGFloat = 24
+    private static var gutter: CGFloat { Space.page }
 
     private var listWidth: CGFloat {
         max(0, min(Self.column, width / 2 - 2 * Self.gutter))
@@ -89,14 +89,14 @@ struct DiscoveryPage: View {
             VStack(alignment: .leading, spacing: 0) {
                 masthead
                     .padding(.horizontal, DiscoveryRow.inset)
-                    .padding(.bottom, 14)
+                    .padding(.bottom, Space.s14)
                 ForEach(items, id: \.self) { item in
                     switch item {
                     case .heading:
-                        heading(DiscoveryCopy.unlockedHeading, top: complete ? 4 : 22)
+                        heading(DiscoveryCopy.unlockedHeading, top: complete ? Space.s4 : Space.scaled(22))
                             .transition(.opacity)
                     case .more:
-                        heading(DiscoveryCopy.moreHeading, top: 20)
+                        heading(DiscoveryCopy.moreHeading, top: Space.s20)
                             .transition(.opacity)
                     case .row(let set):
                         let placed = isPlacedUnlocked(set)
@@ -113,8 +113,8 @@ struct DiscoveryPage: View {
                 }
             }
             .frame(width: listWidth, alignment: .leading)
-            .padding(.top, 28)
-            .padding(.bottom, 64)
+            .padding(.top, Space.scaled(28))
+            .padding(.bottom, Space.scaled(64))
             .frame(maxWidth: .infinity)
         }
         .scrollIndicators(.automatic)
@@ -165,7 +165,7 @@ struct DiscoveryPage: View {
 
     /// The ring and one line. The header bar above already names the page.
     private var masthead: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: Space.s12) {
             DiscoveryRing(
                 progress: DiscoveryProgress(state, fresh: fresh), diameter: 26,
                 breathing: live && fixedTime == nil)
@@ -180,10 +180,10 @@ struct DiscoveryPage: View {
     // MARK: section headings
 
     private func heading(_ title: String, top: CGFloat) -> some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: Space.s12) {
             Text(title)
                 .textCase(.uppercase)
-                .font(.system(size: 9.5, weight: .bold).width(.expanded))
+                .font(Typo.ui(9.5, weight: .bold).width(.expanded))
                 .tracking(0.7)
                 .foregroundStyle(Palette.inkDim)
                 .accessibilityAddTraits(.isHeader)
@@ -194,7 +194,7 @@ struct DiscoveryPage: View {
         .padding(.horizontal, DiscoveryRow.inset)
         // More air above than below: the heading belongs to what follows it.
         .padding(.top, top)
-        .padding(.bottom, 6)
+        .padding(.bottom, Space.s6)
     }
 }
 
@@ -222,41 +222,44 @@ struct DiscoveryRow: View {
 
     /// The row's wash runs this far past its content, so the content of every
     /// row, the masthead and the heading share one left edge.
-    static let inset: CGFloat = 10
-    private static let gap: CGFloat = 14
+    ///
+    /// The featured card uses the same inset, so its picture and words start
+    /// on that edge too (it used to sit 2pt in from everything else).
+    static var inset: CGFloat { Space.s10 }
+    private static var gap: CGFloat { Space.s14 }
     private var picture: CGFloat { featured ? 190 : 64 }
 
     private var kept: Bool { state == .kept && unlocked }
 
     var body: some View {
-        HStack(alignment: .center, spacing: featured ? 18 : Self.gap) {
+        HStack(alignment: .center, spacing: featured ? Space.scaled(18) : Self.gap) {
             // ONLY UNDER THE POINTER. Everything else holds its poster.
             DiscoveryVignette(
-                set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: featured ? 9 : 5)
+                set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: featured ? Radius.image(in: Radius.pane, inset: Self.inset, floor: Radius.well) : 5)
                 .frame(width: picture)
 
             if featured {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: Space.s4) {
                     Text(eyebrow)
-                        .font(.system(size: 9, weight: .bold).width(.expanded))
+                        .font(Typo.ui(9, weight: .bold).width(.expanded))
                         .tracking(0.6)
                         .foregroundStyle(Palette.accent)
                     Text(set.title)
                         .font(Typo.serif(21, weight: .medium))
                         .foregroundStyle(Palette.ink)
                     Text(set.line)
-                        .font(.system(size: 12.5))
+                        .font(Typo.ui(12.5))
                         .foregroundStyle(Palette.inkDim)
                         .lineSpacing(1.5)
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 5) {
+                    HStack(spacing: Space.scaled(5)) {
                         ForEach(set.keys, id: \.self) { DiscoveryKeycap($0) }
                     }
-                    .padding(.top, 5)
+                    .padding(.top, Space.scaled(5))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                     Text(set.title)
                         .font(Typo.serif(15.5, weight: .medium))
                         .foregroundStyle(Palette.ink)
@@ -266,20 +269,19 @@ struct DiscoveryRow: View {
             }
 
             Image(systemName: "chevron.right")
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
                 .foregroundStyle(selected ? Palette.accent : Palette.inkFaintest)
                 .opacity(hovering || selected ? 1 : 0)
         }
-        .padding(.vertical, featured ? 12 : 6)
-        .padding(.leading, featured ? 12 : Self.inset)
-        .padding(.trailing, Self.inset)
+        .padding(.vertical, featured ? Space.s12 : Space.s6)
+        .padding(.horizontal, Self.inset)
         .background {
-            RoundedRectangle(cornerRadius: featured ? 14 : 9, style: .continuous)
+            RoundedRectangle(cornerRadius: featured ? Radius.pane : Radius.row, style: .continuous)
                 .fill(fill)
         }
         .overlay {
             // The card's edge, even all round. Plain rows have none.
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.pane, style: .continuous)
                 .strokeBorder(selected ? Palette.accent.opacity(0.5) : Palette.hairline, lineWidth: 0.75)
                 .opacity(featured ? 1 : 0)
         }
@@ -312,7 +314,7 @@ struct DiscoveryRow: View {
     /// are, and "not yet" is not a state worth a label.
     private var tag: some View {
         Text(fresh ? DiscoveryCopy.freshTag : DiscoveryCopy.keptTag)
-            .font(.system(size: 8.5, weight: .bold).width(.expanded))
+            .font(Typo.ui(8.5, weight: .bold).width(.expanded))
             .tracking(0.5)
             .foregroundStyle(fresh ? DiscoveryInk.ringHot : Palette.accent)
             .fixedSize()
@@ -337,29 +339,29 @@ struct DiscoveryGuide: View {
             VStack(alignment: .leading, spacing: 0) {
                 DiscoveryVignette(set: set, live: live, fixedTime: fixedTime, cornerRadius: 12)
                     .frame(maxWidth: 440)
-                    .padding(.bottom, 20)
+                    .padding(.bottom, Space.s20)
 
                 Text(DiscoveryCopy.guideEyebrow(state))
-                    .font(.system(size: 9.5, weight: .bold).width(.expanded))
+                    .font(Typo.ui(9.5, weight: .bold).width(.expanded))
                     .tracking(0.6)
                     .foregroundStyle(Palette.accent)
-                    .padding(.bottom, 5)
+                    .padding(.bottom, Space.scaled(5))
                 Text(set.title)
                     .font(Typo.serif(26, weight: .medium))
                     .foregroundStyle(Palette.ink)
                 Text(set.line)
-                    .font(.system(size: 13.5))
+                    .font(Typo.ui(13.5))
                     .foregroundStyle(Palette.inkDim)
                     .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 5)
+                    .padding(.top, Space.scaled(5))
 
                 Rectangle().fill(Palette.hairline).frame(height: 0.5)
-                    .padding(.vertical, 18)
+                    .padding(.vertical, Space.scaled(18))
 
-                VStack(alignment: .leading, spacing: 13) {
+                VStack(alignment: .leading, spacing: Space.scaled(13)) {
                     ForEach(Array(set.guide.enumerated()), id: \.offset) { _, step in
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
                             // A fixed gutter, so the words line up whether a
                             // step has a key or is just something that happens.
                             Group {
@@ -370,9 +372,9 @@ struct DiscoveryGuide: View {
                                         .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 4 }
                                 }
                             }
-                            .frame(width: 64, alignment: .trailing)
+                            .frame(width: Typo.measure(64), alignment: .trailing)
                             Text(step.text)
-                                .font(.system(size: 13.5))
+                                .font(Typo.ui(13.5))
                                 .foregroundStyle(Palette.ink)
                                 .lineSpacing(2.5)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -380,10 +382,10 @@ struct DiscoveryGuide: View {
                     }
                 }
             }
-            .frame(maxWidth: 480, alignment: .leading)
-            .padding(.horizontal, 32)
-            .padding(.top, 28)
-            .padding(.bottom, 56)
+            .frame(maxWidth: Typo.measure(480), alignment: .leading)
+            .padding(.horizontal, Space.s32)
+            .padding(.top, Space.scaled(28))
+            .padding(.bottom, Space.scaled(56))
             .frame(maxWidth: .infinity)
         }
         .accessibilityElement(children: .contain)
@@ -403,15 +405,15 @@ struct DiscoveryKeycap: View {
         Text(label)
             .font(Typo.mono(11, weight: .medium))
             .foregroundStyle(Palette.ink.opacity(0.85))
-            .padding(.horizontal, 7)
-            .frame(minWidth: 22, minHeight: 21)
+            .padding(.horizontal, Space.scaled(7))
+            .frame(minWidth: Space.scaled(22), minHeight: Space.scaled(21))
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                     .fill(Palette.readerBackground.opacity(0.85))
                     .shadow(color: .black.opacity(0.14), radius: 0.5, y: 1)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
                     .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
             )
             .fixedSize()
@@ -429,19 +431,19 @@ struct DiscoveryMoment: View {
     var fixedTime: Double? = nil
 
     var body: some View {
-        HStack(spacing: 13) {
-            DiscoveryVignette(set: set, live: live, fixedTime: fixedTime, cornerRadius: 9)
+        HStack(spacing: Space.scaled(13)) {
+            DiscoveryVignette(set: set, live: live, fixedTime: fixedTime, cornerRadius: Radius.image(in: Radius.pane, inset: Space.scaled(9), floor: Radius.well))
                 .frame(width: 98)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
+                HStack(spacing: Space.scaled(5)) {
                     // One arc lit at twelve, glowing: the ring's own picture
                     // of "the ring just grew".
                     DiscoveryRingGlyph(
                         progress: DiscoveryProgress(kept: 0, found: 1, fresh: 1), diameter: 10, glow: 0.9)
                         .frame(width: 12, height: 12)
                     Text(DiscoveryCopy.momentEyebrow)
-                        .font(.system(size: 9, weight: .bold).width(.expanded))
+                        .font(Typo.ui(9, weight: .bold).width(.expanded))
                         .tracking(0.6)
                         .foregroundStyle(Palette.accent)
                 }
@@ -454,11 +456,11 @@ struct DiscoveryMoment: View {
                     .foregroundStyle(Palette.inkDim)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(width: 204, alignment: .leading)
+            .frame(width: Typo.measure(204), alignment: .leading)
         }
-        .padding(9)
-        .padding(.trailing, 7)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTintStrong)
+        .padding(Space.scaled(9))
+        .padding(.trailing, Space.scaled(7))
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTintStrong)
         .shadow(color: .black.opacity(0.26), radius: 22, y: 10)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(set.foundTitle) \(set.foundLine)")

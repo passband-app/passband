@@ -418,7 +418,7 @@ struct MobileAuthEyesRow: View {
 
     var body: some View {
         ListRow(
-            selected: false, cornerRadius: 10, tint: tone, hPadding: PhoneRow.hPadding, vPadding: 8,
+            selected: false, cornerRadius: PhoneRow.radius, tint: tone, hPadding: PhoneRow.hPadding, vPadding: 8,
             hoverFill: false, action: onOpen
         ) { _, _ in
             HStack(alignment: .top, spacing: 10) {

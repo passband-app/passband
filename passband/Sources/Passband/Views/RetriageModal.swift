@@ -44,7 +44,7 @@ struct RetriageModal: View {
                 .foregroundStyle(Palette.accent)
                 .symbolEffect(.rotate, isActive: run.watching && !run.paused && run.blocked == nil)
             Text(title)
-                .font(Typo.ui(14, weight: .semibold))
+                .font(Typo.modalTitle)
                 .foregroundStyle(Palette.ink)
             Spacer(minLength: 0)
         }
@@ -218,8 +218,7 @@ struct RetriageModal: View {
     }
 
     private func closeButton(_ label: String) -> some View {
-        HStack {
-            Spacer(minLength: 0)
+        ModalButtons {
             Button(label) { store.endRetriage() }
                 .buttonStyle(.glass)
         }
@@ -249,15 +248,14 @@ struct RetriageConfirm: View {
         OverlayScrim(onDismiss: { store.cancelRetriageAsk() }) {
             ModalCard(width: 400) {
                 Text("Re-triage the last \(days) days?")
-                    .font(Typo.ui(14, weight: .semibold))
+                    .font(Typo.modalTitle)
                     .foregroundStyle(Palette.ink)
                 Text("Passband is unavailable until it finishes, at least a few minutes.")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: Space.s8) {
-                    Spacer(minLength: 0)
+                ModalButtons {
                     Button("Cancel") { store.cancelRetriageAsk() }
                         .buttonStyle(.glass)
                     Button("Re-triage \(days)d") { Task { await store.confirmRetriage() } }

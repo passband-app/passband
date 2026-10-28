@@ -194,7 +194,10 @@ struct ComposePane: View {
                 Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
             }
         }
-        .padding(.horizontal, Space.scaled(18))
+        // The CARD sits on the panel gutter; its words sit the card's own
+        // inset further in, which is the line the header, the footer and
+        // the drafts page share (`ComposeEdge`).
+        .padding(.horizontal, ComposeEdge.card)
         .padding(.vertical, Space.s14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
@@ -298,7 +301,7 @@ struct ComposePane: View {
                 }
             #endif
         }
-        .padding(.horizontal, Space.scaled(18))
+        .padding(.horizontal, ComposeEdge.text)
         .padding(.vertical, Space.scaled(13))
         .overlay(alignment: .bottom) { Hairline() }
     }
@@ -572,7 +575,7 @@ struct ComposePane: View {
                     .tint(Palette.accent)
             #endif
         }
-        .padding(.horizontal, Space.scaled(18))
+        .padding(.horizontal, ComposeEdge.text)
         .padding(.vertical, Space.s12)
         .overlay(alignment: .top) { Hairline() }
     }
@@ -645,13 +648,13 @@ struct ComposePane: View {
             // Near-opaque, like every input well: a translucent card over a
             // busy wallpaper leaves typed text unreadable.
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.canvas.opacity(0.65))
             )
             // The drop cue is the whole card lighting up: a file let go
             // anywhere on the message lands (see `composeDropTarget`).
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .strokeBorder(
                         dropTargeted ? Palette.accent : Palette.hairlineStrong,
                         lineWidth: dropTargeted ? 1.5 : 0.75))
@@ -979,15 +982,14 @@ struct DiscardConfirm: View {
         OverlayScrim(onDismiss: { store.cancelDiscardAsk() }) {
             ModalCard(width: 380) {
                 Text("Delete this message?")
-                    .font(Typo.ui(14, weight: .semibold))
+                    .font(Typo.modalTitle)
                     .foregroundStyle(Palette.ink)
                 Text("It will not be kept in drafts, and this cannot be undone.")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: Space.s8) {
-                    Spacer(minLength: 0)
+                ModalButtons {
                     Button("Cancel") { store.cancelDiscardAsk() }
                         .buttonStyle(.glass)
                     Button("Delete") { store.confirmDiscard() }
@@ -1027,11 +1029,11 @@ struct AgentDraftNotice: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.accentSoft)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.accent.opacity(0.4), lineWidth: 1))
     }
 }
@@ -1057,11 +1059,11 @@ struct GuardVerdictBox: View {
         .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(Palette.dangerSoft)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(Palette.danger.opacity(0.4), lineWidth: 1))
     }
 }
@@ -1091,4 +1093,16 @@ struct ComposeSummaryRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+}
+
+/// THE COMPOSER'S TWO EDGES. The message card sits on the side-panel gutter
+/// (`Space.panel`, the search panel's edge: the same glass in the same place),
+/// and its words sit `InlineFieldMetrics.inset` further in. Everything else on
+/// the pane that is words (the header's title, the footer's first control,
+/// the drafts page's rows and key line) sits on that text edge, so flipping
+/// between compose and drafts does not move the text.
+@MainActor
+enum ComposeEdge {
+    static var card: CGFloat { Space.panel }
+    static var text: CGFloat { card + InlineFieldMetrics.inset }
 }

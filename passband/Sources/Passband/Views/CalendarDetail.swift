@@ -40,7 +40,7 @@
             }
             .padding(Space.s16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+            .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
         }
 
         // MARK: header
@@ -404,7 +404,7 @@
             .padding(Space.s10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                     .fill(Palette.hairline.opacity(0.45))
             )
         }

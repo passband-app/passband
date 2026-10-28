@@ -56,8 +56,7 @@ struct UnsubscribeViolationNotice: View {
         #else
             .frame(maxWidth: .infinity, alignment: .leading)
         #endif
-        .padding(Space.scaled(13))
-        .passbandGlass(.pane, cornerRadius: 14, tint: Palette.dangerSoft)
+        .toastSurface(tint: Palette.dangerSoft)
     }
 
     /// What the smart block would do, and under it the sentence it saves: the

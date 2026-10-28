@@ -16,7 +16,7 @@ struct RevealPanel: View {
 
     @State private var revealState: Loadable<RevealedSealed> = .loading
 
-    private static let radius: CGFloat = 20
+    private static let radius: CGFloat = Radius.modal
 
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
@@ -38,12 +38,12 @@ struct RevealPanel: View {
                         }
                     }
                 }
-                .padding(.horizontal, Space.s16)
+                .padding(.horizontal, Space.modal)
                 .padding(.vertical, Space.s12)
 
                 if AuthPolicy.offersAnswer(question) {
                     RevealQuestion(meta: question)
-                        .padding(.horizontal, Space.s16)
+                        .padding(.horizontal, Space.modal)
                         .padding(.bottom, Space.s12)
                 }
 
@@ -69,7 +69,8 @@ struct RevealPanel: View {
                             }
                         }
                     }
-                    .padding(Space.s16)
+                    .padding(.horizontal, Space.modal)
+                    .padding(.vertical, Space.s16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 // The body takes every point the header and footer leave, so a
@@ -85,7 +86,7 @@ struct RevealPanel: View {
                 }
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
-                .padding(.horizontal, Space.s16)
+                .padding(.horizontal, Space.modal)
                 .padding(.vertical, Space.s10)
             }
             // A READING SURFACE, NOT A DIALOG: the panel runs the height of the
@@ -101,14 +102,16 @@ struct RevealPanel: View {
             // corners square off the card's rounded ones.
             .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
             .passbandGlass(.pane, cornerRadius: Self.radius, tint: Palette.lockSoft.opacity(0.85))
-            .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
+            .overlayShadow()
             // The margin OUTSIDE the glass, so it shows the page rather than
             // padding the card. The Mac's is the inset the Auth page under it
             // already uses, so the card's edges sit where the page's content
             // does: clear of the window's top bar (the scrim covers the whole
-            // page, header included), then the page's own gutter.
+            // page, header included), then the page's own gutter (`Space.page`).
+            // Its words take the modal inset (`Space.modal`) inside that, the
+            // same distance from the glass as every other floating card's.
             #if os(macOS)
-                .padding(.horizontal, Space.scaled(22))
+                .padding(.horizontal, Space.page)
                 .padding(.top, TopBar.height + Space.s16)
                 .padding(.bottom, Space.s16)
             #else
@@ -146,7 +149,7 @@ struct RevealPanel: View {
             #endif
         }
         .foregroundStyle(Palette.lock)
-        .padding(.horizontal, Space.s16)
+        .padding(.horizontal, Space.modal)
         .padding(.vertical, Space.s8)
         .frame(maxWidth: .infinity)
         .background(Palette.lockSoft)
@@ -234,11 +237,11 @@ struct RevealQuestion: View {
         .padding(.horizontal, Space.s12)
         .padding(.vertical, Space.s8)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .fill(verdict == nil ? tone.opacity(0.08) : Palette.hairline.opacity(0.5))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                 .strokeBorder(verdict == nil ? tone.opacity(0.25) : .clear, lineWidth: 1)
         )
     }

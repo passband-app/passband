@@ -148,7 +148,7 @@ spec:
   ipAllowList:
     sourceRange:
       # 3. EDIT ME: control's egress (the AWS NAT EIP), as a /32.
-      - 192.0.2.1/32
+      - 184.33.248.151/32
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

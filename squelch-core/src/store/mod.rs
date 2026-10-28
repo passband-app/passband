@@ -2183,18 +2183,19 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// The sync engine's change-feed cursor for the account, opaque, or `None`
     /// before the first one is stored (a first run).
     ///
-    /// A GMAIL ACCOUNT ADOPTS ITS LEGACY CURSOR, `sync_state` mailbox
-    /// `'history'`: an install upgraded from before this table has only that
-    /// row, and reading it as "no cursor" would re-run a whole first backfill.
-    /// When both rows exist (a rolled-back build kept advancing the legacy
-    /// one) the later historyId wins, so neither direction of a version change
-    /// steps the feed backwards.
+    /// FOR A GMAIL ACCOUNT THE LEGACY `sync_state` `'history'` ROW STAYS IN
+    /// CHARGE: no legacy row is no cursor (a first run, or the re-ingest drill
+    /// in docs/SECURITY.md §1, which deletes that row), an install upgraded
+    /// from before `sync_cursor` adopts it, and when both rows exist the later
+    /// historyId wins, so neither direction of a version change steps the
+    /// feed backwards. See `store/sqlite/sync_cursor.rs`.
     fn sync_cursor(&self, account_id: AccountId) -> Result<Option<crate::mail::SyncCursor>>;
 
-    /// Store the account's change-feed cursor. For a Gmail account whose
-    /// cursor is a historyId, the legacy `sync_state` `'history'` row is
-    /// written in the same transaction, so a build from before this table
-    /// resumes from the same point instead of from wherever it last stopped.
+    /// Store the account's change-feed cursor. For a Gmail account the cursor
+    /// must be a historyId (anything else is refused, nothing written), and
+    /// the legacy `sync_state` `'history'` row is written in the same
+    /// transaction, so a build from before `sync_cursor` resumes from the same
+    /// point.
     fn set_sync_cursor(
         &self,
         account_id: AccountId,

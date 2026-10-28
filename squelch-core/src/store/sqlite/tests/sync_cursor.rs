@@ -133,17 +133,57 @@ fn another_providers_cursor_is_never_parsed_or_mirrored() {
     assert_eq!(legacy(&store, acct), Some(999), "not mirrored");
 }
 
-/// A Gmail cursor that is not a historyId is not this layer's to repair: it is
-/// stored and returned as it is, and the legacy row is left alone.
+/// A Gmail cursor IS a historyId. Anything else could not be mirrored, and
+/// would read back as the legacy row's value or as no cursor at all: so it is
+/// refused, and nothing is written.
 #[test]
-fn a_gmail_cursor_that_is_not_a_history_id_is_stored_verbatim() {
+fn a_gmail_cursor_that_is_not_a_history_id_is_refused_and_nothing_written() {
     let (store, acct) = store();
     set_legacy(&store, acct, 10);
+    assert!(matches!(
+        store.set_sync_cursor(acct, &SyncCursor::new("not-a-number")),
+        Err(CoreError::InvalidInput(_))
+    ));
+    assert_eq!(cursor(&store, acct), Some("10".into()));
+    assert_eq!(
+        store.query_i64_for_test("SELECT COUNT(*) FROM sync_cursor"),
+        Some(0)
+    );
+}
+
+/// THE RE-INGEST DRILL (docs/SECURITY.md §1) still works: deleting the legacy
+/// row is no cursor, whatever the new table holds, so the next start runs a
+/// first backfill and re-fetches the window. A sanitizer fix reaches stored
+/// mail this way.
+#[test]
+fn deleting_the_legacy_row_is_still_the_re_ingest_drill() {
+    let (store, acct) = store();
     store
-        .set_sync_cursor(acct, &SyncCursor::new("not-a-number"))
+        .set_sync_cursor(acct, &SyncCursor::new("500"))
         .unwrap();
-    assert_eq!(cursor(&store, acct), Some("not-a-number".into()));
-    assert_eq!(legacy(&store, acct), Some(10));
+    store.execute_batch_for_test(&format!(
+        "DELETE FROM sync_state WHERE account_id = {acct} AND mailbox = 'history'"
+    ));
+    assert_eq!(cursor(&store, acct), None);
+    // And the first backfill's write brings both rows back.
+    store
+        .set_sync_cursor(acct, &SyncCursor::new("600"))
+        .unwrap();
+    assert_eq!(cursor(&store, acct), Some("600".into()));
+    assert_eq!(legacy(&store, acct), Some(600));
+}
+
+/// A value past i64::MAX survives the legacy column's i64 cast both ways, as
+/// it always did through `sync_state`.
+#[test]
+fn a_history_id_past_i64_max_round_trips() {
+    let (store, acct) = store();
+    let huge = u64::MAX - 7;
+    store
+        .set_sync_cursor(acct, &SyncCursor::new(huge.to_string()))
+        .unwrap();
+    assert_eq!(cursor(&store, acct), Some(huge.to_string()));
+    assert_eq!(legacy(&store, acct), Some(huge));
 }
 
 #[test]

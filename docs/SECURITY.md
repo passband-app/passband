@@ -38,7 +38,9 @@ pinned to `noopener noreferrer`.
 - HTML never crosses the agent door; MCP serves flattened text only.
 - `body_html` is **baked at ingest** — a sanitizer change does not retroactively fix
   stored mail. Delete the `sync_state` `history` row and restart `squelchd` to
-  re-ingest (triage is preserved).
+  re-ingest (triage is preserved). The `sync_cursor` row needs no edit: for a
+  Gmail account the `history` row decides whether a cursor exists
+  (`store/sqlite/sync_cursor.rs`).
 
 ## 2. Rendering sandbox
 

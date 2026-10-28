@@ -1,18 +1,25 @@
 //! The account's mail provider and the sync engine's opaque change-feed
 //! cursor (`accounts.provider`, `sync_cursor`).
 //!
-//! THE LEGACY GMAIL CURSOR IS ADOPTED BOTH WAYS. Before `sync_cursor` existed
-//! the engine kept Gmail's historyId in `sync_state` under mailbox
-//! `'history'`, and other readers still look there (the stats page's
-//! `last_history_id`). So for a Gmail account:
+//! FOR A GMAIL ACCOUNT THE LEGACY ROW STAYS IN CHARGE. Before `sync_cursor`
+//! existed the engine kept Gmail's historyId in `sync_state` under mailbox
+//! `'history'`, and three things still depend on that row: the stats page's
+//! `last_history_id`, a rolled-back build (which reads nothing else), and the
+//! documented RE-INGEST DRILL (docs/SECURITY.md §1: delete the row and restart
+//! to re-fetch the window, which is how a sanitizer fix reaches stored mail).
+//! So for a Gmail account:
 //!
-//! - a READ with no `sync_cursor` row adopts the legacy row, so an upgraded
-//!   install resumes its feed instead of re-running a first backfill, and a
-//!   read with both takes the later historyId, so a rolled-back build that
+//! - a WRITE stores the historyId in both places in one transaction, and a
+//!   Gmail cursor that is not a historyId is refused rather than stored where
+//!   nothing could read it back;
+//! - a READ with no legacy row is no cursor, whatever `sync_cursor` holds:
+//!   that is the drill, and the next run backfills as a first run does;
+//! - a READ with the legacy row and no `sync_cursor` row (an install upgraded
+//!   from before the table) adopts it, so the feed resumes instead of
+//!   re-running a first backfill;
+//! - a READ with both takes the later historyId, so a rolled-back build that
 //!   kept advancing the legacy row does not send this one back over mail it
-//!   already walked;
-//! - a WRITE of a historyId writes the legacy row in the same transaction, so
-//!   a rolled-back build resumes from where this one stopped.
+//!   already walked, and no version change ever steps the feed backwards.
 //!
 //! Nothing here applies to any other provider: their cursors live in
 //! `sync_cursor` alone and are never parsed.
@@ -49,34 +56,50 @@ impl SqliteStore {
                 |r| r.get(0),
             )
             .optional()?;
+        // No legacy row is no cursor: a first run, or the re-ingest drill.
+        let Some(legacy) = legacy else {
+            return Ok(None);
+        };
         // `as u64`, exactly as `sync_state` reads it back: the column holds a
         // u64 written through an i64 cast.
-        let legacy = legacy.map(|l| l as u64);
-        Ok(match (cursor, legacy) {
-            (Some(cursor), Some(legacy)) => match cursor.trim().parse::<u64>() {
-                Ok(current) => Some(SyncCursor::new(current.max(legacy).to_string())),
-                // Not a historyId: not ours to second-guess. The source
-                // decides what an unreadable cursor means.
-                Err(_) => Some(SyncCursor::new(cursor)),
-            },
-            (Some(cursor), None) => Some(SyncCursor::new(cursor)),
-            (None, Some(legacy)) => Some(SyncCursor::new(legacy.to_string())),
-            (None, None) => None,
-        })
+        let legacy = legacy as u64;
+        // A `sync_cursor` value that is not a historyId was never written by
+        // this code (the write refuses one); the legacy row stands.
+        let current = cursor.and_then(|c| c.trim().parse::<u64>().ok());
+        Ok(Some(SyncCursor::new(
+            current.map_or(legacy, |c| c.max(legacy)).to_string(),
+        )))
     }
 
     pub(super) fn set_sync_cursor(&self, account_id: AccountId, cursor: &SyncCursor) -> Result<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
+        let gmail =
+            provider_conn(&tx, account_id)?.as_deref() == Some(MailProvider::Gmail.as_str());
+        let history_id = if gmail {
+            match cursor.as_str().trim().parse::<u64>() {
+                Ok(history_id) => Some(history_id),
+                // Stored, it would read back as the legacy row's value or as
+                // no cursor at all (see the module doc): a silent rewind or a
+                // backfill on every start. Said here instead, with nothing
+                // written; the value is ours and not mail, so naming the
+                // failure is safe.
+                Err(_) => {
+                    return Err(CoreError::InvalidInput(
+                        "a Gmail sync cursor must be a historyId".into(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         tx.execute(
             "INSERT INTO sync_cursor(account_id, cursor, updated_at) VALUES(?1, ?2, ?3)
              ON CONFLICT(account_id) DO UPDATE SET
                  cursor = excluded.cursor, updated_at = excluded.updated_at",
             params![account_id, cursor.as_str(), Utc::now().to_rfc3339()],
         )?;
-        let gmail =
-            provider_conn(&tx, account_id)?.as_deref() == Some(MailProvider::Gmail.as_str());
-        if gmail && let Ok(history_id) = cursor.as_str().trim().parse::<u64>() {
+        if let Some(history_id) = history_id {
             tx.execute(
                 "INSERT INTO sync_state(account_id, mailbox, uidvalidity, last_uid)
                  VALUES(?1, ?2, 0, ?3)

@@ -239,9 +239,9 @@ enum Analytics {
             // list readable as the vocabulary of THIS event.
             "rail", "settings", "nudge",
             // feature_found / feature_kept sets: `FeatureSet`'s raw values, the
-            // discovery page's eight rows. Listed by hand like the undo kinds,
+            // discovery page's seven rows. Listed by hand like the undo kinds,
             // so a new set must land here too or its find trips the debug assert.
-            "clear", "flow", "later", "teach", "find", "read", "glance", "write",
+            "clear", "flow", "later", "teach", "find", "read", "sweep",
             // thread_opened sources (OpenSource): WHICH SURFACE the reader was
             // entered from. "sitrep", "emails" are MainViews above, "reading" a
             // triage kind, "reply" a compose kind; the rest are named here.

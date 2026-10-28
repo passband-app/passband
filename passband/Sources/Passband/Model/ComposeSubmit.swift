@@ -46,7 +46,6 @@ enum ComposeSubmit {
                 SendBody(compose: c, override: override, draftId: c.draftId),
                 attachmentBytes: c.attachments.reduce(0) { $0 + $1.size })
             capture(c, override, scheduled: false, "sent")
-            if c.groupMode != nil { Discovery.note(.groupSent) }
             return .sent(result)
         } catch let apiError as APIError where apiError.kind == .guardBlocked {
             capture(c, override, scheduled: false, "guard_blocked")
@@ -76,7 +75,6 @@ enum ComposeSubmit {
                 SendBody(compose: c, override: override, draftId: draftId), at: sendAt,
                 attachmentBytes: c.attachments.reduce(0) { $0 + $1.size })
             capture(c, override, scheduled: true, "scheduled")
-            Discovery.note(.sendScheduled)
             return .scheduled(created)
         } catch let apiError as APIError where apiError.kind == .guardBlocked {
             capture(c, override, scheduled: true, "guard_blocked")

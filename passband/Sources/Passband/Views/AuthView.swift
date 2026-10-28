@@ -306,7 +306,7 @@ struct AuthView: View {
 
     private func copy() {
         guard let focus, let code = codes[focus.id] ?? nil else { return }
-        if Clip.copy(code, flashing: $copied) { Discovery.note(.codeCopied) }
+        Clip.copy(code, flashing: $copied)
     }
 
     private func archiveFocused(_ m: SealedMeta) async {

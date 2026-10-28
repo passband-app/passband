@@ -1,4 +1,4 @@
-// EVERY WORD THE DISCOVERY PAGE AND RING SAY, in one place: the eight sets'
+// EVERY WORD THE DISCOVERY PAGE AND RING SAY, in one place: the seven sets'
 // names and lines, their keys, the page's headings and the found moment. The
 // raw values on `FeatureSet` are persisted and leave the machine, so the names
 // a person reads live here and are free to change.
@@ -19,8 +19,7 @@ extension FeatureSet {
         case .teach: "Teach Passband"
         case .find: "Find anything"
         case .read: "Your reading"
-        case .glance: "At a glance"
-        case .write: "Writing"
+        case .sweep: "Smart clear"
         }
     }
 
@@ -34,8 +33,7 @@ extension FeatureSet {
         case .teach: "Tell Passband what matters in your own words, fix a sort, or unsubscribe in one key."
         case .find: "Search everything you have, or simply ask your inbox a question."
         case .read: "Newsletters gather into a stack you read at your own pace and clear in one go."
-        case .glance: "Plans, packages, banking, receipts and sign-in codes, answered without opening a thing."
-        case .write: "Write, reply, send it later, or write to a whole group at once."
+        case .sweep: "One press clears what has run its course: events that passed, offers that ended, mail you never open."
         }
     }
 
@@ -49,8 +47,8 @@ extension FeatureSet {
         case .teach: ["t", "v", "u"]
         case .find: ["/", "⌘K"]
         case .read: ["hold e"]
-        case .glance: ["e", "c"]
-        case .write: ["c", "r"]
+        // No key of its own: it is the pill in Reading's corner.
+        case .sweep: []
         }
     }
 
@@ -87,21 +85,15 @@ extension FeatureSet {
             .init("/", "Search every message you have. Results arrive as you type."),
             .init("⌘K", "Ask a question in plain words and get the answer from your mail."),
         ]
-        case .glance: [
-            .init(nil, "Plans, packages, banking and receipts are read for you and shown on the board."),
-            .init("e", "Seen it? Clear a package and it is gone."),
-            .init("c", "Copy a sign-in code without opening the email."),
-        ]
         case .read: [
             .init(nil, "Newsletters gather in Your reading and stay off the board."),
             .init("↵", "Open one whenever you like. Nothing in the stack is waiting on you."),
             .init("hold e", "Finished, or not in the mood? Hold e to clear the whole stack."),
         ]
-        case .write: [
-            .init("c", "Start a new message from anywhere."),
-            .init("r", "Reply from inside a message."),
-            .init("⌘⇧↵", "Send it later: pick a time and it goes then."),
-            .init(nil, "Name a group once, then write to everyone in it at once."),
+        case .sweep: [
+            .init(nil, "Press smart clear at the top right of Your reading."),
+            .init(nil, "Passband clears what has plainly run its course, and says how much and why."),
+            .init("u", "Not sure about it? Undo puts all of it back."),
         ]
         }
     }
@@ -118,8 +110,7 @@ extension FeatureSet {
         case .teach: "You taught Passband something."
         case .find: "You found search."
         case .read: "You cleared a reading stack."
-        case .glance: "Answered at a glance."
-        case .write: "A new way to write."
+        case .sweep: "You found smart clear."
         }
     }
 
@@ -132,8 +123,7 @@ extension FeatureSet {
         case .teach: "It sorts with that in mind from now on."
         case .find: "Anything in your mail is a few letters away."
         case .read: "New issues will gather there for whenever you like."
-        case .glance: "No email needed opening."
-        case .write: "It is always there in the composer."
+        case .sweep: "Whatever has run its course is one press away."
         }
     }
 

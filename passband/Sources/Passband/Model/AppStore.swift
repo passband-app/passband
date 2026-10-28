@@ -1119,6 +1119,8 @@ final class AppStore {
                 SmartClearCopy.nothing(model: result.model, detail: result.model_detail), .info)
             return
         }
+        // Only a press that cleared something: an empty sweep showed nothing.
+        Discovery.note(.smartCleared)
         showSmartClearReceipt(result)
         await sweepResolved(result.message_ids, epoch: e)
         guard e == epoch else { return }
@@ -3497,7 +3499,6 @@ final class AppStore {
             // knows nothing about it and must not be refreshed on its behalf.
             guard e == epoch else { return }
             Analytics.capture("shipment_cleared")
-            Discovery.note(.shipmentCleared)
             pushToast("cleared \(Self.shipmentLabel(row)) · it returns if there's news", .info)
             await refreshZones(force: true)
         } catch {

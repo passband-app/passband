@@ -16,13 +16,13 @@
 
 import Foundation
 
-/// The eight sets, MOST UNIVERSAL FIRST: case order is the discovery page's
+/// The seven sets, MOST UNIVERSAL FIRST: case order is the discovery page's
 /// order, each one more niche than the last, and nothing else reads it. The
 /// raw values are persisted AND leave the machine as `feature_found` /
 /// `feature_kept` properties, so a rename is a migration and an Analytics
 /// vocabulary change, not a refactor; a reorder is neither.
 enum FeatureSet: String, CaseIterable, Sendable, Codable {
-    case clear, flow, later, find, teach, glance, read, write
+    case clear, flow, later, find, teach, read, sweep
 }
 
 /// One thing a person did that counts toward a set. Raw values are persisted
@@ -40,10 +40,8 @@ enum Move: String, CaseIterable, Sendable, Codable {
     case searchHitOpened, assistantAsked
     // read
     case stackCleared
-    // glance
-    case shipmentCleared, codeCopied
-    // write
-    case sendScheduled, groupSent
+    // sweep: a smart clear that cleared something
+    case smartCleared
 
     /// Exhaustive on purpose: a new move that forgets its set does not compile.
     var set: FeatureSet {
@@ -54,8 +52,7 @@ enum Move: String, CaseIterable, Sendable, Codable {
         case .ruleSaved, .triageCorrected, .unsubscribed: .teach
         case .searchHitOpened, .assistantAsked: .find
         case .stackCleared: .read
-        case .shipmentCleared, .codeCopied: .glance
-        case .sendScheduled, .groupSent: .write
+        case .smartCleared: .sweep
         }
     }
 }
@@ -97,7 +94,7 @@ struct DiscoveryLedger: Equatable, Sendable {
     /// Found and not yet looked at on the page. Drives the ring's "new" glow.
     private(set) var fresh: Set<FeatureSet> = []
     /// The day key of the last celebration, so a busy first day is one
-    /// moment, not eight.
+    /// moment, not seven.
     var lastCelebratedDay: String?
 
     init() {}

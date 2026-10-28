@@ -179,7 +179,6 @@ struct AuthCodeModal: View {
         // Copying is the human acting on the code — stop the auto-dismiss clock.
         if Clip.copy(code, flashing: $copied) {
             paused = true
-            Discovery.note(.codeCopied)
         }
     }
 

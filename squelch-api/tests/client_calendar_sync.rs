@@ -850,6 +850,7 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "description",
             "editable",
             "end",
+            "from_gmail",
             "guest_editable",
             "guests",
             "guests_truncated",
@@ -896,6 +897,7 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             ],
             "guests_truncated": false,
             "guest_editable": false,
+            "from_gmail": false,
         })
     );
     // The all-day ones: dates, the INCLUSIVE last day as the end (Google
@@ -2805,6 +2807,7 @@ async fn creating_an_event_goes_to_google_then_the_store_and_is_served() {
             "guests": [],
             "guests_truncated": false,
             "guest_editable": true,
+            "from_gmail": false,
         })
     );
     // Stored at once, served by the timeline as answered, and the next sync

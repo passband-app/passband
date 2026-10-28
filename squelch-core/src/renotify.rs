@@ -25,6 +25,11 @@
 //!   per-message cap, and past a cooldown that DOUBLES each time a re-notify
 //!   for it was ignored.
 //! - Several picks are ONE banner (a digest), never a burst.
+//!
+//! DUE-SOON MAIL IS ITS OWN PATH. Opening a bill is not paying it: mail that
+//! is still in For your eyes with a due date coming up comes back as the date
+//! nears ([`Why::DueSoon`]), opened or not, and whatever the age ceiling says.
+//! Once per due date, and not counted against the per-message cap.
 
 use std::collections::BTreeMap;
 
@@ -33,6 +38,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use crate::config::RenotifyConfig;
+use crate::triage::decision::{StatedTime, SupportedTime};
 use crate::types::EventKind;
 
 crate::types::str_enum! {
@@ -98,6 +104,13 @@ pub struct Policy {
     /// The wait after a re-notify before the same message may come again.
     /// Doubled for every re-notify already spent on it.
     pub cooldown: Duration,
+    /// Due-soon mail becomes eligible this long before its due time...
+    pub due_lead: Duration,
+    /// ... and stays eligible this long after it.
+    pub due_grace: Duration,
+    /// A date-only due date ("due the 30th") is read as this hour of that day
+    /// in the owner's zone.
+    pub due_day_hour: u32,
 }
 
 impl Policy {
@@ -117,6 +130,9 @@ impl Policy {
             min_age: mins(cfg.min_age_mins),
             max_age: mins(cfg.max_age_mins),
             cooldown: mins(cfg.cooldown_mins),
+            due_lead: mins(cfg.due_lead_mins),
+            due_grace: mins(cfg.due_grace_mins),
+            due_day_hour: cfg.due_day_hour.min(23),
         }
     }
 }
@@ -127,13 +143,26 @@ impl Default for Policy {
     }
 }
 
-/// One message the store found still unhandled after a first notification.
-/// The display fields are the `events` row's own snapshot, so a re-notify
-/// banner says exactly what the first one said.
+/// Why a message is a candidate. Rides the frame, so the app can word the
+/// banner ("Still waiting" against "Due tomorrow").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Why {
+    /// It notified once and is still unopened and unhandled.
+    Unhandled,
+    /// It is in For your eyes with a due date coming up, opened or not.
+    DueSoon,
+}
+
+/// One message a re-notify may name. For [`Why::Unhandled`] the display
+/// fields are the `events` row's own snapshot, so the banner says exactly what
+/// the first one said; for [`Why::DueSoon`] they are the triage decision's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Candidate {
-    /// The `events` row this message first notified on.
-    pub event_id: i64,
+    pub why: Why,
+    /// The `events` row this message first notified on, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<i64>,
     pub message_id: i64,
     pub thread_id: String,
     pub kind: EventKind,
@@ -142,7 +171,13 @@ pub struct Candidate {
     pub one_line: String,
     /// The event's deadline snapshot (RFC 3339), passed through as display copy.
     pub deadline: Option<String>,
-    /// When the first notification was written.
+    /// [`Why::DueSoon`]: the due time this re-notify is for, resolved to an
+    /// instant. Recorded with the banner, which is what makes it once per due
+    /// date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<DateTime<Utc>>,
+    /// When the first notification was written (for due-soon mail without
+    /// one, when the message arrived).
     #[serde(skip)]
     pub notified_at: DateTime<Utc>,
     /// Re-notifies already spent on this message.
@@ -155,10 +190,38 @@ pub struct Candidate {
 
 impl Candidate {
     fn deadline_at(&self) -> Option<DateTime<Utc>> {
-        self.deadline
-            .as_deref()
-            .and_then(|d| DateTime::parse_from_rfc3339(d).ok())
-            .map(|d| d.with_timezone(&Utc))
+        self.due_at.or_else(|| {
+            self.deadline
+                .as_deref()
+                .and_then(|d| DateTime::parse_from_rfc3339(d).ok())
+                .map(|d| d.with_timezone(&Utc))
+        })
+    }
+}
+
+/// A due time as the triage decision states it, as one instant. A timestamp
+/// with an offset is that instant. A local time is read in the zone the
+/// decision names, else the owner's. A bare date is
+/// [`Policy::due_day_hour`] that day in the owner's zone: "due the 30th"
+/// means by the end of the working day. `None` for a value that cannot be
+/// read, or a local time a clock change skips.
+pub fn due_instant(policy: &Policy, time: &SupportedTime, zone: Tz) -> Option<DateTime<Utc>> {
+    use chrono::TimeZone;
+    let local_zone = time
+        .timezone
+        .as_deref()
+        .and_then(crate::owner_clock::device_zone)
+        .unwrap_or(zone);
+    match time.stated()? {
+        StatedTime::Instant(at) => Some(at),
+        StatedTime::Local(local) => local_zone
+            .from_local_datetime(&local)
+            .earliest()
+            .map(|t| t.with_timezone(&Utc)),
+        StatedTime::Day(day) => zone
+            .from_local_datetime(&day.and_hms_opt(policy.due_day_hour, 0, 0)?)
+            .earliest()
+            .map(|t| t.with_timezone(&Utc)),
     }
 }
 
@@ -321,6 +384,9 @@ pub fn meeting_end_due(
 /// Is `c` due for a re-notify at `now`, judged on its own? The store already
 /// ruled out handled mail; this is the timing half.
 pub fn due(policy: &Policy, c: &Candidate, now: DateTime<Utc>) -> bool {
+    if c.why == Why::DueSoon {
+        return due_soon(policy, c, now);
+    }
     let age = now - c.notified_at;
     if age < policy.min_age || age > policy.max_age {
         return false;
@@ -343,6 +409,25 @@ pub fn due(policy: &Policy, c: &Candidate, now: DateTime<Utc>) -> bool {
     }
 }
 
+/// The due-soon window: from [`Policy::due_lead`] before the due time to
+/// [`Policy::due_grace`] after it. Not in the first [`Policy::min_age`] after
+/// the mail arrived (its own banner has that long), and not within
+/// [`Policy::min_age`] of any other re-notify for it. Once per due date is the
+/// store's half: a due time already recorded is never a candidate again.
+fn due_soon(policy: &Policy, c: &Candidate, now: DateTime<Utc>) -> bool {
+    let Some(due_at) = c.due_at else {
+        return false;
+    };
+    if now < due_at - policy.due_lead || now > due_at + policy.due_grace {
+        return false;
+    }
+    if now - c.notified_at < policy.min_age {
+        return false;
+    }
+    c.last_renotified_at
+        .is_none_or(|last| now - last >= policy.min_age)
+}
+
 /// How strongly `c` deserves the banner, higher first. Importance is the base;
 /// a deadline closing in is the relevance that RISES while mail waits, so it
 /// counts most; mail that has already been re-notified yields to mail that
@@ -363,6 +448,11 @@ pub fn score(c: &Candidate, now: DateTime<Utc>) -> i64 {
     }
     if c.kind == EventKind::Urgent {
         s += 20;
+    }
+    if c.why == Why::DueSoon {
+        // Its own reason to be here, on top of the deadline boost.
+        s += 30;
+        return s;
     }
     s - 15 * i64::from(c.renotified)
 }
@@ -405,7 +495,10 @@ pub fn plan(
             .then(b.notified_at.cmp(&a.notified_at))
             .then(b.message_id.cmp(&a.message_id))
     });
-    picks.dedup_by_key(|c| c.message_id);
+    // One entry per message, the best-scoring one: a message can be both
+    // unhandled and due soon.
+    let mut seen = std::collections::HashSet::new();
+    picks.retain(|c| seen.insert(c.message_id));
     Ok(picks.into_iter().take(policy.max_items).cloned().collect())
 }
 
@@ -488,7 +581,8 @@ mod tests {
 
     fn cand(id: i64, importance: u8, notified_at: DateTime<Utc>) -> Candidate {
         Candidate {
-            event_id: id,
+            why: Why::Unhandled,
+            event_id: Some(id),
             message_id: id,
             thread_id: format!("t{id}"),
             kind: EventKind::Surfaced,
@@ -496,6 +590,7 @@ mod tests {
             sender: "alice@example.com".into(),
             one_line: format!("line {id}"),
             deadline: None,
+            due_at: None,
             notified_at,
             renotified: 0,
             last_renotified_at: None,
@@ -755,6 +850,93 @@ mod tests {
         assert_eq!(s.by_hour[&9].handled, 1);
         assert_eq!(s.by_hour[&11].fired, 1);
         assert!(s.muted.is_empty());
+    }
+
+    fn due_soon_cand(id: i64, due_at: DateTime<Utc>, arrived: DateTime<Utc>) -> Candidate {
+        Candidate {
+            why: Why::DueSoon,
+            event_id: None,
+            kind: EventKind::Deadline,
+            due_at: Some(due_at),
+            ..cand(id, 50, arrived)
+        }
+    }
+
+    #[test]
+    fn opened_mail_due_soon_comes_back_inside_its_window() {
+        let p = Policy::default();
+        let due_at = t(17, 0) + Duration::days(1);
+        // Arrived two weeks ago: far past the ordinary age ceiling.
+        let c = due_soon_cand(1, due_at, t(9, 0) - Duration::days(14));
+        assert!(
+            !due(&p, &c, due_at - p.due_lead - Duration::minutes(1)),
+            "too early"
+        );
+        assert!(due(&p, &c, due_at - p.due_lead));
+        assert!(
+            due(&p, &c, due_at + p.due_grace),
+            "a little overdue still counts"
+        );
+        assert!(!due(&p, &c, due_at + p.due_grace + Duration::minutes(1)));
+    }
+
+    #[test]
+    fn due_soon_ignores_the_ordinary_cap_but_not_a_fresh_banner() {
+        let p = Policy::default();
+        let due_at = t(18, 0);
+        let mut c = due_soon_cand(1, due_at, t(9, 0) - Duration::days(3));
+        c.renotified = p.max_per_message;
+        c.last_renotified_at = Some(t(8, 0));
+        assert!(due(&p, &c, t(10, 0)), "the ordinary cap does not apply");
+        c.last_renotified_at = Some(t(10, 0) - p.min_age + Duration::minutes(1));
+        assert!(!due(&p, &c, t(10, 0)), "not right after another re-notify");
+        // Mail that only just arrived has its own banner first.
+        let fresh = due_soon_cand(2, due_at, t(10, 0) - Duration::minutes(5));
+        assert!(!due(&p, &fresh, t(10, 0)));
+    }
+
+    #[test]
+    fn a_message_both_unhandled_and_due_soon_is_named_once_as_due_soon() {
+        let p = Policy::default();
+        let h = Habits::default();
+        let now = t(10, 0);
+        let plain = cand(1, 70, t(8, 0));
+        let dated = due_soon_cand(1, t(16, 0), t(8, 0));
+        let picks = plan(&p, &moment(now, &[], &h), &[plain, dated]).unwrap();
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].why, Why::DueSoon);
+    }
+
+    #[test]
+    fn due_times_resolve_to_one_instant() {
+        let p = Policy::default();
+        let la = chrono_tz::America::Los_Angeles;
+        let time = |value: &str, zone: Option<&str>| SupportedTime {
+            value: value.into(),
+            timezone: zone.map(Into::into),
+            source_message_id: 1,
+            interpreted_relative: false,
+        };
+        assert_eq!(
+            due_instant(&p, &time("2026-10-28T10:00:00Z", None), la),
+            Some(t(10, 0))
+        );
+        // A local time in the zone the decision names...
+        assert_eq!(
+            due_instant(&p, &time("2026-10-28T09:00", Some("America/New_York")), la),
+            Some(t(13, 0))
+        );
+        // ...else the owner's.
+        assert_eq!(
+            due_instant(&p, &time("2026-10-28T09:00", None), la),
+            Some(t(16, 0))
+        );
+        // A bare date is 17:00 that day for the owner (PDT, UTC-7).
+        assert_eq!(
+            due_instant(&p, &time("2026-10-28", None), la),
+            Some(t(17, 0) + Duration::hours(7))
+        );
+        assert_eq!(due_instant(&p, &time("next Friday", None), la), None);
     }
 
     #[test]

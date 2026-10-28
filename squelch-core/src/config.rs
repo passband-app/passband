@@ -780,6 +780,16 @@ pub struct RenotifyConfig {
     /// per re-notify already spent on it. Default 180.
     /// Env: `SQUELCH_RENOTIFY_COOLDOWN_MINS`.
     pub cooldown_mins: u64,
+    /// Mail in For your eyes with a due date comes back this many minutes
+    /// before it, opened or not. Default 1440 (a day).
+    /// Env: `SQUELCH_RENOTIFY_DUE_LEAD_MINS`.
+    pub due_lead_mins: u64,
+    /// ... and stays eligible this long after it. Default 720.
+    /// Env: `SQUELCH_RENOTIFY_DUE_GRACE_MINS`.
+    pub due_grace_mins: u64,
+    /// The hour a date-only due date is read as, in the owner's zone.
+    /// Default 17. Env: `SQUELCH_RENOTIFY_DUE_DAY_HOUR`.
+    pub due_day_hour: u32,
 }
 
 impl Default for RenotifyConfig {
@@ -799,6 +809,9 @@ impl Default for RenotifyConfig {
             min_age_mins: 30,
             max_age_mins: 4320,
             cooldown_mins: 180,
+            due_lead_mins: 1440,
+            due_grace_mins: 720,
+            due_day_hour: 17,
         }
     }
 }
@@ -2338,6 +2351,14 @@ impl Config {
                 "SQUELCH_RENOTIFY_COOLDOWN_MINS",
                 &mut self.renotify.cooldown_mins,
             ),
+            (
+                "SQUELCH_RENOTIFY_DUE_LEAD_MINS",
+                &mut self.renotify.due_lead_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_GRACE_MINS",
+                &mut self.renotify.due_grace_mins,
+            ),
         ] {
             env_override(name, slot);
         }
@@ -2358,6 +2379,10 @@ impl Config {
             &mut self.renotify.max_per_message,
         );
         env_override("SQUELCH_RENOTIFY_MAX_ITEMS", &mut self.renotify.max_items);
+        env_override(
+            "SQUELCH_RENOTIFY_DUE_DAY_HOUR",
+            &mut self.renotify.due_day_hour,
+        );
         // The two notify WINDOWS, both reachable without editing a config file
         // inside a container image. The freshness one never had an override at
         // all, which made the one knob that decides whether a tenant's mail can

@@ -1154,6 +1154,9 @@ CREATE TABLE IF NOT EXISTS renotify_items (
     account_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
     position   INTEGER NOT NULL,
+    -- The due time a due-soon re-notify was for (RFC 3339), NULL for an
+    -- ordinary one. One due-soon re-notify per message per due time.
+    due_at     TEXT,
     PRIMARY KEY(batch_id, position)
 );
 CREATE INDEX IF NOT EXISTS idx_renotify_items_message ON renotify_items(account_id, message_id);

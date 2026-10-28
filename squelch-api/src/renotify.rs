@@ -199,11 +199,15 @@ pub async fn run_renotify_pass(
     let policy = Policy::from_config(&state.renotify.config);
     let store = state.store.clone();
     let account_id = state.account_id;
+    let due_policy = policy.clone();
     let (zone, busy, candidates, fired_today, outcomes) = blocking(state, move || {
         let zone = store.owner_zone(account_id)?.zone;
         let horizon = chrono::Duration::hours(BUSY_HORIZON_HOURS);
         let busy = store.calendar_busy(account_id, now - horizon, now + horizon)?;
-        let candidates = store.renotify_candidates(account_id)?;
+        // Unopened mail still waiting, then For-your-eyes mail coming due.
+        // The planner keeps one entry per message.
+        let mut candidates = store.renotify_candidates(account_id)?;
+        candidates.extend(store.renotify_due_candidates(account_id, &due_policy, zone, now)?);
         let fired_today =
             store.renotify_fired_since(account_id, renotify::local_day_start(zone, now))?;
         let outcomes =
@@ -232,7 +236,8 @@ pub async fn run_renotify_pass(
     }
     let message_ids: Vec<i64> = picks.iter().map(|c| c.message_id).collect();
     let store = state.store.clone();
-    let ids = message_ids.clone();
+    let ids: Vec<(i64, Option<DateTime<Utc>>)> =
+        picks.iter().map(|c| (c.message_id, c.due_at)).collect();
     let batch = blocking(state, move || {
         store.record_renotify(account_id, trigger, now, listeners, &ids)
     })
@@ -404,7 +409,8 @@ mod tests {
     fn the_frame_names_its_batch_and_items_and_nothing_hidden() {
         let at = Utc::now();
         let c = renotify::Candidate {
-            event_id: 9,
+            why: renotify::Why::Unhandled,
+            event_id: Some(9),
             message_id: 4,
             thread_id: "t4".into(),
             kind: squelch_core::types::EventKind::Deadline,
@@ -412,6 +418,7 @@ mod tests {
             sender: "alice@example.com".into(),
             one_line: "Invoice due Friday".into(),
             deadline: Some("2026-10-30T17:00:00Z".into()),
+            due_at: None,
             notified_at: at,
             renotified: 1,
             last_renotified_at: Some(at),
@@ -422,6 +429,11 @@ mod tests {
         assert_eq!(v["trigger"], "meeting_end");
         assert_eq!(v["items"][0]["message_id"], 4);
         assert_eq!(v["items"][0]["kind"], "deadline");
+        assert_eq!(v["items"][0]["why"], "unhandled");
+        assert!(
+            v["items"][0].get("due_at").is_none(),
+            "only on due-soon items"
+        );
         // Bookkeeping stays in the daemon.
         assert!(v["items"][0].get("renotified").is_none());
         assert!(v["items"][0].get("notified_at").is_none());

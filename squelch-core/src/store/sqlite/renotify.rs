@@ -11,7 +11,7 @@
 //! time tests run in Rust.
 
 use super::*;
-use crate::renotify::{BusySpan, Candidate, Outcome, Trigger};
+use crate::renotify::{BusySpan, Candidate, Outcome, Policy, Trigger, Why};
 use crate::triage::ghost::EventTime;
 use crate::types::EventKind;
 
@@ -190,7 +190,8 @@ impl SqliteStore {
             "SELECT e.id, e.message_id, e.thread_id, e.kind, e.importance, e.sender,
                     e.one_line, e.deadline, e.created_at,
                     (SELECT COUNT(*) FROM renotify_items i
-                     WHERE i.account_id = e.account_id AND i.message_id = e.message_id)
+                     WHERE i.account_id = e.account_id AND i.message_id = e.message_id
+                       AND i.due_at IS NULL)
              FROM events e
              JOIN messages m ON m.account_id = e.account_id AND m.id = e.message_id
              LEFT JOIN triage t ON t.account_id = m.account_id AND t.message_id = m.id
@@ -210,7 +211,8 @@ impl SqliteStore {
         let mut out = stmt
             .query_map(params![account_id, CANDIDATE_SCAN], |r| {
                 Ok(Candidate {
-                    event_id: r.get(0)?,
+                    why: Why::Unhandled,
+                    event_id: Some(r.get(0)?),
                     message_id: r.get(1)?,
                     thread_id: r.get(2)?,
                     kind: EventKind::parse(&r.get::<_, String>(3)?).unwrap_or(EventKind::Surfaced),
@@ -218,28 +220,126 @@ impl SqliteStore {
                     sender: r.get(5)?,
                     one_line: r.get(6)?,
                     deadline: r.get(7)?,
+                    due_at: None,
                     notified_at: dt(r, 8)?,
                     renotified: r.get::<_, i64>(9)?.clamp(0, u32::MAX as i64) as u32,
                     last_renotified_at: None,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        // The last re-notify per message, parsed, for the ones that have any.
-        let mut last = conn.prepare_cached(
-            "SELECT b.fired_at FROM renotify_items i
-             JOIN renotify_batches b ON b.id = i.batch_id
-             WHERE i.account_id = ?1 AND i.message_id = ?2
-             ORDER BY b.id DESC LIMIT 1",
-        )?;
-        for c in out.iter_mut().filter(|c| c.renotified > 0) {
-            c.last_renotified_at = last
-                .query_row(params![account_id, c.message_id], |r| dt(r, 0))
-                .optional()?;
+        for c in &mut out {
+            c.last_renotified_at = last_renotified(&conn, account_id, c.message_id)?;
         }
         Ok(out)
     }
 
-    /// Write one banner and the messages it names, in order. Returns its id,
+    /// Mail in For your eyes with a due date, opened or not: the
+    /// [`Why::DueSoon`] candidates. Read from the FYE list itself
+    /// (`agent_triage::list_items`), so "in For your eyes" means exactly what
+    /// the app shows, the owner's own pins and fired reminders included.
+    ///
+    /// The due time is the earliest unresolved action's due date, else the
+    /// thread's `attention_at`, resolved by [`crate::renotify::due_instant`].
+    /// Left out: auth mail, mail marked done, snoozed or replied to, and any
+    /// message already re-notified for this same due time (once per due date;
+    /// a due date that MOVES is a new one). The window itself is the
+    /// planner's to judge.
+    pub fn renotify_due_candidates(
+        &self,
+        account_id: AccountId,
+        policy: &Policy,
+        zone: chrono_tz::Tz,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Candidate>> {
+        let conn = self.lock()?;
+        let items = super::agent_triage::list_items(&conn, account_id, "fye", now)?;
+        let mut still_open = conn.prepare_cached(
+            "SELECT EXISTS(
+                 SELECT 1 FROM messages m
+                 LEFT JOIN triage t ON t.account_id = m.account_id AND t.message_id = m.id
+                 WHERE m.account_id = ?1 AND m.id = ?2
+                   AND m.is_sent = 0 AND m.is_spam = 0
+                   AND COALESCE(t.status, 'new') != 'done'
+                   AND t.remind_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM messages s
+                       WHERE s.account_id = m.account_id AND s.thread_id = m.thread_id
+                         AND s.is_sent = 1 AND s.id > m.id))",
+        )?;
+        let mut already = conn.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM renotify_items
+             WHERE account_id = ?1 AND message_id = ?2 AND due_at = ?3)",
+        )?;
+        let mut event =
+            conn.prepare_cached("SELECT id FROM events WHERE account_id = ?1 AND message_id = ?2")?;
+        let mut out = Vec::new();
+        for item in items {
+            if item.decision.auth.is_auth() {
+                continue;
+            }
+            let attention = &item.attention;
+            let action_due = attention
+                .actions
+                .iter()
+                .filter(|a| !a.resolved)
+                .filter_map(|a| a.due.as_ref())
+                .filter_map(|d| crate::renotify::due_instant(policy, d, zone))
+                .min();
+            let Some(due_at) = action_due.or_else(|| {
+                attention
+                    .factors
+                    .attention_at
+                    .as_ref()
+                    .and_then(|d| crate::renotify::due_instant(policy, d, zone))
+            }) else {
+                continue;
+            };
+            let open: bool =
+                still_open.query_row(params![account_id, item.message_id], |r| r.get(0))?;
+            if !open {
+                continue;
+            }
+            let done: bool = already.query_row(
+                params![account_id, item.message_id, due_at.to_rfc3339()],
+                |r| r.get(0),
+            )?;
+            if done {
+                continue;
+            }
+            let Some(arrived) = DateTime::parse_from_rfc3339(&item.received_at)
+                .ok()
+                .map(|t| t.with_timezone(&Utc))
+            else {
+                continue;
+            };
+            let one_line = if item.decision.summary.trim().is_empty() {
+                attention.summary.clone()
+            } else {
+                item.decision.summary.clone()
+            };
+            out.push(Candidate {
+                why: Why::DueSoon,
+                event_id: event
+                    .query_row(params![account_id, item.message_id], |r| r.get(0))
+                    .optional()?,
+                message_id: item.message_id,
+                thread_id: item.thread_id.clone(),
+                kind: EventKind::Deadline,
+                importance: (attention.factors.importance.clamp(0.0, 1.0) * 100.0).round() as u8,
+                sender: item.from_addr.clone(),
+                one_line,
+                deadline: Some(due_at.to_rfc3339()),
+                due_at: Some(due_at),
+                notified_at: arrived,
+                renotified: 0,
+                last_renotified_at: last_renotified(&conn, account_id, item.message_id)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Write one banner and the messages it names, in order, each with the due
+    /// time it was re-notified for when it came as [`Why::DueSoon`]. Returns its id,
     /// which rides the frame so the app can report a tap against it.
     pub fn record_renotify(
         &self,
@@ -247,7 +347,7 @@ impl SqliteStore {
         trigger: Trigger,
         fired_at: DateTime<Utc>,
         listeners: usize,
-        message_ids: &[i64],
+        items: &[(i64, Option<DateTime<Utc>>)],
     ) -> Result<i64> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
@@ -262,11 +362,17 @@ impl SqliteStore {
             ],
         )?;
         let id = tx.last_insert_rowid();
-        for (position, message_id) in message_ids.iter().enumerate() {
+        for (position, (message_id, due_at)) in items.iter().enumerate() {
             tx.execute(
-                "INSERT INTO renotify_items(batch_id, account_id, message_id, position)
-                 VALUES(?1,?2,?3,?4)",
-                params![id, account_id, message_id, position as i64],
+                "INSERT INTO renotify_items(batch_id, account_id, message_id, position, due_at)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    id,
+                    account_id,
+                    message_id,
+                    position as i64,
+                    due_at.map(|d| d.to_rfc3339())
+                ],
             )?;
         }
         tx.execute(
@@ -397,4 +503,21 @@ impl SqliteStore {
         }
         Ok(out)
     }
+}
+
+/// When `message_id` was last named in a banner, if ever (any reason).
+fn last_renotified(
+    conn: &Connection,
+    account_id: AccountId,
+    message_id: i64,
+) -> Result<Option<DateTime<Utc>>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT b.fired_at FROM renotify_items i
+         JOIN renotify_batches b ON b.id = i.batch_id
+         WHERE i.account_id = ?1 AND i.message_id = ?2
+         ORDER BY b.id DESC LIMIT 1",
+    )?;
+    Ok(stmt
+        .query_row(params![account_id, message_id], |r| dt(r, 0))
+        .optional()?)
 }

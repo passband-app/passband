@@ -51,7 +51,10 @@ Checked in this order. The first one that fails is the hold reason.
 5. The trigger is not paused by the owner's habits (below).
 6. At least one candidate is due.
 
-A **candidate** (the store's query) has an `events` row, is not an open-tracking
+There are two kinds of candidate. A message can be both; it is then named
+once, as due soon.
+
+**Unhandled** (`why: "unhandled"`). The store's query: it has an `events` row, is not an open-tracking
 notice or an auth alert, is received mail that is not spam, has not been opened,
 done, archived or given a reminder, and has no reply on its thread since.
 
@@ -61,8 +64,25 @@ re-notifies (default 2), and the cooldown since its last one has passed. The
 cooldown (`cooldown_mins`, default 180) doubles for each re-notify already spent
 on it. Any of those that is still a candidate went unanswered.
 
+**Due soon** (`why: "due_soon"`). Opening a bill is not paying it. Mail in For
+your eyes (read from the FYE list itself, so pins and fired reminders count)
+with a due date comes back as the date nears, opened or not:
+
+- The due time is the earliest unresolved action's due date, else the thread's
+  `attention_at`. A local time is read in the zone the decision names, else the
+  owner's. A bare date is `due_day_hour` (default 17:00) that day in the owner's
+  zone.
+- It is due from `due_lead_mins` before (default 24h) to `due_grace_mins` after
+  (default 12h), and not within `min_age_mins` of the mail arriving or of
+  another re-notify for it.
+- Once per due date: the due time is recorded on the banner's item. A due date
+  that moves is a new one. This does not count against `max_per_message`, and
+  `max_age_mins` does not apply.
+- Left out: auth mail, and mail marked done, archived, snoozed or replied to.
+
 Picks are ranked by importance, plus a boost for a deadline that is close or
-past and for urgent-tier mail, minus a penalty per re-notify already spent. At
+past, for urgent-tier mail and for due-soon mail, minus a penalty per
+re-notify already spent (ordinary candidates only). At
 most `max_items` (default 3) go in one banner.
 
 ## Delivery
@@ -73,10 +93,15 @@ it:
 
 ```json
 {"renotify": 12, "trigger": "client_online", "at": 1793210000,
- "items": [{"event_id": 9, "message_id": 4, "thread_id": "t4", "kind": "deadline",
-            "importance": 80, "sender": "alice@example.com",
-            "one_line": "Invoice due Friday", "deadline": "2026-10-30T17:00:00Z"}]}
+ "items": [{"why": "due_soon", "event_id": 9, "message_id": 4, "thread_id": "t4",
+            "kind": "deadline", "importance": 80, "sender": "alice@example.com",
+            "one_line": "Invoice due Friday", "deadline": "2026-10-30T17:00:00Z",
+            "due_at": "2026-10-30T17:00:00Z"}]}
 ```
+
+`event_id` is absent for due-soon mail that never had a first banner, and
+`due_at` is present only on due-soon items. The app should word the two
+differently ("Still waiting" against "Due tomorrow").
 
 It is not a second `events` row. That table is one row per message ever
 (`UNIQUE(message_id)`), and the phone's push path reads it. A banner is only

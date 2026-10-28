@@ -154,7 +154,13 @@ fn a_banner_is_recorded_counted_and_tapped() {
     notified(&store, acct, 2);
     let fired = at(9, 0);
     let batch = store
-        .record_renotify(acct, Trigger::ClientOnline, fired, 1, &[2, 1])
+        .record_renotify(
+            acct,
+            Trigger::ClientOnline,
+            fired,
+            1,
+            &[(2, None), (1, None)],
+        )
         .unwrap();
 
     let cands = store.renotify_candidates(acct).unwrap();
@@ -207,7 +213,7 @@ fn handling_before_the_banner_is_not_credited_to_it() {
         &format!("status = 'done', resolved_at = '{}'", at(8, 0).to_rfc3339()),
     );
     store
-        .record_renotify(acct, Trigger::MeetingEnd, at(9, 0), 1, &[1])
+        .record_renotify(acct, Trigger::MeetingEnd, at(9, 0), 1, &[(1, None)])
         .unwrap();
     let outcomes = store.renotify_outcomes(acct, at(0, 0)).unwrap();
     assert_eq!(outcomes[0].handled, 0);
@@ -320,4 +326,109 @@ fn busy_is_timed_accepted_opaque_events_only() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Mail in For your eyes with a due date, committed the way the worker
+/// commits a decision. `attention_at` is the due time.
+fn fye_with_due(store: &SqliteStore, acct: AccountId, key: &str, due: &str) -> i64 {
+    use crate::triage::decision::{EvidenceRef, SupportedTime, ThreadAttentionDecision};
+    let id = super::reading_senders::mail(store, acct, key, "billing@utility.example", 10);
+    super::reading_senders::into_reading_with(store, acct, id, |d| {
+        d.destinations.clear();
+        d.summary = "Electric bill due".into();
+        d.attention = ThreadAttentionDecision {
+            show_in_fye: true,
+            relevant_message_ids: vec![id],
+            evidence: vec![EvidenceRef {
+                message_id: id,
+                location: "body".into(),
+            }],
+            summary: "Pay the electric bill".into(),
+            factors: crate::triage::decision::AttentionFactors {
+                importance: 0.8,
+                attention_at: Some(SupportedTime {
+                    value: due.into(),
+                    timezone: None,
+                    source_message_id: id,
+                    interpreted_relative: false,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+    });
+    id
+}
+
+#[test]
+fn opened_fye_mail_with_a_due_date_is_a_due_soon_candidate_once() {
+    use crate::renotify::{Policy, Why};
+    let (store, acct) = store();
+    let due = Utc::now() + Duration::hours(6);
+    let id = fye_with_due(&store, acct, "bill", &due.to_rfc3339());
+    // Opened: the ordinary path drops it, the due path does not.
+    triage_row(
+        &store,
+        acct,
+        id,
+        &format!("opened_at = '{}'", Utc::now().to_rfc3339()),
+    );
+    assert!(store.renotify_candidates(acct).unwrap().is_empty());
+
+    let p = Policy::default();
+    let due_list = |store: &SqliteStore| {
+        store
+            .renotify_due_candidates(acct, &p, chrono_tz::Tz::UTC, Utc::now())
+            .unwrap()
+    };
+    let found = due_list(&store);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].message_id, id);
+    assert_eq!(found[0].why, Why::DueSoon);
+    assert_eq!(found[0].due_at, Some(due));
+    assert_eq!(found[0].one_line, "Electric bill due");
+    assert_eq!(found[0].importance, 80);
+
+    // Once per due date.
+    store
+        .record_renotify(acct, Trigger::MeetingEnd, Utc::now(), 1, &[(id, Some(due))])
+        .unwrap();
+    assert!(due_list(&store).is_empty());
+    // A due date that MOVES is a new one.
+    let later = due + Duration::days(2);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_thread_attention SET attention_json =
+                 json_set(attention_json, '$.factors.attention_at.value', ?1)",
+            params![later.to_rfc3339()],
+        )
+        .unwrap();
+    let moved = due_list(&store);
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].due_at, Some(later));
+}
+
+#[test]
+fn done_or_snoozed_fye_mail_is_not_due_soon() {
+    use crate::renotify::Policy;
+    let (store, acct) = store();
+    let due = (Utc::now() + Duration::hours(6)).to_rfc3339();
+    let snoozed = fye_with_due(&store, acct, "snoozed", &due);
+    triage_row(
+        &store,
+        acct,
+        snoozed,
+        &format!(
+            "remind_at = '{}'",
+            (Utc::now() + Duration::days(1)).to_rfc3339()
+        ),
+    );
+    let done = fye_with_due(&store, acct, "done", &due);
+    triage_row(&store, acct, done, "status = 'done'");
+    let found = store
+        .renotify_due_candidates(acct, &Policy::default(), chrono_tz::Tz::UTC, Utc::now())
+        .unwrap();
+    assert!(found.is_empty(), "{found:?}");
 }

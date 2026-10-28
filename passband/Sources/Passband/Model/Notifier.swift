@@ -248,9 +248,18 @@ final class Notifier {
         content.threadIdentifier = "\(account).\(copy.threadIdentifier)"
         content.userInfo = EventBanner.renotifyUserInfo(signal, account: accountId)
         if copy.sound { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
+        // `foreground`: the app was frontmost with its window up, so the
+        // ordinary rule (`presentation`) files this into Notification Center
+        // without a banner. Posted is not the same as seen.
+        #if os(macOS)
+            let foreground = NSApp.isActive && MainWindow.find()?.isVisible == true
+        #else
+            let foreground = false
+        #endif
         var props: [String: Any] = [
             "items": signal.items.count,
             "deadline": signal.items.contains(where: \.isDeadline),
+            "foreground": foreground,
         ]
         if let trigger = signal.knownTrigger { props["trigger"] = trigger.rawValue }
         Analytics.capture("renotify_shown", props)

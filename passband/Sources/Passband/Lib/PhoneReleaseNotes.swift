@@ -31,7 +31,7 @@ import Foundation
 /// `ReleaseVignette` is one: this file stays free of SwiftUI, and the walk
 /// maps each case to its scene (PassbandiOS/Views/PhoneVignettes.swift).
 enum PhoneVignette: String, CaseIterable, Sendable {
-    case chainReply, messageSwipe, clearStack, remind
+    case chainReply, messageSwipe, clearStack, remind, smartClear
 }
 
 /// One page of the walk: a thing the phone can now do, and how.
@@ -103,28 +103,26 @@ enum PhoneReleaseNotes {
         PhoneReleaseNote(
             version: "0.0.10",
             date: "2026-10-27",
-            headline: "Less to Wade Through",
+            headline: "Tokyo Update",
             features: [
                 PhoneFeature(
                     "Smart clear",
                     detail: "Tap smart clear on Reading to clear what has expired and what you never open. Undo puts all of it back.",
-                    symbol: "checkmark.rectangle.stack"),
+                    symbol: "checkmark.rectangle.stack", vignette: .smartClear),
                 PhoneFeature(
-                    "Search asks the agent for you",
+                    "Better agent search",
                     detail: "Type a question in Search and the agent looks through your mail for the answer, right above your results.",
                     symbol: "sparkle.magnifyingglass"),
                 PhoneFeature(
-                    "Mail in your language",
-                    detail: "Email written in a language you do not read arrives translated. Tap show original to see it as sent.",
+                    "Mail in other languages arrives translated",
+                    detail: "Email written in a language you do not read arrives in English. Tap show original to see it as sent.",
                     symbol: "character.bubble"),
             ],
             also: [
-                PhoneAside(
-                    "The person icon opens your accounts, with Settings at the bottom",
-                    symbol: "gearshape"),
-                PhoneAside("Delete a message you are writing with the trash in the corner", symbol: "trash"),
-                PhoneAside("Choose the languages you read in Account, under Mail", symbol: "globe"),
                 PhoneAside("Press and drag to select text in plain emails", symbol: "text.cursor"),
+                PhoneAside("Instant account switching", symbol: "person.2"),
+                PhoneAside("See opens under mail you sent", symbol: "eye"),
+                PhoneAside("Search reaches a year back", symbol: "clock.arrow.circlepath"),
                 PhoneAside("Bug fixes"),
             ]),
         PhoneReleaseNote(

@@ -141,6 +141,12 @@ struct ThreadViewer: View {
     /// issue competing `scrollTo`s at two targets, which is a column that
     /// judders rather than lands. See `settle`.
     @State private var settleTask: Task<Void, Never>?
+    /// A SELECTION MOVED WITHOUT MOVING THE READER, by index: a message picked
+    /// by a tap on the phone (it is already on screen), or the message on
+    /// screen put back after a refetch (`takeInPlace`, where it never moved).
+    /// The two scroll watchers below stand down while the selection is on it,
+    /// and the next selection anywhere else clears it.
+    @State private var quietSelection: Int?
     /// The opening landing, kept until the reader takes the scroll. See
     /// `LandingHold`.
     @State private var hold = LandingHold()
@@ -982,6 +988,14 @@ struct ThreadViewer: View {
                                         if originals.remove(m.id) == nil { originals.insert(m.id) }
                                     }
                                 ) {
+                                    // A TAP ON THE PHONE SELECTS, IT DOES NOT
+                                    // SCROLL. The card is already under the
+                                    // thumb, and taking its top to the top of
+                                    // the window yanked a long message back to
+                                    // its first line on every touch.
+                                    #if !os(macOS)
+                                        if index != i { quietSelection = i }
+                                    #endif
                                     index = i
                                 }
                                 // THE CARD DIFFS ON ITS DATA, NOT ON ITS
@@ -1109,6 +1123,10 @@ struct ThreadViewer: View {
                         // `.animating` is ours (a `j`, the pill), not theirs.
                         if phase == .tracking || phase == .interacting || phase == .decelerating {
                             hold.end()
+                            // And any jump still landing: a phone has no wheel
+                            // for `settle` to watch, so this is how a thumb
+                            // outranks it there.
+                            settleTask?.cancel()
                         }
                         // A WHEEL NEVER TOUCHES THE SELECTION, so somebody who
                         // scrolled down to the arrival themselves would still be
@@ -1182,6 +1200,10 @@ struct ThreadViewer: View {
                     // Reaching the end of the thread IS reading what arrived —
                     // whether that took the pill, a press of `j`, or the rail.
                     if now == newestIndex { arrivals = 0 } else { hold.end() }
+                    if let quiet = quietSelection {
+                        if now == quiet { return }
+                        quietSelection = nil
+                    }
                     // The find moved the selection and has aimed the column
                     // itself, at a line rather than at this card's top.
                     if find.steering {
@@ -1272,6 +1294,9 @@ struct ThreadViewer: View {
                     #endif
                 }
                 .onChange(of: messages.last?.id) { _, _ in
+                    // An arrival below somebody reading higher up: it does not
+                    // move them, and `takeInPlace` has said so.
+                    if quietSelection == index { return }
                     proxy.scrollTo(index, anchor: .top)
                 }
                 // A STYLE FLIP IS THE WHOLE COLUMN RELAID OUT UNDER SOMEBODY'S
@@ -2262,6 +2287,10 @@ struct ThreadViewer: View {
         // already reading is noise.
         let held = anchor.flatMap { id in messages.firstIndex { $0.id == id } }
         if let held {
+            // QUIETLY. The cards are keyed by message id, so the one on screen
+            // is still where it was, mid-paragraph; scrolling to the
+            // selection here would snap the reader to its top.
+            quietSelection = held
             index = held
             arrivals += gained
         }

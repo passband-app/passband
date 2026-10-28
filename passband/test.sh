@@ -227,6 +227,16 @@ run_suite shipment-wire \
   Sources/Passband/Model/APIError.swift \
   Tests/ShipmentWireTests.swift
 
+# The last board on disk: no sealed or auth row ever reaches the file, only a
+# fresh board of this version is painted (the rest are deleted), and the file
+# is the owner's alone, out of backups, and gone with its account.
+run_suite board-file \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/BoardFile.swift \
+  Tests/BoardFileTests.swift
+
 # Credential validation must never succeed against the fixture transport.
 run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \

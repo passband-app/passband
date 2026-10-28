@@ -478,6 +478,7 @@ final class SitrepPoller {
                 Analytics.capture("connection_restored")
             }
             store.lastRefresh = Date()
+            LaunchSignpost.end(fromDisk: false)
             // Daily triage-volume counters, all ints: the denominator for the
             // correction rate, and the surfaced-vs-squelched split. Tier counts
             // are flattened onto fixed keys so no server string ever rides.

@@ -918,6 +918,23 @@ the call goes out.
   and the file is deleted when history is cleared or the account is removed. A
   restored chat is re-sanitized (no card comes back live) and is refused if its
   history names a tool the chat no longer offers.
+- **The last board on disk.** The client also keeps at rest the board a launch
+  paints before the daemon answers
+  (`passband/Sources/Passband/Lib/BoardFile.swift`): the bands' rows (subject,
+  sender, the triage's one-line summary and preview), the calendar and shipment
+  cards, the stats, the hero's headline and the head of each mail page. It is
+  kept exactly as the saved chats are: one file per account under Application
+  Support's `Passband/Boards`, excluded from backup, written atomically, 0600 in a
+  0700 directory on the Mac, complete file protection on the phone, contents never
+  logged. NEVER on disk, because the persisted type has no place for them: the
+  sealed list, any row whose decision names an auth kind (its preview can be the
+  code), and the banking and receipt cards. Rows are filtered on the way in and
+  again on the way back out, so a file written any other way still cannot paint
+  one. A board the daemon last answered for more than a week ago is not painted
+  and its file is deleted; the file goes when the account is removed, when the
+  same daemon is connected again (the credentials may open another mailbox), and
+  when the daemon refuses the saved credentials at launch. Never written for the
+  practice inbox, or for a board the daemon has not yet confirmed this session.
 
 **What a maintainer must not break.**
 - **Prompt injection is the standing threat, and the gate is the answer to it.**

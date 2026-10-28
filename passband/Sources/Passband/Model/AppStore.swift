@@ -617,6 +617,7 @@ final class AppStore {
     /// Model/Badge.swift.
     var sitrep = SitrepData() {
         didSet {
+            scheduleBoardSave()
             // The threads `ThreadPrefetch` refuses follow both signals: the
             // sealed list and the feed rows' own decisions. (Verdict writes
             // settle in `AuthDecisions.listed`, which the poller calls.)
@@ -741,6 +742,7 @@ final class AppStore {
     // MARK: sitrep zones — see SitrepZoneCache
     var zones = SitrepZoneCache() {
         didSet {
+            scheduleBoardSave()
             // A zone pass writes each zone apart; only Reading's moves this.
             guard zones.reading != oldValue.reading else { return }
             noteReadingThreads()
@@ -1673,6 +1675,7 @@ final class AppStore {
     }
 
     private init() {
+        LaunchSignpost.begin()
         // A thread holding auth mail is never fetched speculatively or kept in
         // the cache: its body is meant to arrive through the audited reveal
         // (or a reader the human opened on purpose), not a hover or a warm.
@@ -1683,6 +1686,19 @@ final class AppStore {
         // whenever one of its runs ends; see `saveQuestionChat`.
         assistant.onRunEnded = { [weak self] in self?.saveQuestionChat(from: $0) }
         searchLane.onRunEnded = { [weak self] in self?.saveQuestionChat(from: $0) }
+        // The board on disk is brought up to date whenever the app leaves the
+        // screen, and before it quits (waiting for the write, which a quit
+        // would otherwise outrun). See `saveBoardNow`.
+        for name in Self.boardSaveNotifications {
+            let quitting = name == Platform.willTerminateNotification
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {
+                [weak self] _ in
+                // Directly, not via a Task, for the reason SitrepWindow gives:
+                // a quit never runs the next runloop turn. Delivered on the
+                // main queue, so the assumeIsolated is honest.
+                MainActor.assumeIsolated { self?.saveBoardNow(waitingForDisk: quitting) }
+            }
+        }
     }
 
     // MARK: - settings
@@ -1869,6 +1885,9 @@ final class AppStore {
             connStatus = .disconnected
             return
         }
+        // The last board on disk is read beside the credentials rather than
+        // after them; it is painted only once they are in.
+        async let keptBoard = BoardFile.load(account: active.id)
         // Off the main actor: a keychain read can put up the system's "allow
         // access?" panel and block until answered.
         switch await SettingsStore.loadAsync(accountId: active.id) {
@@ -1877,7 +1896,21 @@ final class AppStore {
                 await APIClient.shared.configure(
                     baseURL: stored.serverURL, token: stored.apiToken)
                 settings = stored
-                recoverSavedConnection(stored, accountId: active.id)
+                // THE LAST BOARD FIRST, when one is kept (BoardFile.swift):
+                // the shell mounts on it at once, and the daemon is asked
+                // beside it rather than in front of it. Without one, the
+                // loading gate waits for the daemon as it always has.
+                if let board = await keptBoard,
+                    AccountManager.shared.activeId == active.id, connStatus == .loading,
+                    !RehearsalMode.isEnabled
+                {
+                    restorePersistedBoard(board, for: active.id)
+                    connError = nil
+                    connStatus = .connected
+                    confirmSavedConnection(stored, accountId: active.id)
+                } else {
+                    recoverSavedConnection(stored, accountId: active.id)
+                }
 
             } else {
                 connStatus = .disconnected
@@ -1960,6 +1993,51 @@ final class AppStore {
                         return
                     }
                     connError = "Server temporarily unavailable. Retrying automatically…"
+                    do { try await Task.sleep(for: .seconds(30)) }
+                    catch { return }
+                }
+            }
+        }
+    }
+
+    /// The saved daemon's check for a launch that is ALREADY ON ITS BOARD
+    /// (`restorePersistedBoard`): the same probe `recoverSavedConnection`
+    /// waits on, run beside the first pull instead of in front of it. It moves
+    /// nothing on screen unless the daemon refuses outright (credentials gone,
+    /// a daemon too old for this build), which ends at the same error gate
+    /// the wait would have, and takes the board on disk with it. A daemon
+    /// that is only not answering leaves the board up under the stale banner,
+    /// which the poller's failing pulls raise, exactly as on a switch to one;
+    /// the check keeps trying behind it, so the phone's push registration
+    /// still follows the first answer.
+    private func confirmSavedConnection(_ stored: ConnectionSettings, accountId: UUID) {
+        capabilityRecoveryTask?.cancel()
+        let recoveryEpoch = epoch
+        capabilityRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                guard isCurrent(recoveryEpoch), AccountManager.shared.activeId == accountId else { return }
+                do {
+                    try await APIClient.shared.probe(baseURL: stored.serverURL, token: stored.apiToken)
+                    guard !Task.isCancelled, isCurrent(recoveryEpoch),
+                        AccountManager.shared.activeId == accountId else { return }
+                    #if os(iOS)
+                        await PushRegistration.shared.registerAndSync()
+                        guard !Task.isCancelled, isCurrent(recoveryEpoch) else { return }
+                        pairLink = nil
+                    #else
+                        if pairLink != nil { addAccountSheetOpen = true }
+                    #endif
+                    return
+                } catch {
+                    guard !Task.isCancelled, isCurrent(recoveryEpoch),
+                        AccountManager.shared.activeId == accountId else { return }
+                    guard CapabilityProbeRetry.isTransient(error) else {
+                        BoardFile.discard(account: accountId)
+                        connStatus = .error
+                        connError = Self.connectErrorText(error)
+                        return
+                    }
                     do { try await Task.sleep(for: .seconds(30)) }
                     catch { return }
                 }
@@ -2062,8 +2140,9 @@ final class AppStore {
             wipeAccountCaches()
             // A record reused by host match can be an account that was parked
             // in the background, and these credentials may open a different
-            // mailbox behind the same host.
+            // mailbox behind the same host. The one on disk too.
             boardSnapshots[account.id] = nil
+            BoardFile.discard(account: account.id)
             // Arriving from the Connect gate the feeds are down, so this is a
             // no-op and the `.connected` transition below is what raises them
             // — the same route the single-account build took. Kept as a
@@ -2432,7 +2511,10 @@ final class AppStore {
         //     the next line retires. Not on the removal path, where the index
         //     has already handed `activeId` to the survivor and the world on
         //     screen is the forgotten account's.
-        if !currentWorldGone { keepBoardSnapshot() }
+        if !currentWorldGone {
+            keepBoardSnapshot()
+            saveBoardNow()
+        }
 
         // (3) From here, every answer still in flight belongs to the old
         //     account and every writer that captured the old epoch is inert.
@@ -2571,7 +2653,9 @@ final class AppStore {
 
     /// IN MEMORY ONLY, and only for accounts that are NOT live: an entry is
     /// made when its account leaves the screen and taken when it comes back.
-    /// Mail on disk is a decision this cache does not get to make.
+    /// The copy a LAUNCH paints is kept on disk by `BoardFile`, under its own
+    /// rules (no sealed list, no auth row, no money zones; see that file and
+    /// `persistableBoard`), and comes in through this cache's restore.
     @ObservationIgnored private var boardSnapshots: [UUID: BoardSnapshot] = [:]
 
     /// True from a snapshot's repaint until the daemon has answered for the
@@ -2643,6 +2727,102 @@ final class AppStore {
         // screen a round trip before the pass that would refill them.
         preloadBoardHeroes()
         warmZoneThreads()
+    }
+
+    // MARK: - the board on disk
+
+    /// The notifications after which the board on disk is brought up to date:
+    /// leaving the screen, and quitting, after which the save waits for the
+    /// disk.
+    #if os(macOS)
+        private static let boardSaveNotifications: [Notification.Name] = [
+            Platform.didResignActiveNotification, Platform.willTerminateNotification,
+        ]
+    #else
+        private static let boardSaveNotifications: [Notification.Name] = [
+            Platform.didResignActiveNotification, UIApplication.didEnterBackgroundNotification,
+            Platform.willTerminateNotification,
+        ]
+    #endif
+
+    /// How long after a change to the board it is written: changes come in
+    /// runs (a pull, then the zone pass behind it, then a page), and the board
+    /// is written once for the run.
+    private static let boardSaveDelay: Duration = .seconds(20)
+    @ObservationIgnored private var boardSaveTask: Task<Void, Never>?
+
+    /// The live board as it may be kept on disk (`PersistedBoard`, which
+    /// leaves out the sealed list, every auth row and the money zones by
+    /// construction), or nil when there is none worth keeping: the same rules
+    /// as `keepBoardSnapshot`, plus one. A board that is still a SNAPSHOT
+    /// (repainted from disk or from a switch, not yet confirmed by this
+    /// daemon) is not written back: its rows are already on disk, and writing
+    /// them again would restamp a board nobody has vouched for since.
+    private func persistableBoard() -> PersistedBoard? {
+        guard connStatus == .connected, !RehearsalMode.isEnabled, !boardIsSnapshot,
+            statsEpoch == epoch, let lastRefresh
+        else { return nil }
+        let pages: [String: [AttentionUpdate]]
+        if mailKeyset {
+            // The head of each page, for the reason `keepBoardSnapshot` gives.
+            let heads = mailPages.compactMapValues { $0.value.map { Array($0.prefix(Self.mailLimit)) } }
+            pages = Dictionary(uniqueKeysWithValues: heads.map { ($0.key.rawValue, $0.value) })
+        } else {
+            pages = [:]
+        }
+        return PersistedBoard(
+            standing: sitrep.standing, new: sitrep.new, open: sitrep.open,
+            totalCount: sitrep.totalCount, stats: stats,
+            fyeHeadline: fyeHeadline, fyeHeadlineKey: fyeHeadlineKey,
+            calendar: zones.calendar, shipments: zones.shipments,
+            mailPages: pages, mailKeyset: mailKeyset, lastRefresh: lastRefresh)
+    }
+
+    /// Write the board to disk a little after it changes. One write for a run
+    /// of changes; what is written is the board when the delay is up.
+    private func scheduleBoardSave() {
+        guard boardSaveTask == nil, connStatus == .connected, !RehearsalMode.isEnabled else { return }
+        boardSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.boardSaveDelay)
+            guard let self, !Task.isCancelled else { return }
+            self.boardSaveTask = nil
+            self.saveBoardNow()
+        }
+    }
+
+    /// Write the live account's board to disk now: the app leaving the
+    /// screen or quitting, a switch away, a scheduled save coming due.
+    /// Nothing when there is no board worth keeping (`persistableBoard`).
+    func saveBoardNow(waitingForDisk: Bool = false) {
+        boardSaveTask?.cancel()
+        boardSaveTask = nil
+        guard let id = AccountManager.shared.activeId, let board = persistableBoard() else { return }
+        BoardFile.save(board, account: id, wait: waitingForDisk)
+    }
+
+    /// Paint `id`'s board from disk over the empty world of a launch, through
+    /// the same restore a switch back uses: the board is a snapshot until the
+    /// daemon answers for it, every refresh still asks, and the stale banner
+    /// dates it from the daemon's last answer. The Reading zone and the money
+    /// zones are not on disk, so they come with the first zone pass; the
+    /// selection is not kept across a launch.
+    private func restorePersistedBoard(_ board: PersistedBoard, for id: UUID) {
+        var kept = SitrepZoneCache()
+        kept.calendar = board.calendar
+        kept.shipments = board.shipments
+        var pages: [MailMode: [AttentionUpdate]] = [:]
+        for (key, rows) in board.mailPages {
+            if let mode = MailMode(rawValue: key) { pages[mode] = rows }
+        }
+        boardSnapshots[id] = BoardSnapshot(
+            sitrep: SitrepData(
+                standing: board.standing, new: board.new, open: board.open,
+                sealed: [], totalCount: board.totalCount),
+            stats: board.stats, fyeHeadline: board.fyeHeadline, fyeHeadlineKey: board.fyeHeadlineKey,
+            zones: kept, mailPages: pages, mailKeyset: board.mailKeyset, selectedId: nil,
+            lastRefresh: board.lastRefresh)
+        restoreBoardSnapshot(for: id)
+        LaunchSignpost.end(fromDisk: true)
     }
 
     /// The page a switch leaves the person on: the one they were on. A switch
@@ -3667,7 +3847,9 @@ final class AppStore {
     /// every visit and showed "loading mail…" over an empty page each time. Held in
     /// the store they survive navigation, and `Loadable` keeps the last rows through
     /// a reload, so even a stale revisit paints rows first and updates underneath.
-    private var mailPages: [MailMode: Loadable<[AttentionUpdate]>] = [:]
+    private var mailPages: [MailMode: Loadable<[AttentionUpdate]>] = [:] {
+        didSet { scheduleBoardSave() }
+    }
     /// Which page the emails tab is on. Here for the same reason as the pages
     /// themselves: a trip to the sitrep and back has to land where you left off.
     var mailMode: MailMode = .inbox

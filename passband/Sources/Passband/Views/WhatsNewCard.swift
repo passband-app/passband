@@ -204,7 +204,7 @@ struct WhatsNewCard: View {
                     .textCase(.uppercase)
                     .foregroundStyle(Palette.accent)
                     .lineLimit(1)
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 Text(headliner.surfaces.map(\.label).joined(separator: " · "))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
@@ -302,7 +302,7 @@ struct WhatsNewCard: View {
                                 .font(Typo.ui(13, weight: .semibold))
                                 .foregroundStyle(Palette.ink)
                                 .lineLimit(1)
-                            Spacer(minLength: 8)
+                            Spacer(minLength: Space.s8)
                             Text(Self.longDate(note.date))
                                 .font(Typo.micro)
                                 .foregroundStyle(Palette.inkFaintest)
@@ -448,7 +448,7 @@ struct WhatsNewCard: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
-            Spacer(minLength: 10)
+            Spacer(minLength: Space.s10)
             if page > 0 {
                 Button("Back") { go(to: page - 1) }
                     .buttonStyle(.plain)

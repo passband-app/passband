@@ -229,7 +229,7 @@ struct SwipeRow<Content: View>: View {
                     .fixedSize()
             }
         } else {
-            VStack(spacing: 3) {
+            VStack(spacing: Space.scaled(3)) {
                 Image(systemName: verb.symbol)
                     .font(.system(size: 15, weight: .semibold))
                 Text(verb.title)

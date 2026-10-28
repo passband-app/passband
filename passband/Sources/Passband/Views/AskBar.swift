@@ -291,7 +291,7 @@ struct AskBar: View {
 
     private func userRow(_ text: String) -> some View {
         HStack(spacing: 0) {
-            Spacer(minLength: 56)
+            Spacer(minLength: Space.scaled(56))
             Text(text)
                 .font(Typo.row)
                 .foregroundStyle(Palette.ink)

@@ -309,7 +309,7 @@
                 }
                 // The tags sit a little above the label's text line, so the
                 // first row of them centres on it.
-                .padding(.vertical, -Space.scaled(2))
+                .padding(.vertical, -Space.s2)
             } else {
                 Menu {
                     ForEach(list) { c in
@@ -1238,7 +1238,7 @@
                 }
                 .padding(.leading, Space.s8)
                 .padding(.trailing, Space.scaled(3))
-                .padding(.vertical, Space.scaled(2))
+                .padding(.vertical, Space.s2)
                 .overlay(
                     shape.strokeBorder(
                         focused ? Palette.accent.opacity(0.7) : Palette.inkFaint.opacity(0.55),

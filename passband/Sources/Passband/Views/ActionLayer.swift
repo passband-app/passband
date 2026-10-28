@@ -30,7 +30,7 @@ struct ActionLayer: View {
                 }
             }
             .padding(.leading, SidebarRail.railWidth + Space.s14)
-            .padding(.bottom, Space.scaled(18))
+            .padding(.bottom, ToastMetrics.edge)
 
             // AUTOMATIC UNSUBSCRIBES, bottom-right of the sitrep: the toasts'
             // opposite corner, so a job and an undo chip never fight for one.
@@ -59,8 +59,8 @@ struct ActionLayer: View {
                         }
                     }
                 }
-                .padding(.trailing, Space.scaled(18))
-                .padding(.bottom, Space.scaled(18))
+                .padding(.trailing, ToastMetrics.edge)
+                .padding(.bottom, ToastMetrics.edge)
                 .transition(.opacity)
                 .animation(.smooth(duration: 0.3), value: store.smartClearReceipt?.id)
                 .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)

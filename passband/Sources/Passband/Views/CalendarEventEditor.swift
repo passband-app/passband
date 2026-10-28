@@ -162,7 +162,7 @@
                     .frame(maxWidth: Typo.measure(200), alignment: .leading)
             }
             .padding(.horizontal, Space.s8)
-            .padding(.vertical, Space.scaled(4))
+            .padding(.vertical, Space.s4)
             .background(Capsule().fill(inks.fill.opacity(selected ? 1 : 0)))
             .overlay(
                 Capsule().strokeBorder(

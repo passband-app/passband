@@ -512,9 +512,9 @@ struct GroupsView: View {
                     membersSection(group)
                     historySection
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, PhoneRow.gutter)
                 .padding(.top, Space.s8)
-                .padding(.bottom, 28)
+                .padding(.bottom, Space.scaled(28))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Palette.canvas)

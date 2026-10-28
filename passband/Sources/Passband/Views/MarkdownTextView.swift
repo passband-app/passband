@@ -312,7 +312,7 @@ final class HighlightingTextView: NSTextView {
     /// Air kept around the caret when the page is scrolled to it, and the
     /// extra kept under the LAST line, which is where a reply is written: the
     /// composer's own foot (its files, its send keys) stays on screen with it.
-    private static var caretRoom: CGFloat { Space.scaled(24) }
+    private static var caretRoom: CGFloat { Space.s24 }
     private static var footRoom: CGFloat { Space.scaled(64) }
 
     /// Measure what the text needs at the width it has, and say so if that
@@ -528,7 +528,7 @@ final class HighlightingTextView: NSTextView {
     /// empty editor they are what sizes the caret and the first letter.
     func applyDensity() {
         font = MarkdownStyle.baseFont
-        textContainerInset = NSSize(width: 2, height: Space.scaled(4))
+        textContainerInset = NSSize(width: 2, height: Space.s4)
         rehighlight()
         typingAttributes = MarkdownStyle.base
     }

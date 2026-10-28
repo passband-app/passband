@@ -44,7 +44,7 @@ struct MailFilterBar: View {
                 }
             }
             #if os(macOS)
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
             #endif
             // The reminder lens is your own parked list, which the picker does
             // not narrow; a lit control there would claim it did.

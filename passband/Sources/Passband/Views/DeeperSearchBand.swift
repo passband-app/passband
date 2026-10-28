@@ -233,8 +233,8 @@ struct DeeperSearchBand: View {
                         Text("ask the agent")
                             .font(Typo.chip)
                             .foregroundStyle(Palette.ink)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
+                            .padding(.horizontal, Space.s12)
+                            .padding(.vertical, Space.s6)
                             .glassCapsule()
                             .contentShape(Capsule())
                     }

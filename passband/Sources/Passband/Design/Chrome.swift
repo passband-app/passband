@@ -552,6 +552,10 @@ extension View {
 enum ToastMetrics {
     static var hPadding: CGFloat { Space.s12 }
     static var vPadding: CGFloat { Space.s10 }
+    /// How far a corner toast, the unsubscribe tray and the update card float
+    /// in from the window's bottom (and right) edge, so the floating things
+    /// pinned to an edge sit off it by the same air.
+    static var edge: CGFloat { Space.scaled(18) }
     static let cornerRadius: CGFloat = Radius.toast
 }
 

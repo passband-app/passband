@@ -110,7 +110,7 @@
                 let drafting = store.eventPaneOpen
                 // The hours fill the height there is, between the month
                 // column's own floor and ceiling; past the floor they scroll.
-                let room = visibleHeight - nightHeight - Space.s6 - Space.scaled(20)
+                let room = visibleHeight - nightHeight - Space.s6 - Space.s20
                 let pph = min(Space.scaled(44), max(Space.scaled(20), floor(room / CGFloat(MonthGrid.dayHours))))
                 VStack(alignment: .leading, spacing: 0) {
                     heads(col: col, gutter: gutter)
@@ -118,7 +118,7 @@
                     ScrollView(.vertical) {
                         hours(col: col, pph: pph, drafting: drafting)
                             .padding(.top, Space.s6)
-                            .padding(.bottom, Space.scaled(20))
+                            .padding(.bottom, Space.s20)
                             .frame(width: width, alignment: .topLeading)
                     }
                     .scrollBounceBehavior(.basedOnSize)

@@ -75,7 +75,7 @@ struct RootView: View {
         // the reason it will not pair.
         .overlay(alignment: .bottom) {
             UpdateAlert()
-                .padding(.bottom, Space.scaled(18))
+                .padding(.bottom, ToastMetrics.edge)
         }
         // ADD ACCOUNT — the same form as the gate, over a working app. Hung on
         // the whole shell rather than on any one surface: it is raised from

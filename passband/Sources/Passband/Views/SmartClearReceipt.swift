@@ -428,9 +428,9 @@ struct SmartClearGroupSection: View {
                             SmartClearGroupSection(group: group)
                         }
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, PhoneRow.gutter)
                     .padding(.top, Space.s8)
-                    .padding(.bottom, 28)
+                    .padding(.bottom, Space.scaled(28))
                 }
                 .background(Palette.canvas)
                 .navigationTitle("Smart clear")
@@ -468,7 +468,7 @@ struct SmartClearGroupSection: View {
                 .buttonStyle(.glass)
                 .disabled(receipt.undoing)
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, PhoneRow.gutter)
             .padding(.vertical, Space.s10)
             .background(.bar)
         }

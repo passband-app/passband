@@ -802,7 +802,7 @@
                         now: calendar.isDate(column.day, inSameDayAs: now) ? now : nil,
                         calendar: calendar)
                 }
-                .padding(.bottom, Space.scaled(20))
+                .padding(.bottom, Space.s20)
             }
             .scrollBounceBehavior(.basedOnSize)
             .scrollIndicators(.hidden)
@@ -1220,7 +1220,7 @@
                         EndText(label: end)
                             .padding(.leading, Space.s6)
                             .frame(maxHeight: .infinity, alignment: .bottom)
-                            .padding(.bottom, Space.scaled(16))
+                            .padding(.bottom, Space.s16)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

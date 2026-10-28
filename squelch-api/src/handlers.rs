@@ -4773,8 +4773,14 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
             )
             .with_budget(state.gmail_budget().cloned()),
         )),
-        MailProvider::Outlook => Err(writer_unavailable(CoreError::InvalidInput(
-            "outlook writes are not in this build yet".into(),
+        MailProvider::Outlook => Ok(Arc::new(crate::write::graph::GraphWriteClient::with_http(
+            creds,
+            state.account_id,
+            state
+                .write_api_base()
+                .map(str::to_string)
+                .unwrap_or_else(|| squelch_core::mail::graph::GRAPH_API_BASE.to_string()),
+            state.write_http(),
         ))),
     }
 }

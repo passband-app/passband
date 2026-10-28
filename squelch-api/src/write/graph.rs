@@ -1,0 +1,505 @@
+//! Outlook WRITE operations over Microsoft Graph, behind [`MailWriter`].
+//!
+//! Same rules as the Gmail writer: the write token is fetched per request from
+//! a store bound to the Write slot, never retained, never logged, and no
+//! upstream body is ever echoed. What Graph changes:
+//!
+//! - **IMMUTABLE IDS ON EVERY REQUEST** (`Prefer: IdType="ImmutableId"`), as
+//!   the read side sends them. Archive and trash are folder MOVES in Graph,
+//!   and without the preference the moved message would come back under a
+//!   new id the stored row does not know.
+//! - **SEND IS DRAFT, THEN SEND.** `POST /me/sendMail` answers `202` with no
+//!   id, which would cost the audit row its id and the send its echo. So the
+//!   MIME is posted as a draft (`POST /me/messages`, base64 body,
+//!   `text/plain`), which answers with the message, and then sent
+//!   (`POST /me/messages/{id}/send`). With immutable ids the draft's id is the
+//!   sent item's id, so [`SentRef::id`] is what the echo fetches. A draft
+//!   whose send Graph REFUSED (a status, not a dropped connection) is deleted
+//!   best-effort; one whose send outcome is unknown is left alone, because
+//!   deleting it might delete mail that went out.
+//! - **LABELS ARE GMAIL'S.** [`MailWriter::modify`] maps the ones Outlook has
+//!   a meaning for (`UNREAD` is read state, `STARRED` is the flag, removing
+//!   `INBOX` is an archive) and refuses the rest with a 400, never a guess.
+//! - **THROTTLING** is a `429` with `Retry-After`, answered as
+//!   [`WriteError::Paced`]: nothing was done, try again then.
+//! - **A REQUEST IS AT MOST 4 MB.** Graph refuses larger bodies outright;
+//!   a bigger message needs an upload session this writer does not open yet,
+//!   so it is refused before anything is created.
+
+use base64::Engine as _;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use squelch_core::credentials::CredentialStore;
+use squelch_core::mail::graph::PREFER_IMMUTABLE_IDS;
+use squelch_core::types::AccountId;
+
+use super::mime::{OUTBOX_HEADER, bare_message_id, outbox_token};
+use super::{FetchedRaw, MailWriter, ParentHeaders, SentRef, WriteError, send_budget};
+
+/// Graph's ceiling on one request body.
+const GRAPH_MAX_REQUEST: usize = 4 * 1024 * 1024;
+
+/// Candidates per page, and pages, of the scheduled-send Sent scan; the same
+/// bounds the Gmail writer uses (see [`super::gmail::SCAN_PAGE`]).
+use super::gmail::{SCAN_MAX_PAGES, SCAN_PAGE};
+
+/// The Gmail labels [`MailWriter::modify`] can translate, and the refusal for
+/// every other.
+const LABELS_REFUSED: &str =
+    "labels are a Gmail concept; an Outlook account can only mark read or unread, flag, or archive";
+
+/// Percent-encode one path segment or query value.
+fn enc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// An OData string literal: single quotes doubled.
+fn odata_string(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailAddress {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Recipient {
+    email_address: EmailAddress,
+}
+
+#[derive(Debug, Deserialize)]
+struct Header {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageMeta {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    received_date_time: Option<String>,
+    #[serde(default)]
+    internet_message_id: Option<String>,
+    #[serde(default)]
+    internet_message_headers: Vec<Header>,
+    #[serde(default)]
+    from: Option<Recipient>,
+    #[serde(default)]
+    reply_to: Vec<Recipient>,
+    #[serde(default)]
+    to_recipients: Vec<Recipient>,
+    #[serde(default)]
+    cc_recipients: Vec<Recipient>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Page {
+    #[serde(default)]
+    value: Vec<MessageMeta>,
+    #[serde(rename = "@odata.nextLink", default)]
+    next_link: Option<String>,
+}
+
+/// One address as a header would carry it; the reply path re-derives bare
+/// addresses from these values, so a display name never reaches the wire.
+fn render(r: &Recipient) -> Option<String> {
+    let addr = r.email_address.address.as_deref()?.trim();
+    if addr.is_empty() {
+        return None;
+    }
+    match r.email_address.name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() && !name.eq_ignore_ascii_case(addr) => Some(format!(
+            "\"{}\" <{addr}>",
+            name.replace('\\', "\\\\").replace('"', "\\\"")
+        )),
+        _ => Some(addr.to_string()),
+    }
+}
+
+fn render_list(list: &[Recipient]) -> Option<String> {
+    let parts: Vec<String> = list.iter().filter_map(render).collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// Executes Outlook write ops with a WRITE-bound credential store.
+pub struct GraphWriteClient {
+    creds: std::sync::Arc<dyn CredentialStore>,
+    account_id: AccountId,
+    http: reqwest::Client,
+    /// API base. Graph's own in production; tests point it at a mock.
+    base: String,
+}
+
+impl GraphWriteClient {
+    /// Over a client of its own, for tests.
+    pub fn with_base(
+        creds: std::sync::Arc<dyn CredentialStore>,
+        account_id: AccountId,
+        base: String,
+    ) -> Self {
+        Self::with_http(
+            creds,
+            account_id,
+            base,
+            super::gmail::GmailWriteClient::build_http(),
+        )
+    }
+
+    /// Over the door's shared client (redirects refused; see
+    /// `GmailWriteClient::build_http`).
+    pub fn with_http(
+        creds: std::sync::Arc<dyn CredentialStore>,
+        account_id: AccountId,
+        base: String,
+        http: reqwest::Client,
+    ) -> Self {
+        Self {
+            creds,
+            account_id,
+            http,
+            base,
+        }
+    }
+
+    fn msg_url(&self, id: &str) -> String {
+        format!("{}/me/messages/{}", self.base, enc(id))
+    }
+
+    async fn write_token(&self) -> Result<String, WriteError> {
+        self.creds
+            .token(self.account_id)
+            .await
+            .map(|t| t.access_token)
+            .map_err(|e| {
+                WriteError::MissingCredential(format!("no write credential available: {e}"))
+            })
+    }
+
+    /// Send one request with the write bearer and the immutable-id
+    /// preference, and turn a non-success into an error that carries no
+    /// upstream text. A `429` is [`WriteError::Paced`]: Graph did nothing.
+    async fn call(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response, WriteError> {
+        let token = self.write_token().await?;
+        let resp = req
+            .bearer_auth(&token)
+            .header("Prefer", PREFER_IMMUTABLE_IDS)
+            .send()
+            .await
+            .map_err(|e| {
+                WriteError::Transport(format!(
+                    "graph request failed ({})",
+                    if e.is_timeout() {
+                        "timeout"
+                    } else {
+                        "transport"
+                    }
+                ))
+            })?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(resp);
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_in_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(30)
+                .max(1);
+            return Err(WriteError::Paced { retry_in_secs });
+        }
+        Err(WriteError::Api {
+            status: status.as_u16(),
+            message: "request rejected".into(),
+        })
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, WriteError> {
+        self.call(self.http.get(url))
+            .await?
+            .json::<T>()
+            .await
+            .map_err(|_| WriteError::Transport("graph json decode failed".into()))
+    }
+
+    async fn post_json(&self, url: &str, body: &Value) -> Result<reqwest::Response, WriteError> {
+        self.call(self.http.post(url).json(body)).await
+    }
+
+    async fn patch_json(&self, url: &str, body: &Value) -> Result<(), WriteError> {
+        self.call(self.http.patch(url).json(body)).await.map(|_| ())
+    }
+
+    /// Move a message to a well-known folder.
+    async fn move_to(&self, id: &str, folder: &str) -> Result<(), WriteError> {
+        self.post_json(
+            &format!("{}/move", self.msg_url(id)),
+            &json!({ "destinationId": folder }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Whether message `id` is the fired send: its [`OUTBOX_HEADER`] is
+    /// `token`, or its `internetMessageId` is the minted one.
+    fn carries_outbox(m: &MessageMeta, token: &str, bare_mid: &str) -> bool {
+        m.internet_message_id
+            .as_deref()
+            .is_some_and(|mid| bare_message_id(mid) == bare_mid)
+            || m.internet_message_headers
+                .iter()
+                .any(|h| h.name.eq_ignore_ascii_case(OUTBOX_HEADER) && h.value.trim() == token)
+    }
+}
+
+#[async_trait::async_trait]
+impl MailWriter for GraphWriteClient {
+    /// The Gmail labels Outlook has a meaning for, applied in one PATCH (plus
+    /// a move for an archive); anything else refuses the whole request before
+    /// a call is made, so a mixed request never half-applies.
+    async fn modify(
+        &self,
+        msg_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<(), WriteError> {
+        let mut patch = serde_json::Map::new();
+        let mut archive = false;
+        for (label, adding) in add
+            .iter()
+            .map(|l| (l, true))
+            .chain(remove.iter().map(|l| (l, false)))
+        {
+            match (label.as_str(), adding) {
+                ("UNREAD", adding) => {
+                    patch.insert("isRead".into(), json!(!adding));
+                }
+                ("STARRED", adding) => {
+                    patch.insert(
+                        "flag".into(),
+                        json!({ "flagStatus": if adding { "flagged" } else { "notFlagged" } }),
+                    );
+                }
+                ("INBOX", false) => archive = true,
+                _ => return Err(WriteError::Invalid(LABELS_REFUSED.into())),
+            }
+        }
+        if !patch.is_empty() {
+            self.patch_json(&self.msg_url(msg_id), &Value::Object(patch))
+                .await?;
+        }
+        if archive {
+            self.archive(msg_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn archive(&self, msg_id: &str) -> Result<(), WriteError> {
+        self.move_to(msg_id, "archive").await
+    }
+
+    async fn not_spam(&self, msg_id: &str) -> Result<(), WriteError> {
+        self.move_to(msg_id, "inbox").await
+    }
+
+    /// To Deleted Items: recoverable, never a permanent delete.
+    async fn trash(&self, msg_id: &str) -> Result<(), WriteError> {
+        self.move_to(msg_id, "deleteditems").await
+    }
+
+    /// The threading headers from `internetMessageId` and the transport
+    /// headers (`References`), the audience from the structured fields.
+    async fn parent_headers(&self, msg_id: &str) -> Result<ParentHeaders, WriteError> {
+        let url = format!(
+            "{}?$select=internetMessageId,internetMessageHeaders,from,replyTo,toRecipients,ccRecipients",
+            self.msg_url(msg_id)
+        );
+        let m: MessageMeta = self.get_json(&url).await?;
+        let references = m
+            .internet_message_headers
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case("references"))
+            .map(|h| h.value.clone())
+            .reduce(|a, b| format!("{a} {b}"));
+        Ok(ParentHeaders {
+            message_id: m.internet_message_id.clone(),
+            references,
+            reply_to: render_list(&m.reply_to),
+            from: m.from.as_ref().and_then(render),
+            to: render_list(&m.to_recipients),
+            cc: render_list(&m.cc_recipients),
+        })
+    }
+
+    /// Draft, then send (see the module doc). `thread_id` is not needed: the
+    /// MIME's `In-Reply-To` and `References` thread the reply in Exchange.
+    async fn send(&self, raw: &[u8], _thread_id: Option<&str>) -> Result<SentRef, WriteError> {
+        if raw.is_empty() {
+            return Err(WriteError::Invalid("empty message".into()));
+        }
+        let body = base64::engine::general_purpose::STANDARD.encode(raw);
+        if body.len() > GRAPH_MAX_REQUEST {
+            return Err(WriteError::Invalid(format!(
+                "this message is {} MB; Outlook sends over about 3 MB are not supported yet",
+                raw.len() / (1024 * 1024)
+            )));
+        }
+        let draft = self
+            .call(
+                self.http
+                    .post(format!("{}/me/messages", self.base))
+                    .header(reqwest::header::CONTENT_TYPE, "text/plain")
+                    .timeout(send_budget(raw.len()))
+                    .body(body),
+            )
+            .await?
+            .json::<MessageMeta>()
+            .await
+            .map_err(|_| WriteError::Transport("graph draft response unreadable".into()))?;
+        if draft.id.is_empty() {
+            return Err(WriteError::Transport(
+                "graph created a draft without an id; nothing was sent".into(),
+            ));
+        }
+        let sent = self
+            .post_json(&format!("{}/send", self.msg_url(&draft.id)), &json!({}))
+            .await;
+        match sent {
+            Ok(_) => Ok(SentRef {
+                id: Some(draft.id),
+                thread_id: draft.conversation_id,
+            }),
+            Err(e) => {
+                // Refused outright (a status, or pacing): nothing went out, so
+                // the draft is ours to clean up. A transport failure is not
+                // proof either way, and the draft stays.
+                if matches!(e, WriteError::Api { .. } | WriteError::Paced { .. }) {
+                    let _ = self.call(self.http.delete(self.msg_url(&draft.id))).await;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// `$value` (raw MIME bytes), re-encoded base64url for [`FetchedRaw`],
+    /// with the thread and received date from the message's metadata.
+    async fn fetch_raw(&self, msg_id: &str) -> Result<FetchedRaw, WriteError> {
+        let meta: MessageMeta = self
+            .get_json(&format!(
+                "{}?$select=id,conversationId,receivedDateTime",
+                self.msg_url(msg_id)
+            ))
+            .await?;
+        let bytes = self
+            .call(self.http.get(format!("{}/$value", self.msg_url(msg_id))))
+            .await?
+            .bytes()
+            .await
+            .map_err(|_| WriteError::Transport("graph body read failed".into()))?;
+        let internal_date = meta
+            .received_date_time
+            .as_deref()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.timestamp_millis().to_string());
+        Ok(FetchedRaw {
+            raw_b64: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes),
+            thread_id: meta.conversation_id,
+            internal_date,
+        })
+    }
+
+    async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError> {
+        let filter = format!("internetMessageId eq {}", odata_string(msgid.trim()));
+        let url = format!(
+            "{}/me/messages?$select=id&$top=1&$filter={}",
+            self.base,
+            enc(&filter)
+        );
+        let page: Page = self.get_json(&url).await?;
+        Ok(page
+            .value
+            .into_iter()
+            .map(|m| m.id)
+            .find(|id| !id.is_empty()))
+    }
+
+    /// The scheduled send's recovery question, as the Gmail writer asks it: a
+    /// `Message-ID` lookup, then a bounded scan of Sent Items inside `window`
+    /// reading each candidate's outbox header. Any doubt is `Err`.
+    async fn find_scheduled_send(
+        &self,
+        message_id: &str,
+        window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+        stopping: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<Option<String>, WriteError> {
+        let token = outbox_token(message_id);
+        if token.is_empty() {
+            return Err(WriteError::Invalid("no outbox token to search for".into()));
+        }
+        if let Some(id) = self.find_by_rfc822_msgid(message_id).await? {
+            return Ok(Some(id));
+        }
+        let bare_mid = bare_message_id(message_id);
+        let fmt = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let filter = format!(
+            "sentDateTime ge {} and sentDateTime lt {}",
+            fmt(window.0),
+            fmt(window.1.max(window.0 + chrono::Duration::seconds(1)))
+        );
+        let mut url = format!(
+            "{}/me/mailFolders/sentitems/messages?$select=id,internetMessageId,internetMessageHeaders&$top={SCAN_PAGE}&$filter={}",
+            self.base,
+            enc(&filter)
+        );
+        let cut_short = || WriteError::Transport("sent scan cut short by shutdown".into());
+        for _ in 0..SCAN_MAX_PAGES {
+            if stopping() {
+                return Err(cut_short());
+            }
+            let page: Page = self.get_json(&url).await?;
+            if let Some(hit) = page
+                .value
+                .iter()
+                .find(|m| Self::carries_outbox(m, &token, bare_mid))
+            {
+                return Ok(Some(hit.id.clone()));
+            }
+            match page.next_link {
+                // A link off our own base is never followed with the token.
+                Some(next) if next.starts_with(&format!("{}/", self.base)) => url = next,
+                Some(_) => {
+                    return Err(WriteError::Transport(
+                        "sent scan got a next link off the Graph base".into(),
+                    ));
+                }
+                None => return Ok(None),
+            }
+        }
+        Err(WriteError::Transport(
+            "sent scan reached its page cap without ruling the mail out".into(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests;

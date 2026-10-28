@@ -807,32 +807,73 @@ fn auth_plan(args: &AuthArgs) -> Vec<AuthScopes> {
     }
 }
 
-/// Whether a Gmail run (plain `auth` or `--write`) should end with the
-/// OPTIONAL calendar consent, so a new self-host is asked for calendar at
+/// Whether a Gmail run (plain `auth` or `--write`) should end by OFFERING
+/// the optional calendar consent, so a new self-host is asked for calendar at
 /// setup even while the `calendar` hidden feature is off (sync calls nothing
-/// until it is on). Asked only while no calendar credential is stored, so a
-/// later repair run does not ask again, and never on `--calendar` (which is
-/// that consent already) or `--import` (where the blob decides).
+/// until it is on). Offered only while no calendar credential is stored, so
+/// a repair run does not ask again, and never on `--calendar`, which is that
+/// consent already.
 ///
-/// A third consent and not more scopes on the Read one: calendar.events can
-/// write, and the Read slot stays a token that cannot.
+/// NOT ON `--export`: the blob is printed only after every consent, so an
+/// abandoned optional screen would hold the Gmail tokens hostage for the full
+/// consent wait, and a blob carrying a Calendar entry is refused whole by an
+/// importer older than daemon 0.0.13. Export users add `--calendar`.
+///
+/// A third consent into the Calendar slot rather than more scopes on the
+/// Read consent, so the Read consent screen stays Gmail-only. What keeps the
+/// two doors apart is still which slot a code path loads (Google unions
+/// grants per project, so a later token may carry more than it asked for).
 fn wants_first_calendar(args: &AuthArgs, calendar_stored: bool) -> bool {
-    !args.calendar && !args.import && !calendar_stored
+    !args.calendar && !args.export && !args.import && !calendar_stored
 }
 
-/// Run the trailing optional calendar consent. NEVER fatal: the mailbox is
-/// fully set up by now, so an unticked box or a failed consent is a warning
-/// and a hint, and the run still succeeds.
-fn mint_first_calendar(run: impl FnOnce() -> Result<(), squelch_core::CoreError>) {
-    eprintln!(
-        "\nsquelchd: one more, optional: Google Calendar, so Passband can put events from your \
-         mail beside your schedule. Untick it at Google to skip."
-    );
-    if let Err(e) = run() {
+/// A yes to "connect calendar now?": empty (Enter) or anything starting
+/// with y. Everything else, including a closed stdin, is a no.
+fn says_yes(answer: &str) -> bool {
+    let a = answer.trim().to_ascii_lowercase();
+    a.is_empty() || a.starts_with('y')
+}
+
+/// Ask before the optional calendar consent, and only when a person is at a
+/// terminal: a consent nobody opens waits out the full timeout, so with no
+/// terminal, or on a no, it is skipped with the command that connects it
+/// later.
+fn confirm_first_calendar() -> bool {
+    use std::io::{IsTerminal, Write};
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
         eprintln!(
-            "squelchd: calendar was not connected ({e}). Your mailbox is set up; run \
+            "\nsquelchd: Google Calendar is optional and not connected; run \
              `squelchd auth --calendar` any time to connect it."
         );
+        return false;
+    }
+    eprint!(
+        "\nsquelchd: your mailbox is set up. Also connect Google Calendar now, so Passband can \
+         put events from your mail beside your schedule? It is one more Google screen. [Y/n] "
+    );
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if stdin.read_line(&mut answer).unwrap_or(0) == 0 || !says_yes(&answer) {
+        eprintln!("squelchd: skipped. Run `squelchd auth --calendar` any time to connect it.");
+        return false;
+    }
+    true
+}
+
+/// Run the optional calendar consent. NEVER fatal: the mailbox is fully set
+/// up by now, so an unticked box or a failed consent is a warning and a hint,
+/// and the run still succeeds.
+fn mint_first_calendar(run: impl FnOnce() -> Result<(), squelch_core::CoreError>) -> bool {
+    match run() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "squelchd: calendar was not connected ({e}). Your mailbox is set up; run \
+                 `squelchd auth --calendar` any time to connect it."
+            );
+            false
+        }
     }
 }
 
@@ -876,12 +917,6 @@ fn cmd_auth(
 
     let plan = auth_plan(args);
     let total = plan.len();
-    // A missing or unreadable calendar slot both read as "not stored": the
-    // worst case is one optional consent asked again.
-    let first_calendar = wants_first_calendar(
-        args,
-        load_token_backend(backend, &creds_path, &email, CredentialKind::Calendar).is_ok(),
-    );
     if total > 1 {
         eprintln!(
             "squelchd: --write renews BOTH credentials so they cannot drift apart; \
@@ -920,7 +955,12 @@ fn cmd_auth(
             return Err(e);
         }
     }
-    if first_calendar {
+    // Read AFTER the Gmail consents, so a keyring prompt can never stand in
+    // front of the screen that matters. Missing or unreadable both read as
+    // "not stored": the worst case is one optional offer made again.
+    let calendar_stored =
+        load_token_backend(backend, &creds_path, &email, CredentialKind::Calendar).is_ok();
+    if wants_first_calendar(args, calendar_stored) && confirm_first_calendar() {
         mint_first_calendar(|| {
             mint_credential(
                 &client,
@@ -1111,30 +1151,6 @@ fn cmd_auth_export(config: &Config, args: &AuthArgs) -> Result<(), squelch_core:
             token,
         });
     }
-
-    // The optional calendar consent, packed into the same blob. The export
-    // machine has no slots to look at, so it is always offered; refusing it
-    // or failing it exports the Gmail credentials alone.
-    if wants_first_calendar(args, false) {
-        mint_first_calendar(|| {
-            let (mailbox, token) =
-                run_export_flow(&client, expected_account, AuthScopes::Calendar, bind)?;
-            if let Some(first) = &account {
-                check_export_same_account(first, &mailbox)?;
-            }
-            if token.refresh_token.is_none() {
-                return Err(other_err(
-                    "Google returned no refresh token for it".to_string(),
-                ));
-            }
-            credentials.push(TransferCredential {
-                kind: CredentialKind::Calendar,
-                token,
-            });
-            Ok(())
-        });
-    }
-    let total = credentials.len();
 
     let account = account.ok_or_else(|| other_err("no credential was authorized".to_string()))?;
     let blob = encode_transfer(&CredentialTransfer::new(account.clone(), credentials))?;
@@ -3150,9 +3166,9 @@ mod tests {
         );
     }
 
-    /// A Gmail run ends with the optional calendar consent while no calendar
+    /// A Gmail run offers the optional calendar consent while no calendar
     /// credential is stored; never once one is, never on `--calendar` (that IS
-    /// the consent) and never on `--import`.
+    /// the consent), and never on `--export` or `--import`.
     #[test]
     fn a_first_gmail_run_offers_calendar_once() {
         let plain = bare_auth_args();
@@ -3163,25 +3179,44 @@ mod tests {
             ..bare_auth_args()
         };
         assert!(wants_first_calendar(&write, false));
-        let calendar = AuthArgs {
-            calendar: true,
-            ..bare_auth_args()
-        };
-        assert!(!wants_first_calendar(&calendar, false));
-        let import = AuthArgs {
-            import: true,
-            ..bare_auth_args()
-        };
-        assert!(!wants_first_calendar(&import, false));
-        // The Gmail plan itself is unchanged: calendar is never folded into
-        // the Read or Write consent.
+        for args in [
+            AuthArgs {
+                calendar: true,
+                ..bare_auth_args()
+            },
+            AuthArgs {
+                export: true,
+                ..bare_auth_args()
+            },
+            AuthArgs {
+                import: true,
+                ..bare_auth_args()
+            },
+        ] {
+            assert!(!wants_first_calendar(&args, false));
+        }
+        // The Gmail plan is unchanged: calendar is never folded into it.
         assert_eq!(auth_plan(&plain), vec![AuthScopes::Read]);
-        assert!(
-            AuthScopes::Read
-                .requested()
-                .iter()
-                .all(|s| !s.contains("calendar"))
-        );
+        assert_eq!(auth_plan(&write), vec![AuthScopes::Write, AuthScopes::Read]);
+    }
+
+    /// Enter or a y is a yes; anything else is a no.
+    #[test]
+    fn the_calendar_offer_defaults_to_yes() {
+        for yes in ["", "\n", "y\n", "Y", "yes", " YES \n"] {
+            assert!(says_yes(yes), "{yes:?}");
+        }
+        for no in ["n\n", "no", "N", "later", "q"] {
+            assert!(!says_yes(no), "{no:?}");
+        }
+    }
+
+    /// The optional step swallows its failure, so a run whose mailbox is set
+    /// up never fails over calendar.
+    #[test]
+    fn a_failed_calendar_step_is_not_fatal() {
+        assert!(!mint_first_calendar(|| Err(other_err("unticked".into()))));
+        assert!(mint_first_calendar(|| Ok(())));
     }
 
     /// `--calendar` mints the Calendar credential and NOTHING ELSE: no Read

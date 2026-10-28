@@ -1016,10 +1016,12 @@ from the plan below:
 - **Self-host** connects from the app (`POST /client/calendar/connect`, the
   daemon running the consent on loopback) or from a terminal with
   `squelchd auth --calendar`. Both BUILT, and both build the same consent.
-  Since 2026-10-27 plain `squelchd auth` (and `--write`, and `--export`) ends
-  with that same calendar consent, optional and never fatal, while no
-  calendar credential is stored. It is a third consent into the Calendar
-  slot, not more scopes on the Read token, which stays unable to write.
+  Since 2026-10-27 plain `squelchd auth` (and `--write`) ends by offering
+  that same calendar consent ("[Y/n]", only at a terminal), optional and
+  never fatal, while no calendar credential is stored. A separate consent
+  into the Calendar slot, so the Read consent screen stays Gmail-only. Not
+  on `--export`: an abandoned screen would hold the blob, and importers
+  before daemon 0.0.13 refuse a blob with a Calendar entry.
 - **Order of release:** control and warden, then the daemon, then the client.
   A client that meets a daemon without the capability shows ghost mode only.
 

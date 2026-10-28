@@ -472,7 +472,7 @@ impl EventEdit {
 /// other form is set to `null` ("To delete a field, specify the field and set
 /// it to `null`"), so an event switched between all-day and timed does not
 /// keep both.
-fn google_time(time: &EventTime, is_end: bool, edit: bool) -> Result<Value, Invalid> {
+pub(crate) fn google_time(time: &EventTime, is_end: bool, edit: bool) -> Result<Value, Invalid> {
     let (key, value, other) = match time {
         EventTime::At(at) => ("dateTime", at.to_rfc3339(), "date"),
         EventTime::Date(day) => {

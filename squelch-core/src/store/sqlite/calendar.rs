@@ -3,7 +3,8 @@
 //! (the events in the synced window) and `calendar_event_guests` (each
 //! event's attendees, replaced whole with the event and deleted with it by a
 //! trigger), and `calendar_places` (the card's place made of each event
-//! location, [`crate::gcal::place`]). Written by the sync loop
+//! location, [`crate::gcal::place`]), and `calendar_owned` (the event
+//! Passband made for a ghost, [`crate::gcal::own`]). Written by the sync loop
 //! ([`crate::gcal::sync`]) and, one event at a time, by the human door after
 //! Google accepted the user's own create, edit or delete; read only by the
 //! human door. HUMAN DOOR ONLY: no agent route and no triage prompt reads
@@ -20,12 +21,12 @@
 //! UTC sort key, so the two listings apply one `[from, to)` rule, by start.
 use super::ghosts::{in_range, listing_order, sort_key};
 use super::*;
-use crate::gcal::place;
 use crate::gcal::{
     AccessRole, CalendarErrorKind, CalendarMeta, CalendarStatus, EventItem, EventRow, Guest,
     GuestResponse, MAX_EVENTS_PER_CALENDAR, MAX_GUESTS, PRIMARY, PageApplied, SelfResponse,
     StoredCalendar, SyncedEvent,
 };
+use crate::gcal::{own, place};
 use crate::triage::ghost::EventTime;
 use chrono::FixedOffset;
 use std::collections::{HashMap, HashSet};
@@ -629,6 +630,89 @@ impl SqliteStore {
                  WHERE e.account_id=calendar_places.account_id AND e.location=calendar_places.raw)",
             params![account],
         )?)
+    }
+
+    /// Every binding of a ghost to the event Passband made for it
+    /// ([`crate::gcal::own`]). A row whose state does not parse is skipped.
+    pub fn calendar_owned(&self, account: AccountId) -> Result<Vec<own::Owned>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT ghost_id, calendar_id, event_id, state, fingerprint
+             FROM calendar_owned WHERE account_id=?1 ORDER BY ghost_id",
+        )?;
+        let rows = stmt.query_map(params![account], |r| {
+            let state: String = r.get(3)?;
+            Ok(
+                own::OwnState::parse(&state).map(|state| -> rusqlite::Result<own::Owned> {
+                    Ok(own::Owned {
+                        ghost_id: r.get(0)?,
+                        calendar_id: r.get(1)?,
+                        event_id: r.get(2)?,
+                        state,
+                        fingerprint: r.get(4)?,
+                    })
+                }),
+            )
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(owned) = row?.transpose()? {
+                out.push(owned);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Write a ghost's binding, replacing any it had.
+    pub fn calendar_owned_put(
+        &self,
+        account: AccountId,
+        owned: &own::Owned,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO calendar_owned(account_id,ghost_id,calendar_id,event_id,state,fingerprint,
+                 updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(account_id,ghost_id) DO UPDATE SET calendar_id=excluded.calendar_id,
+                 event_id=excluded.event_id, state=excluded.state,
+                 fingerprint=excluded.fingerprint, updated_at=excluded.updated_at",
+            params![
+                account,
+                owned.ghost_id,
+                owned.calendar_id,
+                owned.event_id,
+                owned.state.as_str(),
+                owned.fingerprint,
+                now.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Set a ghost's binding's state. Whether there was one.
+    pub fn calendar_owned_set_state(
+        &self,
+        account: AccountId,
+        ghost_id: i64,
+        state: own::OwnState,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "UPDATE calendar_owned SET state=?3, updated_at=?4 WHERE account_id=?1 AND ghost_id=?2",
+            params![account, ghost_id, state.as_str(), now.to_rfc3339()],
+        )? > 0)
+    }
+
+    /// Forget a ghost's binding. Whether there was one.
+    pub fn calendar_owned_forget(&self, account: AccountId, ghost_id: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM calendar_owned WHERE account_id=?1 AND ghost_id=?2",
+            params![account, ghost_id],
+        )? > 0)
     }
 
     /// Every stored place, by the location it was made from: `None` for a

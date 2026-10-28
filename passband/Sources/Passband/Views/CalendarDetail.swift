@@ -95,6 +95,7 @@
         private var source: String {
             if let event = item.event {
                 let name = event.calendar_name.map { "\($0) calendar" } ?? "Your calendar"
+                if event.passband_owned == true { return "\(name), kept current by Passband" }
                 return event.from_gmail == true ? "\(name), added by Gmail" : name
             }
             switch item.ghost?.kind ?? .other {

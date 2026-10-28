@@ -2132,6 +2132,10 @@ fn ghost_view(
 /// carries `place` once the small model has cleaned its location
 /// ([`squelch_core::gcal::place`]): the text the detail card shows in place
 /// of `location`, `""` when the location names no place. Absent until then.
+/// An event Passband made in place of Gmail's and keeps current from the mail
+/// ([`squelch_core::gcal::own`]) carries `passband_owned: true`, and the ghost
+/// it was made for is matched to it whatever its title; a ghost is matched to
+/// an event Gmail made from the same mail by `own::same_event` too.
 ///
 /// Defaults: `from` is a day ago and `to` is `from` plus the default window
 /// (so with neither, now-1d to now+90d). `state` is judged at the server's
@@ -2160,7 +2164,7 @@ pub async fn get_timeline(
         Some(calendar) => calendar.granted().await,
         None => false,
     };
-    let (ghosts, events, calendars, status, places) =
+    let (ghosts, events, calendars, status, places, owned) =
         store_call(&state, move |store, account_id| {
             let ghosts = store.list_ghost_events(account_id, from, to)?;
             if !granted {
@@ -2170,6 +2174,7 @@ pub async fn get_timeline(
                     Vec::new(),
                     Default::default(),
                     Default::default(),
+                    Vec::new(),
                 ));
             }
             let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
@@ -2182,15 +2187,43 @@ pub async fn get_timeline(
                 .filter(|c| c.selected)
                 .collect();
             let places = store.calendar_places(account_id)?;
-            Ok((ghosts, events, calendars, status, places))
+            let owned = store.calendar_owned(account_id)?;
+            Ok((ghosts, events, calendars, status, places, owned))
         })
         .await?;
     // The display match, computed here and never stored, so it can never go
     // stale and never changes a ghost.
-    let matched = squelch_core::gcal::match_ghosts(
+    let mut matched = squelch_core::gcal::match_ghosts(
         ghosts.iter().map(|g| (g.title.as_str(), &g.start)),
         &events,
     );
+    // Two more ways a ghost is the same thing as an event: Passband made the
+    // event for it and keeps it (gcal/own.rs), whatever its time or title
+    // now; or Gmail made the event from the same mail, which titles it its
+    // own way (`own::same_event`: the same start and a distinctive word).
+    use squelch_core::gcal::own::{self, OwnState};
+    let mine: std::collections::HashSet<(&str, &str)> = owned
+        .iter()
+        .filter(|o| o.state == OwnState::Owned)
+        .map(|o| (o.calendar_id.as_str(), o.event_id.as_str()))
+        .collect();
+    for (ghost, slot) in ghosts.iter().zip(matched.iter_mut()) {
+        let bound = owned
+            .iter()
+            .find(|o| o.ghost_id == ghost.id && o.state == OwnState::Owned)
+            .and_then(|o| {
+                events
+                    .iter()
+                    .position(|e| e.calendar_id == o.calendar_id && e.row.event_id == o.event_id)
+            });
+        if bound.is_some() {
+            *slot = bound;
+        } else if slot.is_none() {
+            *slot = events
+                .iter()
+                .position(|e| e.row.from_gmail && own::same_event(ghost, &e.row));
+        }
+    }
     let now = now.with_timezone(from.offset());
     let ghosts: Vec<_> = ghosts
         .iter()
@@ -2219,6 +2252,11 @@ pub async fn get_timeline(
             // and the client shows `location`.
             if let Some(place) = e.row.location.as_ref().and_then(|raw| places.get(raw)) {
                 view["place"] = json!(place.as_deref().unwrap_or(""));
+            }
+            // Passband made this event and keeps it current from the mail.
+            // Absent otherwise.
+            if mine.contains(&(e.calendar_id.as_str(), e.row.event_id.as_str())) {
+                view["passband_owned"] = json!(true);
             }
             view
         })

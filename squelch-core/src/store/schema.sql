@@ -2088,6 +2088,23 @@ END;
 -- by the text, so every event at one place shares one call. A row whose text
 -- no event holds any more is pruned after each batch. HUMAN DOOR ONLY, like
 -- the events it describes.
+-- PASSBAND'S OWN EVENTS (gcal/own.rs): which event on the user's calendar
+-- Passband made for a ghost, in place of Gmail's copy, and keeps current from
+-- the mail. `state` is `owned` (kept current), `released` (the user deleted
+-- it or dismissed the ghost: never adopted again) or `refused` (Google would
+-- not delete Gmail's copy: left alone). `fingerprint` is what the mail said
+-- when Passband last wrote the event. One row per ghost; a ghost that goes
+-- takes its row with it, the event stays. HUMAN DOOR ONLY.
+CREATE TABLE IF NOT EXISTS calendar_owned (
+    account_id  INTEGER NOT NULL,
+    ghost_id    INTEGER NOT NULL,
+    calendar_id TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(account_id, ghost_id)
+);
 CREATE TABLE IF NOT EXISTS calendar_places (
     account_id     INTEGER NOT NULL,
     raw            TEXT NOT NULL,

@@ -93,6 +93,9 @@ struct Google {
     list_gets: Vec<String>,
     /// Answer every `calendarList.get` with this status instead.
     list_get_status: Option<u16>,
+    /// Answer every delete of this event id 403, as Google refuses a change
+    /// it does not allow.
+    fail_delete_of: Option<String>,
     /// Answer this many of the next one-event reads 404, found or not, as a
     /// replica that has not caught up would.
     stale_reads: usize,
@@ -305,6 +308,10 @@ async fn delete_route(
     let mut g = g.lock().unwrap();
     if let Some(failed) = g.record("DELETE", &calendar, Some(&id), q, Value::Null, &headers) {
         return failed;
+    }
+    if g.fail_delete_of.as_deref() == Some(id.as_str()) {
+        let error = json!({"error": {"code": 403, "errors": [{"reason": "forbidden"}]}});
+        return (StatusCode::FORBIDDEN, Json(error)).into_response();
     }
     let Some(pages) = g.full.get_mut(&calendar) else {
         return StatusCode::GONE.into_response();
@@ -5761,4 +5768,185 @@ async fn a_place_answer_that_adds_a_word_keeps_the_location() {
     assert_eq!(sync.pass(Utc::now()).await, PassOutcome::Synced);
     sync.clean_places(Utc::now()).await;
     assert_eq!(w.events().await[0]["place"], json!(noisy));
+}
+
+// --- Passband owns Gmail's events -------------------------------------------
+
+/// Gmail's own copy of a reservation on the user's calendar is replaced by
+/// Passband's event, which nobody is emailed about and which the audit log
+/// records; an invitation Gmail added from someone else's mail is left
+/// alone; a second pass changes nothing; and when Gmail adds its copy again,
+/// it is deleted as a duplicate. Without the `calendar_own` key, nothing is
+/// written at all.
+#[tokio::test]
+async fn passband_takes_over_gmails_own_events_and_leaves_invitations_alone() {
+    use squelch_core::features::{CALENDAR, CALENDAR_OWN};
+    use squelch_core::gcal::own::{AUDIT_ACTOR, OWNED_NOTE};
+    let w = world("own", GRANTED).await;
+    let start = minute(Utc::now() + Duration::days(2));
+    let later = start + Duration::days(1);
+    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    gmail["eventType"] = json!("fromGmail");
+    gmail["location"] = json!("Dingles Public House, 165 Main St");
+    gmail["organizer"] = json!({"email": "me@example.com", "self": true});
+    let mut invite = timed("gm2", "Drinks at Bemelmans", later, 60);
+    invite["eventType"] = json!("fromGmail");
+    invite["organizer"] = json!({"email": "ellie@example.com"});
+    invite["attendees"] = json!([
+        {"email": "ellie@example.com", "organizer": true, "responseStatus": "accepted"},
+        {"email": "me@example.com", "self": true, "responseStatus": "accepted"}
+    ]);
+    w.google()
+        .full
+        .insert(PRIMARY.into(), vec![vec![gmail.clone(), invite]]);
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    seed_ghost(&w.store, w.acct, "g2", "Drinks at Bemelmans", rfc(later));
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+
+    // The calendar key alone writes nothing.
+    w.sync.own_events(Utc::now()).await;
+    assert!(w.google().writes.is_empty(), "off without calendar_own");
+
+    w.features.replace_granted([CALENDAR, CALENDAR_OWN]);
+    w.sync.own_events(Utc::now()).await;
+    let new_id = {
+        let g = w.google();
+        assert_eq!(g.writes.len(), 2, "{:?}", g.writes);
+        let insert = &g.writes[0];
+        assert_eq!((insert.method, insert.calendar.as_str()), ("POST", PRIMARY));
+        assert_eq!(insert.query["sendUpdates"], "none");
+        assert_eq!(
+            insert.body["summary"],
+            "Reservation at Dingles Public House"
+        );
+        assert_eq!(insert.body["description"], OWNED_NOTE);
+        assert_eq!(insert.body["start"]["dateTime"], json!(rfc(start)));
+        let id = insert.body["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("passband"));
+        let delete = &g.writes[1];
+        assert_eq!(
+            (delete.method, delete.event.as_deref()),
+            ("DELETE", Some("gm1"))
+        );
+        assert_eq!(delete.query["sendUpdates"], "none");
+        id
+    };
+
+    // Served: Passband's event, editable, in Gmail's place; the invitation
+    // as it was.
+    let events = w.events().await;
+    let ids: Vec<&str> = events.iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, [new_id.as_str(), "gm2"]);
+    assert_eq!(events[0]["editable"], json!(true));
+    assert_eq!(events[0]["from_gmail"], json!(false));
+    assert_eq!(events[1]["from_gmail"], json!(true));
+    assert_eq!(events[1]["editable"], json!(false));
+    assert_eq!(events[0]["passband_owned"], json!(true));
+    assert!(events[1].get("passband_owned").is_none());
+    // The ghost Passband made it for is matched to it, though the titles
+    // differ, so the timeline draws one item, not two.
+    let ghosts = w.timeline().await["ghosts"].as_array().unwrap().clone();
+    let dinner = ghosts
+        .iter()
+        .find(|g| g["title"] == "Dinner at Dingles")
+        .unwrap();
+    assert_eq!(
+        dinner["matched_event"],
+        json!({"calendar_id": PRIMARY, "id": new_id})
+    );
+
+    // Audited, with no title or place.
+    let rows = w.store.list_audit(w.acct, 10).unwrap();
+    let actions: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.actor.as_str(),
+                r.action.as_str(),
+                r.detail.as_deref().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert!(actions.contains(&(AUDIT_ACTOR, "calendar_event_adopt", "ok")));
+    assert!(actions.contains(&(AUDIT_ACTOR, "calendar_event_replace_gmail", "ok")));
+    let text = serde_json::to_string(&rows).unwrap();
+    for secret in ["Dingles", "Bemelmans", "Main St"] {
+        assert!(!text.contains(secret), "the audit log carries {secret}");
+    }
+
+    // Again: nothing to do.
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(w.google().writes.len(), 2);
+
+    // Gmail adds its copy back: the next sync brings it, and it goes.
+    let mut again = gmail;
+    again["id"] = json!("gm3");
+    w.google().changes.insert(
+        PRIMARY.into(),
+        HashMap::from([(
+            "tok-primary-1".to_string(),
+            (vec![again], "tok-primary-2".to_string()),
+        )]),
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    w.sync.own_events(Utc::now()).await;
+    {
+        let g = w.google();
+        assert_eq!(g.writes.len(), 3);
+        assert_eq!(
+            (g.writes[2].method, g.writes[2].event.as_deref()),
+            ("DELETE", Some("gm3"))
+        );
+    }
+    let ids: Vec<String> = w
+        .events()
+        .await
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, [new_id, "gm2".to_string()]);
+}
+
+/// When Google refuses to delete Gmail's copy, Passband's event is taken
+/// back off, the pair is left as Gmail made it, and it is not tried again.
+#[tokio::test]
+async fn a_refused_gmail_delete_takes_passbands_event_back_off_for_good() {
+    use squelch_core::features::{CALENDAR, CALENDAR_OWN};
+    let w = world("own-refused", GRANTED).await;
+    w.features.replace_granted([CALENDAR, CALENDAR_OWN]);
+    let start = minute(Utc::now() + Duration::days(2));
+    let mut gmail = timed("gm1", "Reservation at Dingles Public House", start, 60);
+    gmail["eventType"] = json!("fromGmail");
+    gmail["organizer"] = json!({"email": "me@example.com", "self": true});
+    w.google().full.insert(PRIMARY.into(), vec![vec![gmail]]);
+    seed_ghost(&w.store, w.acct, "g1", "Dinner at Dingles", rfc(start));
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    w.google().fail_delete_of = Some("gm1".into());
+    w.sync.own_events(Utc::now()).await;
+    {
+        let g = w.google();
+        let methods: Vec<(&str, Option<&str>)> = g
+            .writes
+            .iter()
+            .map(|w| (w.method, w.event.as_deref()))
+            .collect();
+        let id = g.writes[0].body["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            methods,
+            [
+                ("POST", None),
+                ("DELETE", Some("gm1")),
+                ("DELETE", Some(id.as_str()))
+            ]
+        );
+    }
+    let ids: Vec<String> = w
+        .events()
+        .await
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["gm1"]);
+    w.sync.own_events(Utc::now()).await;
+    assert_eq!(w.google().writes.len(), 3, "never tried again");
 }

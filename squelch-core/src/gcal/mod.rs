@@ -35,6 +35,7 @@
 //! at [`MAX_GUESTS`] ([`client`]).
 
 pub mod client;
+pub mod own;
 pub mod place;
 pub mod sync;
 pub mod write;
@@ -467,6 +468,14 @@ impl SyncedEvent {
     /// organizer field says. And never an event Gmail made itself
     /// ([`EventRow::from_gmail`]), which Google will not let anyone edit.
     pub fn editable(&self, account_email: &str) -> bool {
+        self.users_own(account_email) && !self.row.from_gmail
+    }
+
+    /// [`Self::editable`] before the Gmail rule: on a calendar the user
+    /// writes to, and theirs by every organizer test. Gmail's own events
+    /// that pass it are the ones Passband may take over
+    /// ([`own::adoptable`]); an invitation from someone else never does.
+    pub fn users_own(&self, account_email: &str) -> bool {
         let writable = self.calendar_access.is_some_and(AccessRole::writable);
         let organized_elsewhere = self.row.guests.iter().any(|g| g.organizer && !g.is_self);
         let own = self.row.organizer_self
@@ -476,7 +485,7 @@ impl SyncedEvent {
                     .organizer_email
                     .as_deref()
                     .is_none_or(|org| org.eq_ignore_ascii_case(account_email.trim())));
-        writable && own && !organized_elsewhere && !self.row.from_gmail
+        writable && own && !organized_elsewhere
     }
 
     /// THE GUEST GUARD: whether the app offers to change this event's guest

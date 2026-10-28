@@ -1242,14 +1242,19 @@ never in a triage prompt. ONE EXCEPTION, the owner's decision (2026-10-28): an
 event's location string, alone, goes to the configured provider's small
 (`notify`) model to be cut down to the place the card shows (see "The card's
 place" below). Nothing calendar-related is on `/mcp` or
-`/client/agent/*`. The daemon writes to a calendar only when the user creates,
-edits or deletes one event from the human door; nothing writes on its own. Google
-emails an event's guests only when such a write says `notify: true`; no other
-input, default or code path can ask for it.
+`/client/agent/*`. The daemon writes to a calendar when the user creates,
+edits or deletes one event from the human door, and, ONE EXCEPTION (the owner's
+decision, 2026-10-28, behind the `calendar_own` hidden feature), when it
+replaces Gmail's own copy of an event with its own and keeps that event current
+from authenticated mail (see "Passband's own events" below). Nothing else
+writes on its own. Google emails an event's guests only when a human-door
+write says `notify: true`; no other input, default or code path can ask for
+it, and Passband's own writes always send `sendUpdates=none`.
 
 **Enforcement.**
-- **Four tables, human door only.** `calendar_calendars`, `calendar_events`,
-  `calendar_places` (the card's place per location text) and
+- **Five tables, human door only.** `calendar_calendars`, `calendar_events`,
+  `calendar_places` (the card's place per location text), `calendar_owned`
+  (which event Passband made for which ghost, `gcal/own.rs`) and
   `calendar_event_guests` (an event's attendees, deleted with it by a trigger)
   (`squelch-core/src/store/sqlite/calendar.rs`) are written by the sync loop
   (`squelch-core/src/gcal/sync.rs`) and, one row at a time after Google accepted
@@ -1276,6 +1281,25 @@ input, default or code path can ask for it.
   boilerplate on an event it made from mail ("To see detailed information for
   automatically created events like this one...") is dropped with its link
   (`triage/ghost.rs:strip_google_boilerplate`).
+- **Passband's own events** (`gcal/own.rs`, `gcal/sync.rs:own_events`). Off
+  unless both `calendar` and `calendar_own` are on. It touches only events
+  on the PRIMARY calendar: Gmail's own (`fromGmail`) that are the user's by
+  every organizer test and carry no other guest, and the events Passband made
+  in their place. An invitation from anyone else is never written. Every
+  write sends `sendUpdates=none`, never names attendees, and is audited
+  (actor `passband-calendar`, target `calendar:<calendar>/<event>`, detail
+  `ok` or an error kind; never a title or a place). Only a ghost from mail
+  that passed sender authentication adopts or moves an event. A cancellation
+  from mail marks the event ("Canceled: ", free), it does not delete it. The
+  user's deletion of Passband's event, or dismissal of the ghost, ends
+  Passband's hold on it for good. At most 10 writes a pass, 100 a day.
+  KNOWN GAP against docs/CALENDAR.md "Before anything writes to a real
+  calendar": a time or place change comes from what the triage model read in
+  the mail, not from structured calendar data (an iCalendar UID), so on a
+  shared sending platform another host's mail that the model reads as the
+  same booking could move the event. The marking-not-deleting of
+  cancellations and the authentication rule bound it; structured updates are
+  the fix.
 - **The card's place** (`gcal/place.rs`). After a pass that synced, the loop
   sends up to 10 stored locations longer than 40 characters (upcoming first) to
   the provider and `notify` model that already read the owner's mail, each on

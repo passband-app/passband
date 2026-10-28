@@ -1767,6 +1767,9 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     /// `eventType: fromGmail`). Google refuses edits to it, so `editable` is
     /// false; the card says where it came from. Nil from an older daemon.
     var from_gmail: Bool?
+    /// Passband made this event in place of Gmail's copy and keeps it current
+    /// from the mail (the daemon's `calendar_own`). Nil means no.
+    var passband_owned: Bool?
 }
 
 /// How a guest answered, in the daemon's four words.

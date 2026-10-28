@@ -4744,14 +4744,21 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
             "write credential not configured; run `squelchd auth --write`",
         ));
     };
-    // The inner `Result` is the provider read itself, mapped below rather
-    // than by the store's generic mapping (which would call an unknown
-    // provider the CALLER's 400).
-    let provider = store_call(state, |store, account_id| {
-        Ok(store.account_provider(account_id))
-    })
-    .await?;
-    match provider.map_err(writer_unavailable)? {
+    let provider = match state.mail_provider.get() {
+        Some(provider) => *provider,
+        None => {
+            // The inner `Result` is the provider read itself, mapped below
+            // rather than by the store's generic mapping (which would call an
+            // unknown provider the CALLER's 400).
+            let read = store_call(state, |store, account_id| {
+                Ok(store.account_provider(account_id))
+            })
+            .await?;
+            let provider = read.map_err(writer_unavailable)?;
+            *state.mail_provider.get_or_init(|| provider)
+        }
+    };
+    match provider {
         // Over the state's one shared HTTP client (see `ApiState::write_http`);
         // what is built per action is two `Arc` clones and a base URL.
         MailProvider::Gmail => Ok(Arc::new(
@@ -4789,6 +4796,18 @@ fn writer_unavailable(e: CoreError) -> ApiError {
             )
         }
         _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
+}
+
+/// The audit reason for a [`write_client`] refusal, by what refused: the
+/// credential (403, the reason every caller has always recorded), a provider
+/// this build cannot write to (501), or anything else (the store). Distinct so
+/// a store blip is not recorded as "re-authorize".
+pub(crate) fn write_refusal(e: &ApiError) -> &'static str {
+    match e.status {
+        StatusCode::FORBIDDEN => "rejected:no_write_credential",
+        StatusCode::NOT_IMPLEMENTED => "rejected:unsupported_provider",
+        _ => "failed:store",
     }
 }
 
@@ -4871,7 +4890,7 @@ where
     let client = match write_client(state).await {
         Ok(c) => c,
         Err(e) => {
-            audit_action(state, action, target, "rejected:no_write_credential").await;
+            audit_action(state, action, target, write_refusal(&e)).await;
             return Err(e);
         }
     };
@@ -5838,14 +5857,9 @@ pub(crate) async fn perform_send(
     let client = match write_client(state).await {
         Ok(c) => c,
         Err(e) => {
-            audit_action(
-                state,
-                "send",
-                target,
-                &fired(fire, "rejected:no_write_credential"),
-            )
-            .await;
-            return Err(SendFailure::new("rejected:no_write_credential", e));
+            let reason = write_refusal(&e);
+            audit_action(state, "send", target, &fired(fire, reason)).await;
+            return Err(SendFailure::new(reason, e));
         }
     };
 
@@ -5897,7 +5911,7 @@ pub(crate) async fn perform_send(
         && let Some(audience) = &audience
         && audience.mode == GroupMode::Individual
     {
-        return fan_out_send(state, body, audience, attachments).await;
+        return fan_out_send(state, client, body, audience, attachments).await;
     }
 
     let (parent, thread_id) = match body.reply_to_message_id {
@@ -6211,6 +6225,7 @@ fn frozen_addrs(body: &SendBody, mode: GroupMode) -> Vec<String> {
 /// recipients ARE the progress bar, so nothing else has to be plumbed.
 async fn fan_out_send(
     state: &ApiState,
+    client: Arc<dyn MailWriter>,
     body: &SendBody,
     audience: &group_send::GroupAudience,
     attachments: Vec<MailAttachment>,
@@ -6249,7 +6264,7 @@ async fn fan_out_send(
     plan.attachments = attachments;
     let recipients = plan.audience.addrs.len();
 
-    let group_send_id = match group_send::start(state, plan).await {
+    let group_send_id = match group_send::start(state, client, plan).await {
         Ok(id) => id,
         Err(e) => {
             if let Some((token, _)) = &tracker {
@@ -6948,9 +6963,13 @@ pub async fn run_shred_pass(state: &ApiState) -> Result<u32, ApiError> {
     if !enabled {
         return Ok(0);
     }
-    let Ok(client) = write_client(state).await else {
+    let client = match write_client(state).await {
+        Ok(client) => client,
         // No write credential: nothing to do, and nothing to complain about.
-        return Ok(0);
+        Err(e) if e.status == StatusCode::FORBIDDEN => return Ok(0),
+        // Anything else is a failure the timer should see, like every other
+        // store error in this pass.
+        Err(e) => return Err(e),
     };
 
     let cutoff = Utc::now() - chrono::Duration::days(after_days);
@@ -7525,6 +7544,43 @@ mod write_client_tests {
         // Gmail's archive, exactly: a label modify removing INBOX.
         assert!(req.starts_with("POST /messages/gm-1/modify "), "{req}");
         assert!(req.contains("\"removeLabelIds\":[\"INBOX\"]"), "{req}");
+    }
+
+    /// THE PROVIDER IS READ ONCE PER DOOR. After the first writer, a later
+    /// action neither pays a store call for it nor can fail on one: a store
+    /// hiccup must not fail a write the credential would have allowed.
+    #[tokio::test]
+    async fn the_provider_is_read_once_and_kept() {
+        let fx = Fixture::new("cached");
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:9".into());
+        assert!(write_client(&state).await.is_ok());
+        // What a second read would now see: a provider this build refuses.
+        fx.set_provider("imap");
+        assert!(
+            write_client(&state.clone()).await.is_ok(),
+            "the cached read stands, on every clone of the state"
+        );
+    }
+
+    /// A refusal is audited as what refused, so a store failure is never
+    /// recorded as "re-authorize".
+    #[test]
+    fn a_refusal_is_audited_as_what_refused() {
+        let at = |status| ApiError::new(status, "x");
+        assert_eq!(
+            write_refusal(&at(StatusCode::FORBIDDEN)),
+            "rejected:no_write_credential"
+        );
+        assert_eq!(
+            write_refusal(&at(StatusCode::NOT_IMPLEMENTED)),
+            "rejected:unsupported_provider"
+        );
+        assert_eq!(
+            write_refusal(&at(StatusCode::INTERNAL_SERVER_ERROR)),
+            "failed:store"
+        );
     }
 
     #[tokio::test]

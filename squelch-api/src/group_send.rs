@@ -17,6 +17,7 @@
 //! goes, because twelve identical 422s for one composition would read as the
 //! first override having been ignored.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -162,7 +163,11 @@ pub(crate) struct FanOut {
 /// row is written BEFORE the task spawns and before any mail moves: a batch that
 /// dies between the two must leave a record of an audience it did not reach, not
 /// no record at all.
-pub(crate) async fn start(state: &ApiState, plan: FanOut) -> Result<i64, ApiError> {
+pub(crate) async fn start(
+    state: &ApiState,
+    client: Arc<dyn MailWriter>,
+    plan: FanOut,
+) -> Result<i64, ApiError> {
     let group_id = plan.audience.group_id;
     let subject = plan.subject.clone();
     let pending: Vec<GroupSendRecipient> = plan
@@ -198,7 +203,7 @@ pub(crate) async fn start(state: &ApiState, plan: FanOut) -> Result<i64, ApiErro
     .await;
 
     let state = state.clone();
-    tokio::spawn(async move { run(state, group_send_id, plan).await });
+    tokio::spawn(async move { run(state, client, group_send_id, plan).await });
     Ok(group_send_id)
 }
 
@@ -208,20 +213,11 @@ pub(crate) async fn start(state: &ApiState, plan: FanOut) -> Result<i64, ApiErro
 /// the audience is a list of people and one bad address is not a reason to stop
 /// writing to the other eleven. Each outcome is settled as it happens, so a
 /// daemon that dies halfway leaves a truthful record of how far it got.
-async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
-    let client = match crate::handlers::write_client(&state).await {
-        Ok(c) => c,
-        Err(_) => {
-            // The credential was there when the route checked it and is not now.
-            // Fail the whole batch loudly rather than leaving it pending forever.
-            let _ = store_call(&state, move |store, account_id| {
-                store.fail_pending_group_sends(account_id, "write credential unavailable")
-            })
-            .await;
-            return;
-        }
-    };
-
+///
+/// THE WRITER IS THE ONE THE ROUTE ALREADY GOT, not a second lookup: the
+/// credential and the provider were checked before the batch was accepted, and
+/// a fresh read here could only fail a fan-out the route had promised.
+async fn run(state: ApiState, client: Arc<dyn MailWriter>, group_send_id: i64, plan: FanOut) {
     let total = plan.audience.addrs.len();
     let mut sent = 0usize;
     for (i, addr) in plan.audience.addrs.iter().enumerate() {

@@ -277,6 +277,12 @@ pub struct ApiState {
     /// The mailbox's Gmail quota budget, shared with the sync engines. `None`
     /// when no daemon wired one (tests); the write door is then unpaced.
     pub(crate) gmail_budget: Option<Arc<squelch_core::gmail_budget::GmailBudget>>,
+    /// The account's mail provider once `handlers::write_client` has read it.
+    /// It cannot change under a running door (nothing writes the column yet),
+    /// so after the first successful read no write action pays a store call
+    /// for it, or can fail on one. Shared by every clone of the state; a
+    /// failed read is not cached.
+    pub(crate) mail_provider: Arc<std::sync::OnceLock<squelch_core::mail::MailProvider>>,
     /// THE ESCAPE HATCH, from `[console] allow_insecure_cookie` /
     /// `SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE`: the operator's declaration that
     /// this console is served over plain http on an origin that is not loopback.
@@ -653,6 +659,7 @@ impl ApiState {
             audit_actor: crate::handlers::ACTION_ACTOR,
             sync_metrics: None,
             gmail_budget: None,
+            mail_provider: Arc::new(std::sync::OnceLock::new()),
             console_allow_insecure_cookie: false,
             console_signin_limiter: Arc::new(std::sync::Mutex::new(
                 ConsoleRateLimiter::per_minute(crate::console::CONSOLE_SIGNIN_REQUESTS_PER_MINUTE),

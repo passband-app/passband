@@ -44,7 +44,7 @@ use crate::handlers::{
     Fire, MAX_FORWARD_RAW_BYTES, OutboundAttachmentView, SendBody, SendGuard, SendOutcome,
     audit_action, composition_kinds, dedup_ids, echo_sent, forward_original_kinds, guard_verdict,
     load_send_attachments, mail_attachment, perform_send, read_forward_original, resolve_target,
-    send_target, store_call, validate_send, write_client,
+    send_target, store_call, validate_send, write_client, write_refusal,
 };
 use crate::state::ApiState;
 use crate::write::gmail::SCAN_SLACK;
@@ -404,13 +404,7 @@ async fn require_write_client(
     match write_client(state).await {
         Ok(c) => Ok(c),
         Err(e) => {
-            audit_action(
-                state,
-                AUDIT_SCHEDULE,
-                target,
-                "rejected:no_write_credential",
-            )
-            .await;
+            audit_action(state, AUDIT_SCHEDULE, target, write_refusal(&e)).await;
             Err(e)
         }
     }
@@ -1010,17 +1004,21 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
     if expired.is_empty() {
         return;
     }
-    let Ok(client) = write_client(state).await else {
-        // Nothing can be asked, so nothing is decided: the rows stay
-        // `sending`, and the listing says why.
-        eprintln!(
-            "squelch-api: {} scheduled send(s) await recovery; no write credential",
-            expired.len()
-        );
-        for row in &expired {
-            cannot_recover(state, row, "rejected:no_write_credential", report).await;
+    let client = match write_client(state).await {
+        Ok(client) => client,
+        Err(e) => {
+            // Nothing can be asked, so nothing is decided: the rows stay
+            // `sending`, and the listing says why.
+            let reason = write_refusal(&e);
+            eprintln!(
+                "squelch-api: {} scheduled send(s) await recovery; {reason}",
+                expired.len()
+            );
+            for row in &expired {
+                cannot_recover(state, row, reason, report).await;
+            }
+            return;
         }
-        return;
     };
     for row in expired {
         if stopping(state) {
@@ -1218,12 +1216,13 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
         }
         let client = match write_client(state).await {
             Ok(c) => c,
-            Err(_) => {
+            Err(e) => {
                 // Nothing could be sent without it either: the ordinary
                 // retryable failure a fire without a credential is. Audited
                 // only when the settle moved the row (see `fail_unsent`).
-                if settle_retry(state, &row, "rejected:no_write_credential", false, report).await {
-                    audit_fire(state, &row, "rejected:no_write_credential").await;
+                let reason = write_refusal(&e);
+                if settle_retry(state, &row, reason, false, report).await {
+                    audit_fire(state, &row, reason).await;
                 }
                 return;
             }

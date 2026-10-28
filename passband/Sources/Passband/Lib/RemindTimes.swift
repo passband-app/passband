@@ -6,10 +6,11 @@
 // the label is what you typed and the `detail` is when it actually fires. A
 // suggestion nobody can read back is not a suggestion, it is a guess.
 //
-// FOUR SOURCES, IN ORDER OF HOW MUCH WE KNOW. The quick picks are words this
+// FIVE SOURCES, IN ORDER OF HOW MUCH WE KNOW. The quick picks are words this
 // app owns and resolves exactly; the relative parser handles "in N units"; the
-// ordinal parser handles "the 24th"; and NSDataDetector is the open world
-// underneath them all. The detector is only asked when none of the closed
+// ordinal parser handles "the 24th"; the clock parser handles a bare time of
+// day ("noon", "3pm"); and NSDataDetector is the open world underneath them
+// all. The detector is only asked when none of the closed
 // sources answered — it would otherwise re-guess a word we already resolved
 // and hand back a near-duplicate an hour off.
 //
@@ -155,6 +156,14 @@ enum RemindTimes {
             out.append(hit)
         }
 
+        // A BARE CLOCK TIME LEADS. Its answer is the soonest that time comes
+        // around, and a pick it shares an alias with may be a day later:
+        // "9am" at 8am is the pick tomorrow morning AND the clock today, and
+        // Enter takes the top row. Same minute, the clock's label wins the
+        // dedup, which echoes what was typed.
+        let clock = timeOfDay(query, now: now, calendar: calendar)
+        add(clock)
+
         let hits = ranked(query)
         for (pick, _) in hits {
             guard let date = resolve(pick.recipe, now: now, calendar: calendar) else { continue }
@@ -168,8 +177,6 @@ enum RemindTimes {
         add(rel)
         let ord = ordinal(query, now: now, calendar: calendar)
         add(ord)
-        let clock = timeOfDay(query, now: now, calendar: calendar)
-        add(clock)
 
         // The open world, asked last and only when no closed source had an
         // exact answer. Every guard matters: "mon" is the picks', "in 2 hours"
@@ -262,12 +269,7 @@ enum RemindTimes {
         if text.hasPrefix("in ") { text = String(text.dropFirst(3)) }
         text = text.trimmingCharacters(in: .whitespaces)
 
-        var digits = ""
-        var rest = Substring(text)
-        while let c = rest.first, c.isNumber {
-            digits.append(c)
-            rest = rest.dropFirst()
-        }
+        let (digits, rest) = leadingDigits(text)
         let unit = rest.trimmingCharacters(in: .whitespaces)
         guard let count = Int(digits), count > 0, !unit.isEmpty else { return nil }
 
@@ -297,6 +299,13 @@ enum RemindTimes {
             detail: detail(date, now: now, calendar: calendar))
     }
 
+    /// The ASCII digits a string starts with, and what follows them. ASCII
+    /// only: `isNumber` also takes numerals `Int()` then refuses.
+    private static func leadingDigits(_ text: String) -> (digits: String, rest: Substring) {
+        let digits = text.prefix(while: { $0.isASCII && $0.isNumber })
+        return (String(digits), text.dropFirst(digits.count))
+    }
+
     // MARK: - "noon", "3pm"
 
     /// A bare time of day: "noon", "midnight", "3pm", "3:30 pm", "15:30", each
@@ -315,26 +324,23 @@ enum RemindTimes {
         if text.hasPrefix("at ") { text = String(text.dropFirst(3)) }
         text = text.trimmingCharacters(in: .whitespaces)
 
-        let hour: Int
+        // The hours the text could mean: one, or for a 12-hour reading of a
+        // colon time, both halves of the day.
+        var hours: [Int]
         var minute = 0
-        let label: String
         switch text {
         case "noon", "midday":
-            (hour, label) = (12, "at noon")
+            hours = [12]
         case "midnight":
-            (hour, label) = (0, "at midnight")
+            hours = [0]
         default:
-            var rest = Substring(text)
-            var digits = ""
-            while let c = rest.first, c.isNumber {
-                digits.append(c)
-                rest = rest.dropFirst()
-            }
+            let (digits, tail) = leadingDigits(text)
+            var rest = tail
             guard (1...2).contains(digits.count), var h = Int(digits) else { return nil }
             var hadColon = false
             if rest.first == ":" {
                 rest = rest.dropFirst()
-                let mins = String(rest.prefix(while: \.isNumber))
+                let mins = String(rest.prefix(while: { $0.isASCII && $0.isNumber }))
                 guard mins.count == 2, let m = Int(mins), m < 60 else { return nil }
                 minute = m
                 rest = rest.dropFirst(2)
@@ -353,17 +359,27 @@ enum RemindTimes {
             default:
                 return nil
             }
-            hour = h
-            label = "at \(text)"
+            hours = [h]
+            // NO MARKER, 1 TO 11: EITHER HALF OF THE DAY. "3:30" typed at
+            // 14:30 means this afternoon to anyone on a 12-hour clock, and
+            // reading it as 24-hour books 03:30 tomorrow, a reminder that
+            // fires while they sleep. So both are candidates and the sooner
+            // wins. 12:xx stays noon ("0:30" says after midnight), and 0, 13+
+            // or a leading zero ("09:00") are unambiguously 24-hour.
+            if marker.isEmpty, (1...11).contains(h), !digits.hasPrefix("0") {
+                hours.append(h + 12)
+            }
         }
 
-        guard
-            let date = calendar.nextDate(
+        let candidates = hours.compactMap { hour in
+            calendar.nextDate(
                 after: now,
                 matching: DateComponents(hour: hour, minute: minute, second: 0),
                 matchingPolicy: .nextTime)
-        else { return nil }
-        return RemindHit(label: label, date: date, detail: detail(date, now: now, calendar: calendar))
+        }
+        guard let date = candidates.min() else { return nil }
+        return RemindHit(
+            label: "at \(text)", date: date, detail: detail(date, now: now, calendar: calendar))
     }
 
     // MARK: - "the 24th"
@@ -384,12 +400,7 @@ enum RemindTimes {
         if hadArticle { text = String(text.dropFirst(4)) }
         text = text.trimmingCharacters(in: .whitespaces)
 
-        var digits = ""
-        var rest = Substring(text)
-        while let c = rest.first, c.isNumber {
-            digits.append(c)
-            rest = rest.dropFirst()
-        }
+        let (digits, rest) = leadingDigits(text)
         let suffix = rest.trimmingCharacters(in: .whitespaces)
         guard let day = Int(digits), (1...31).contains(day) else { return nil }
         switch suffix {

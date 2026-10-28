@@ -89,6 +89,21 @@ struct RemindTimesTests {
         equal(first("2pm")?.date, moment(2026, 8, 20, 14), "2pm gone by is tomorrow, not nothing")
         equal(first("at 3:45 pm")?.date, moment(2026, 8, 19, 15, 45), "minutes and a spaced marker")
         equal(first("16:15")?.date, moment(2026, 8, 19, 16, 15), "a 24-hour clock")
+        // No marker, 1 to 11: the sooner half of the day. 14:30 now, so "3:30"
+        // is this afternoon, not 03:30 tomorrow.
+        equal(first("3:30")?.date, moment(2026, 8, 19, 15, 30), "3:30 in the afternoon is 15:30")
+        equal(first("at 1:15")?.date, moment(2026, 8, 20, 1, 15),
+            "1:15 with both halves gone by is the coming night")
+        equal(first("09:00")?.date, moment(2026, 8, 20, 9), "a leading zero is 24-hour")
+        equal(first("12:30")?.date, moment(2026, 8, 20, 12, 30), "12:30 is half past noon")
+        // A clock time that is also a pick's alias leads with the sooner one:
+        // "9am" at 8am is today, not the tomorrow-morning pick.
+        let eight = moment(2026, 8, 19, 8)
+        equal(first("9am", now: eight)?.date, moment(2026, 8, 19, 9), "9am at 8am is today")
+        equal(
+            RemindTimes.match("9am", now: eight, calendar: cal).map(\.label),
+            ["at 9am", "tomorrow morning"], "and tomorrow morning stays on offer under it")
+        equal(first("midday")?.label, "at midday", "the label echoes what was typed")
         equal(first("12am")?.date, moment(2026, 8, 20, 0), "12am is midnight")
         equal(first("12pm")?.date, moment(2026, 8, 20, 12), "12pm is noon")
         equal(

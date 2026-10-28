@@ -167,6 +167,9 @@ struct DiscoveryLayer: View {
             // A finished walk has its own moment on the sitrep, and it is very
             // often the thing that just found flow mode. One at a time.
             && store.walkFinished == nil
+            // Same for a smart clear's receipt: it is the thing that just found
+            // Sweep, and it shares this corner until its undo runs out.
+            && store.smartClearReceipt == nil
             // The corner belongs to one card at a time, and an ad or an
             // update that got there first keeps it.
             && !AgentNudge.othersShowing(store) && !AgentNudge.shared.showingNudge

@@ -32,7 +32,7 @@
 //! HOUSE COPY RULES: the product is Passband, the voice is lowercase, and there
 //! are no em dashes in anything a person reads.
 
-use crate::gmail_write::ReplyParts;
+use crate::write::mime::ReplyParts;
 
 /// The marker the invite block replaces. Doubled braces because a single brace
 /// is a character people type; this pair is not.
@@ -162,7 +162,7 @@ pub fn has_marker(body: &str) -> bool {
     body.contains(INVITE_MARKER)
 }
 
-/// The whole message, ready for [`crate::gmail_write::build_reply_rfc822`].
+/// The whole message, ready for [`crate::write::mime::build_reply_rfc822`].
 ///
 /// A COLD SEND: no `In-Reply-To`, no `References`, no thread. It is a new
 /// conversation with somebody, and threading it onto anything would be wrong.

@@ -1311,7 +1311,7 @@ impl ApiState {
     /// for every clone of this state. See the field.
     pub(crate) fn write_http(&self) -> reqwest::Client {
         self.write_http
-            .get_or_init(crate::gmail_write::GmailWriteClient::build_http)
+            .get_or_init(crate::write::gmail::GmailWriteClient::build_http)
             .clone()
     }
 

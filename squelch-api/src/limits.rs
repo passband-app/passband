@@ -51,7 +51,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 pub const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The ceiling for the routes whose own budgets run to minutes: a send
-/// ([`crate::gmail_write::send_budget`] grows with the message, to about 13
+/// ([`crate::write::send_budget`] grows with the message, to about 13
 /// min for the largest attachments allowed, on top of the fetches around
 /// it), an attachment upload (25 MiB at whatever the uplink gives), the
 /// shredder pass, the invite minter's serial sends, and the assistant relay's
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn the_long_ceiling_clears_the_largest_send() {
         let raw = crate::handlers::MAX_OUTBOUND_ATTACHMENT_BYTES * 78 / 57 + 2 * 1024 * 1024;
-        let send = crate::gmail_write::send_budget(raw);
+        let send = crate::write::send_budget(raw);
         let around = Duration::from_secs(60 + 15 + 5 + 5 + 30 + 5);
         assert!(
             LONG_REQUEST_TIMEOUT > send + around,

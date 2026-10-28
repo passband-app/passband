@@ -24,9 +24,10 @@ use squelch_core::store::sqlite::groups::{GroupSendRecipient, GroupSendStatus};
 use squelch_core::types::GroupMode;
 
 use crate::error::ApiError;
-use crate::gmail_write::{GmailWriteClient, MailAttachment, ReplyParts, build_reply_rfc822};
 use crate::handlers::{audit_action, store_call};
 use crate::state::ApiState;
+use crate::write::MailWriter;
+use crate::write::mime::{MailAttachment, ReplyParts, build_reply_rfc822};
 
 /// Gap between the messages of one fan-out.
 ///
@@ -208,7 +209,7 @@ pub(crate) async fn start(state: &ApiState, plan: FanOut) -> Result<i64, ApiErro
 /// writing to the other eleven. Each outcome is settled as it happens, so a
 /// daemon that dies halfway leaves a truthful record of how far it got.
 async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
-    let client = match crate::handlers::write_client(&state) {
+    let client = match crate::handlers::write_client(&state).await {
         Ok(c) => c,
         Err(_) => {
             // The credential was there when the route checked it and is not now.
@@ -227,7 +228,7 @@ async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
         if i > 0 {
             tokio::time::sleep(FAN_OUT_GAP).await;
         }
-        match send_one(&state, &client, &plan, addr).await {
+        match send_one(&state, &*client, &plan, addr).await {
             Ok(message_id) => {
                 sent += 1;
                 settle(
@@ -271,7 +272,7 @@ async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
 /// upstream detail never rides along in it.
 async fn send_one(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     plan: &FanOut,
     addr: &str,
 ) -> Result<Option<i64>, String> {

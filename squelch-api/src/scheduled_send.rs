@@ -35,10 +35,10 @@ use squelch_core::store::{
     ScheduledSendState, SearchClock, TOO_MANY_SCHEDULED,
 };
 use squelch_core::types::GroupMode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::ApiError;
-use crate::gmail_write::{GmailWriteClient, SCAN_SLACK, SentRef, WriteError, send_budget};
 use crate::group_send;
 use crate::handlers::{
     Fire, MAX_FORWARD_RAW_BYTES, OutboundAttachmentView, SendBody, SendGuard, SendOutcome,
@@ -47,6 +47,8 @@ use crate::handlers::{
     send_target, store_call, validate_send, write_client,
 };
 use crate::state::ApiState;
+use crate::write::gmail::SCAN_SLACK;
+use crate::write::{MailWriter, SentRef, WriteError, send_budget};
 
 /// Audit action for scheduling, and for every refusal on the way to it.
 const AUDIT_SCHEDULE: &str = "schedule";
@@ -69,7 +71,7 @@ const MAX_SCHEDULE_AHEAD: chrono::Duration = chrono::Duration::days(366);
 /// recovery asks Gmail by Message-ID before anything is retried.
 ///
 /// THE PRE-FIRE LOOKUP CAN OUTRUN THIS: after a `rfc822msgid:` miss it is a
-/// paged Sent scan ([`GmailWriteClient::find_scheduled_send`]), at worst
+/// paged Sent scan ([`MailWriter::find_scheduled_send`]), at worst
 /// 1 + 4 + 100 requests, which a lease sized for three calls does not cover.
 /// That is still safe, because a lapse during the lookup can hand nobody the
 /// row mid-send: the pass loop is sequential (recovery runs before the claims,
@@ -149,7 +151,7 @@ async fn no_store_layer(mut resp: Response) -> Response {
 
 /// The `Message-ID` a scheduled send goes out with, minted NOW. Its 48-hex
 /// local part is also the row's outbox token (`X-Passband-Outbox`, see
-/// [`crate::gmail_write::outbox_token`]): together they are what answers "did
+/// [`crate::write::mime::outbox_token`]): together they are what answers "did
 /// it go out?" after a crash mid-send (the worker's recovery asks Gmail before
 /// any retry). 24 bytes of OS entropy as hex, so the id is plain `atext` and
 /// neither search needs quoting. The host is DOTTED (`passband.app`): a
@@ -269,7 +271,7 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
         let staged: usize = attachments.iter().map(|a| a.data.len()).sum();
         let (_, original) = read_forward_original(
             state,
-            &client,
+            &*client,
             AUDIT_SCHEDULE,
             target.clone(),
             original_id,
@@ -398,8 +400,8 @@ fn parse_send_at(raw: Option<&str>, now: DateTime<Utc>) -> Result<DateTime<Utc>,
 async fn require_write_client(
     state: &ApiState,
     target: Option<String>,
-) -> Result<GmailWriteClient, ApiError> {
-    match write_client(state) {
+) -> Result<Arc<dyn MailWriter>, ApiError> {
+    match write_client(state).await {
         Ok(c) => Ok(c),
         Err(e) => {
             audit_action(
@@ -955,7 +957,7 @@ enum Asking {
 }
 
 /// The `(after, before)` instants the Sent scan of
-/// [`GmailWriteClient::find_scheduled_send`] searches between, [`SCAN_SLACK`]
+/// [`MailWriter::find_scheduled_send`] searches between, [`SCAN_SLACK`]
 /// included on both sides.
 ///
 /// FLOOR: the earliest of `send_at`, the last attempt's end and the lease's
@@ -1008,7 +1010,7 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
     if expired.is_empty() {
         return;
     }
-    let Ok(client) = write_client(state) else {
+    let Ok(client) = write_client(state).await else {
         // Nothing can be asked, so nothing is decided: the rows stay
         // `sending`, and the listing says why.
         eprintln!(
@@ -1033,7 +1035,7 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
             .await
         {
             Ok(Some(gmail_id)) => {
-                if settle_recovered(state, &client, &row, gmail_id).await {
+                if settle_recovered(state, &*client, &row, gmail_id).await {
                     report.recovered_sent += 1;
                 }
             }
@@ -1130,7 +1132,7 @@ async fn cannot_recover(
 /// row's claim. NO SECOND SEND. `true` when the row moved.
 async fn settle_recovered(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     row: &ScheduledSend,
     gmail_id: String,
 ) -> bool {
@@ -1214,7 +1216,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             .await;
             return;
         }
-        let client = match write_client(state) {
+        let client = match write_client(state).await {
             Ok(c) => c,
             Err(_) => {
                 // Nothing could be sent without it either: the ordinary
@@ -1235,7 +1237,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             .await
         {
             Ok(Some(gmail_id)) => {
-                if settle_recovered(state, &client, &row, gmail_id).await {
+                if settle_recovered(state, &*client, &row, gmail_id).await {
                     report.recovered_sent += 1;
                 }
                 return;
@@ -1902,7 +1904,7 @@ mod tests {
         let local = &a[1..a.len() - "@passband.app>".len()];
         assert_eq!(local.len(), 48);
         assert!(local.bytes().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(crate::gmail_write::outbox_token(&a), local);
+        assert_eq!(crate::write::mime::outbox_token(&a), local);
     }
 
     #[test]

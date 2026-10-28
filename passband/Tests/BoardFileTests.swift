@@ -181,14 +181,13 @@ struct BoardFileTests {
             return fail("the answered bands are written")
         }
         check(bands.standing.map(\.id) == [1, 2], "the bands are kept")
-        check(bands.calendar.isEmpty, "a zone not answered yet is kept empty")
+        check(bands.calendar.map(\.id) == [31], "and the zone cards as they stand")
         check(bands.mailPages.isEmpty, "a page not loaded since is not kept")
-        let everything = LiveBoard.Answered(bands: true, shipments: true, calendar: true, pages: ["inbox"])
-        guard case .write(let full) = PersistedBoard.keeping(live(answered: everything)) else {
+        let loaded = LiveBoard.Answered(bands: true, pages: ["inbox"])
+        guard case .write(let full) = PersistedBoard.keeping(live(answered: loaded)) else {
             return fail("an answered board is written")
         }
-        check(full.calendar.map(\.id) == [31], "an answered zone is kept")
-        check(Array(full.mailPages.keys) == ["inbox"], "and a loaded page, but not the one never loaded")
+        check(Array(full.mailPages.keys) == ["inbox"], "a loaded page is, but not the one never loaded")
         check(full.fyeHeadline == "Two things today", "a headline for this band is kept")
         guard case .write(let older) = PersistedBoard.keeping(live(headlineKey: "k2")) else {
             return fail("a board with an older headline is written")
@@ -206,11 +205,14 @@ struct BoardFileTests {
         let later = board(lastRefresh: wholeNow.addingTimeInterval(60))
         let much = board(lastRefresh: wholeNow.addingTimeInterval(700))
         let other = board(lastRefresh: wholeNow.addingTimeInterval(60), rows: [row(1)])
-        check(!later.needsWrite(over: last, forced: false, restampAfter: 600), "the same rows a minute on are not")
-        check(much.needsWrite(over: last, forced: false, restampAfter: 600), "the same rows ten minutes on are")
-        check(other.needsWrite(over: last, forced: false, restampAfter: 600), "different rows are")
-        check(later.needsWrite(over: nil, forced: false, restampAfter: 600), "a file not known to hold it is")
-        check(later.needsWrite(over: last, forced: true, restampAfter: 600), "and a quit writes regardless")
+        let behind = board(lastRefresh: wholeNow.addingTimeInterval(-700))
+        check(!later.needsWrite(over: last, forced: false), "the same rows a minute on are not")
+        check(much.needsWrite(over: last, forced: false), "the same rows ten minutes on are")
+        check(behind.needsWrite(over: last, forced: false),
+            "and ten minutes BEHIND, a file a clock that stepped back dated ahead")
+        check(other.needsWrite(over: last, forced: false), "different rows are")
+        check(later.needsWrite(over: nil, forced: false), "a file not known to hold it is")
+        check(later.needsWrite(over: last, forced: true), "and a quit writes regardless")
     }
 
     /// Under a week by the daemon's last answer, a little slack for a clock

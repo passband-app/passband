@@ -1941,14 +1941,25 @@ final class AppStore {
                 // the shell mounts on it at once, and the daemon is asked
                 // beside it rather than in front of it. Without one, the
                 // loading gate waits for the daemon as it always has.
-                if let board = await keptBoard,
-                    AccountManager.shared.activeId == active.id, connStatus == .loading,
-                    !RehearsalMode.isEnabled
+                // Read only when it could be painted (not, say, from the error
+                // gate's retry), and every condition asked again after it.
+                var kept: PersistedBoard?
+                if connStatus == .loading, !RehearsalMode.isEnabled { kept = await keptBoard }
+                if let board = kept, AccountManager.shared.activeId == active.id,
+                    connStatus == .loading, !RehearsalMode.isEnabled
                 {
                     restorePersistedBoard(board)
                     connError = nil
                     unverifiedEpoch = epoch
                     connStatus = .connected
+                    // A link that arrived during the reads was parked under
+                    // the loading gate; the shell is up now, so it is handled
+                    // as the probe's success handles one on the waiting path.
+                    #if os(iOS)
+                        pairLink = nil
+                    #else
+                        if pairLink != nil { addAccountSheetOpen = true }
+                    #endif
                     recoverSavedConnection(stored, accountId: active.id, behindBoard: true)
                 } else {
                     recoverSavedConnection(stored, accountId: active.id)
@@ -2032,15 +2043,14 @@ final class AppStore {
                     guard !Task.isCancelled, isCurrent(recoveryEpoch),
                         AccountManager.shared.activeId == accountId else { return }
                     if behindBoard {
-                        unverifiedEpoch = nil
-                        Notifier.shared.connectionBecameReady()
+                        noteConnectionVerified()
                     } else {
                         connError = nil
                         connStatus = .connected
                     }
-                    // Behind a board the shell was up and `.connected` all
-                    // along, so a pair link was taken as on any connected
-                    // launch, never parked: nothing to raise or drop.
+                    // Behind a board the shell came up before this answer, and
+                    // a link parked under the gate was handled then
+                    // (`loadSettings`): nothing to raise or drop here.
                     #if os(iOS)
                         await PushRegistration.shared.registerAndSync()
                         guard !Task.isCancelled, isCurrent(recoveryEpoch) else { return }
@@ -2056,13 +2066,12 @@ final class AppStore {
                     guard !Task.isCancelled, isCurrent(recoveryEpoch),
                         AccountManager.shared.activeId == accountId else { return }
                     guard CapabilityProbeRetry.isTransient(error) else {
-                        // A daemon that refuses outright (the credentials, a
-                        // paused tenant, a build it is too old for) takes the
-                        // board kept for it, painted or not (a locked phone
-                        // cannot read it): the gate it ends at is the next
-                        // launch's too, and a board painted over it would only
-                        // flash before the same refusal.
-                        discardBoardFile(accountId)
+                        // Refused credentials take the board kept under them,
+                        // painted or not (a locked phone cannot read it). Any
+                        // other refusal (a captive portal's page, a build the
+                        // daemon is too old for) leaves it for a launch that
+                        // can reach the daemon.
+                        if (error as? APIError)?.kind == .unauthorized { discardBoardFile(accountId) }
                         if behindBoard { refuseBoardFromDisk() }
                         connStatus = .error
                         connError = Self.connectErrorText(error)
@@ -2088,6 +2097,17 @@ final class AppStore {
     private func refuseBoardFromDisk() {
         unverifiedEpoch = nil
         epoch &+= 1
+    }
+
+    /// A launch from disk has been answered (its probe, or a pull): taps may
+    /// be delivered, and what the shell asked once at `.connected`, before
+    /// anything had answered, is asked again where a failure would otherwise
+    /// stand for the session (the tracking config, which nothing retries).
+    private func noteConnectionVerified() {
+        guard unverifiedEpoch != nil else { return }
+        unverifiedEpoch = nil
+        Notifier.shared.connectionBecameReady()
+        if tracking == nil { Task { await refreshTrackingConfig() } }
     }
 
     /// Ask the saved daemon again now instead of sitting out the loop's sleep:
@@ -2825,9 +2845,6 @@ final class AppStore {
     /// runs (a pull, then the zone pass behind it, then a page), and the board
     /// is written once for the run.
     private static let boardSaveDelay: Duration = .seconds(20)
-    /// How stale the last answer's time on disk may grow while nothing else
-    /// changes before a save that is not a quit writes it anyway.
-    private static let boardRestampAfter: TimeInterval = 600
     @ObservationIgnored private var boardSaveTask: Task<Void, Never>?
     /// True only while `restorePersistedBoard` assigns the board from disk.
     @ObservationIgnored private var paintingFromDisk = false
@@ -2838,27 +2855,15 @@ final class AppStore {
     /// The last write: whose, under which epoch, and what.
     @ObservationIgnored private var boardWritten: (account: UUID, epoch: Int, board: PersistedBoard)?
 
-    /// The parts of the board on disk the daemon has answered for under
-    /// `epoch`: the bands (a pull landed) and each zone the file keeps.
-    /// `boardToKeep` writes only these, so the file is never rows nobody
-    /// has vouched for this session: a board repainted from disk or a switch,
-    /// or a zone whose fetch keeps failing, is not written back under a
-    /// fresh date.
-    private enum BoardPart { case bands, shipments, calendar }
-    @ObservationIgnored private var boardAnswered: (epoch: Int, answered: LiveBoard.Answered)?
+    /// The epoch a pull last landed under. `boardToKeep` writes nothing until
+    /// it is the live one, so the file is never a board nobody has vouched
+    /// for this session (one repainted from disk or a switch) under a fresh
+    /// date.
+    @ObservationIgnored private var bandsAnsweredEpoch: Int?
 
-    private func noteBoardAnswered(_ part: BoardPart, epoch e: Int) {
-        guard e == epoch else { return }
-        var answered = LiveBoard.Answered()
-        if let current = boardAnswered, current.epoch == e { answered = current.answered }
-        let before = answered
-        switch part {
-        case .bands: answered.bands = true
-        case .shipments: answered.shipments = true
-        case .calendar: answered.calendar = true
-        }
-        guard answered != before else { return }
-        boardAnswered = (e, answered)
+    private func noteBoardAnswered(epoch e: Int) {
+        guard e == epoch, bandsAnsweredEpoch != e else { return }
+        bandsAnsweredEpoch = e
         // An answer can leave the board exactly as it was (the first pull
         // finding the board from disk unchanged), which assigns nothing and so
         // schedules nothing; the file is due all the same.
@@ -2878,27 +2883,23 @@ final class AppStore {
             restoredAuthThreads = []
             noteAuthThreads()
         }
-        if unverifiedEpoch == e {
-            unverifiedEpoch = nil
-            Notifier.shared.connectionBecameReady()
-        }
-        noteBoardAnswered(.bands, epoch: e)
+        if unverifiedEpoch == e { noteConnectionVerified() }
+        noteBoardAnswered(epoch: e)
         LaunchSignpost.end(RehearsalMode.isEnabled ? .skipped : .network)
     }
 
     /// What a save would do with the live board (`PersistedBoard.keeping`):
     /// `liveSnapshot`'s rules, nothing under an epoch whose writes are refused,
     /// and only what the daemon has answered for this session
-    /// (`boardAnswered`, and a page only once it has loaded, `mailLoadedAt`),
-    /// so a zone or page painted from disk and not asked again is never
-    /// restamped.
+    /// (`bandsAnsweredEpoch`, and a page only once it has loaded,
+    /// `mailLoadedAt`, so a page painted from disk and not asked again is
+    /// never restamped).
     private func boardToKeep() -> PersistedBoard.Keeping {
         guard boardWritesRefusedEpoch != epoch, let board = liveSnapshot(),
             let lastRefresh = board.lastRefresh
         else { return .nothing }
-        var answered = LiveBoard.Answered()
-        if let current = boardAnswered, current.epoch == epoch { answered = current.answered }
-        answered.pages = Set(mailLoadedAt.keys.map(\.rawValue))
+        let answered = LiveBoard.Answered(
+            bands: bandsAnsweredEpoch == epoch, pages: Set(mailLoadedAt.keys.map(\.rawValue)))
         var pages: [String: [AttentionUpdate]] = [:]
         for (mode, rows) in board.mailPages { pages[mode.rawValue] = rows }
         return PersistedBoard.keeping(
@@ -2947,7 +2948,7 @@ final class AppStore {
         // Nothing has changed since, and the file's date is recent: nothing
         // is built (every focus change on the Mac comes through here).
         if !evenIfUnchanged, !boardDirty, let last, let lastRefresh,
-            lastRefresh.timeIntervalSince(last.lastRefresh) < Self.boardRestampAfter
+            !PersistedBoard.restampDue(lastRefresh, written: last.lastRefresh)
         {
             return
         }
@@ -2959,8 +2960,7 @@ final class AppStore {
             discardBoardFile(id)
         case .write(let board):
             boardDirty = false
-            guard board.needsWrite(over: last, forced: evenIfUnchanged, restampAfter: Self.boardRestampAfter)
-            else { return }
+            guard board.needsWrite(over: last, forced: evenIfUnchanged) else { return }
             boardWritten = (id, epoch, board)
             BoardFile.save(board, account: id)
         }
@@ -3047,8 +3047,11 @@ final class AppStore {
     /// way, because every entry in it carries the old account's selection.
     private func wipeAccountState(landingOn page: MainView = .sitrep) {
         boardIsSnapshot = false
-        // Before the bands are emptied below, whose didSet rebuilds the fence.
+        // And the fence rebuilt without it now: the didSet below rebuilds it
+        // only when the bands or the sealed list change, and an empty band
+        // emptied again does not.
         restoredAuthThreads = []
+        noteAuthThreads()
         // A reveal up over the old account would keep showing its body, and
         // one not yet mounted would reveal the same int on the NEW daemon.
         revealRequest = nil
@@ -3791,7 +3794,6 @@ final class AppStore {
                 switch answer {
                 case .shipments(let rows?):
                     if rows != zones.shipments { zones.shipments = rows }
-                    noteBoardAnswered(.shipments, epoch: e)
                 case .reading(let rows?):
                     if rows != zones.reading { zones.reading = rows }
                     if !zones.readingLoaded { zones.readingLoaded = true }
@@ -3805,7 +3807,6 @@ final class AppStore {
                     if receipts != zones.receipts { zones.receipts = receipts }
                     if banking != zones.banking { zones.banking = banking }
                     if calendar != zones.calendar { zones.calendar = calendar }
-                    noteBoardAnswered(.calendar, epoch: e)
                 case .shipments, .reading, .records: missed = true
                 }
             }

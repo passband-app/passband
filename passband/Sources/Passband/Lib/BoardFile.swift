@@ -168,11 +168,14 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     }
 
     /// What a save does with `live`. Nothing until the daemon has answered for
-    /// the bands this session; then a board of only the parts it has answered
-    /// for, with the headline only if it was written for the band as it
-    /// stands (one written for an older band may be about an auth row that has
-    /// since left it). DISCARD when every row of a band that has rows is auth
-    /// mail: painted without them it would read as all clear.
+    /// the bands this session; then the bands, the zone cards as they stand
+    /// (this session's answer, or the rows painted from this same file, which
+    /// a save before the zone pass must not wipe), the pages loaded since (a
+    /// page painted from disk and never visited again is not restamped), and
+    /// the headline only if it was written for the band as it stands (one
+    /// written for an older band may be about an auth row that has since left
+    /// it). DISCARD when every row of a band that has rows is auth mail:
+    /// painted without them it would read as all clear.
     static func keeping(_ live: LiveBoard) -> Keeping {
         guard live.answered.bands else { return .nothing }
         let current = live.fyeHeadlineKey == live.headlineKey
@@ -180,8 +183,7 @@ struct PersistedBoard: Codable, Sendable, Equatable {
             standing: live.standing, totalCount: live.totalCount,
             fyeHeadline: current ? live.fyeHeadline : nil,
             fyeHeadlineKey: current ? live.fyeHeadlineKey : nil,
-            calendar: live.answered.calendar ? live.calendar : [],
-            shipments: live.answered.shipments ? live.shipments : [],
+            calendar: live.calendar, shipments: live.shipments,
             mailPages: live.mailPages.filter { live.answered.pages.contains($0.key) },
             mailKeyset: live.mailKeyset, authThreads: live.authThreads,
             lastRefresh: live.lastRefresh)
@@ -191,13 +193,25 @@ struct PersistedBoard: Codable, Sendable, Equatable {
 
     /// Whether this board must be written over `last`, what the file holds
     /// from this session (nil: nothing known to be there): when anything but
-    /// the date differs, when the file's date has fallen `restampAfter`
-    /// behind, or when `forced`.
-    func needsWrite(over last: PersistedBoard?, forced: Bool, restampAfter: TimeInterval) -> Bool {
+    /// the date differs, when the file's date is due again (`restampDue`), or
+    /// when `forced`.
+    func needsWrite(over last: PersistedBoard?, forced: Bool) -> Bool {
         guard !forced, let last else { return true }
         var undated = self
         undated.lastRefresh = last.lastRefresh
-        return undated != last || lastRefresh.timeIntervalSince(last.lastRefresh) >= restampAfter
+        return undated != last || Self.restampDue(lastRefresh, written: last.lastRefresh)
+    }
+
+    /// How far the file's date may drift from the daemon's last answer before
+    /// unchanged rows are written again for it.
+    static let restampAfter: TimeInterval = 600
+
+    /// Whether a file dated `written` is due a new date at `lastRefresh`:
+    /// `restampAfter` apart EITHER way, because a clock that stepped back
+    /// leaves the file dated ahead of every later answer, and a date more than
+    /// `clockSlack` ahead is one the next launch will not paint.
+    static func restampDue(_ lastRefresh: Date, written: Date) -> Bool {
+        abs(lastRefresh.timeIntervalSince(written)) >= restampAfter
     }
 
     // MARK: - bytes
@@ -245,8 +259,6 @@ struct LiveBoard: Sendable {
     /// What the daemon has answered for under the live epoch.
     struct Answered: Sendable, Equatable {
         var bands = false
-        var shipments = false
-        var calendar = false
         /// The pages loaded since, by `MailMode` raw value.
         var pages: Set<String> = []
     }
@@ -412,7 +424,9 @@ enum BoardFile {
 /// once, by whichever comes first: the board painted from disk, the first
 /// pull to land, or a launch that is not a sample (a gate, the practice
 /// inbox). Its end message says which, so one build measures both kinds of
-/// launch (one with no board kept is the network's).
+/// launch (one with no board kept is the network's). The disk end is the
+/// paint's assignment, before the shell's first layout; the network end lands
+/// on a shell already mounted. So the disk figure leaves out one mount.
 @MainActor
 enum LaunchSignpost {
     enum Outcome { case disk, network, skipped }

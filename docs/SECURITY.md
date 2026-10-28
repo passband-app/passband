@@ -942,8 +942,8 @@ the call goes out.
   is otherwise mail like any other: its rows on a mail page are kept. The
   headline is kept only for the band it was written about, and not when a band
   row was taken out. Only what the daemon has answered for this session is
-  written: never a board still repainted from disk or a switch, never a zone or
-  page that has not loaded since, and nothing after the credentials are
+  written: never a board still repainted from disk or a switch, never a page
+  that has not loaded since, and nothing after the credentials are
   re-validated in Settings until the next account change. A band that is
   nothing but auth mail is not written at all, and the file goes. A board the daemon last answered for more than a
   week ago is not painted and is deleted, by the read that finds it or by the

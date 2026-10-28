@@ -27,14 +27,19 @@ row in `client_sessions` for as long as it is open. When one opens and the Mac
 had been disconnected for at least `min_offline_mins` (default 120), the stream
 wakes the worker. The worker waits `online_settle_secs` (default 30) so the
 app's own event replay lands first and a wake that sleeps again at once is
-dropped. If the session is still open, it runs a pass.
+dropped. If that session is still open, or any Mac stream is (a Wi-Fi handoff
+during the settle replaces the session without a second wake), it runs a pass.
 
 A first-ever connection is onboarding, not an arrival. A second stream while
 one is open is no gap at all. A daemon restart closes the sessions it left open
-at startup time, which can only make the next gap look shorter.
+at startup time, before the listener binds, which can only make the next gap
+look shorter. (Run any later, it could close a live session that reconnected
+first, and that Mac's next blip would read as an arrival.)
 
 **Meeting end.** Once a minute, while a Mac is listening, the worker reads the
-owner's busy intervals. A meeting's window opens `meeting_end_delay_mins` after
+owner's busy intervals. Only the owner's own calendars count: the primary and
+any they own. A teammate's or team calendar they subscribe to is someone else's
+schedule. A meeting's window opens `meeting_end_delay_mins` after
 it ends (default 3) and stays open `meeting_end_window_mins` (default 10). A
 block longer than `max_meeting_mins` (default 240) is not a meeting. An end that
 falls inside another busy interval (back-to-back meetings) is no gap.
@@ -54,9 +59,14 @@ Checked in this order. The first one that fails is the hold reason.
 There are two kinds of candidate. A message can be both; it is then named
 once, as due soon.
 
-**Unhandled** (`why: "unhandled"`). The store's query: it has an `events` row, is not an open-tracking
-notice or an auth alert, is received mail that is not spam, has not been opened,
-done, archived or given a reminder, and has no reply on its thread since.
+**Unhandled** (`why: "unhandled"`). The store's query: it has an `events` row,
+is not an open-tracking notice or an auth alert, is received mail that is not
+spam, has not been opened, done, archived or given a reminder, and has no reply
+on its thread since. Its thread must also not have been taken out of For your
+eyes since the first banner, by the owner's own correction or by a re-triage
+(a new sender rule re-triages that sender's mail). The `events` row is the first
+verdict; this is the current one. "Still open" is one SQL fragment
+(`renotify_still_open_sql!`) shared by both candidate reads.
 
 It is **due** when its first banner is between `min_age_mins` (default 30) and
 `max_age_mins` (default 3 days) old, it has had fewer than `max_per_message`
@@ -148,6 +158,20 @@ the owner's day, plus the paused triggers.
 **Habits, first rung.** A trigger whose last 8 banners were all ignored (no tap,
 nothing handled) is paused for that owner until one of them is answered.
 Nothing else adapts yet.
+
+## Known limits
+
+- **Weekends.** Working hours are hours only, every day of the week.
+- **A zone change re-fires a date-only due date.** "Due the 30th" resolves to
+  17:00 in the owner's current zone; if the zone changes, the instant does too,
+  and the once-per-due-date record no longer matches.
+- **Mac clock skew.** A Mac more than a minute off drops every frame, the
+  daemon counts each as ignored, and after 8 the trigger pauses. `open_draft`
+  has the same exposure.
+- **Point queries.** Candidate reads run a few indexed queries per candidate
+  under the store lock, on each pass (not each tick).
+- Every duration tunable is clamped to a year, so an absurd value cannot make
+  the time arithmetic panic.
 
 ## Not built yet
 

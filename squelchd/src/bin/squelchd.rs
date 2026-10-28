@@ -2870,6 +2870,9 @@ fn cmd_serve(
         // SMART RE-NOTIFY (docs/RENOTIFY.md). Always spawned, and idle unless
         // the `renotify` hidden feature is on for this mailbox: the feature is
         // read at every pass, so ticking it on the admin page needs no restart.
+        // Before the listener binds, so no Mac stream can open a session the
+        // sweep would then close while it is live.
+        squelch_api::close_stale_renotify_sessions(&api_state);
         let renotify_handle = tokio::spawn(squelch_api::renotify_worker(
             api_state.clone(),
             shutdown_tx.subscribe(),

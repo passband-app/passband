@@ -409,3 +409,54 @@ async fn a_short_absence_is_not_an_arrival() {
     let mut buf = String::new();
     assert!(next_renotify(&mut body, &mut buf).await.is_none());
 }
+
+/// A Wi-Fi handoff during the settle: the stream that woke the worker drops
+/// and another opens (reporting no gap, so no second wake). The owner is still
+/// there, so the banner reaches the replacement.
+#[tokio::test]
+async fn a_reconnect_during_the_settle_still_gets_the_banner() {
+    let (state, store, acct) = state_with(|_, _| {});
+    let state = state
+        .with_features(Features::pinned([features::RENOTIFY]))
+        .with_renotify_config(RenotifyConfig {
+            min_age_mins: 0,
+            online_settle_secs: 1,
+            ..always_on()
+        });
+    let app = router(state.clone());
+    let message_id = notified(&store, acct, 1);
+    let (old, _) = store
+        .open_client_session(acct, "macos", Utc::now() - chrono::Duration::hours(4))
+        .unwrap();
+    store
+        .close_client_session(acct, old, Utc::now() - chrono::Duration::hours(3))
+        .unwrap();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(squelch_api::renotify_worker(
+        state,
+        shutdown_rx,
+        squelch_api::RenotifyTiming {
+            tick: Duration::from_secs(3600),
+        },
+    ));
+
+    let first = app
+        .clone()
+        .oneshot(authed("GET", "/client/events?opens=1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/events?opens=1"))
+        .await
+        .unwrap();
+    let mut body = resp.into_body();
+    let mut buf = String::new();
+    let frame = next_renotify(&mut body, &mut buf)
+        .await
+        .expect("the banner reaches the replacement connection");
+    assert_eq!(frame["items"][0]["message_id"], message_id);
+}

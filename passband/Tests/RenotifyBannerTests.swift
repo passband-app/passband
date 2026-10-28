@@ -112,6 +112,7 @@ struct RenotifyBannerTests {
         expect(c.title == "3 emails still need you", "the count: \(c.title)")
         expect(c.body.hasPrefix("Due today: "), "a deadline among them leads: \(c.body)")
         expect(c.body.contains("Sarah Chen") && c.body.contains("and 1 more"), "a couple of senders, once each: \(c.body)")
+        expect(c.body.components(separatedBy: "Sarah Chen").count == 2, "two of her emails name her once: \(c.body)")
         expect(c.sound, "a deadline among them chimes")
 
         let two = RenotifySignal.parse(frame(note + "," + old))!

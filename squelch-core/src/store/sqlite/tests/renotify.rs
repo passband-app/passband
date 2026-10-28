@@ -331,6 +331,17 @@ fn busy_is_timed_accepted_opaque_events_only() {
 /// Mail in For your eyes with a due date, committed the way the worker
 /// commits a decision. `attention_at` is the due time.
 fn fye_with_due(store: &SqliteStore, acct: AccountId, key: &str, due: &str) -> i64 {
+    fye_with_due_and(store, acct, key, due, |_| {})
+}
+
+/// [`fye_with_due`], with a last word on the decision.
+fn fye_with_due_and(
+    store: &SqliteStore,
+    acct: AccountId,
+    key: &str,
+    due: &str,
+    extra: impl FnOnce(&mut crate::triage::decision::MessageDecision),
+) -> i64 {
     use crate::triage::decision::{EvidenceRef, SupportedTime, ThreadAttentionDecision};
     let id = super::reading_senders::mail(store, acct, key, "billing@utility.example", 10);
     super::reading_senders::into_reading_with(store, acct, id, |d| {
@@ -356,6 +367,7 @@ fn fye_with_due(store: &SqliteStore, acct: AccountId, key: &str, due: &str) -> i
             },
             ..Default::default()
         };
+        extra(d);
     });
     id
 }
@@ -431,4 +443,178 @@ fn done_or_snoozed_fye_mail_is_not_due_soon() {
         .renotify_due_candidates(acct, &Policy::default(), chrono_tz::Tz::UTC, Utc::now())
         .unwrap();
     assert!(found.is_empty(), "{found:?}");
+}
+
+fn attention(store: &SqliteStore, acct: AccountId, id: i64, show_in_fye: bool) {
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_thread_attention(decision_message_id, account_id, thread_id,
+                 message_id, show_in_fye, attention_json, relevant_activity)
+             VALUES(?1, ?2, ?3, ?1, ?4, '{}', ?5)",
+            params![
+                id,
+                acct,
+                format!("t{id}"),
+                show_in_fye,
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .unwrap();
+}
+
+#[test]
+fn mail_taken_out_of_for_your_eyes_since_is_no_longer_a_candidate() {
+    let (store, acct) = store();
+    for id in 1..=4 {
+        notified(&store, acct, id);
+    }
+    // Still in For your eyes.
+    attention(&store, acct, 1, true);
+    // A re-triage after the banner moved it out (a new sender rule does this).
+    attention(&store, acct, 2, false);
+    // The owner's own correction, over a verdict that still says FYE.
+    attention(&store, acct, 3, true);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_thread_preferences(account_id, thread_id, show_in_fye, updated_at)
+             VALUES(?1, 't3', 0, ?2)",
+            params![acct, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    // Message 4 has no attention row at all: the first verdict stands.
+    let mut got = ids(&store, acct);
+    got.sort();
+    assert_eq!(got, vec![1, 4]);
+}
+
+#[test]
+fn a_calendar_the_owner_only_subscribes_to_is_not_their_schedule() {
+    let (store, acct) = store();
+    calendar_event(
+        &store,
+        acct,
+        "mine",
+        "2026-10-28T10:00:00Z",
+        Some("2026-10-28T11:00:00Z"),
+        "",
+    );
+    {
+        let conn = store.lock().unwrap();
+        for (cal, role) in [("team", "reader"), ("side", "owner")] {
+            conn.execute(
+                "INSERT INTO calendar_calendars(account_id, calendar_id, access_role) VALUES(?1,?2,?3)",
+                params![acct, cal, role],
+            )
+            .unwrap();
+        }
+        for (cal, ev, start, end) in [
+            ("team", "t", "2026-10-28T12:00:00Z", "2026-10-28T13:00:00Z"),
+            ("side", "s", "2026-10-28T14:00:00Z", "2026-10-28T15:00:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO calendar_events(account_id, calendar_id, event_id, status, starts_at, start_sort, ends_at, all_day)
+                 VALUES(?1,?2,?3,'confirmed',?4,?4,?5,0)",
+                params![acct, cal, ev, start, end],
+            )
+            .unwrap();
+        }
+    }
+    let busy = store.calendar_busy(acct, at(0, 0), at(23, 59)).unwrap();
+    assert_eq!(
+        busy.iter().map(|s| s.start).collect::<Vec<_>>(),
+        vec![at(10, 0), at(14, 0)],
+        "the primary and an owned calendar; not the team's"
+    );
+}
+
+#[test]
+fn replied_fye_mail_is_not_due_soon() {
+    use crate::renotify::Policy;
+    let (store, acct) = store();
+    let due = (Utc::now() + Duration::hours(6)).to_rfc3339();
+    let id = fye_with_due(&store, acct, "bill", &due);
+    let thread: String = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT thread_id FROM messages WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let found = |store: &SqliteStore| {
+        store
+            .renotify_due_candidates(acct, &Policy::default(), chrono_tz::Tz::UTC, Utc::now())
+            .unwrap()
+            .len()
+    };
+    assert_eq!(found(&store), 1, "in For your eyes and due");
+    // The owner answered it. The FYE list does not drop it for that; the
+    // re-notify must.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,is_sent)
+             VALUES(9000,?1,'reply',?2,'me@example.com','Re',?3,'',1)",
+            params![acct, thread, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    assert_eq!(found(&store), 0, "a reply handles it");
+}
+
+#[test]
+fn auth_mail_in_for_your_eyes_is_never_due_soon() {
+    use crate::renotify::Policy;
+    use crate::triage::decision::{AuthAssessment, AuthKind, EvidenceRef};
+    let (store, acct) = store();
+    let due = (Utc::now() + Duration::hours(6)).to_rfc3339();
+    let id = fye_with_due_and(&store, acct, "change", &due, |d| {
+        d.auth = AuthAssessment {
+            kinds: vec![AuthKind::AccountChange],
+            evidence: vec![EvidenceRef {
+                message_id: d.attention.relevant_message_ids[0],
+                location: "body".into(),
+            }],
+            critical: true,
+        };
+    });
+    // Precondition: an unruled critical account change IS in For your eyes,
+    // so this test is about the re-notify's own filter.
+    let fye =
+        super::super::agent_triage::list_items(&store.lock().unwrap(), acct, "fye", Utc::now())
+            .unwrap();
+    assert!(
+        fye.iter().any(|i| i.message_id == id),
+        "the auth thread is in FYE"
+    );
+    let found = store
+        .renotify_due_candidates(acct, &Policy::default(), chrono_tz::Tz::UTC, Utc::now())
+        .unwrap();
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_due_soon_renotify_spends_none_of_the_ordinary_cap() {
+    let (store, acct) = store();
+    notified(&store, acct, 1);
+    let due = Utc::now() + Duration::hours(6);
+    store
+        .record_renotify(acct, Trigger::ClientOnline, at(9, 0), 1, &[(1, Some(due))])
+        .unwrap();
+    let c = &store.renotify_candidates(acct).unwrap()[0];
+    assert_eq!(c.renotified, 0);
+    assert_eq!(
+        c.last_renotified_at,
+        Some(at(9, 0)),
+        "but it still counts as recent"
+    );
+    store
+        .record_renotify(acct, Trigger::ClientOnline, at(10, 0), 1, &[(1, None)])
+        .unwrap();
+    assert_eq!(store.renotify_candidates(acct).unwrap()[0].renotified, 1);
 }

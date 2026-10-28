@@ -113,9 +113,15 @@ pub struct Policy {
     pub due_day_hour: u32,
 }
 
+/// The ceiling on any one [`Policy`] duration: a year, in minutes.
+const MAX_POLICY_MINS: u64 = 366 * 24 * 60;
+
 impl Policy {
     pub fn from_config(cfg: &RenotifyConfig) -> Self {
-        let mins = |m: u64| Duration::minutes(m.min(i64::MAX as u64 / 60_000) as i64);
+        // Clamped to a year: every duration here is added to or taken from a
+        // DateTime, and an absurd config value (or env override) would make
+        // that arithmetic panic in the worker.
+        let mins = |m: u64| Duration::minutes(m.min(MAX_POLICY_MINS) as i64);
         Self {
             min_offline: mins(cfg.min_offline_mins),
             meeting_end_delay: mins(cfg.meeting_end_delay_mins),
@@ -777,6 +783,53 @@ mod tests {
             picks.iter().map(|c| c.message_id).collect::<Vec<_>>(),
             vec![2, 3]
         );
+    }
+
+    #[test]
+    fn due_soon_mail_outranks_equally_important_unanswered_mail() {
+        let p = Policy {
+            max_items: 1,
+            ..Policy::default()
+        };
+        let h = Habits::default();
+        let now = t(10, 0);
+        let waiting = cand(1, 70, t(8, 0));
+        let mut due = cand(2, 70, t(8, 0));
+        due.why = Why::DueSoon;
+        due.due_at = Some(now + Duration::hours(12));
+        // Same importance, and the waiting one has the higher id (the last
+        // tie-break): only the due-soon boost puts the bill first.
+        let mut waiting = waiting;
+        waiting.message_id = 9;
+        // The same deadline on both, so the deadline boost cannot be what
+        // separates them.
+        waiting.deadline = Some((now + Duration::hours(12)).to_rfc3339());
+        due.deadline = waiting.deadline.clone();
+        let picks = plan(&p, &moment(now, &[], &h), &[waiting, due]).unwrap();
+        assert_eq!(picks[0].message_id, 2);
+    }
+
+    #[test]
+    fn an_absurd_config_is_clamped_rather_than_panicking() {
+        let cfg = RenotifyConfig {
+            due_lead_mins: u64::MAX,
+            due_grace_mins: u64::MAX,
+            meeting_guard_mins: u64::MAX,
+            max_age_mins: u64::MAX,
+            cooldown_mins: u64::MAX,
+            ..RenotifyConfig::default()
+        };
+        let p = Policy::from_config(&cfg);
+        let h = Habits::default();
+        let mut c = cand(1, 70, t(8, 0));
+        c.renotified = 1;
+        c.last_renotified_at = Some(t(9, 0));
+        let mut due_soon = cand(2, 70, t(8, 0));
+        due_soon.why = Why::DueSoon;
+        due_soon.due_at = Some(t(12, 0));
+        let busy = [span(t(11, 0), t(11, 30))];
+        // Must not panic; what it decides is beside the point.
+        let _ = plan(&p, &moment(t(10, 0), &busy, &h), &[c, due_soon]);
     }
 
     #[test]

@@ -52,7 +52,9 @@ pub use limits::{
     STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
 };
 /// Smart re-notify's worker and its pass (issue #625).
-pub use renotify::{PassOutcome, RenotifyTiming, renotify_worker, run_renotify_pass};
+pub use renotify::{
+    PassOutcome, RenotifyTiming, close_stale_renotify_sessions, renotify_worker, run_renotify_pass,
+};
 /// The scheduled-send worker and its pass. Exported for the daemon for the
 /// same reason as the shredder: it sends on the WRITE credential.
 pub use scheduled_send::{

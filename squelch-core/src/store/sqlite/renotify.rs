@@ -24,6 +24,24 @@ const BATCHES_KEPT: i64 = 2000;
 /// days, so this is far more than will ever be due at once.
 const CANDIDATE_SCAN: i64 = 400;
 
+/// STILL OPEN, the one definition both candidate reads share (`m` is the
+/// message, `t` its LEFT JOINed triage row): received mail, not spam, not
+/// sealed, not done or archived (an archive resolves to done), no pending
+/// reminder, and nobody on the account has replied in its thread since. A
+/// change to what "handled" means is made here, once.
+macro_rules! renotify_still_open_sql {
+    () => {
+        "m.is_sent = 0 AND m.is_spam = 0
+         AND t.sealed_kind IS NULL
+         AND COALESCE(t.status, 'new') != 'done'
+         AND t.remind_at IS NULL
+         AND NOT EXISTS (
+             SELECT 1 FROM messages s
+             WHERE s.account_id = m.account_id AND s.thread_id = m.thread_id
+               AND s.is_sent = 1 AND s.id > m.id)"
+    };
+}
+
 impl SqliteStore {
     /// Record a Mac event stream opening, and say how long the Mac had been
     /// away: `None` when this account has never had a session (a first
@@ -122,6 +140,11 @@ impl SqliteStore {
     /// Not busy: all-day events, events marked free (transparent), events the
     /// owner declined, and cancelled ones. A timed event with no end is taken
     /// as half an hour.
+    ///
+    /// Only the owner's OWN calendars count: the primary, and any they own.
+    /// A teammate's or a team calendar they subscribe to is somebody else's
+    /// schedule, and its events carry no response from the owner, so the
+    /// declined filter could never take them out.
     pub fn calendar_busy(
         &self,
         account_id: AccountId,
@@ -142,6 +165,7 @@ impl SqliteStore {
              FROM calendar_events e
              JOIN calendar_calendars c ON c.account_id = e.account_id AND c.calendar_id = e.calendar_id
              WHERE e.account_id = ?1 AND c.selected = 1
+               AND (c.is_primary = 1 OR c.access_role = 'owner')
                AND e.start_sort >= ?2 AND e.start_sort <= ?3
                AND e.all_day = 0 AND e.transparent = 0
                AND COALESCE(e.self_response, '') != 'declined'
@@ -183,10 +207,15 @@ impl SqliteStore {
     /// - it is received mail, not spam;
     /// - the owner has not opened it, marked it done or archived it, or set a
     ///   reminder (their own word on when it comes back wins);
-    /// - nobody on the account has replied in its thread since.
+    /// - nobody on the account has replied in its thread since;
+    /// - its thread has not been taken OUT of For your eyes since: by the
+    ///   owner's own correction (`agent_thread_preferences`), or by a
+    ///   re-triage after it (a new sender rule re-triages the sender's mail).
+    ///   The `events` row is a snapshot of the first verdict; this is the
+    ///   current one.
     pub fn renotify_candidates(&self, account_id: AccountId) -> Result<Vec<Candidate>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(concat!(
             "SELECT e.id, e.message_id, e.thread_id, e.kind, e.importance, e.sender,
                     e.one_line, e.deadline, e.created_at,
                     (SELECT COUNT(*) FROM renotify_items i
@@ -195,19 +224,20 @@ impl SqliteStore {
              FROM events e
              JOIN messages m ON m.account_id = e.account_id AND m.id = e.message_id
              LEFT JOIN triage t ON t.account_id = m.account_id AND t.message_id = m.id
+             LEFT JOIN agent_thread_preferences pref
+                    ON pref.account_id = m.account_id AND pref.thread_id = m.thread_id
+             LEFT JOIN agent_thread_attention a
+                    ON a.account_id = m.account_id AND a.thread_id = m.thread_id
              WHERE e.account_id = ?1
                AND e.kind != 'opened' AND e.is_auth = 0 AND e.sealed_kind IS NULL
-               AND m.is_sent = 0 AND m.is_spam = 0
                AND t.opened_at IS NULL
-               AND COALESCE(t.status, 'new') != 'done'
-               AND t.remind_at IS NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM messages s
-                   WHERE s.account_id = m.account_id AND s.thread_id = m.thread_id
-                     AND s.is_sent = 1 AND s.id > m.id)
+               AND COALESCE(pref.show_in_fye, a.show_in_fye, 1) != 0
+               AND ",
+            renotify_still_open_sql!(),
+            "
              ORDER BY e.id DESC
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
         let mut out = stmt
             .query_map(params![account_id, CANDIDATE_SCAN], |r| {
                 Ok(Candidate {
@@ -253,19 +283,14 @@ impl SqliteStore {
     ) -> Result<Vec<Candidate>> {
         let conn = self.lock()?;
         let items = super::agent_triage::list_items(&conn, account_id, "fye", now)?;
-        let mut still_open = conn.prepare_cached(
+        let mut still_open = conn.prepare_cached(concat!(
             "SELECT EXISTS(
                  SELECT 1 FROM messages m
                  LEFT JOIN triage t ON t.account_id = m.account_id AND t.message_id = m.id
-                 WHERE m.account_id = ?1 AND m.id = ?2
-                   AND m.is_sent = 0 AND m.is_spam = 0
-                   AND COALESCE(t.status, 'new') != 'done'
-                   AND t.remind_at IS NULL
-                   AND NOT EXISTS (
-                       SELECT 1 FROM messages s
-                       WHERE s.account_id = m.account_id AND s.thread_id = m.thread_id
-                         AND s.is_sent = 1 AND s.id > m.id))",
-        )?;
+                 WHERE m.account_id = ?1 AND m.id = ?2 AND ",
+            renotify_still_open_sql!(),
+            ")"
+        ))?;
         let mut already = conn.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM renotify_items
              WHERE account_id = ?1 AND message_id = ?2 AND due_at = ?3)",

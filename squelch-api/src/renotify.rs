@@ -266,23 +266,27 @@ fn log(trigger: Trigger, outcome: &Result<PassOutcome, ApiError>) {
     }
 }
 
-/// THE WORKER. Closes sessions a previous process left open, then waits on
-/// three things: a Mac arriving, the meeting-end tick, and shutdown.
+/// Close the sessions a previous process left open. Call ONCE at startup,
+/// BEFORE the router serves: run any later, a Mac that reconnected in the
+/// meantime has its live session stamped closed, and its next blip would read
+/// as hours away and fire an arrival nobody made.
+pub fn close_stale_renotify_sessions(state: &ApiState) {
+    if let Err(error) = state
+        .store
+        .close_stale_client_sessions(state.account_id, Utc::now())
+    {
+        eprintln!("squelchd: renotify: closing stale sessions failed: {error}");
+    }
+}
+
+/// THE WORKER. Waits on three things: a Mac arriving, the meeting-end tick,
+/// and shutdown. Stale sessions are closed before it starts
+/// ([`close_stale_renotify_sessions`]).
 pub async fn renotify_worker(
     state: ApiState,
     mut shutdown: watch::Receiver<bool>,
     timing: RenotifyTiming,
 ) {
-    {
-        let store = state.store.clone();
-        let account_id = state.account_id;
-        let _ = blocking(&state, move || {
-            store
-                .close_stale_client_sessions(account_id, Utc::now())
-                .map(|_| ())
-        })
-        .await;
-    }
     let policy = Policy::from_config(&state.renotify.config);
     let settle = Duration::from_secs(state.renotify.config.online_settle_secs);
     let mut last_meeting_end: Option<DateTime<Utc>> = None;
@@ -319,6 +323,13 @@ pub async fn renotify_worker(
             })
             .await
             .unwrap_or(false);
+            // A REPLACEMENT CONNECTION COUNTS AS STILL HERE. A Wi-Fi handoff
+            // during the settle closes the session that woke this and opens
+            // another that reports no gap (so no second wake), and the owner
+            // who just sat down is still sitting there. Whether a Mac is
+            // listening right now is the question; the session id was only
+            // ever a proxy for it.
+            let still_here = still_here || state.renotify.frames.receiver_count() > 0;
             if still_here {
                 let outcome = run_renotify_pass(&state, Trigger::ClientOnline, Utc::now()).await;
                 log(Trigger::ClientOnline, &outcome);

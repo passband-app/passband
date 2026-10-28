@@ -613,7 +613,7 @@ pub async fn post_invites(
     }
 
     // Before any mint: a code minted with no way to mail it is spent quota.
-    let client = crate::handlers::write_client(&state)?;
+    let client = crate::handlers::write_client(&state).await?;
 
     // NO OPEN RATE ON THIS PATH. It shaped the DRAFT, back when the composer was
     // opened; by now the words are the user's, and recomputing the number here

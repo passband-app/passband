@@ -401,7 +401,7 @@ async fn require_write_client(
     state: &ApiState,
     target: Option<String>,
 ) -> Result<Arc<dyn MailWriter>, ApiError> {
-    match write_client(state) {
+    match write_client(state).await {
         Ok(c) => Ok(c),
         Err(e) => {
             audit_action(
@@ -1010,7 +1010,7 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
     if expired.is_empty() {
         return;
     }
-    let Ok(client) = write_client(state) else {
+    let Ok(client) = write_client(state).await else {
         // Nothing can be asked, so nothing is decided: the rows stay
         // `sending`, and the listing says why.
         eprintln!(
@@ -1216,7 +1216,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             .await;
             return;
         }
-        let client = match write_client(state) {
+        let client = match write_client(state).await {
             Ok(c) => c,
             Err(_) => {
                 // Nothing could be sent without it either: the ordinary

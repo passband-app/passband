@@ -209,7 +209,7 @@ pub(crate) async fn start(state: &ApiState, plan: FanOut) -> Result<i64, ApiErro
 /// writing to the other eleven. Each outcome is settled as it happens, so a
 /// daemon that dies halfway leaves a truthful record of how far it got.
 async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
-    let client = match crate::handlers::write_client(&state) {
+    let client = match crate::handlers::write_client(&state).await {
         Ok(c) => c,
         Err(_) => {
             // The credential was there when the route checked it and is not now.

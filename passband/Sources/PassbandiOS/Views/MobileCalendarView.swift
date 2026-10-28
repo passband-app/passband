@@ -40,6 +40,14 @@ enum PhoneCalendarMode: String, CaseIterable, Identifiable {
     case month, week, day
 
     var id: String { rawValue }
+    /// The mode button's glyph: the shape of what is on screen.
+    var symbol: String {
+        switch self {
+        case .month: "calendar"
+        case .week: "list.bullet.below.rectangle"
+        case .day: "clock"
+        }
+    }
     var label: String {
         switch self {
         case .month: "Month"
@@ -129,7 +137,6 @@ struct MobileCalendarView: View {
             // the way it scrolls under the navigation bar above it.
             .safeAreaBar(edge: .top) {
                 VStack(spacing: 10) {
-                    modePicker
                     MobileCalendarStrip(
                         model: model, place: place, now: now, calendar: cal,
                         expanded: mode == .month, stepForward: $stepForward)
@@ -138,7 +145,10 @@ struct MobileCalendarView: View {
             .navigationTitle(MonthGrid.title(place.month, calendar: cal))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarLeading) {
+                    modeButton
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
                     // Only off today: a Today that does nothing is a button
                     // that teaches you to stop pressing it.
                     if !cal.isDate(place.day, inSameDayAs: now)
@@ -151,11 +161,29 @@ struct MobileCalendarView: View {
                         }
                         .foregroundStyle(Palette.accent)
                     }
+                    // A new event on the day picked (today's next hour on
+                    // today), in the sheet. Only where the daemon lists a
+                    // calendar the user can write to.
+                    if store.calendarCanCreate {
+                        Button {
+                            Haptics.tick()
+                            store.openEventEditor(day: place.day, now: now)
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .foregroundStyle(Palette.accent)
+                        .accessibilityLabel("New event")
+                    }
                 }
             }
         }
         .navigationDestination(for: MobileCalendarRoute.self) { route in
             MobileEventPage(id: route.id)
+        }
+        // THE EVENT SHEET, on the store's own editor: what "+" opens, and the
+        // detail's Edit from a page pushed on this stack.
+        .sheet(item: editorBinding) { request in
+            MobileEventSheet(request: request)
         }
         #if DEBUG
             .navigationDestination(item: $fixtureDetail) { id in MobileEventPage(id: id) }
@@ -166,6 +194,18 @@ struct MobileCalendarView: View {
                     }
                     try? await Task.sleep(for: .seconds(1.5))
                     fixtureDetail = FixtureStage.calendarDetail
+                    // The sheet, staged straight onto the store: the
+                    // practice inbox never offers "+" (nothing can be saved).
+                    if FixtureStage.scene == "calendar-new" {
+                        let draft = EventForm.retitled(
+                            EventForm.newDraft(
+                                day: Date(), now: Date(), calendarId: store.calendarWritable.first?.id,
+                                calendar: .current),
+                            title: "Dinner with Sam fri 7pm", today: Date(), calendar: .current)
+                        store.calendarDraft = draft
+                        store.calendarEditor = CalendarEditorRequest(
+                            mode: .create, initial: draft, epoch: store.epoch)
+                    }
                 }
             }
         #endif
@@ -194,19 +234,30 @@ struct MobileCalendarView: View {
         }
     }
 
-    /// Month | Week | Day, the desktop's switch.
-    private var modePicker: some View {
-        Picker("View", selection: Binding(
-            get: { mode },
-            set: { new in
-                Haptics.tick()
-                withAnimation(.snappy) { mode = new }
-            }
-        )) {
-            ForEach(PhoneCalendarMode.allCases) { Text($0.label).tag($0) }
+    /// THE DESKTOP'S SWITCH AS ONE GLYPH: it shows the mode you are in, and a
+    /// tap steps to the next (Month, Week, Day, and round). Three pills spent
+    /// a row of the screen on a choice made once a day.
+    private var modeButton: some View {
+        Button {
+            Haptics.tick()
+            let all = PhoneCalendarMode.allCases
+            let next = all[((all.firstIndex(of: mode) ?? 0) + 1) % all.count]
+            withAnimation(.snappy) { mode = next }
+        } label: {
+            Image(systemName: mode.symbol)
+                .contentTransition(.symbolEffect(.replace))
         }
-        .pickerStyle(.segmented)
-        .padding(.horizontal, 16)
+        .foregroundStyle(Palette.accent)
+        .accessibilityLabel("Showing \(mode.label.lowercased())")
+        .accessibilityHint("Switches to the next view")
+    }
+
+    /// The editor while it is this account's and not parked; dismissing the
+    /// sheet closes it the way Cancel does.
+    private var editorBinding: Binding<CalendarEditorRequest?> {
+        Binding(
+            get: { store.eventPaneOpen ? store.calendarEditor : nil },
+            set: { if $0 == nil, store.calendarEditor != nil { store.closeEventEditor() } })
     }
 
     private func listKey(place: MonthPlace, week: MonthWeek?) -> String {
@@ -444,7 +495,9 @@ private struct MobileCalendarStrip: View {
         .padding(.bottom, 8)
         .clipped()
         .contentShape(Rectangle())
-        .gesture(swipe)
+        // Beside the day buttons, not under them: a plain gesture on the
+        // parent loses every drag that starts on a button.
+        .simultaneousGesture(swipe)
     }
 
     private var weekdayHeader: some View {
@@ -904,7 +957,7 @@ private struct MobileDayTimeline: View {
                 nightLine
             }
             hoursWell
-                .gesture(swipe)
+                .simultaneousGesture(swipe)
             if !column.unlikely.isEmpty {
                 unlikelyFold
             }
@@ -1182,12 +1235,19 @@ private struct MobileMonthGrid: View {
         }
         .clipped()
         .contentShape(Rectangle())
-        .gesture(
+        // Beside the cells' buttons, not under them (a plain gesture lost
+        // every drag that began on a day). Sideways as on the strip, and
+        // up/down as Google's month does: left or up is the next month.
+        .simultaneousGesture(
             DragGesture(minimumDistance: 24)
                 .onEnded { value in
                     let dx = value.translation.width
-                    guard abs(dx) > abs(value.translation.height), abs(dx) > 60 else { return }
-                    turn(dx < 0)
+                    let dy = value.translation.height
+                    if abs(dx) > abs(dy), abs(dx) > 60 {
+                        turn(dx < 0)
+                    } else if abs(dy) > abs(dx), abs(dy) > 60 {
+                        turn(dy < 0)
+                    }
                 })
     }
 

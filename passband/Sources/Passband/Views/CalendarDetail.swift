@@ -10,8 +10,9 @@
 // wire's own fields and is said plainly.
 //
 // THE PHONE PUSHES THIS SAME VIEW (PassbandiOS/Views/MobileCalendarView.swift).
-// What differs there is only the verbs: no key chips on a phone, and no edit
-// or delete yet, because the event pane they open is the Mac's.
+// What differs there is only the verbs: no key chips on a phone, and edit
+// opens the phone's sheet (PassbandiOS/Views/MobileEventSheet.swift). No
+// delete there yet.
 
 import SwiftUI
 
@@ -272,16 +273,16 @@ struct CalendarDetail: View {
             }
         } else if let event = item.event {
             let link = event.html_link.flatMap { Opener.isHTTP($0) ? $0 : nil }
-            #if os(macOS)
-                let editable = CalendarWrite.canEdit(event) && !RehearsalMode.isEnabled
-            #else
-                let editable = false
-            #endif
+            let editable = CalendarWrite.canEdit(event) && !RehearsalMode.isEnabled
             if link != nil || editable {
                 HStack(spacing: Space.s14) {
                     if editable {
                         HintButton(key: "e", label: "edit") { store.openEventEditor(editing: event) }
-                        HintButton(key: "⌫", label: "delete") { store.askDeleteEvent(event) }
+                        // The phone edits in its sheet; deleting is a later
+                        // pass there.
+                        #if os(macOS)
+                            HintButton(key: "⌫", label: "delete") { store.askDeleteEvent(event) }
+                        #endif
                     }
                     if let link {
                         HintButton(key: "↵", label: "open in Google Calendar") { Opener.open(link) }

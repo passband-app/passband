@@ -47,6 +47,13 @@ import SwiftUI
 struct MobileSitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
+    /// The login-codes push, owned by the shell so a notification tap can open
+    /// it from any tab. Pushed from HERE only while this board holds the
+    /// records (`holdsRecords`); otherwise Quick Look's bar is its door.
+    @Binding var showAuth: Bool
+    /// The calendar holds the tab bar's second slot, so Quick Look's records
+    /// (and their login-codes key) live under this board instead.
+    let holdsRecords: Bool
 
     /// ReadingZone takes a cursor because the Mac drives it with the
     /// keyboard. Nothing writes to this one — it is the shared component's
@@ -134,6 +141,9 @@ struct MobileSitrepView: View {
                 if !(reading.isEmpty && ranked.isEmpty) {
                     ReadingZone(senders: reading, cursor: cursor)
                 }
+                if holdsRecords {
+                    records
+                }
                 BoardFootnote(bannerShowing: bannerShowing)
             }
             .padding(.horizontal, 16)
@@ -200,10 +210,14 @@ struct MobileSitrepView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         }
+        #if DEBUG
+            // A screenshot's way down to the records (`records-bottom`).
+            .defaultScrollAnchor(FixtureStage.scene == "records-bottom" ? .bottom : nil)
+        #endif
         .simultaneousGesture(accountSwipe)
-        .refreshable {
-            _ = await SitrepPoller.shared.pull()
-            await store.refreshZones(force: true)
+        .refreshable { await RecordZones.refresh(store) }
+        .navigationDestination(isPresented: holdsRecords ? $showAuth : .constant(false)) {
+            MobileAuthView()
         }
         // The zones each ask for this too; the store joins the in-flight pass, so
         // asking here as well is what makes a cold launch paint from one round of
@@ -220,6 +234,37 @@ struct MobileSitrepView: View {
         .background { VisibleWarmKeeper(rows: visible) }
         .onChange(of: visible.count) { _, count in
             if count == 0 { expanded = false }
+        }
+    }
+
+    // MARK: - the records, while the calendar holds their tab
+
+    /// Quick Look's four cards, under everything you owe: reference material
+    /// is what a scroll is for. The key to the login codes rides the section's
+    /// own heading, the same door Quick Look's bar had, because the codes are
+    /// a lookup and this is where the lookups went.
+    private var records: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("quick look")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.accent)
+                        .textCase(.uppercase)
+                        .tracking(0.6)
+                    Text("Pulled out of your mail, kept here.")
+                        .font(Typo.hero(22))
+                        .foregroundStyle(Palette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                CodesKey { showAuth = true }
+                    .font(Typo.ui(17))
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 12)
+            RecordZones()
         }
     }
 

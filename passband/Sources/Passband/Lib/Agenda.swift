@@ -393,23 +393,29 @@ enum Agenda {
         return a.id < b.id
     }
 
-    /// Today and the days after it, in the user's zone.
+    /// Today and the days after it, in the user's zone. `from` starts the
+    /// list on another day instead (the phone's selected day, which can be
+    /// last week or next month); nil is today.
     ///
     /// A row lands on the day it STARTS. The exception is one still running
-    /// when today began (last night's party, a trip that started Sunday): it
-    /// is listed under today, because today is when it is in the way.
-    /// Anything that ended before today began is gone. Today is always returned, empty
-    /// or not; any other day only when it has something on it.
-    static func days(_ items: [AgendaItem], now: Date, calendar: Calendar) -> [AgendaDay] {
+    /// when the first day began (last night's party, a trip that started
+    /// Sunday): it is listed under that day, because that is when it is in
+    /// the way. Anything that ended before the first day began is gone. The
+    /// first day is always returned, empty or not; any other day only when it
+    /// has something on it. Only TODAY folds what has finished into "earlier".
+    static func days(
+        _ items: [AgendaItem], now: Date, calendar: Calendar, from anchor: Date? = nil
+    ) -> [AgendaDay] {
         let today = calendar.startOfDay(for: now)
-        var byDay: [Date: [AgendaItem]] = [today: []]
+        let first = anchor.map { calendar.startOfDay(for: $0) } ?? today
+        var byDay: [Date: [AgendaItem]] = [first: []]
         for item in items {
             let day = calendar.startOfDay(for: item.start)
-            if day < today {
-                // Ran into today at all: listed there, and the earlier fold
-                // below takes it if it has finished since.
-                guard item.effectiveEnd > today else { continue }
-                byDay[today, default: []].append(item)
+            if day < first {
+                // Ran into the first day at all: listed there, and the
+                // earlier fold below takes it if it has finished since.
+                guard item.effectiveEnd > first else { continue }
+                byDay[first, default: []].append(item)
             } else {
                 byDay[day, default: []].append(item)
             }
@@ -429,7 +435,7 @@ enum Agenda {
                 }
             }
             let built = AgendaDay(day: day, visible: visible, unlikely: unlikely, earlier: earlier)
-            return day == today || !(visible.isEmpty && unlikely.isEmpty) ? built : nil
+            return day == first || day == today || !(visible.isEmpty && unlikely.isEmpty) ? built : nil
         }
     }
 

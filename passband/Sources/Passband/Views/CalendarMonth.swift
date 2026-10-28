@@ -71,40 +71,6 @@
 
     // MARK: - colours
 
-    /// One hue's three tones as SwiftUI colours, each resolving per theme.
-    struct ChipInks {
-        /// A solid chip's body.
-        let fill: Color
-        /// The hue as text: a row's time, a calendar's name.
-        let ink: Color
-        /// The hue as a line: stripes, outlines, the agenda's mark.
-        let edge: Color
-    }
-
-    /// `CalendarColor`'s tones, built once per hue: a month redraws on every
-    /// poll tick, and the OKLab round trip is cheap but not free.
-    @MainActor
-    enum ChipColors {
-        private static var cache: [ChipHue: ChipInks] = [:]
-
-        static func inks(_ hue: ChipHue) -> ChipInks {
-            if let hit = cache[hue] { return hit }
-            let light = CalendarColor.tones(for: hue, dark: false)
-            let dark = CalendarColor.tones(for: hue, dark: true)
-            let out = ChipInks(
-                fill: Color(light: light.fill.hex, dark: dark.fill.hex),
-                ink: Color(light: light.ink.hex, dark: dark.ink.hex),
-                edge: Color(light: light.edge.hex, dark: dark.edge.hex))
-            // A user has a handful of calendars; a bound keeps a daemon that
-            // sends a new colour on every event from growing this forever.
-            if cache.count > 256 { cache.removeAll() }
-            cache[hue] = out
-            return out
-        }
-
-        static func inks(_ item: AgendaItem) -> ChipInks { inks(CalendarColor.style(item).hue) }
-    }
-
     /// A chip's body on the likelihood scale, in its hue. Solid is the fill;
     /// striped is a thinner fill, hatched, with an even edge; an outline is the
     /// edge alone, an EMPTY container (the words on it never fade). Thin (a

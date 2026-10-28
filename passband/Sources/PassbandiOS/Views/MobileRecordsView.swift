@@ -38,33 +38,11 @@ struct MobileRecordsView: View {
     /// it from any tab (see `AppStore.requestAuthPage`).
     @Binding var showAuth: Bool
 
-    /// Is there a sealed message young enough to still be worth racing to? The
-    /// window and the test both belong to MobileAuthView, which is the surface
-    /// that has to keep its word about them — this is only the badge asking.
-    ///
-    /// EVERY sealed kind, not just the code kinds the sitrep's card is gated on:
-    /// the dot's job is "there is something new behind this key", and a sign-in
-    /// alert is something new behind this key even though nobody is racing it.
-    private var liveCode: Bool {
-        store.sitrep.sealed.contains { MobileAuthView.isLive($0) }
-    }
-
-    /// Spoken instead of drawn, for the same dot. Typed as `String` rather than
-    /// inlined: a ternary of two literals leaves the compiler choosing between
-    /// the StringProtocol and LocalizedStringKey overloads of
-    /// `accessibilityValue`.
-    private var liveCodeValue: String {
-        liveCode ? "a code just arrived" : ""
-    }
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 masthead
-                CalendarZone()
-                ShipmentsZone()
-                BankingZone()
-                ReceiptsZone()
+                RecordZones()
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
@@ -79,33 +57,7 @@ struct MobileRecordsView: View {
         // is a door.
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showAuth = true
-                } label: {
-                    // A DOT WHEN SOMETHING JUST LANDED. Behind a glyph the codes
-                    // are invisible, and something arriving while you were
-                    // elsewhere is the one moment this bar has to speak up. Same
-                    // live window the page itself uses, so the dot and the row's
-                    // "live" tag can never disagree.
-                    //
-                    // The padding RESERVES the dot's corner rather than hanging
-                    // it outside the glyph: the item's own bounds are still what
-                    // the toolbar lays out and clips against, capsule or no
-                    // capsule, and a dot pushed past them is at that clip's mercy.
-                    Image(systemName: "key.fill")
-                        .foregroundStyle(Palette.accent)
-                        .padding(.top, 3)
-                        .padding(.trailing, 3)
-                        .overlay(alignment: .topTrailing) {
-                            if liveCode {
-                                Circle()
-                                    .fill(Palette.positive)
-                                    .frame(width: 6, height: 6)
-                            }
-                        }
-                }
-                .accessibilityLabel("Login codes")
-                .accessibilityValue(liveCodeValue)
+                CodesKey { showAuth = true }
             }
             .sharedBackgroundVisibility(.hidden)
         }
@@ -114,10 +66,7 @@ struct MobileRecordsView: View {
         // from the zones fetch, and the resolution that MOVED a mail into one of
         // them rides the sitrep pull. Pulling only the zones would leave the
         // bands claiming an item this screen has already taken over.
-        .refreshable {
-            _ = await SitrepPoller.shared.pull()
-            await store.refreshZones(force: true)
-        }
+        .refreshable { await RecordZones.refresh(store) }
         // Each zone asks for this too and the store joins the in-flight pass, so
         // asking here as well is what makes a cold open paint from one round of
         // requests rather than from whichever zone happened to mount first.
@@ -141,5 +90,84 @@ struct MobileRecordsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 4)
+    }
+}
+
+/// The four record cards, in the Mac rail's order. Their own tab while the
+/// calendar is hidden; under the sitrep's board once the calendar takes this
+/// slot in the tab bar (MobileSitrepView), because a calendar is a place you
+/// live in and records are a place you look one fact up.
+struct RecordZones: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            CalendarZone()
+            ShipmentsZone()
+            BankingZone()
+            ReceiptsZone()
+        }
+    }
+
+    /// Both halves, because a record can arrive either way: the zones come
+    /// from the zones fetch, and the resolution that MOVED a mail into one of
+    /// them rides the sitrep pull. Pulling only the zones would leave the
+    /// bands claiming an item this screen has already taken over.
+    static func refresh(_ store: AppStore) async {
+        _ = await SitrepPoller.shared.pull()
+        await store.refreshZones(force: true)
+    }
+}
+
+/// THE LOGIN CODES' DOOR: a key, with a dot when something just landed.
+/// Quick Look's bar carries it, or the sitrep's records section once those
+/// records live there.
+struct CodesKey: View {
+    @Environment(AppStore.self) private var store
+    let action: () -> Void
+
+    /// Is there a sealed message young enough to still be worth racing to? The
+    /// window and the test both belong to MobileAuthView, which is the surface
+    /// that has to keep its word about them; this is only the badge asking.
+    ///
+    /// EVERY sealed kind, not just the code kinds the sitrep's card is gated on:
+    /// the dot's job is "there is something new behind this key", and a sign-in
+    /// alert is something new behind this key even though nobody is racing it.
+    private var liveCode: Bool {
+        store.sitrep.sealed.contains { MobileAuthView.isLive($0) }
+    }
+
+    /// Spoken instead of drawn, for the same dot. Typed as `String` rather than
+    /// inlined: a ternary of two literals leaves the compiler choosing between
+    /// the StringProtocol and LocalizedStringKey overloads of
+    /// `accessibilityValue`.
+    private var liveCodeValue: String {
+        liveCode ? "a code just arrived" : ""
+    }
+
+    var body: some View {
+        Button(action: action) {
+            // A DOT WHEN SOMETHING JUST LANDED. Behind a glyph the codes are
+            // invisible, and something arriving while you were elsewhere is
+            // the one moment this door has to speak up. Same live window the
+            // page itself uses, so the dot and the row's "live" tag can never
+            // disagree.
+            //
+            // The padding RESERVES the dot's corner rather than hanging it
+            // outside the glyph: the item's own bounds are still what a
+            // toolbar lays out and clips against, and a dot pushed past them
+            // is at that clip's mercy.
+            Image(systemName: "key.fill")
+                .foregroundStyle(Palette.accent)
+                .padding(.top, 3)
+                .padding(.trailing, 3)
+                .overlay(alignment: .topTrailing) {
+                    if liveCode {
+                        Circle()
+                            .fill(Palette.positive)
+                            .frame(width: 6, height: 6)
+                    }
+                }
+        }
+        .accessibilityLabel("Login codes")
+        .accessibilityValue(liveCodeValue)
     }
 }

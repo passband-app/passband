@@ -99,6 +99,25 @@ fn special_use_wins_over_a_folder_named_like_the_role() {
 }
 
 #[test]
+fn a_stale_location_is_searched_for_in_archive_and_all_mail_too() {
+    let roles = resolve_roles(&names(&[
+        ("INBOX", &[]),
+        ("Sent", &["\\Sent"]),
+        ("Junk", &["\\Junk"]),
+        ("Archive", &["\\Archive"]),
+        ("[Gmail]/All Mail", &["\\All"]),
+        ("Projects", &[]),
+    ]));
+    assert_eq!(
+        roles.search_folders(),
+        vec!["INBOX", "Sent", "Junk", "Archive", "[Gmail]/All Mail"]
+    );
+    // By name when there is no SPECIAL-USE, and never twice.
+    let roles = resolve_roles(&names(&[("INBOX", &[]), ("All Mail", &[])]));
+    assert_eq!(roles.search_folders(), vec!["INBOX", "All Mail"]);
+}
+
+#[test]
 fn a_server_with_no_junk_folder_watches_two() {
     let roles = resolve_roles(&names(&[("INBOX", &[]), ("Sent Messages", &[])]));
     assert_eq!(roles.sent.as_deref(), Some("Sent Messages"));
@@ -941,12 +960,19 @@ async fn live_a_moved_message_keeps_its_id_and_its_rows_follow_it() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].folder, "Junk");
 
-    // Out of every watched folder: Missing, not an error that would fail a
-    // whole ingest batch, and the stale row is gone.
+    // Archived from another client: the search widens to the archive and
+    // all-mail folders, so the body is still there under the same id and the
+    // row follows it. Reading this as gone would leave the blank-body heal
+    // and the recipients backfill with nothing for good.
     let m = src.fetch_raw(&to_archive, Urgency::Live).await.unwrap();
-    assert!(matches!(m.raw, RawBody::Missing));
-    assert!(locs.message_locations(1, &to_archive).unwrap().is_empty());
-    // The archive window still sees it, under the same id: no duplicate row.
+    assert!(matches!(m.raw, RawBody::Bytes(_)));
+    assert_eq!(m.placement, Placement::default());
+    let rows = locs.message_locations(1, &to_archive).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].folder, "Archive");
+    let h = src.fetch_headers(&to_archive, &["Subject"]).await.unwrap();
+    assert_eq!(h.headers, vec![("Subject".into(), "to archive".into())]);
+    // The archive window sees it under the same id: no duplicate row.
     let window = src
         .list(
             Listing::Window {
@@ -960,10 +986,15 @@ async fn live_a_moved_message_keeps_its_id_and_its_rows_follow_it() {
         .await
         .unwrap();
     assert_eq!(window, vec![to_archive.clone()]);
-    assert!(matches!(
-        src.fetch_raw(&to_archive, Urgency::Live).await.unwrap().raw,
-        RawBody::Bytes(_)
-    ));
+
+    // Filed somewhere the search does not look (a user folder): Missing, not
+    // an error that would fail a whole ingest batch, and the stale row goes.
+    other.create("Projects").await.unwrap();
+    other.select("Archive").await.unwrap();
+    other.uid_mv("1:*", "Projects").await.unwrap();
+    let m = src.fetch_raw(&to_archive, Urgency::Live).await.unwrap();
+    assert!(matches!(m.raw, RawBody::Missing));
+    assert!(locs.message_locations(1, &to_archive).unwrap().is_empty());
     // Never seen at all is NotFound.
     assert!(matches!(
         src.fetch_raw("imap:nope", Urgency::Live).await,
@@ -1218,4 +1249,164 @@ async fn live_the_sqlite_store_is_a_location_table() {
         RawBody::Bytes(_)
     ));
     let _ = other.logout().await;
+}
+
+// ---- step 3 live: IDLE ------------------------------------------------------
+
+/// Hang up every connection `user` has open, the way a server restart or a
+/// NAT timeout would.
+fn kick(user: &str) {
+    let out = std::process::Command::new("docker")
+        .args(["exec", "squelch-imap-dev", "doveadm", "kick", user])
+        .output()
+        .expect("docker exec");
+    assert!(
+        out.status.success(),
+        "doveadm kick: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_idle_wakes_on_an_append_within_seconds() {
+    let user = fresh_user("idle");
+    let mut other = other_client(&user).await;
+    let (src, _) = live(&user);
+    let src = Arc::new(src);
+    let cursor = src.current_cursor().await.unwrap();
+
+    let waiter = {
+        let (src, cursor) = (src.clone(), cursor.clone());
+        tokio::spawn(async move {
+            let t = tokio::time::Instant::now();
+            src.wait_for_change(Some(&cursor), Duration::from_secs(60))
+                .await;
+            t.elapsed()
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!waiter.is_finished(), "parked, not polling");
+    append(&mut other, INBOX, &mail(Some("idle@x.org"), "idle"), None).await;
+    let took = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("IDLE woke within 5s of the APPEND")
+        .unwrap();
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert_eq!(src.idle_connects(), 1);
+
+    // The command session saw none of that and still works.
+    let walk = src.changes(&cursor, Folder::Inbox).await.unwrap();
+    assert_eq!(walk.ids, vec![stable_id_for_message_id("idle@x.org")]);
+
+    // The engine hands back the walked cursor: the next wait parks on the
+    // SAME idle connection (no new login).
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(Some(&walk.cursor), Duration::from_secs(2))
+        .await;
+    assert!(t.elapsed() >= Duration::from_millis(1900));
+    assert_eq!(src.idle_connects(), 1);
+    let _ = other.logout().await;
+}
+
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_idle_returns_at_once_when_the_server_is_ahead_but_never_twice() {
+    let user = fresh_user("ahead");
+    let mut other = other_client(&user).await;
+    let (src, _) = live(&user);
+    let stale = src.current_cursor().await.unwrap();
+    append(&mut other, INBOX, &mail(Some("early@x.org"), "early"), None).await;
+
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(Some(&stale), Duration::from_secs(30))
+        .await;
+    assert!(
+        t.elapsed() < Duration::from_secs(3),
+        "mail landed before the park"
+    );
+    // The same cursor again: the engine's walk did not move it, so this
+    // parks rather than spin.
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(Some(&stale), Duration::from_secs(2))
+        .await;
+    assert!(t.elapsed() >= Duration::from_millis(1900));
+    let _ = other.logout().await;
+}
+
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_wait_dropped_mid_idle_leaves_nothing_broken() {
+    let user = fresh_user("drop");
+    let mut other = other_client(&user).await;
+    let (src, _) = live(&user);
+    let cursor = src.current_cursor().await.unwrap();
+
+    // Shutdown or a manual refresh wins the select! mid-IDLE.
+    for _ in 0..3 {
+        let r = tokio::time::timeout(
+            Duration::from_millis(500),
+            src.wait_for_change(Some(&cursor), Duration::from_secs(60)),
+        )
+        .await;
+        assert!(r.is_err(), "still parked when dropped");
+    }
+    // Each dropped wait took its connection with it; the next logs in anew
+    // and still wakes on mail.
+    assert_eq!(src.idle_connects(), 3);
+    let src = Arc::new(src);
+    let waiter = {
+        let (src, cursor) = (src.clone(), cursor.clone());
+        tokio::spawn(async move {
+            src.wait_for_change(Some(&cursor), Duration::from_secs(60))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    append(&mut other, INBOX, &mail(Some("after@x.org"), "after"), None).await;
+    tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("woke after the drops")
+        .unwrap();
+    // The command session is unaffected.
+    assert!(src.inbox_unread().await.is_ok());
+    let _ = other.logout().await;
+}
+
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_a_killed_idle_connection_sleeps_out_the_wait_and_never_spins() {
+    let user = fresh_user("kick");
+    let (src, _) = live(&user);
+    let cursor = src.current_cursor().await.unwrap();
+
+    let src = Arc::new(src);
+    let waiter = {
+        let (src, cursor) = (src.clone(), cursor.clone());
+        tokio::spawn(async move {
+            let t = tokio::time::Instant::now();
+            src.wait_for_change(Some(&cursor), Duration::from_secs(4))
+                .await;
+            t.elapsed()
+        })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    kick(&user);
+    let took = waiter.await.unwrap();
+    // Not back at the moment of the hang-up: the rest of max_wait is slept.
+    assert!(took >= Duration::from_millis(3900), "{took:?}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
+
+    // A server refusing the login is the same: one attempt, then sleep.
+    let bad = dev_source_for(&user, ImapTls::Plain, 10143, "wrong", mem());
+    let t = tokio::time::Instant::now();
+    bad.wait_for_change(None, Duration::from_secs(2)).await;
+    assert!(t.elapsed() >= Duration::from_millis(1900));
+
+    // And the next wait reconnects and parks normally.
+    let t = tokio::time::Instant::now();
+    src.wait_for_change(Some(&cursor), Duration::from_secs(2))
+        .await;
+    assert!(t.elapsed() >= Duration::from_millis(1900));
+    assert_eq!(src.idle_connects(), 2);
 }

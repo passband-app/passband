@@ -3,8 +3,8 @@
 //! What works: connecting (implicit TLS, STARTTLS, and plaintext to loopback
 //! only), `LOGIN`, folder roles from `SPECIAL-USE` with a fallback by name,
 //! both listings, the change feed with its per-folder cursor, `fetch_raw`,
-//! `fetch_headers`, `current_cursor` and `inbox_unread`. `wait_for_change`
-//! keeps the default sleep until the IDLE step.
+//! `fetch_headers`, `current_cursor`, `inbox_unread` and `wait_for_change`
+//! (IDLE on INBOX over a connection of its own).
 //!
 //! What a source here must never do:
 //! - change server state: every folder is opened with `EXAMINE` (read-only)
@@ -27,7 +27,8 @@
 //! THE LOCATION TABLE ([`MessageLocations`], the store's `imap_locations`)
 //! records every folder and UID each id was seen at. `fetch_raw` and
 //! `fetch_headers` resolve through it, re-checking `UIDVALIDITY` and the UID,
-//! then fall back to `SEARCH HEADER Message-ID` in the watched folders. A row
+//! then fall back to `SEARCH HEADER Message-ID` in the watched folders, then
+//! the archive and all-mail folders. A row
 //! that has gone stale is dropped as it is found.
 //!
 //! THE CURSOR is one `{mailbox, uidvalidity, last_uid, highestmodseq}` per
@@ -46,7 +47,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -234,6 +235,9 @@ pub(crate) struct FolderRoles {
     pub trash: Option<String>,
     pub drafts: Option<String>,
     pub archive: Option<String>,
+    /// The all-mail view (`\All`), where a server has one (Gmail, some
+    /// Dovecot setups): every message whatever folder it is filed in.
+    pub all: Option<String>,
     /// Every selectable folder, for the archive window's walk.
     pub selectable: Vec<String>,
 }
@@ -254,6 +258,24 @@ impl FolderRoles {
             .into_iter()
             .filter_map(|f| self.folder(f).map(|name| (f, name)))
             .collect()
+    }
+
+    /// Where a stale location's `SEARCH HEADER Message-ID` looks: the
+    /// watched folders, then the archive and all-mail folders, since a
+    /// message the user archived from another client is filed in one of
+    /// those and must not read as gone (that would leave a blank body or
+    /// an empty recipient list stuck on its row for good).
+    pub fn search_folders(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self.watched().into_iter().map(|(_, n)| n).collect();
+        for extra in [self.archive.as_deref(), self.all.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !out.contains(&extra) {
+                out.push(extra);
+            }
+        }
+        out
     }
 
     /// The folders the archive window walks: every selectable folder but
@@ -312,6 +334,7 @@ pub(crate) fn resolve_roles(names: &[(String, Vec<String>)]) -> FolderRoles {
         trash: pick("\\Trash", &["Trash", "Deleted Messages", "Deleted Items"]),
         drafts: pick("\\Drafts", &["Drafts"]),
         archive: pick("\\Archive", &["Archive"]),
+        all: pick("\\All", &["All Mail", "[Gmail]/All Mail"]),
         selectable: names
             .iter()
             .filter(|(_, attrs)| {
@@ -735,6 +758,13 @@ impl Conn {
     }
 }
 
+/// What a server said it can do, read once per login.
+#[derive(Debug, Clone, Copy)]
+struct Caps {
+    condstore: bool,
+    idle: bool,
+}
+
 /// One message as a listing or a walk saw it.
 #[derive(Debug, Clone)]
 struct Seen {
@@ -761,7 +791,29 @@ pub struct ImapSource {
     /// session from a new one.
     connects: AtomicU64,
     refusals: Arc<SourceRefusals>,
+    /// Does the server do IDLE? [`IDLE_UNKNOWN`] until a login says.
+    idle_support: AtomicU8,
+    /// The parked IDLE connection between `wait_for_change` calls (contract
+    /// §8, §11): its own login, never the command session. TAKEN out for the
+    /// length of a wait and put back only after a clean `DONE`, so a wait
+    /// dropped mid-IDLE drops the connection with it and the next call
+    /// starts over on a new one.
+    idle_conn: tokio::sync::Mutex<Option<ImapSession>>,
+    /// The cursor a wait last returned early for because the server was
+    /// already ahead of it. The same cursor again means the engine's walk
+    /// did not move it, so the next wait parks instead: never a spin.
+    idle_ahead_of: std::sync::Mutex<Option<SyncCursor>>,
+    /// IDLE logins that succeeded, for the tests.
+    idle_connects: AtomicU64,
 }
+
+const IDLE_UNKNOWN: u8 = 0;
+const IDLE_YES: u8 = 1;
+const IDLE_NO: u8 = 2;
+
+/// The longest one IDLE runs before it is re-issued: RFC 2177 says servers
+/// may drop a client idle for 30 minutes, so under that with room to spare.
+const IDLE_REISSUE: Duration = Duration::from_secs(25 * 60);
 
 impl std::fmt::Debug for ImapSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -831,6 +883,10 @@ impl ImapSource {
             snapshots: std::sync::Mutex::new(BTreeMap::new()),
             connects: AtomicU64::new(0),
             refusals,
+            idle_support: AtomicU8::new(IDLE_UNKNOWN),
+            idle_conn: tokio::sync::Mutex::new(None),
+            idle_ahead_of: std::sync::Mutex::new(None),
+            idle_connects: AtomicU64::new(0),
         })
     }
 
@@ -870,6 +926,22 @@ impl ImapSource {
 
     /// Open, secure and authenticate one connection, then resolve roles.
     async fn connect(&self) -> Result<Conn> {
+        let (mut session, caps) = self.open_session().await?;
+        let roles = list_roles(&mut session).await?;
+        self.connects.fetch_add(1, Ordering::Relaxed);
+        Ok(Conn {
+            session,
+            roles,
+            condstore: caps.condstore,
+            selected: None,
+            calls: 0,
+            busy: false,
+        })
+    }
+
+    /// Open, secure and authenticate one connection: the command session's
+    /// and the IDLE connection's shared first half.
+    async fn open_session(&self) -> Result<(ImapSession, Caps)> {
         let tcp = self.connect_tcp().await?;
         let mut client = match self.server.tls {
             ImapTls::Implicit => Client::new(self.tls_wrap(tcp).await?),
@@ -905,21 +977,20 @@ impl ImapSource {
             }
             Err((e, _)) => return Err(net_err("login", e)),
         };
-        let condstore = session
+        let caps = session
             .capabilities()
             .await
-            .map_err(imap_err("capability"))?
-            .has_str("CONDSTORE");
-        let roles = list_roles(&mut session).await?;
-        self.connects.fetch_add(1, Ordering::Relaxed);
-        Ok(Conn {
-            session,
-            roles,
-            condstore,
-            selected: None,
-            calls: 0,
-            busy: false,
-        })
+            .map_err(imap_err("capability"))?;
+        let caps = Caps {
+            condstore: caps.has_str("CONDSTORE"),
+            idle: caps.has_str("IDLE"),
+        };
+        // Whichever connection learns it first, the source remembers it.
+        self.idle_support.store(
+            if caps.idle { IDLE_YES } else { IDLE_NO },
+            Ordering::Relaxed,
+        );
+        Ok((session, caps))
     }
 
     /// Sit out what is left of the backoff after the last failed connect.
@@ -1157,22 +1228,23 @@ async fn uid_exists(session: &mut ImapSession, uid: u32) -> Result<bool> {
     Ok(fetches.iter().any(|f| f.uid == Some(uid)))
 }
 
-/// Every watched folder holding a message with this Message-ID, for a
-/// location that has gone stale (contract §6). The highest UID per folder.
+/// Every folder holding a message with this Message-ID, for a location that
+/// has gone stale (contract §6): the watched folders, then archive and all
+/// mail ([`FolderRoles::search_folders`]). The highest UID per folder.
 async fn find_by_message_id(c: &mut Conn, message_id: &str) -> Result<Vec<MessageLocation>> {
     // The value goes inside a quoted string: refuse anything that could end
     // it or the command early.
     if message_id.contains(['"', '\\', '\r', '\n']) {
         return Ok(Vec::new());
     }
-    let watched: Vec<String> = c
+    let folders: Vec<String> = c
         .roles
-        .watched()
+        .search_folders()
         .into_iter()
-        .map(|(_, n)| n.to_string())
+        .map(str::to_string)
         .collect();
     let mut out = Vec::new();
-    for folder in watched {
+    for folder in folders {
         let Some(uidvalidity) = c.examine(&folder).await? else {
             continue;
         };
@@ -1191,6 +1263,20 @@ async fn find_by_message_id(c: &mut Conn, message_id: &str) -> Result<Vec<Messag
         }
     }
     Ok(out)
+}
+
+/// Does an untagged response seen during IDLE mean INBOX changed? An
+/// arrival (`EXISTS`), a removal (`EXPUNGE`, or `VANISHED` under QRESYNC),
+/// or a flag change (`FETCH`). `RECENT` always rides with an `EXISTS`.
+fn is_mailbox_change(r: &async_imap::imap_proto::Response<'_>) -> bool {
+    use async_imap::imap_proto::{MailboxDatum, Response};
+    matches!(
+        r,
+        Response::MailboxData(MailboxDatum::Exists(_))
+            | Response::Expunge(_)
+            | Response::Vanished { .. }
+            | Response::Fetch(..)
+    )
 }
 
 /// Where the rows say a message is: in the inbox if any row is INBOX, sent
@@ -1675,10 +1761,138 @@ impl MailSource for ImapSource {
         .await
     }
 
-    // `wait_for_change` keeps the default sleep until the IDLE step.
+    /// IDLE on INBOX until it changes or `max_wait` passes (contract §8).
+    async fn wait_for_change(&self, cursor: Option<&SyncCursor>, max_wait: Duration) {
+        let deadline = tokio::time::Instant::now() + max_wait;
+        if self.idle_support.load(Ordering::Relaxed) == IDLE_NO {
+            tokio::time::sleep_until(deadline).await;
+            return;
+        }
+        match self.idle_until(cursor, deadline).await {
+            Ok(()) => {}
+            Err(e) => {
+                // Sit out the rest of the wait: a server that is down or
+                // refusing is asked again next tick, never in a loop. The
+                // error is about the transport, never the password.
+                eprintln!("squelch: imap idle unavailable ({e}); polling this tick");
+                tokio::time::sleep_until(deadline).await;
+            }
+        }
+    }
 }
 
 impl ImapSource {
+    /// THE IDLE WAIT: on its own connection, `EXAMINE INBOX`, return at once
+    /// if the server is already past `cursor`, else IDLE (re-issued every
+    /// [`IDLE_REISSUE`]) until INBOX reports an arrival, an expunge or a flag
+    /// change, or `deadline`.
+    ///
+    /// CANCEL-SAFE BY OWNERSHIP: the session is taken out of `idle_conn` for
+    /// the whole wait and only put back after a clean `DONE`. A wait dropped
+    /// at any await drops the session with it (the socket closes, the server
+    /// ends the IDLE), and nothing shared is left half-way through a command:
+    /// the next call logs in afresh. The command session is never touched.
+    async fn idle_until(
+        &self,
+        cursor: Option<&SyncCursor>,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        use async_imap::extensions::idle::IdleResponse;
+
+        let parked = self.idle_conn.lock().await.take();
+        let mut session = match parked {
+            Some(s) => s,
+            None => {
+                let (s, caps) = self.open_session().await?;
+                if !caps.idle {
+                    // No IDLE on this server: the default poll, for good.
+                    drop(s);
+                    tokio::time::sleep_until(deadline).await;
+                    return Ok(());
+                }
+                self.idle_connects.fetch_add(1, Ordering::Relaxed);
+                s
+            }
+        };
+        // A fresh view of INBOX each wait: its UIDNEXT is what the engine's
+        // cursor is compared with, and IDLE reports changes against it.
+        let mbox = session
+            .examine(INBOX)
+            .await
+            .map_err(imap_err("idle examine"))?;
+        if self.already_ahead(cursor, mbox.uid_validity, mbox.uid_next) {
+            *self.idle_conn.lock().await = Some(session);
+            return Ok(());
+        }
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                *self.idle_conn.lock().await = Some(session);
+                return Ok(());
+            }
+            let round = (deadline - now).min(IDLE_REISSUE);
+            let mut handle = session.idle();
+            handle.init().await.map_err(imap_err("idle"))?;
+            let woke = {
+                // `_stop` must outlive the wait: dropping it interrupts it.
+                let (wait, _stop) = handle.wait_with_timeout(round);
+                wait.await.map_err(imap_err("idle"))?
+            };
+            session = handle.done().await.map_err(imap_err("idle done"))?;
+            match woke {
+                IdleResponse::NewData(data) if is_mailbox_change(data.parsed()) => {
+                    *self.idle_conn.lock().await = Some(session);
+                    return Ok(());
+                }
+                // Something that is not a change (RECENT, an alert), or
+                // the round's timer: IDLE again for what is left.
+                IdleResponse::NewData(_) | IdleResponse::Timeout => {}
+                // The stream ended: the server hung up.
+                IdleResponse::ManualInterrupt => {
+                    return Err(broken_err("idle", "connection closed"));
+                }
+            }
+        }
+    }
+
+    /// Is INBOX already past what `cursor` covers? Then the wait returns at
+    /// once, but only once per cursor: if the engine hands the same cursor
+    /// back, its walk did not move it, and returning early again would spin.
+    fn already_ahead(
+        &self,
+        cursor: Option<&SyncCursor>,
+        uidvalidity: Option<u32>,
+        uid_next: Option<u32>,
+    ) -> bool {
+        let Some(cursor) = cursor else {
+            return false;
+        };
+        let Some(pos) = ImapCursor::decode(cursor)
+            .and_then(|c| c.folders.get(role_key(Folder::Inbox)).cloned())
+        else {
+            return false;
+        };
+        let ahead = uidvalidity.is_some_and(|v| v != pos.uidvalidity)
+            || uid_next.is_some_and(|n| n.saturating_sub(1) > pos.last_uid);
+        if !ahead {
+            return false;
+        }
+        let Ok(mut last) = self.idle_ahead_of.lock() else {
+            return false;
+        };
+        if last.as_ref() == Some(cursor) {
+            return false;
+        }
+        *last = Some(cursor.clone());
+        true
+    }
+
+    /// IDLE logins so far.
+    #[cfg(test)]
+    pub(crate) fn idle_connects(&self) -> u64 {
+        self.idle_connects.load(Ordering::Relaxed)
+    }
+
     /// Bring the location rows in line with what a resolve found: stale rows
     /// out, rows the search found in.
     fn settle<T>(&self, id: &str, r: &Resolved<T>) -> Result<()> {

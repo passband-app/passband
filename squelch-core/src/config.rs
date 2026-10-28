@@ -1392,7 +1392,7 @@ impl Default for Stage1Config {
 /// written before the 1-hour TTL (at 1.25x) are re-priced at 2x here, and so
 /// would every row if a gateway dropped the `ttl` field. The per-TTL split
 /// is stored per run in `agent_triage_runs.metadata_json.usage[].cache_creation`,
-/// for the runs of the last `HISTORY_RETENTION_DAYS` (`store/sqlite/retention.rs`);
+/// for every run (nothing schedules `store/sqlite/retention.rs`'s pruning);
 /// pricing from it needs a ledger column, which is a follow-up.
 pub const CACHE_WRITE_INPUT_MULT: f64 = 2.0;
 pub const CACHE_READ_INPUT_MULT: f64 = 0.05;

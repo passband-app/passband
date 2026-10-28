@@ -1,7 +1,13 @@
 //! History retention: the per-run diagnostics the triage worker and the fast
-//! notification lane write, kept for [`HISTORY_RETENTION_DAYS`] and then
-//! deleted, so the two tables stop growing with every run for the life of the
-//! store.
+//! notification lane write, deleted once past [`HISTORY_RETENTION_DAYS`], so
+//! the two tables stop growing with every run for the life of the store.
+//!
+//! NOT SCHEDULED. squelchd used to run this every six hours; it no longer
+//! calls it at all. These rows (prompt versions, models, configs, per-turn
+//! usage, the fast lane's reasons) are the raw material for triage evaluation
+//! and cost work, and are kept until that work decides what it needs. The
+//! pass stays here, tested, so turning it back on (or replacing it with an
+//! archive) is a scheduling change, not a rewrite.
 //!
 //! Only these two tables, on purpose. The other never-pruned tables are
 //! records something still reads to decide: a terminal triage job is the
@@ -158,9 +164,9 @@ impl SqliteStore {
     /// rather than shrinking: the store is not `auto_vacuum`, and a `VACUUM`
     /// rewrites the whole file under the write lock.
     ///
-    /// Off the open path and on a timer, like
-    /// [`refresh_statistics`](Self::refresh_statistics) (`spawn_history_retention`
-    /// in squelchd), and best effort: both tables are tried even when the
+    /// Meant for off the open path and on a timer, like
+    /// [`refresh_statistics`](Self::refresh_statistics), though nothing
+    /// schedules it today (see the module docs). Best effort: both tables are tried even when the
     /// first fails, so a busy file does not hold the other back, and the
     /// counts include the pages committed before an error.
     pub fn prune_history(&self, now: DateTime<Utc>) -> (HistoryPruned, Result<()>) {
@@ -205,7 +211,7 @@ impl SqliteStore {
     /// deferred read that another process's commit overtook could not be
     /// upgraded, and would fail at once rather than wait out the busy
     /// timeout. Plain `prepare`, not the statement cache: these run a few
-    /// times every six hours, and would only push hot statements out of it.
+    /// times a pass, and would only push hot statements out of it.
     pub(super) fn prune_page(
         &self,
         table: &Pruning,

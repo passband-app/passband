@@ -78,6 +78,12 @@ impl Fetched {
 pub(crate) struct Fetcher {
     client: reqwest::Client,
     allow_local: bool,
+    /// Tests only: one exact `host:port` (a loopback stub) that skips the
+    /// per-hop check, so a test can serve the FIRST hop locally while every
+    /// hop after it meets the production checks. `allow_local` cannot do
+    /// that: it waives the checks for every hop at once.
+    #[cfg(test)]
+    trusted: Option<String>,
 }
 
 impl Fetcher {
@@ -97,7 +103,38 @@ impl Fetcher {
         Ok(Self {
             client,
             allow_local,
+            #[cfg(test)]
+            trusted: None,
         })
+    }
+
+    /// Production checks on every hop except `authority` (`host:port`).
+    #[cfg(test)]
+    fn trusting(authority: &str) -> Self {
+        let mut f = Self::new(false).unwrap();
+        f.trusted = Some(authority.to_owned());
+        f
+    }
+
+    fn is_trusted(&self, url: &Url) -> bool {
+        #[cfg(test)]
+        if let Some(t) = &self.trusted {
+            let authority = format!(
+                "{}:{}",
+                url.host_str().unwrap_or_default(),
+                url.port_or_known_default().unwrap_or_default()
+            );
+            return &authority == t;
+        }
+        let _ = url;
+        false
+    }
+
+    fn check_hop(&self, url: &Url) -> Result<(), FetchError> {
+        if self.is_trusted(url) {
+            return Ok(());
+        }
+        check_url(url, self.allow_local)
     }
 
     /// RFC 8058: one POST of `List-Unsubscribe=One-Click` to the header's URL,
@@ -146,7 +183,7 @@ impl Fetcher {
         mut body: Option<String>,
     ) -> Result<Fetched, FetchError> {
         for _ in 0..=MAX_REDIRECTS {
-            check_url(&url, self.allow_local)?;
+            self.check_hop(&url)?;
             let mut resp = self.send_hop(&method, &url, body.as_deref()).await?;
             let status = resp.status();
             if status.is_redirection()
@@ -222,7 +259,7 @@ impl Fetcher {
         url: &Url,
         body: Option<&str>,
     ) -> Result<reqwest::Response, FetchError> {
-        if url.scheme() == "http" && !self.allow_local {
+        if url.scheme() == "http" && !self.allow_local && !self.is_trusted(url) {
             let mut secure = url.clone();
             if secure.set_scheme("https").is_ok() && secure.set_port(None).is_ok() {
                 match self.send_raw(method, &secure, body).await {
@@ -526,5 +563,132 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, FetchError::Refused(_)));
         assert!(!accepted.await.unwrap(), "no connection was ever made");
+    }
+
+    /// A loopback stub that answers every request with `status` and
+    /// `Location: location`, counting what it receives.
+    async fn redirector(
+        status: StatusCode,
+        location: String,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = hits.clone();
+        let app = axum::Router::new().fallback(move || {
+            let location = location.clone();
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                (status, [(axum::http::header::LOCATION, location)])
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let authority = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (authority, hits)
+    }
+
+    /// A listener that records whether anything ever connected.
+    async fn tripwire() -> (u16, tokio::task::JoinHandle<bool>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(800), listener.accept())
+                .await
+                .is_ok()
+        });
+        (port, accepted)
+    }
+
+    /// SECURITY.md §7: redirects are followed by hand so every hop passes the
+    /// same checks. A public-looking first hop that bounces to the daemon,
+    /// the cloud metadata service or the LAN is refused at the bounce, and
+    /// nothing is ever sent there. (The first hop is the loopback stub,
+    /// trusted by exact host:port; nothing after it is.)
+    #[tokio::test]
+    async fn a_redirect_into_the_private_network_is_refused_at_the_hop() {
+        use std::sync::atomic::Ordering;
+        let (port, accepted) = tripwire().await;
+        for target in [
+            format!("http://127.0.0.1:{port}/client/stats"),
+            "http://169.254.169.254/latest/meta-data/".to_owned(),
+            "http://localhost/".to_owned(),
+            "http://[::1]/".to_owned(),
+            "http://10.0.0.1/admin".to_owned(),
+            "http://metadata.google.internal/".to_owned(),
+            "file:///etc/passwd".to_owned(),
+        ] {
+            for status in [
+                StatusCode::FOUND,
+                StatusCode::SEE_OTHER,
+                StatusCode::TEMPORARY_REDIRECT,
+                StatusCode::PERMANENT_REDIRECT,
+            ] {
+                let (authority, hits) = redirector(status, target.clone()).await;
+                let f = Fetcher::trusting(&authority);
+                let err = f.get(&format!("http://{authority}/u")).await.unwrap_err();
+                assert!(
+                    matches!(err, FetchError::Refused(_)),
+                    "{status} to {target}: {err:?}"
+                );
+                assert_eq!(hits.load(Ordering::SeqCst), 1, "the first hop was fetched");
+            }
+        }
+        assert!(
+            !accepted.await.unwrap(),
+            "no hop ever reached the daemon's port"
+        );
+    }
+
+    /// Control for the test above: the same trusted first hop, redirecting to
+    /// an ordinary public name, gets past the check (and then fails to
+    /// connect in a sandbox, which is a Transport error, not a refusal).
+    #[tokio::test]
+    async fn a_redirect_to_a_public_name_passes_the_hop_check() {
+        let (authority, _hits) =
+            redirector(StatusCode::FOUND, "https://example.invalid/u".into()).await;
+        let f = Fetcher::trusting(&authority);
+        let err = f.get(&format!("http://{authority}/u")).await.unwrap_err();
+        assert!(
+            !matches!(err, FetchError::Refused(_)),
+            "a public name must not be refused by the hop check: {err:?}"
+        );
+    }
+
+    /// SECURITY.md §7: a 307/308 keeps the method and body, so a submitted
+    /// form is never carried to another host. 127.0.0.1 and localhost are
+    /// different hosts as far as the check is concerned, which lets both
+    /// ends be loopback stubs.
+    #[tokio::test]
+    async fn a_form_body_is_never_carried_to_another_host() {
+        use std::sync::atomic::Ordering;
+        let (_other, other_hits) = redirector(StatusCode::OK, String::new()).await;
+        let other_port = _other.rsplit(':').next().unwrap().to_owned();
+        for status in [
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            let (authority, _) =
+                redirector(status, format!("http://localhost:{other_port}/collect")).await;
+            let f = Fetcher::new(true).unwrap();
+            let action = Url::parse(&format!("http://{authority}/unsubscribe")).unwrap();
+            let err = f
+                .submit(
+                    Method::POST,
+                    action,
+                    &[("email".into(), "me@example.com".into())],
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, FetchError::Refused("body redirected off-host")),
+                "{status}: {err:?}"
+            );
+        }
+        assert_eq!(
+            other_hits.load(Ordering::SeqCst),
+            0,
+            "the body went nowhere"
+        );
     }
 }

@@ -686,6 +686,10 @@ pub(crate) fn verify_transfer_credential_at(
         ))
     })?;
 
+    // Before the refresh, which would send the blob's refresh token to THIS
+    // daemon's issuer: a blob exported under the other provider says so in
+    // its scopes, and is refused instead.
+    crate::credentials::check_token_issuer(token, client.issuer)?;
     let refreshed =
         crate::credentials::refresh_stored_token_detailed_at(client, refresh, token_url, timeout)
             .map_err(|e| transfer_client_error(kind, &e))?;
@@ -3599,5 +3603,58 @@ mod microsoft_tests {
         let (base, _rx) = capturing(vec![ok_token(), me()]);
         let err = verify(&base, "someone@else.com").unwrap_err().to_string();
         assert!(err.contains("nothing was stored"), "{err}");
+    }
+
+    #[test]
+    fn a_token_from_the_other_company_is_never_used_or_refreshed() {
+        use crate::credentials::{check_token_issuer, token_issuer};
+        let t = |scopes: Option<&[&str]>| StoredToken {
+            access_token: "a".into(),
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: scopes.map(|s| s.iter().map(|x| x.to_string()).collect()),
+        };
+        let google = t(Some(&[GMAIL_MODIFY_SCOPE]));
+        let ms = t(Some(&["Mail.ReadWrite", "Mail.Send", "User.Read"]));
+        assert_eq!(token_issuer(&google), Some(OAuthIssuer::Google));
+        assert_eq!(token_issuer(&ms), Some(OAuthIssuer::Microsoft));
+        assert_eq!(token_issuer(&t(None)), None);
+        assert!(check_token_issuer(&google, OAuthIssuer::Microsoft).is_err());
+        assert!(check_token_issuer(&ms, OAuthIssuer::Google).is_err());
+        assert!(check_token_issuer(&ms, OAuthIssuer::Microsoft).is_ok());
+        // A Gmail blob imported into an Outlook daemon: refused before the
+        // refresh, so no request is made (the endpoint here does not exist).
+        let err = verify_transfer_credential_at(
+            &ms_client(),
+            "me@outlook.com",
+            CredentialKind::Read,
+            &google,
+            "http://127.0.0.1:1/token",
+            "http://127.0.0.1:1/me",
+            Duration::from_secs(1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("minted by Google"), "{err}");
+    }
+
+    #[test]
+    fn a_microsoft_refresh_asks_for_the_consents_scopes() {
+        let (base, rx) = capturing(vec![(
+            "200 OK",
+            r#"{"access_token":"a","token_type":"Bearer","expires_in":3600}"#.into(),
+        )]);
+        crate::credentials::refresh_stored_token_detailed_at(
+            &ms_client(),
+            "r1",
+            &format!("{base}/token"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let req = rx.recv().unwrap();
+        assert!(
+            req.contains("offline_access") && req.contains("Mail.Send"),
+            "{req}"
+        );
     }
 }

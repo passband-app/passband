@@ -74,6 +74,17 @@ async fn delta(
     .into_response()
 }
 
+/// An empty listing that takes its time, standing in for a long backfill.
+async fn slow_list(
+    State(m): State<Mock>,
+    h: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    m.note(&h, format!("list:{name}"));
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    axum::Json(json!({ "value": [] })).into_response()
+}
+
 async fn meta(State(m): State<Mock>, h: HeaderMap, AxumPath(id): AxumPath<String>) -> Response {
     m.note(&h, format!("meta:{id}"));
     axum::Json(json!({
@@ -98,6 +109,7 @@ async fn serve(m: Mock) -> String {
     let app = Router::new()
         .route("/me/mailFolders/{name}", get(folder))
         .route("/me/mailFolders/{name}/messages/delta", get(delta))
+        .route("/me/mailFolders/{name}/messages", get(slow_list))
         .route("/me/messages/{id}", get(meta))
         .route("/me/messages/{id}/$value", get(value))
         .fallback(|| async { StatusCode::IM_A_TEAPOT })
@@ -188,4 +200,44 @@ async fn an_outlook_poll_fetches_only_new_mail_and_an_idle_one_says_so() {
         "a request without ImmutableId"
     );
     assert_eq!(m.calls("folder:"), 5, "folder ids are looked up once");
+}
+
+/// The cursor a catch-up stores must reach back from BEFORE the window was
+/// listed: minted after a long listing, the gap would never be synced.
+#[tokio::test]
+async fn an_outlook_catch_up_mints_its_cursor_before_it_lists() {
+    let m = Mock::default();
+    let base = serve(m.clone()).await;
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("me@outlook.com").unwrap();
+    store
+        .bind_account_provider(acct, MailProvider::Outlook)
+        .unwrap();
+    let engine = SyncEngine::new(
+        store.clone(),
+        Arc::new(FixedToken),
+        acct,
+        "me@outlook.com".into(),
+        Config::default(),
+    )
+    .with_api_base(base.clone());
+    let started = chrono::Utc::now();
+    engine.catch_up().await.unwrap();
+    let finished = chrono::Utc::now();
+    assert!(
+        (finished - started).num_milliseconds() >= 3000,
+        "both listings ran"
+    );
+    let stored = store.sync_cursor(acct).unwrap().unwrap();
+    let v: serde_json::Value = serde_json::from_str(stored.as_str()).unwrap();
+    let link = v["inbox"].as_str().unwrap();
+    let stamp = link.rsplit("%20").next().unwrap().replace("%3A", ":");
+    let at = chrono::DateTime::parse_from_rfc3339(&stamp)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let reach = started - crate::mail::graph::CURSOR_OVERLAP;
+    assert!(
+        (at - reach).num_seconds().abs() <= 1,
+        "the cursor reaches back from {at}, not from before the listing ({reach})"
+    );
 }

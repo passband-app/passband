@@ -160,7 +160,7 @@ mailbox never changes provider.
 |---|---|
 | `list(Folder)` | `GET /me/mailFolders/{inbox,sentitems,junkemail}/messages?$select=id&$orderby=receivedDateTime desc[&$filter=receivedDateTime ge …]` |
 | `list(Window)` | `GET /me/messages?$filter=receivedDateTime ge … and lt …&$select=id,parentFolderId,isDraft`, dropping drafts and anything in Drafts, Deleted Items or Junk; `filed_only` also drops Inbox and Sent Items. Folder ids are looked up once per source |
-| `current_cursor` | **no request.** The cursor is `{"v":1,"inbox":<link>,"sent":<link>}`, and a fresh one holds each folder's INITIAL delta round filtered to `receivedDateTime ge now - 30m` (`CURSOR_OVERLAP`). The first walk runs it, so mail that landed between a window's listing and the cursor comes back instead of falling in the gap |
+| `current_cursor` | **no request.** The cursor is `{"v":1,"inbox":<link>,"sent":<link>}`, and a fresh one holds each folder's INITIAL delta round filtered to `receivedDateTime ge now - 30m` (`CURSOR_OVERLAP`). `cursor_before_window` is `true`, so the engine mints it BEFORE a backfill or catch-up lists its window and stores it after: the first walk replays everything since the listing began, however long the window took, and stored ids are skipped |
 | `changes` | follows `@odata.nextLink` to the `@odata.deltaLink`, drops `@removed` entries, replaces that folder's link. `mailbox_unchanged` is always `false` |
 | `merge_cursors` | each folder's link from whichever walk moved it relative to `since` |
 | `cursor_is_usable` | decodes, version 1, both links on the Graph base |
@@ -203,10 +203,10 @@ sent. That is what the mailbox holds.
 |---|---|
 | `archive` / `trash` / `not_spam` | `POST /me/messages/{id}/move` to `archive` / `deleteditems` / `inbox` |
 | `modify` | `UNREAD` is `isRead`, `STARRED` is `flag.flagStatus`, removing `INBOX` is an archive. Any other label refuses the whole request (400) before a call |
-| `send` | **draft, then send**: `POST /me/messages` with the MIME base64 as `text/plain`, then `POST /me/messages/{id}/send`. `sendMail` answers `202` with no id; this way the draft's (immutable) id is the sent item's, so the audit row and the send echo keep it. A refused send (a status) deletes its draft; a dropped connection leaves it, since the mail may have gone. Over Graph's 4 MB request limit is refused before a draft exists (upload sessions are not built) |
+| `send` | **draft, then send**: `POST /me/messages` with the MIME base64 as `text/plain`, then `POST /me/messages/{id}/send`. `sendMail` answers `202` with no id; this way the draft's (immutable) id is the sent item's, so the audit row and the send echo keep it. A definite refusal (a 4xx other than 408, or a 429) deletes its draft; a 5xx, a 408 or a dropped connection leaves it, since the mail may have gone and the draft's id may now name the Sent Items copy. Over Graph's 4 MB request limit is refused before a draft exists (upload sessions are not built) |
 | `parent_headers` | `internetMessageId`, `References` from `internetMessageHeaders`, structured recipients |
 | `fetch_raw` | `$value`, re-encoded base64url for `FetchedRaw` |
-| `find_by_rfc822_msgid` | `$filter=internetMessageId eq '…'` |
+| `find_by_rfc822_msgid` | `$filter=internetMessageId eq '…' and isDraft eq false`: a send whose outcome was unknown leaves a draft carrying the Message-ID, and finding it would record unsent mail as sent |
 | `find_scheduled_send` | that lookup, then Sent Items filtered by `sentDateTime` in the window, reading each page's `internetMessageHeaders` for the outbox header. Same page cap, shutdown check, and "any doubt is `Err`" as Gmail's |
 
 A `429` is `WriteError::Paced` with Graph's `Retry-After`.
@@ -228,10 +228,19 @@ decides every endpoint, scope set and identity check:
   `https://graph.microsoft.com/` prefix) satisfies a requirement. An exchange
   with no refresh token stores nothing: without `offline_access` there is
   none and the credential dies within the hour.
+- **A token from the other company is refused** before it is used or
+  refreshed (`credentials::check_token_issuer`, read off its recorded
+  scopes): the same address moved between Workspace and Microsoft 365 with
+  the old credential in its slot, or a blob exported under the other
+  provider. Tokens with no recorded scopes (old Google ones) pass.
+- **The refresh** sends the consent's scopes, which Microsoft's v2 refresh
+  documents as required.
 - **The account check** asks Graph `/me`: `mail`, else an address-shaped
   `userPrincipalName` (`mail` is null on some personal accounts).
 - **Transfer blobs** (`--export` / `--import`) verify against Microsoft. The
   exporting machine's config needs `provider = "outlook"` too.
+- **`accounts.provider` is bound** by every daemon entry point and by the
+  `squelch-api` binary (`ApiState::from_config`), before a writer is picked.
 - **Refused for Outlook**: `--broker` (it relays Google's consent), the
   calendar consent and its first-run offer, and calendar credentials in the
   API state, so a Microsoft token is never offered to Google.
@@ -262,3 +271,13 @@ decides every endpoint, scope set and identity check:
 6. **Hosted** stays Gmail-only: squelch-control's signup and tenant model are
    Google-shaped, and need their security argument re-made for a second IdP.
 7. **No profile photo** for Outlook accounts (Graph `/me/photo` is not wired).
+8. **A body Exchange cannot render as MIME** fails the batch every poll
+   (any non-404 error on `$value` does), which would hold the cursor. If live
+   mail shows such items, map that error to `RawBody::Undecodable`.
+9. **A 404 on a fetch** (mail deleted between the delta round and the
+   fetch) reads as an expired cursor and costs a catch-up, as on Gmail; more
+   likely on Graph.
+10. **The archive window's exclusions** are the top-level Drafts, Deleted
+    Items and Junk only: mail in their subfolders, Outbox or Sync Issues is
+    listed.
+11. **The account check** trusts `/me` `mail`, which a tenant admin sets.

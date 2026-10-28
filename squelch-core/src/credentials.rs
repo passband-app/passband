@@ -261,12 +261,18 @@ pub(crate) fn refresh_stored_token_detailed_at(
         .build()
         .map_err(|e| CoreError::Credential(format!("building http client: {e}")))?;
 
-    let resp = oauth
-        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
-        .request(&http)
-        .map_err(|e| {
-            CoreError::Credential(refresh_error_message_for(client.issuer, &e.to_string()))
-        })?;
+    let refresh = RefreshToken::new(refresh_token.to_string());
+    let mut req = oauth.exchange_refresh_token(&refresh);
+    // Microsoft's v2 refresh documents `scope` as required; sending the
+    // consent's own set keeps the grant what it was. Google's never needed it.
+    if client.issuer == crate::config::OAuthIssuer::Microsoft {
+        for scope in crate::config::OUTLOOK_SCOPES {
+            req = req.add_scope(oauth2::Scope::new(scope.to_string()));
+        }
+    }
+    let resp = req.request(&http).map_err(|e| {
+        CoreError::Credential(refresh_error_message_for(client.issuer, &e.to_string()))
+    })?;
 
     let new_refresh = resp
         .refresh_token()
@@ -285,6 +291,43 @@ pub(crate) fn refresh_stored_token_detailed_at(
         .with_scopes(granted_scopes.clone()),
         granted_scopes,
     })
+}
+
+/// Whose token this is, read off the scopes recorded on it: every consent
+/// and refresh this code runs records them, and Google's and Microsoft's
+/// scope names never overlap. `None` when nothing recorded says (a token
+/// stored before scopes were recorded, which is Google's).
+pub fn token_issuer(token: &StoredToken) -> Option<crate::config::OAuthIssuer> {
+    use crate::config::OAuthIssuer;
+    let scopes = token.scopes.as_deref()?;
+    if scopes.iter().any(|s| s.contains("googleapis.com")) {
+        Some(OAuthIssuer::Google)
+    } else if scopes
+        .iter()
+        .any(|s| s.contains("graph.microsoft.com") || s.starts_with("Mail.") || s == "User.Read")
+    {
+        Some(OAuthIssuer::Microsoft)
+    } else {
+        None
+    }
+}
+
+/// Refuse a stored token minted by the OTHER identity platform before it is
+/// used or refreshed: its bearer would go to the wrong company's API and its
+/// refresh token to the wrong company's token endpoint. How it gets here: the
+/// same address moving from Google Workspace to Microsoft 365 (or back) with
+/// the old credential still in its slot, or a blob exported under the other
+/// provider.
+pub fn check_token_issuer(token: &StoredToken, issuer: crate::config::OAuthIssuer) -> Result<()> {
+    match token_issuer(token) {
+        Some(minted) if minted != issuer => Err(CoreError::Credential(format!(
+            "the stored credential was minted by {}, but this daemon is configured for {} \
+             (provider in the config); it was not used. Re-run `squelchd auth`.",
+            minted.name(),
+            issuer.name()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// The token to persist after a refresh of `stored`.
@@ -364,6 +407,7 @@ fn validate_or_refresh_stored_at<P>(
     timeout: Duration,
     persist: impl FnOnce(&StoredToken) -> Result<P>,
 ) -> Result<(StoredToken, Option<P>)> {
+    check_token_issuer(&stored, client.issuer)?;
     if stored.is_expired(ChronoDuration::seconds(REFRESH_SKEW_SECS)) {
         let refresh = stored.refresh_token.clone().ok_or_else(|| {
             CoreError::Credential(

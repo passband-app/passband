@@ -840,6 +840,10 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GraphSource<C> {
     fn changes_report_updates(&self) -> bool {
         true
     }
+
+    fn cursor_before_window(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

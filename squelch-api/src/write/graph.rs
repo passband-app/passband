@@ -390,10 +390,17 @@ impl MailWriter for GraphWriteClient {
                 thread_id: draft.conversation_id,
             }),
             Err(e) => {
-                // Refused outright (a status, or pacing): nothing went out, so
-                // the draft is ours to clean up. A transport failure is not
-                // proof either way, and the draft stays.
-                if matches!(e, WriteError::Api { .. } | WriteError::Paced { .. }) {
+                // Refused outright (a 4xx other than a timeout, or pacing):
+                // nothing went out, so the draft is ours to clean up. A 5xx,
+                // a 408 or a dropped connection is not proof either way: the
+                // mail may have gone, and with immutable ids the draft's id
+                // now names the Sent Items copy. The draft stays.
+                let refused = match &e {
+                    WriteError::Api { status, .. } => (400..500).contains(status) && *status != 408,
+                    WriteError::Paced { .. } => true,
+                    _ => false,
+                };
+                if refused {
                     let _ = self.call(self.http.delete(self.msg_url(&draft.id))).await;
                 }
                 Err(e)
@@ -429,7 +436,13 @@ impl MailWriter for GraphWriteClient {
     }
 
     async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError> {
-        let filter = format!("internetMessageId eq {}", odata_string(msgid.trim()));
+        // Never a draft: a send whose outcome was unknown leaves its draft,
+        // carrying this Message-ID, and finding THAT would record as sent
+        // mail that may never have gone.
+        let filter = format!(
+            "internetMessageId eq {} and isDraft eq false",
+            odata_string(msgid.trim())
+        );
         let url = format!(
             "{}/me/messages?$select=id&$top=1&$filter={}",
             self.base,

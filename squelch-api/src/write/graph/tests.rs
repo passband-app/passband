@@ -316,7 +316,7 @@ async fn the_message_id_lookup_quotes_its_literal() {
     assert!(
         seen(&m)[0]
             .target
-            .contains("$filter=internetMessageId eq '<o''brien@x>'"),
+            .contains("$filter=internetMessageId eq '<o''brien@x>' and isDraft eq false"),
         "{}",
         seen(&m)[0].target
     );
@@ -394,4 +394,18 @@ async fn a_scan_that_cannot_rule_the_mail_out_is_an_error_never_a_none() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn a_send_whose_outcome_is_unknown_keeps_its_draft() {
+    for status in [500u16, 503, 504, 408] {
+        let (m, c) = mock(vec![(201, r#"{"id":"d1"}"#), (status, "{}")]).await;
+        assert!(c.send(b"x", None).await.is_err());
+        let s = seen(&m);
+        assert_eq!(
+            s.len(),
+            2,
+            "{status}: the draft (maybe the sent mail) was deleted"
+        );
+    }
 }

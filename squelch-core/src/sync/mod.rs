@@ -1283,6 +1283,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
     async fn backfill_inner(&self) -> Result<()> {
         let since = self.backfill_since();
+        let early_cursor = self.cursor_ahead_of_window().await?;
 
         // INBOX bodies.
         let inbox_ids = self
@@ -1334,7 +1335,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // folder is fetched only when somebody opens the page that shows it.
 
         // Establish the cursor from the mailbox as it stands now.
-        let cursor = self.source()?.current_cursor().await?;
+        let cursor = match early_cursor {
+            Some(cursor) => cursor,
+            None => self.source()?.current_cursor().await?,
+        };
         self.store_cursor(&cursor)?;
         eprintln!("squelch: history cursor established (backfill window from {since})");
         Ok(())
@@ -2421,6 +2425,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
     }
 
+    /// The cursor to store at the end of a window, minted NOW, before the
+    /// window is listed, for a source whose cursor is a point in time
+    /// ([`MailSource::cursor_before_window`]); `None` for one that is asked
+    /// where its feed stands after the window, as Gmail always has been.
+    async fn cursor_ahead_of_window(&self) -> Result<Option<SyncCursor>> {
+        let source = self.source()?;
+        if !source.cursor_before_window() {
+            return Ok(None);
+        }
+        Ok(Some(source.current_cursor().await?))
+    }
+
     /// The ids of an incremental walk worth fetching. All of them for a
     /// source whose change feed names only arrivals (Gmail); for one that also
     /// names CHANGED mail (Graph's delta, on every read-state flip), only the
@@ -2592,6 +2608,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// The catch-up body, split out so [`Self::catch_up`] can hold the progress
     /// guard and run the trim across every exit path, `?` included.
     async fn catch_up_inner(&self) -> Result<()> {
+        let early_cursor = self.cursor_ahead_of_window().await?;
         let ids = self
             .list(self.window_listing(Folder::Inbox), None, Urgency::Window)
             .await?;
@@ -2675,7 +2692,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // the longest thing this loop does, and the spam folder is fetched only
         // when the page that shows it is opened.
 
-        let cursor = self.source()?.current_cursor().await?;
+        let cursor = match early_cursor {
+            Some(cursor) => cursor,
+            None => self.source()?.current_cursor().await?,
+        };
         self.store_cursor(&cursor)?;
         Ok(())
     }

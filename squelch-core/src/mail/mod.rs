@@ -4,11 +4,13 @@
 //! The engine keeps cadence, ingest, triage and cursor PERSISTENCE. A
 //! [`MailSource`] owns listing, the change feed, fetching and cursor
 //! ENCODING: the engine stores whatever [`SyncCursor`] a source hands it and
-//! never looks inside. Gmail (`GmailSource`) is the only source
+//! never looks inside. Gmail ([`gmail::GmailSource`]) is the only source
 //! today, and it is what every account is unless its `accounts.provider` row
 //! says otherwise ([`MailProvider`]).
 //!
 //! What stays Gmail-specific on purpose, and why, is in `docs/MAIL-PROVIDERS.md`.
+
+pub mod gmail;
 
 use std::time::Duration;
 
@@ -132,13 +134,11 @@ pub struct SourceRefusals {
     pub auth: std::sync::atomic::AtomicU64,
 }
 
-/// Where the provider says a fetched message is filed, as of the fetch. `None`
-/// fields are "the provider did not say", which is different from "no".
+/// Where the provider says a fetched message is filed, as of the fetch. A
+/// provider that reports nothing leaves both `false`, which hands the decision
+/// back to the folder the batch was listed from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Placement {
-    /// Whether the provider reported the message's folders at all. A fetch
-    /// that carried none leaves the batch's own folder to decide.
-    pub reported: bool,
     pub in_inbox: bool,
     pub in_sent: bool,
 }
@@ -277,6 +277,12 @@ pub trait MailSource: Send + Sync {
     /// The default sleeps, which is exactly the polling the engine has always
     /// done. Returning early is always safe: the next tick asks
     /// [`Self::changes`] and finds out.
+    ///
+    /// IT MUST BE CANCEL-SAFE. The poll lane drops this future whenever a
+    /// manual refresh, a spam-page request or shutdown wins the `select!`, so
+    /// an implementation that holds a connection in IDLE has to leave it
+    /// reusable (or cleanly closed) at every await point, never half-way
+    /// through a command.
     async fn wait_for_change(&self, cursor: Option<&SyncCursor>, max_wait: Duration) {
         let _ = cursor;
         tokio::time::sleep(max_wait).await;

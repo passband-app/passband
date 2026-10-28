@@ -484,6 +484,11 @@ const BASE_INSTRUCTIONS: &str = "squelch: local-first email intelligence. Use se
  it when you report that mail. Pending assessments and actionable auth secrets are \
  unavailable. Informational login and security alerts may be readable.";
 
+/// Told only while `search_calendar` is offered.
+const CALENDAR_INSTRUCTIONS: &str = " search_calendar finds events on the owner's calendar \
+ and events guessed from their mail (kind=ghost, a possibility, not a commitment); use it \
+ for when, where and who, rather than hunting the invitation in search_mail.";
+
 /// The paragraph of the instructions that says what this agent may WRITE,
 /// chosen by the owner's current setting.
 ///
@@ -1779,6 +1784,9 @@ impl ServerHandler for SquelchServer {
     /// tools themselves never rely on it and re-check on every call.
     fn get_info(&self) -> ServerInfo {
         let mut instructions = String::from(BASE_INSTRUCTIONS);
+        if self.calendar.enabled() {
+            instructions.push_str(CALENDAR_INSTRUCTIONS);
+        }
         instructions.push_str(write_instructions(
             self.write_access(),
             self.mailer.is_some(),
@@ -2050,6 +2058,8 @@ mod tests {
                 .any(|n| n == "search_calendar")
         );
         assert!(server.search_calendar(params()).await.is_err());
+        let told = server.get_info().instructions.unwrap_or_default();
+        assert!(!told.contains("search_calendar"), "{told}");
 
         features.replace_granted([squelch_core::features::CALENDAR]);
         assert!(
@@ -2058,6 +2068,8 @@ mod tests {
                 .iter()
                 .any(|n| n == "search_calendar")
         );
+        let told = server.get_info().instructions.unwrap_or_default();
+        assert!(told.contains("search_calendar"), "{told}");
         let answer = server.search_calendar(params()).await.unwrap();
         let text = format!("{:?}", answer.content);
         assert!(text.contains("total"), "{text}");

@@ -1120,18 +1120,35 @@ pub(super) fn doubling_backoff_secs(base: u64, step: u32, cap: u64) -> u64 {
     base.saturating_mul(1u64 << step.min(63)).min(cap)
 }
 
-/// A job's wait before its next attempt, after `attempts` of them: 30 s,
-/// 60 s, 120 s, ... up to an hour. The retry's wait, and the hand-back's.
-pub(super) fn retry_backoff_secs(attempts: u32) -> u64 {
-    doubling_backoff_secs(15, attempts, 3600)
+/// `0` on the first step, then `base` doubling per step up to `cap`: a
+/// transient failure is retried at once, and only a failure that repeats
+/// backs off.
+pub(super) fn immediate_then_doubling_secs(base: u64, step: u32, cap: u64) -> u64 {
+    match step {
+        0 => 0,
+        _ => doubling_backoff_secs(base, step - 1, cap),
+    }
 }
 
-/// The first rung of the cooldown after a throttle (429) or a server error
-/// (5xx, 529, a transport failure): short, and spread over a window, as is
-/// every wait the ladder yields, so the tenants of one host, each with its
-/// own engine seeing the same provider (and told the same `retry-after`),
-/// do not all come back in the same second. The cooldown doubles for every
-/// probe that fails in turn, `15, 30, 60, ...`, up to
+/// The longest any LLM retry waits: the retry ladder's cap.
+pub(super) const RETRY_CEILING_SECS: u64 = 300;
+
+/// A job's wait before its next attempt, after `attempts` of them: at once
+/// after the first, then 15 s, 30 s, 60 s, ... up to five minutes. The
+/// retry's wait, and the hand-back's. A rescue push rides on these jobs, so
+/// a blip must not hold one for minutes.
+pub(super) fn retry_backoff_secs(attempts: u32) -> u64 {
+    immediate_then_doubling_secs(15, attempts.saturating_sub(1), RETRY_CEILING_SECS)
+}
+
+/// The second rung of the cooldown after a throttle (429) or a server error
+/// (5xx, 529, a transport failure). The first failure after a success
+/// retries AT ONCE (no cooldown, no jitter): most of these are one dropped
+/// connection, and a rescue push waits on the answer. From the second probe
+/// on, the wait is spread over a window so the tenants of one host, each
+/// with its own engine seeing the same provider (and told the same
+/// `retry-after`), do not all come back in the same second, and doubles for
+/// every probe that fails in turn, `0, 15, 30, 60, ...`, up to
 /// [`AgentConfig::outage_retry_secs`], and starts over at the first success.
 ///
 /// [`AgentConfig::outage_retry_secs`]: crate::triage::agent_config::AgentConfig::outage_retry_secs
@@ -1172,10 +1189,12 @@ pub(super) fn throttle_cooldown_secs(
     let asked = retry_after
         .filter(|asked| !asked.is_zero())
         .map(|asked| asked.as_secs().clamp(1, ceiling));
-    let rung = doubling_backoff_secs(THROTTLE_COOLDOWN_SECS, strikes, ceiling);
+    let rung = immediate_then_doubling_secs(THROTTLE_COOLDOWN_SECS, strikes, ceiling);
     let wait = match (asked, strikes) {
         (Some(asked), 0) => asked,
         (Some(asked), _) => asked.max(rung),
+        // The first failure with no number from the provider: retry now.
+        (None, 0) => return 0,
         (None, _) => rung,
     };
     // The jitter rides UNDER the ceiling, not over it: at the terminal rung
@@ -1416,17 +1435,17 @@ mod cooldown_tests {
 
     /// On the first failure the provider's `retry-after` is believed between
     /// a second and the ceiling, the jitter riding on it so the tenants told
-    /// the same number spread out; without one the stand-off is short and
-    /// spread.
+    /// the same number spread out; without one there is no stand-off at all,
+    /// and the second failure's is short and spread.
     #[test]
     fn a_throttle_cooldown_is_what_the_provider_asked_or_a_short_spread_wait() {
         let secs = |s| Some(std::time::Duration::from_secs(s));
         assert_eq!(throttle_cooldown_secs(secs(7), 0, CEILING, 0), 7);
-        // Zero (a past HTTP-date) is no number: the first rung.
-        assert_eq!(
-            throttle_cooldown_secs(secs(0), 0, CEILING, 0),
-            THROTTLE_COOLDOWN_SECS
-        );
+        // Zero (a past HTTP-date) is no number: the first rung, which is
+        // an immediate retry, jitter or no jitter.
+        assert_eq!(throttle_cooldown_secs(secs(0), 0, CEILING, 0), 0);
+        assert_eq!(throttle_cooldown_secs(secs(0), 0, CEILING, 15), 0);
+        assert_eq!(throttle_cooldown_secs(None, 0, CEILING, 15), 0);
         // Past the ceiling, the ceiling: the provider's number is honoured in
         // full up to it, jitter or no jitter.
         assert_eq!(throttle_cooldown_secs(secs(99_999), 0, CEILING, 0), CEILING);
@@ -1435,17 +1454,17 @@ mod cooldown_tests {
         assert_eq!(throttle_cooldown_secs(secs(295), 0, CEILING, 0), 295);
         assert_eq!(throttle_cooldown_secs(secs(295), 0, CEILING, 15), CEILING);
         assert_eq!(throttle_cooldown_secs(secs(290), 0, CEILING, 15), CEILING);
-        // Without a number, every value in the spread is reachable, and a
-        // jitter past the room is held to it.
+        // Without a number, the second failure's every value in the spread
+        // is reachable, and a jitter past the room is held to it.
         let spread =
             THROTTLE_COOLDOWN_SECS..=THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS;
         let seen: std::collections::BTreeSet<u64> = (0..=THROTTLE_COOLDOWN_JITTER_SECS)
-            .map(|jitter| throttle_cooldown_secs(None, 0, CEILING, jitter))
+            .map(|jitter| throttle_cooldown_secs(None, 1, CEILING, jitter))
             .collect();
         assert_eq!(seen.len() as u64, THROTTLE_COOLDOWN_JITTER_SECS + 1);
         assert!(seen.iter().all(|wait| spread.contains(wait)));
         assert_eq!(
-            throttle_cooldown_secs(None, 0, CEILING, 999),
+            throttle_cooldown_secs(None, 1, CEILING, 999),
             THROTTLE_COOLDOWN_SECS + THROTTLE_COOLDOWN_JITTER_SECS
         );
     }
@@ -1476,11 +1495,11 @@ mod cooldown_tests {
             .map(|strikes| throttle_cooldown_secs(None, strikes, CEILING, 0))
             .collect();
         // The terminal rung leaves the jitter its room below the ceiling.
-        assert_eq!(rungs, [15, 30, 60, 120, 240, 285, 285, 285]);
-        // The jitter rides on top of every rung, the terminal one included,
-        // so tenants at the ceiling still spread.
-        assert_eq!(throttle_cooldown_secs(None, 3, CEILING, 15), 135);
-        assert_eq!(throttle_cooldown_secs(None, 5, CEILING, 15), 300);
+        assert_eq!(rungs, [0, 15, 30, 60, 120, 240, 285, 285]);
+        // The jitter rides on top of every rung after the first, the
+        // terminal one included, so tenants at the ceiling still spread.
+        assert_eq!(throttle_cooldown_secs(None, 4, CEILING, 15), 135);
+        assert_eq!(throttle_cooldown_secs(None, 6, CEILING, 15), 300);
         let at_ceiling: std::collections::BTreeSet<u64> = (0..=THROTTLE_COOLDOWN_JITTER_SECS)
             .map(|jitter| throttle_cooldown_secs(None, 9, CEILING, jitter))
             .collect();
@@ -1491,7 +1510,8 @@ mod cooldown_tests {
         assert_eq!(throttle_cooldown_secs(secs(60), 0, CEILING, 0), 60);
         assert_eq!(throttle_cooldown_secs(secs(60), 1, CEILING, 0), 60);
         assert_eq!(throttle_cooldown_secs(secs(60), 2, CEILING, 0), 60);
-        assert_eq!(throttle_cooldown_secs(secs(60), 3, CEILING, 0), 120);
+        assert_eq!(throttle_cooldown_secs(secs(60), 3, CEILING, 0), 60);
+        assert_eq!(throttle_cooldown_secs(secs(60), 4, CEILING, 0), 120);
         // ...and a long one is believed up to the ceiling, on any strike.
         assert_eq!(throttle_cooldown_secs(secs(1800), 0, CEILING, 0), CEILING);
         assert_eq!(throttle_cooldown_secs(secs(1800), 5, CEILING, 0), CEILING);

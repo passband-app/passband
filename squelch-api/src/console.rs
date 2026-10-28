@@ -13,15 +13,18 @@
 //!
 //! TWO WAYS IN, one mechanism:
 //!
-//! - PASTE A CODE (`POST /console/login-code`). The universal path, and the only
-//!   one a self-host has: `squelchd pair` prints a code, the user types it here;
+//! - PASTE A CODE (`POST /console/login-code`). The only one a self-host has:
+//!   `squelchd pair` prints a code, the user types it here. SELF-HOST ONLY: a
+//!   hosted tenant refuses it (and `POST /console/pair`) and never renders the
+//!   form, so Google is the one way in there;
 //! - GOOGLE, VIA THE CONTROL PLANE (`GET /console/callback?code=`). Google forbids
 //!   wildcard redirect URIs, so a per-tenant hostname cannot run OAuth itself. The
 //!   login page LINKS to the control plane, which authenticates the mailbox, mints
 //!   a pairing code through the warden, and sends the browser back here with it.
 //!   The callback claims that code exactly like a pasted one. The link renders
-//!   only when `SQUELCH_CONSOLE_SSO_URL` is configured, which on self-host it is
-//!   not, so the button simply is not there.
+//!   only when `SQUELCH_CONSOLE_SSO_URL` is configured, which is what makes a
+//!   daemon hosted (see [`hosted`]); on self-host it is not, so the button
+//!   simply is not there.
 //!
 //! WHAT THIS FILE WILL NOT DO:
 //!
@@ -30,7 +33,8 @@
 //!   discipline is `squelch-control/src/pages.rs`'s, MIRRORED here rather than
 //!   imported: the daemon does not depend on the control plane, and a console
 //!   that could only be built alongside the hosted signup service would not ship
-//!   on self-host at all;
+//!   on self-host at all. The look is mirrored too: `console.css` wears the
+//!   landing page the way the signup pages do;
 //! - no token in any page, ever. A pairing code renders exactly once, on the page
 //!   that mints it, which is the entire point of that page. A device token
 //!   appears only in a `Set-Cookie`;
@@ -186,11 +190,65 @@ fn deep_link(daemon_url: &str, pair_code: &str) -> String {
     )
 }
 
+/// The console's stylesheet. A file rather than more of the format string
+/// because it is long, and because it is plain CSS with single braces that can
+/// be edited as CSS.
+const CONSOLE_CSS: &str = include_str!("console.css");
+
+/// The Passband mark, inline, in one colour: `squelch-control/src/pages.rs`'s
+/// `MARK`, copied verbatim (see the file header for why this crate mirrors
+/// that one rather than importing it; `brand/` remains the source).
+///
+/// INLINE BECAUSE OF THE CSP: `img-src` falls under `default-src 'none'`, and an
+/// inline `<svg>` is markup rather than a fetch. `currentColor` lets the sheet
+/// colour it. `aria-hidden` because the wordmark beside it already says
+/// Passband.
+const MARK: &str = concat!(
+    r#"<svg viewBox="0 221 1024 557" aria-hidden="true" fill="currentColor"><g>"#,
+    r#"<rect x="129.8" y="697.3" width="44.4" height="74.7" rx="22.2"/>"#,
+    r#"<rect x="189.8" y="600.7" width="44.4" height="171.3" rx="22.2"/>"#,
+    r#"<rect x="249.8" y="550.1" width="44.4" height="221.9" rx="22.2"/>"#,
+    r#"<rect x="309.8" y="420.4" width="44.4" height="351.6" rx="22.2"/>"#,
+    r#"<rect x="369.8" y="297.4" width="44.4" height="474.6" rx="22.2"/>"#,
+    r#"<rect x="429.8" y="370.0" width="44.4" height="402.0" rx="22.2"/>"#,
+    r#"<rect x="489.8" y="253.1" width="44.4" height="518.9" rx="22.2"/>"#,
+    r#"<rect x="549.8" y="329.5" width="44.4" height="442.5" rx="22.2"/>"#,
+    r#"<rect x="609.8" y="356.3" width="44.4" height="415.7" rx="22.2"/>"#,
+    r#"<rect x="669.8" y="362.2" width="44.4" height="409.8" rx="22.2"/>"#,
+    r#"<rect x="729.8" y="555.9" width="44.4" height="216.1" rx="22.2"/>"#,
+    r#"<rect x="789.8" y="619.1" width="44.4" height="152.9" rx="22.2"/>"#,
+    r#"<rect x="849.8" y="699.3" width="44.4" height="72.7" rx="22.2"/>"#,
+    r#"</g><path fill="none" stroke="currentColor" stroke-width="12" "#,
+    r#"stroke-linecap="round" stroke-linejoin="round" d="#,
+    r#"M-12 768L12 765L33 760L54 752L69 745L87 733L102 721L117 707L135 686"#,
+    r#"L159 653L189 602L279 420L309 364L339 316L369 279L384 265L399 254"#,
+    r#"L414 244L429 238L462 229L501 227L552 228L588 235L606 242L621 251"#,
+    r#"L636 262L651 275L681 311L711 357L744 418L834 600L861 646L888 685"#,
+    r#"L918 718L936 733L954 744L972 753L993 760L1035 768"/></svg>"#,
+);
+
+/// The backdrop behind every page: a glow and the analyzer's graticule, fixed
+/// and still, and none of it data.
+const CHROME: &str =
+    r#"<div class="fx" aria-hidden="true"><i class="glow"></i><i class="grat"></i></div>"#;
+
+/// How a page's column is set: a narrow DOOR (sign in, a fresh code, a dead
+/// end), or the wide signed-in BOARD.
+#[derive(Clone, Copy)]
+enum Layout {
+    Door,
+    Board,
+}
+
 /// The shell every console page shares. `no-store` and `no-referrer` are not
 /// decoration: these pages name a mailbox and one of them carries a live pairing
 /// code.
-fn page(status: StatusCode, title: &str, body: &str) -> Response {
+fn page(status: StatusCode, layout: Layout, title: &str, body: &str) -> Response {
     let title = escape_html(title);
+    let main_class = match layout {
+        Layout::Door => r#" class="door""#,
+        Layout::Board => "",
+    };
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
@@ -200,50 +258,14 @@ fn page(status: StatusCode, title: &str, body: &str) -> Response {
 <meta name="robots" content="noindex, nofollow">
 <title>{title}</title>
 <style>
-:root {{ color-scheme: light dark; }}
-body {{ margin: 0; padding: 3rem 1.25rem; background: #fbfaf8; color: #1a1a1a;
-  font: 1rem/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }}
-main {{ max-width: 44rem; margin: 0 auto; }}
-h1 {{ font-size: 1.35rem; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 1rem; }}
-h2 {{ font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.6rem; }}
-p {{ margin: 0 0 1rem; }}
-ul {{ margin: 0 0 1.25rem; padding-left: 1.2rem; }}
-li {{ margin: 0 0 0.4rem; }}
-label {{ display: block; font-weight: 600; margin: 0 0 0.35rem; }}
-input[type=text] {{ width: 100%; max-width: 20rem; box-sizing: border-box; padding: 0.6rem 0.7rem;
-  margin: 0 0 1rem; border: 1px solid #cdc7bd; border-radius: 6px; background: #fff; color: inherit;
-  font: inherit; letter-spacing: 0.06em; }}
-button {{ padding: 0.5rem 1rem; border: 0; border-radius: 6px; background: #1a1a1a; color: #fbfaf8;
-  font: inherit; font-weight: 500; cursor: pointer; }}
-table {{ border-collapse: collapse; width: 100%; margin: 0 0 1.25rem; }}
-th, td {{ text-align: left; padding: 0.45rem 0.6rem 0.45rem 0; border-bottom: 1px solid #e3ded6;
-  vertical-align: top; font-size: 0.95rem; }}
-th {{ font-weight: 600; }}
-dl {{ margin: 0 0 1.25rem; }}
-dt {{ font-weight: 600; margin: 0.6rem 0 0; }}
-dd {{ margin: 0; }}
-.muted {{ color: #6b6b6b; font-size: 0.9rem; }}
-.stop {{ border-left: 3px solid #b3261e; padding: 0.1rem 0 0.1rem 0.85rem; }}
-.code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1.5rem;
-  letter-spacing: 0.08em; background: #efece7; padding: 0.4rem 0.7rem; border-radius: 6px;
-  display: inline-block; user-select: all; }}
-code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em;
-  background: #efece7; padding: 0.1em 0.35em; border-radius: 3px; word-break: break-all; }}
-a.button {{ display: inline-block; margin: 0.25rem 0 1.25rem; padding: 0.5rem 1rem;
-  background: #1a1a1a; color: #fbfaf8; text-decoration: none; border-radius: 6px; font-weight: 500; }}
-form.inline {{ display: inline; }}
-@media (prefers-color-scheme: dark) {{
-  body {{ background: #141414; color: #e8e6e3; }}
-  .muted {{ color: #9a9a9a; }}
-  code, .code {{ background: #262626; }}
-  th, td {{ border-bottom-color: #333; }}
-  input[type=text] {{ background: #1f1f1f; border-color: #3a3a3a; }}
-  button, a.button {{ background: #e8e6e3; color: #141414; }}
-  .stop {{ border-left-color: #f2b8b5; }}
-}}
-</style>
+{CONSOLE_CSS}</style>
 </head>
-<body><main>{body}</main></body>
+<body>{CHROME}
+<header class="brand">{MARK}<span class="wordmark">Passband</span></header>
+<main{main_class}>
+{body}
+</main>
+</body>
 </html>
 "#
     );
@@ -265,11 +287,12 @@ form.inline {{ display: inline; }}
 fn problem(status: StatusCode, heading: &str, detail: &str) -> Response {
     page(
         status,
+        Layout::Door,
         heading,
         &format!(
             r#"<h1>{heading}</h1>
-<p>{detail}</p>
-<p><a class="button" href="/console">Back to the console</a></p>"#,
+<p class="lead">{detail}</p>
+<a class="button" href="/console">Back to the console</a>"#,
             heading = escape_html(heading),
             detail = escape_html(detail),
         ),
@@ -702,16 +725,20 @@ struct LoginCodeForm {
 
 /// `POST /console/login-code` — sign in by pasting a pairing code.
 ///
-/// THE UNIVERSAL PATH: it is how a self-host signs in, and it is the fallback on
-/// hosted when the Google hop is unavailable. The claim is the store's, unchanged
-/// and unauthenticated, so a wrong code costs the user's live code exactly as it
-/// does at `/client/pair`.
+/// SELF-HOST ONLY: it is how a self-host signs in. A hosted tenant signs in with
+/// Google and nothing else, so there this answers [`google_only`] before any
+/// gate or claim runs. The claim is the store's, unchanged and unauthenticated,
+/// so a wrong code costs the user's live code exactly as it does at
+/// `/client/pair`.
 async fn login_code(
     State(state): State<ApiState>,
     site: Site,
     ClientIp(ip): ClientIp,
     form: Result<Form<LoginCodeForm>, FormRejection>,
 ) -> Response {
+    if hosted(&state) {
+        return google_only();
+    }
     // A malformed body is refused with the same page as a wrong code: what was
     // wrong with the request is not something this surface answers.
     let code = form.map(|Form(f)| f.code).unwrap_or_default();
@@ -794,25 +821,31 @@ async fn claim_and_land(
 /// The one refusal a sign-in attempt can produce. Rendered as the login page so a
 /// person can simply try again, and byte-identical across every reason.
 fn refused_sign_in(state: &ApiState, site: &Site) -> Response {
-    login_page(
-        state,
-        site,
-        Some(
-            "That code did not work. A code is good for ten minutes, works once, and stops \
-             working after a few wrong tries. Get a new one and try again.",
-        ),
-    )
+    let message = if hosted(state) {
+        "That sign in did not go through. Sign in links work once and expire after ten \
+         minutes. Continue with Google to try again."
+    } else {
+        "That code did not work. A code is good for ten minutes, works once, and stops \
+         working after a few wrong tries. Get a new one and try again."
+    };
+    login_page(state, site, Some(message))
 }
 
 /// `POST /console/pair` — mint a pairing code for another device.
 ///
 /// The code renders exactly once, on this page. That is the whole purpose of the
 /// page, and it is the only secret material any console page ever contains.
+///
+/// Self-host only, like the pasted-code door: a hosted tenant's app pairs itself
+/// through Gmail sign in, so there is no code for the console to hand out.
 async fn pair(
     State(state): State<ApiState>,
     site: Site,
     Extension(_session): Extension<ConsoleSession>,
 ) -> Response {
+    if hosted(&state) {
+        return google_only();
+    }
     let minted = crate::handlers::store_call(&state, move |store, account_id| {
         store.mint_pairing_code(account_id, Duration::seconds(PAIRING_TTL_SECS))
     })
@@ -890,30 +923,42 @@ async fn logout(
 
 // --- pages ------------------------------------------------------------------
 
+/// Whether this daemon is a HOSTED tenant, which on hosted means Google is the
+/// only way into the console.
+///
+/// `console_sso_url` is the self-host/hosted split in one field (see its doc on
+/// [`ApiState`]): the warden provisions every hosted pod with it and a self-host
+/// never sets it. On hosted there is no terminal to run `squelchd pair` in, and
+/// the app pairs itself through its own Gmail sign in, so the console neither
+/// takes a pasted code nor mints one. The control plane's callback still claims
+/// a pairing code under the hood; that code is the control plane's, minted only
+/// after Google vouched for the mailbox.
+fn hosted(state: &ApiState) -> bool {
+    state.console_sso_url().is_some()
+}
+
+/// The answer to a pairing-code route on a hosted tenant: not here.
+fn google_only() -> Response {
+    problem(
+        StatusCode::NOT_FOUND,
+        "Sign in with Google",
+        "This mailbox's console signs in with Google only. Pairing codes are not used here.",
+    )
+}
+
 /// The login page. Also the answer to every failed sign-in and every dead cookie,
 /// which is why the message is a parameter.
 ///
-/// The Google button renders ONLY when `SQUELCH_CONSOLE_SSO_URL` is configured
-/// AND this daemon is answering on a hosted-shaped hostname it can name a tenant
-/// label from. On self-host neither holds, and the page is simply the code form.
+/// SELF-HOST: the pairing-code form, and nothing else.
+///
+/// HOSTED: the Google button, and nothing else. It renders only when this daemon
+/// is answering on a hosted-shaped hostname it can name a tenant label from;
+/// anywhere else the page says where to go instead of offering a code form that
+/// would be refused.
 fn login_page(state: &ApiState, site: &Site, error: Option<&str>) -> Response {
     let error_html = error
         .map(|e| format!(r#"<p class="stop"><strong>{}</strong></p>"#, escape_html(e)))
         .unwrap_or_default();
-
-    let sso_html = match (state.console_sso_url(), site.tenant_label()) {
-        (Some(sso), Some(label)) => {
-            let href = format!("{sso}/console/auth?tenant={}", percent_encode(label));
-            format!(
-                r#"<p><a class="button" href="{href}">Continue with Google</a></p>
-<p class="muted">Signing in with Google proves you own the mailbox this daemon syncs. Passband
-checks the address against this mailbox and sends you straight back here.</p>
-<h2>Or paste a pairing code</h2>"#,
-                href = escape_html(&href),
-            )
-        }
-        _ => String::new(),
-    };
 
     let insecure_html = if state.console_allow_insecure_cookie {
         r#"<p class="stop"><strong>Insecure cookie mode is enabled.</strong> Your console session
@@ -922,29 +967,53 @@ can travel over the network without encryption. Use this only on a trusted LAN.<
         ""
     };
 
-    page(
-        StatusCode::OK,
-        "Passband console",
-        &format!(
-            r#"<h1>Passband console</h1>
-<p>This is the console for one Passband mailbox. Sign in to see what the daemon is doing, pair a
-device, or revoke one.</p>
+    let body = match (state.console_sso_url(), site.tenant_label()) {
+        (Some(sso), Some(label)) => {
+            let href = format!("{sso}/console/auth?tenant={}", percent_encode(label));
+            format!(
+                r#"<p class="eyebrow">Console</p>
+<h1>Sign in</h1>
+<p class="lead">See what Passband is doing with this mailbox, and which devices can reach it.</p>
 {error_html}
 {insecure_html}
-{sso_html}
-<form method="post" action="/console/login-code">
+<a class="button wide" href="{href}">Continue with Google <span class="arrow" aria-hidden="true">→</span></a>
+<p class="hint">Signing in with Google proves you own this mailbox. Passband checks the address
+and sends you straight back here.</p>"#,
+                href = escape_html(&href),
+            )
+        }
+        (Some(_), None) => format!(
+            r#"<p class="eyebrow">Console</p>
+<h1>Sign in</h1>
+{error_html}
+{insecure_html}
+<p class="lead">This console signs in with Google, and only from this mailbox's own Passband
+address. Open the console there to sign in.</p>"#
+        ),
+        (None, _) => format!(
+            r#"<p class="eyebrow">Console</p>
+<h1>Sign in</h1>
+<p class="lead">The console for one Passband mailbox. Sign in to see what the daemon is doing,
+pair a device, or revoke one.</p>
+{error_html}
+{insecure_html}
+<form class="rig" method="post" action="/console/login-code">
+<div class="slot">
 <label for="code">Pairing code</label>
 <input type="text" id="code" name="code" placeholder="XXXX-XXXX" autocomplete="off"
   autocapitalize="characters" spellcheck="false" required>
-<p><button type="submit">Sign in</button></p>
+</div>
+<button type="submit">Sign in <span class="arrow" aria-hidden="true">→</span></button>
 </form>
-<p class="muted">Run <code>squelchd pair</code> on the machine that runs this daemon to print a
+<p class="hint">Run <code>squelchd pair</code> on the machine that runs this daemon to print a
 code. A code is good for ten minutes, works once, and stops working after a few wrong tries.</p>
-<p class="muted">Signing in pairs this browser like any other device. It shows up in the device
+<p class="hint">Signing in pairs this browser like any other device. It shows up in the device
 list as <code>console</code>, and you can revoke it from there or from
 <code>squelchd token revoke</code>.</p>"#
         ),
-    )
+    };
+
+    page(StatusCode::OK, Layout::Door, "Passband console", &body)
 }
 
 /// Render a timestamp the one way this console renders timestamps.
@@ -952,30 +1021,33 @@ fn stamp(ts: DateTime<Utc>) -> String {
     ts.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
-/// One row of the devices table. The current session is marked, because "which
+/// One row of the devices list. The current session is marked, because "which
 /// of these is the browser I am looking at" is the question a person revoking
 /// things actually has.
 fn device_row(token: &DeviceToken, session: ConsoleSession) -> String {
     let is_me = token.id == session.token_id;
     let name = escape_html(&token.name);
     let this_one = if is_me {
-        r#" <span class="muted">(this browser)</span>"#
+        r#"<span class="tag">this browser</span>"#
     } else {
         ""
     };
     let last_used = token
         .last_used_at
         .map_or_else(|| "never".to_string(), |ts| escape_html(&stamp(ts)));
-    let (status, action) = match token.revoked_at {
+    let (class, action) = match token.revoked_at {
         Some(at) => (
-            format!("revoked {}", escape_html(&stamp(at))),
-            String::new(),
+            " revoked",
+            format!(
+                r#"<span class="state">revoked {}</span>"#,
+                escape_html(&stamp(at))
+            ),
         ),
         None => (
-            "active".to_string(),
+            "",
             format!(
-                r#"<form class="inline" method="post" action="/console/revoke/{id}">
-<button type="submit">{label}</button></form>"#,
+                r#"<form method="post" action="/console/revoke/{id}">
+<button class="quiet danger" type="submit">{label}</button></form>"#,
                 id = token.id,
                 label = if is_me {
                     "Revoke and sign out"
@@ -986,14 +1058,18 @@ fn device_row(token: &DeviceToken, session: ConsoleSession) -> String {
         ),
     };
     format!(
-        "<tr><td>{name}{this_one}</td><td>{created}</td><td>{last_used}</td><td>{status}</td>\
-         <td>{action}</td></tr>",
+        r#"<li class="device{class}"><div><span class="name">{name}</span>{this_one}
+<span class="meta">Added {created} · Last used {last_used}</span></div>
+{action}</li>"#,
         created = escape_html(&stamp(token.created_at)),
     )
 }
 
 /// The signed-in page: who this mailbox is, what the daemon has done with it,
-/// what is paired to it, and the two things you can do from here.
+/// what is paired to it, and what you can do from here.
+///
+/// On hosted there is no "Create a pairing code": the app pairs itself through
+/// its own Gmail sign in, and the console takes no part in it (see [`hosted`]).
 async fn home_page(state: &ApiState, site: &Site, session: ConsoleSession) -> Response {
     let since = Utc::now() - Duration::days(STATS_WINDOW_DAYS);
     let loaded = crate::handlers::store_call(state, move |store, account_id| {
@@ -1013,6 +1089,7 @@ async fn home_page(state: &ApiState, site: &Site, session: ConsoleSession) -> Re
         );
     };
 
+    let hosted = hosted(state);
     let rows: String = tokens
         .iter()
         .map(|t| device_row(t, session))
@@ -1025,46 +1102,76 @@ async fn home_page(state: &ApiState, site: &Site, session: ConsoleSession) -> Re
     );
     let surfaced = stats
         .last_surfaced_at
-        .map_or_else(|| "nothing has been surfaced yet".to_string(), stamp);
+        .map_or_else(|| "nothing yet".to_string(), stamp);
     let url = site.url().unwrap_or_default();
+    let attention = stats.bands.standing + stats.bands.new + stats.bands.open;
+
+    let where_html = if hosted {
+        format!(
+            r#"Your Passband mailbox, at <code>{}</code>."#,
+            escape_html(&url)
+        )
+    } else {
+        format!(
+            r#"This daemon answers at <code>{}</code>."#,
+            escape_html(&url)
+        )
+    };
+
+    let (pair_button, devices_note) = if hosted {
+        (
+            "",
+            "Everything signed in to this mailbox. Revoking one takes effect on its next request.",
+        )
+    } else {
+        (
+            r#"<form method="post" action="/console/pair"><button class="quiet" type="submit">Create a pairing code</button></form>"#,
+            "Every device paired with this mailbox. Revoking one takes effect on its next \
+             request, with no restart and nothing to wait out. A pairing code lets one new \
+             device in, and creating one retires any code still outstanding.",
+        )
+    };
 
     page(
         StatusCode::OK,
+        Layout::Board,
         "Passband console",
         &format!(
-            r#"<h1>Passband console</h1>
-<p>Signed in as <code>{email}</code>. This daemon answers at <code>{url}</code>.</p>
+            r#"<p class="eyebrow">Console</p>
+<h1 class="addr">{email}</h1>
+<p class="lead">{where_html}</p>
 
-<h2>Sync</h2>
-<dl>
-<dt>Messages triaged</dt><dd>{total}</dd>
-<dt>Sealed (metadata only)</dt><dd>{sealed}</dd>
-<dt>Needing attention in the last {days} days</dt>
-<dd>{standing} standing, {new} new, {open} open</dd>
-<dt>Last surfaced</dt><dd>{surfaced}</dd>
-<dt>Gmail history cursor</dt><dd>{cursor}</dd>
+<section class="panel" id="sync">
+<div class="panel-head"><h2>Sync</h2></div>
+<dl class="readings">
+<div><dt>Triaged</dt><dd>{total}</dd></div>
+<div><dt>Sealed</dt><dd>{sealed}<small>metadata only</small></dd></div>
+<div><dt>Needs attention</dt><dd>{attention}<small>{standing} standing, {new} new, {open} open</small></dd></div>
+<div><dt>Last surfaced</dt><dd class="when">{surfaced}</dd></div>
 </dl>
+<p class="hint">Attention counts cover the last {days} days. Gmail history cursor:
+<code>{cursor}</code></p>
+</section>
 
-<h2>Devices</h2>
-<p>Every device paired with this mailbox. Revoking one takes effect on its next request,
-with no restart and nothing to wait out.</p>
-<table>
-<tr><th>Name</th><th>Added</th><th>Last used</th><th>Status</th><th></th></tr>
+<section class="panel" id="devices">
+<div class="panel-head"><h2>Devices</h2>{pair_button}</div>
+<ul class="devices">
 {rows}
-</table>
-<form method="post" action="/console/pair"><button type="submit">Create a pairing code</button></form>
-<p class="muted">A code lets one new device in. Creating one retires any code that was still
-outstanding, so there is never more than one live at a time.</p>
+</ul>
+<p class="hint">{devices_note}</p>
+</section>
 
-<h2>Agent MCP</h2>
+<section class="panel" id="agents">
+<div class="panel-head"><h2>Agent MCP</h2></div>
 {agent_door}
+</section>
 
-<h2>Sign out</h2>
-<p>Signing out revokes this browser's own device token, so the cookie it leaves behind is worth
-nothing to anybody who finds it.</p>
-<form method="post" action="/console/logout"><button type="submit">Sign out</button></form>"#,
+<div class="signout">
+<p class="hint">Signing out revokes this browser's own device token, so the cookie it leaves
+behind is worth nothing to anybody who finds it.</p>
+<form method="post" action="/console/logout"><button class="quiet" type="submit">Sign out</button></form>
+</div>"#,
             email = escape_html(&email),
-            url = escape_html(&url),
             total = stats.total,
             sealed = stats.sealed,
             days = STATS_WINDOW_DAYS,
@@ -1073,7 +1180,6 @@ nothing to anybody who finds it.</p>
             open = stats.bands.open,
             surfaced = escape_html(&surfaced),
             cursor = escape_html(&cursor),
-            rows = rows,
             agent_door = agent_door_html(state.agent_door()),
         ),
     )
@@ -1109,13 +1215,13 @@ the setting at fault. Mail sync and this console are not affected.</p>"#
 
 /// The page a freshly minted pairing code renders on, and the only page in the
 /// console that carries a secret. It is shown once, it is not logged, and the
-/// store cannot reproduce it.
+/// store cannot reproduce it. Self-host only: see [`hosted`].
 fn pair_page(site: &Site, code: &str) -> Response {
     let link_html = site
         .url()
         .map(|url| {
             format!(
-                r#"<p><a class="button" href="{link}">Open Passband and pair</a></p>"#,
+                r#"<a class="button wide" href="{link}">Open Passband and pair <span class="arrow" aria-hidden="true">→</span></a>"#,
                 link = escape_html(&deep_link(&url, code)),
             )
         })
@@ -1123,17 +1229,19 @@ fn pair_page(site: &Site, code: &str) -> Response {
 
     page(
         StatusCode::OK,
+        Layout::Door,
         "Pair a device",
         &format!(
-            r#"<h1>Pair a device</h1>
-<p>Open Passband on the new device, press <strong>Pair</strong>, and enter this code. On this
-device you can use the link instead.</p>
-<p><span class="code">{code}</span></p>
+            r#"<p class="eyebrow">Console</p>
+<h1>Pair a device</h1>
+<p class="lead">Open Passband on the new device, press <strong>Pair</strong>, and enter this code.
+On this device you can use the link instead.</p>
+<span class="code">{code}</span>
 {link_html}
-<p class="muted">The code is good for ten minutes and works once. If it expires before you get to
-it, come back and make another.</p>
-<p class="muted">Keep it to yourself while it is live. It is what lets a device in.</p>
-<p><a class="button" href="/console">Back to the console</a></p>"#,
+<p class="hint">The code is good for ten minutes and works once. If it expires before you get to
+it, come back and make another. Keep it to yourself while it is live: it is what lets a device
+in.</p>
+<p><a href="/console">Back to the console</a></p>"#,
             code = escape_html(code),
         ),
     )
@@ -1547,11 +1655,10 @@ mod tests {
         let (store, acct, app) = fixture_with(|s| s.with_agent_door(status));
         let token = sign_in(&app, &store, acct).await;
         let html = body_of(app.oneshot(get("/console", Some(&token))).await.unwrap()).await;
-        let start = html.find("<h2>Agent MCP</h2>").expect("agent door section");
-        let end = html[start..]
-            .find("<h2>Sign out</h2>")
-            .expect("next section")
-            + start;
+        let start = html
+            .find(r#"<section class="panel" id="agents">"#)
+            .expect("agent door section");
+        let end = html[start..].find("</section>").expect("section end") + start;
         html[start..end].to_string()
     }
 
@@ -1736,6 +1843,105 @@ mod tests {
             .await
             .unwrap();
         assert!(!body_of(resp).await.contains("Continue with Google"));
+    }
+
+    /// HOSTED IS GOOGLE ONLY: the login page carries the Google button and no
+    /// code form, and neither pairing-code route does anything, signed in or not.
+    #[tokio::test]
+    async fn a_hosted_console_signs_in_with_google_only() {
+        let (store, acct, app) = fixture_with(|s| s.with_console_sso_url(Some(SSO.to_string())));
+
+        let html = body_of(app.clone().oneshot(get("/console", None)).await.unwrap()).await;
+        assert!(html.contains("Continue with Google"), "{html}");
+        assert!(!html.contains("Pairing code"), "{html}");
+        assert!(!html.contains("/console/login-code"), "{html}");
+        assert!(!html.contains("squelchd pair"), "{html}");
+
+        // A real, live code pasted at the form a hosted page never shows is
+        // refused without being claimed: it still works at the callback after.
+        let minted = store.mint_pairing_code(acct, ttl()).unwrap();
+        let resp = app
+            .clone()
+            .oneshot(post(
+                "/console/login-code",
+                None,
+                &format!("code={}", minted.code),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(resp.headers().get(header::SET_COOKIE).is_none());
+
+        // The control plane's hand-back is how Google lands, so it still works.
+        let resp = app
+            .clone()
+            .oneshot(get(
+                &format!("/console/callback?code={}", minted.code),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let token = cookie_of(&resp).expect("the callback signs the browser in");
+
+        // Signed in, there is no button to mint a code and the route refuses.
+        let html = body_of(
+            app.clone()
+                .oneshot(get("/console", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("ada@example.com"), "{html}");
+        assert!(!html.contains("Create a pairing code"), "{html}");
+        assert!(!html.contains("/console/pair"), "{html}");
+        let resp = app
+            .clone()
+            .oneshot(post("/console/pair", Some(&token), ""))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(!body_of(resp).await.contains("passband://pair"));
+
+        // A failed hand-back says to try Google again, not to fetch a code.
+        let html = body_of(
+            app.oneshot(get("/console/callback?code=AAAA-AAAA", None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("Continue with Google to try again"), "{html}");
+        assert!(!html.contains("Pairing code"), "{html}");
+    }
+
+    /// Hosted, but reached on a host it cannot name a tenant from: no Google
+    /// button can be built, and the code form still does not come back.
+    #[tokio::test]
+    async fn a_hosted_console_off_its_own_address_offers_no_code_form() {
+        let (_, _, app) = fixture_with(|s| s.with_console_sso_url(Some(SSO.to_string())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/console")
+                    .header(header::HOST, "localhost:8848")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(resp).await;
+        assert!(!html.contains("Continue with Google"), "{html}");
+        assert!(!html.contains("Pairing code"), "{html}");
+        assert!(html.contains("own Passband\naddress"), "{html}");
+    }
+
+    /// Self-host keeps both pairing-code affordances.
+    #[tokio::test]
+    async fn a_self_hosted_console_keeps_the_pairing_code() {
+        let (store, acct, app) = fixture();
+        let token = sign_in(&app, &store, acct).await;
+        let html = body_of(app.oneshot(get("/console", Some(&token))).await.unwrap()).await;
+        assert!(html.contains("Create a pairing code"), "{html}");
     }
 
     /// The callback claims a real, control-plane-minted code, and refuses every

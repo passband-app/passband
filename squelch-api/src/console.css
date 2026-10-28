@@ -1,0 +1,178 @@
+/* THE TENANT CONSOLE WEARS THE LANDING PAGE, the way the signup pages do
+   (`squelch-control/src/pages.rs`, `body.auth`): its night ground, its
+   analyzer graticule, a serif for the words that matter, and ONE material for
+   controls, the dark machined "rig" edged in passband blue. Mirrored here
+   rather than imported, for the reason the file header gives.
+
+   ALWAYS DARK, like the landing page, which has no light mode at all.
+
+   NO FONT TO FETCH. The CSP is `default-src 'none'`, so the serif is the
+   platform's (New York on Apple, Georgia elsewhere), named after Newsreader so
+   a machine that has it installed gets it. */
+:root { color-scheme: dark;
+  --bg: #090D16; --ink: #E9EEF5; --dim: #A8B4C4; --faint: #808E9F; --faintest: #62707F;
+  --hair: rgba(233, 238, 245, 0.08); --accent: #4E9BEA; --brand: #82BAF5;
+  --danger: #FF7A68; --positive: #4FC08A;
+  --grid: rgba(130, 186, 245, 0.045);
+  --rig-top: #152032; --rig-bottom: #0c121c;
+  --rig-edge: rgba(78, 155, 234, 0.22); --rig-lit: rgba(78, 155, 234, 0.62);
+  --rig-glow: rgba(78, 155, 234, 0.45); --rig-shadow: rgba(0, 0, 0, 0.5);
+  --slot-rule: rgba(78, 155, 234, 0.18);
+  --cta-ink: #dfe8f3; --cta-ink-lit: #f4f8fd; --autofill: #101826;
+  --serif: "Newsreader", ui-serif, "New York", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --gutter: clamp(1rem, 4vw, 2.75rem); }
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; padding: 1.4rem var(--gutter) 4rem;
+  background: var(--bg); color: var(--ink); font: 1rem/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased; }
+
+/* THE BACKDROP: one glow from the top and the graticule, faded out at the
+   edges so the screen has no border to sit inside. Still. */
+.fx { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+.fx > i { position: absolute; inset: 0; display: block; }
+.glow { background: radial-gradient(60% 45% at 50% -5%, rgba(78, 155, 234, 0.14), transparent 70%); }
+.grat { background-image:
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(180deg, var(--grid) 0 1px, transparent 1px 64px);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 20%, transparent 80%);
+          mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 20%, transparent 80%); }
+
+/* THE MASTHEAD: the mark, then the name in the serif, top left. */
+.brand, main { position: relative; z-index: 1; }
+.brand { display: flex; align-items: center; gap: 0.6rem; margin: 0; }
+.brand svg { height: 1.45rem; width: auto; flex: none; color: var(--brand); }
+.wordmark { font-family: var(--serif); font-size: 1.5rem; font-weight: 500; letter-spacing: -0.005em; }
+
+main { max-width: 46rem; margin: clamp(2.5rem, 9vh, 5rem) auto 0; overflow-wrap: anywhere; }
+/* A door (sign in, a fresh code, a dead end) is one narrow column, set low,
+   the way the signup page is. */
+main.door { max-width: 28rem; margin-top: clamp(3.5rem, 13vh, 8rem); }
+
+/* TYPE. */
+.eyebrow { margin: 0 0 0.7rem; color: var(--faintest); font-size: 0.7rem; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase; }
+h1 { font-family: var(--serif); font-weight: 500; font-size: clamp(2.2rem, 5vw, 2.9rem);
+  line-height: 1.05; letter-spacing: -0.01em; margin: 0 0 0.9rem; }
+h1.addr { font-size: clamp(1.75rem, 4.5vw, 2.5rem); }
+h2 { margin: 0; color: var(--faint); font-size: 0.7rem; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase; }
+p { margin: 0 0 1rem; color: var(--dim); }
+.lead { line-height: 1.6; margin: 0 0 2rem; }
+a { color: var(--brand); text-underline-offset: 0.15em; }
+strong { color: var(--ink); font-weight: 500; }
+.hint { color: var(--faintest); font-size: 0.82rem; }
+.stop { margin: 0 0 1.5rem; padding: 0.8rem 1rem; border-radius: 10px;
+  background: rgba(255, 122, 104, 0.07); box-shadow: inset 0 0 0 1px rgba(255, 122, 104, 0.3);
+  color: var(--danger); font-size: 0.9rem; }
+.stop strong { color: #ffd2cb; font-weight: 600; }
+code, .code { font-family: var(--mono); background: var(--hair); color: var(--ink); }
+code { font-size: 0.86em; padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+.code { display: inline-block; margin: 0.25rem 0 1.5rem; padding: 0.6rem 1rem; border-radius: 0.9rem;
+  border: 1px solid var(--slot-rule); font-size: 2rem; letter-spacing: 0.14em; user-select: all; }
+
+/* THE MATERIAL. One recipe for every control: a standalone button is a small
+   piece of it, the sign in form a bigger piece with a slot cut in it. Lit as
+   one instrument on hover or focus: the whole edge and a glow. */
+.rig, a.button, button { position: relative; isolation: isolate; overflow: hidden;
+  border-radius: 0.9rem; border: 1px solid var(--rig-edge);
+  background: linear-gradient(180deg, var(--rig-top), var(--rig-bottom));
+  box-shadow: 0 12px 30px var(--rig-shadow);
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.4s ease,
+    box-shadow 0.4s ease, color 0.4s ease, background 0.4s ease; }
+.rig:hover, .rig:focus-within, a.button:hover, a.button:focus-visible,
+button:hover, button:focus-visible { border-color: var(--rig-lit);
+  box-shadow: 0 0 34px -6px var(--rig-glow), 0 16px 38px var(--rig-shadow); }
+a.button, button { display: inline-flex; align-items: center; justify-content: center; gap: 0.6rem;
+  margin: 0; padding: 0.95rem 1.9rem; color: var(--cta-ink);
+  font: 600 0.95rem/1.2 var(--sans); letter-spacing: 0.015em; text-decoration: none; cursor: pointer; }
+a.button:is(:hover, :focus-visible), button:is(:hover, :focus-visible) { color: var(--cta-ink-lit);
+  transform: translateY(-2px); }
+a.button:active, button:active { transform: translateY(0) scale(0.995); }
+:is(a, button, input, summary):focus-visible { outline: 2px solid var(--rig-lit); outline-offset: 3px; }
+.arrow { transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }
+:is(a.button, button):is(:hover, :focus-visible) .arrow { transform: translateX(3px); }
+.door a.button { margin: 0 0 1.25rem; }
+.door .button.wide { width: 100%; }
+
+/* The smaller, quieter buttons the signed in page is made of: same shape,
+   less pull, because none of them is the reason somebody came. */
+button.quiet { padding: 0.5rem 0.95rem; font-size: 0.82rem; font-weight: 500; color: var(--dim);
+  box-shadow: none; }
+button.quiet:is(:hover, :focus-visible) { transform: none; box-shadow: 0 0 22px -8px var(--rig-glow); }
+/* Revoking is the one destructive press here, so it lights red, not blue. */
+button.danger:is(:hover, :focus-visible) { color: var(--danger); border-color: rgba(255, 122, 104, 0.55);
+  box-shadow: 0 0 22px -8px rgba(255, 122, 104, 0.5); }
+
+/* THE SIGN IN FORM: one slot cut into a rig, its label engraved in it, and
+   the submit as the rig's last slot rather than a button sitting under it. */
+form.rig { display: flex; flex-direction: column; margin: 0 0 1.25rem; padding: 0; }
+.slot { position: relative; margin: 0; padding: 0.8rem 1.1rem 0.85rem; border-bottom: 1px solid var(--slot-rule); }
+.slot:focus-within > label { color: var(--brand); }
+.slot > label { display: block; margin: 0 0 0.3rem; color: var(--faintest);
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }
+.slot input { display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0;
+  background: none; outline: none; color: var(--ink); font: 1.15rem/1.4 var(--mono);
+  letter-spacing: 0.12em; text-transform: uppercase; }
+.slot input::placeholder { color: var(--faintest); }
+.slot input:-webkit-autofill { -webkit-text-fill-color: var(--ink); caret-color: var(--ink);
+  box-shadow: inset 0 0 0 100vw var(--autofill); transition: background-color 9999s; }
+.rig button { width: 100%; padding: 1rem 1.1rem; border: 0; border-radius: 0; background: none; box-shadow: none; }
+.rig button:is(:hover, :focus-visible) { transform: none; box-shadow: none;
+  background: linear-gradient(180deg, transparent, var(--slot-rule)); }
+.rig button:focus-visible { outline-offset: -3px; }
+
+/* THE SIGNED IN PAGE: panels on the ground, each a quiet piece of the rig. */
+.panel { margin: 0 0 1.25rem; padding: 1.3rem 1.4rem 1.35rem; border-radius: 0.9rem;
+  border: 1px solid var(--hair);
+  background: linear-gradient(180deg, rgba(21, 32, 50, 0.55), rgba(12, 18, 28, 0.55)); }
+.panel > :last-child { margin-bottom: 0; }
+.panel p { font-size: 0.92rem; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  flex-wrap: wrap; margin: 0 0 1rem; }
+.panel-head form { margin: 0; }
+
+/* Readings: what the daemon has done, set as instrument readouts. */
+.readings { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 1px;
+  margin: 0 0 1rem; border: 1px solid var(--slot-rule); border-radius: 0.7rem; overflow: hidden;
+  background: var(--slot-rule); }
+.readings > div { padding: 0.85rem 1rem 0.9rem; background: #0b111b; }
+.readings dt { margin: 0 0 0.35rem; color: var(--faintest); font-size: 0.68rem; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase; }
+.readings dd { margin: 0; color: var(--ink); font: 500 1.45rem/1.2 var(--mono);
+  font-variant-numeric: tabular-nums; }
+.readings dd.when { font-size: 0.95rem; line-height: 1.5; }
+.readings dd small { display: block; margin-top: 0.25rem; color: var(--faint);
+  font: 0.78rem/1.4 var(--sans); }
+
+/* Devices: one row each, the browser you are looking at marked. */
+.devices { list-style: none; margin: 0 0 1rem; padding: 0; }
+.device { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem 1rem;
+  padding: 0.85rem 0; border-top: 1px solid var(--hair); }
+.device:first-child { border-top: 0; padding-top: 0.15rem; }
+.device form { margin: 0; flex: none; }
+.device .name { color: var(--ink); font-weight: 500; }
+.device .meta { display: block; margin-top: 0.15rem; color: var(--faintest); font-size: 0.8rem;
+  font-variant-numeric: tabular-nums; }
+.device.revoked .name { color: var(--faint); }
+.device .state { flex: none; color: var(--faintest); font-size: 0.8rem; }
+.tag { display: inline-block; margin-left: 0.45rem; padding: 0.05rem 0.55rem; border-radius: 999px;
+  background: rgba(78, 155, 234, 0.12); color: var(--brand); font-size: 0.7rem; font-weight: 600;
+  letter-spacing: 0.04em; vertical-align: 0.1em; }
+
+.signout { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  flex-wrap: wrap; margin: 2rem 0 0; padding: 1.25rem 0 0; border-top: 1px solid var(--hair); }
+.signout p { margin: 0; flex: 1 1 18rem; }
+.signout form { margin: 0; }
+
+@media (max-width: 600px) {
+  main, main.door { margin-top: 2.5rem; }
+  .panel { padding: 1.1rem 1.1rem 1.15rem; }
+  .device { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rig, a.button, button, .arrow { transition-duration: 0.01ms; }
+  a.button:is(:hover, :focus-visible), button:is(:hover, :focus-visible),
+  :is(a.button, button):is(:hover, :focus-visible) .arrow { transform: none; }
+}

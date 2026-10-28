@@ -235,7 +235,7 @@ struct DiscoveryRow: View {
         HStack(alignment: .center, spacing: featured ? Space.scaled(18) : Self.gap) {
             // ONLY UNDER THE POINTER. Everything else holds its poster.
             DiscoveryVignette(
-                set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: featured ? Radius.concentric(Radius.pane, inset: Self.inset) : 5)
+                set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: featured ? Radius.image(in: Radius.pane, inset: Self.inset, floor: Radius.well) : 5)
                 .frame(width: picture)
 
             if featured {
@@ -432,7 +432,7 @@ struct DiscoveryMoment: View {
 
     var body: some View {
         HStack(spacing: Space.scaled(13)) {
-            DiscoveryVignette(set: set, live: live, fixedTime: fixedTime, cornerRadius: Radius.concentric(Radius.pane, inset: Space.scaled(9)))
+            DiscoveryVignette(set: set, live: live, fixedTime: fixedTime, cornerRadius: Radius.image(in: Radius.pane, inset: Space.scaled(9), floor: Radius.well))
                 .frame(width: 98)
 
             VStack(alignment: .leading, spacing: Space.scaled(3)) {

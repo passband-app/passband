@@ -414,9 +414,14 @@ enum PaletteMetrics {
     /// grows as typing filters it, and a center-anchored card would breathe
     /// in both directions, the input line jumping under the cursor mid-word.
     /// The inset, not the anchor, is what puts it at the screen's visual
-    /// center. One inset for every palette, so `h`, ⌘⇧L and the triage fix
-    /// open in the same place.
+    /// center. The default for the short palettes (`h`, ⌘⇧L); a taller one
+    /// (the triage fix, with its detail line and longer list) passes its own
+    /// so it still lands on the screen instead of off the bottom of it.
     static let topInset: CGFloat = 210
+    /// The least room kept between the palette's glass and the window's
+    /// bottom edge, so the footer and the shadow never meet it. The shell
+    /// shrinks the LIST to keep it, never the footer.
+    static var bottomMargin: CGFloat { Space.s24 }
 }
 
 /// One pickable palette row: the palette's selection fill and metrics around
@@ -466,8 +471,12 @@ struct PaletteShell<Field: View, Rows: View>: View {
     /// keyboard.
     let selection: Int
     let idAt: (Int) -> AnyHashable?
-    /// A compact height the list may grow to before it scrolls.
+    /// A compact height the list may grow to before it scrolls. On the Mac it
+    /// is also capped by the window: a short window scrolls the list sooner
+    /// rather than push the footer off the bottom.
     var listMaxHeight: CGFloat = 230
+    /// Points from the window's top to the glass (see `PaletteMetrics.topInset`).
+    var topInset: CGFloat = PaletteMetrics.topInset
     /// The footer's verb: "↵ set", or "tap to set" on a phone.
     let verb: String
     /// The footer's trailing note: what a pick does that is not obvious.
@@ -477,19 +486,27 @@ struct PaletteShell<Field: View, Rows: View>: View {
     @ViewBuilder var rows: Rows
 
     @Namespace private var paletteGlass
+    /// The scrim's height, which is the window's: what the card may fill.
+    @State private var roomHeight: CGFloat = 0
 
     var body: some View {
         #if os(macOS)
-            OverlayScrim(alignment: .top, topInset: PaletteMetrics.topInset, onDismiss: onClose) {
+            OverlayScrim(alignment: .top, topInset: topInset, onDismiss: onClose) {
                 GlassEffectContainer(spacing: 8) {
                     palette
                         .frame(width: Typo.measure(PaletteMetrics.width))
+                        // NEVER TALLER THAN THE WINDOW. The list is the one
+                        // flexible part (see `list`), so this squeezes it and
+                        // leaves the header, field and footer whole.
+                        .frame(maxHeight: roomHeight > 0
+                            ? max(0, roomHeight - topInset - PaletteMetrics.bottomMargin) : nil)
                         .passbandGlass(
                             .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                             id: glassID, in: paletteGlass)
                         .overlayShadow()
                 }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { roomHeight = $0 }
         #else
             palette
                 // Clear of the sheet's grabber, which the header's own top
@@ -524,6 +541,9 @@ struct PaletteShell<Field: View, Rows: View>: View {
                 .padding(.bottom, Space.s12)
             Divider().overlay(Palette.hairline)
             list
+                // Sized LAST: when the window caps the card, the list gives
+                // up the height, not the footer or the field.
+                .layoutPriority(-1)
             footer
         }
     }

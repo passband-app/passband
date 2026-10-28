@@ -700,9 +700,10 @@ struct ThreadViewer: View {
                 }
                 .buttonStyle(.textAction)
             }
-            // These metrics match every other page's bar: the reader's rule
-            // ends on the line the rail's top edge is cut to.
-            .padding(.horizontal, Space.s24)
+            // These metrics match every other page's bar: the page gutter,
+            // and the reader's rule ends on the line the rail's top edge is
+            // cut to.
+            .padding(.horizontal, Space.page)
             .frame(height: TopBar.height)
             .overlay(alignment: .bottom) { Hairline() }
         #else
@@ -4475,7 +4476,7 @@ private struct StackDoneHold: View {
             .padding(.horizontal, Space.scaled(28))
             .padding(.vertical, Space.s24)
             .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTint)
-            .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
+            .overlayShadow()
             #if !os(macOS)
                 // THE MIDDLE OF THE SCREEN, not of what the bars leave: the
                 // navigation bar is taller than the home indicator's strip,

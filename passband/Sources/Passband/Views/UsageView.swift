@@ -150,6 +150,9 @@ struct UsageView: View {
                 spark: s.spend.map(\.total), tint: Palette.accent,
                 sub: s.costPerEmail.map { "\(Fmt.fmtCost($0)) per email" } ?? "no priced calls")
         }
+        // ONE HEIGHT FOR THE ROW: each tile fills it (`StatTile`), so a tile
+        // with a shorter line never ends above its neighbours.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// A tile's delta, toned by direction × whether up is good — and left
@@ -658,10 +661,15 @@ private struct StatTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s4) {
-            Text(label).font(Typo.micro).foregroundStyle(Palette.inkFaint)
+            Text(label).font(Typo.micro).foregroundStyle(Palette.inkFaint).lineLimit(1)
+            // ONE LINE, ALWAYS: a figure broken over two lines ("$12." /
+            // "34") reads as two numbers. A narrow tile shrinks it a little
+            // instead.
             Text(value)
                 .font(Typo.ui(22, weight: .semibold))
                 .foregroundStyle(Palette.ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
             HStack(spacing: Space.s4) {
                 if let delta {
                     Text(delta.text).font(Typo.num(11, weight: .semibold)).foregroundStyle(delta.tone)
@@ -681,7 +689,7 @@ private struct StatTile: View {
         // A standalone pane in the page's column, so it pads like one: its
         // label sits on the same line as the cards' labels below it.
         .zonePadding()
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 }

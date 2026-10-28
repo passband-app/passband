@@ -33,7 +33,7 @@ struct TriageFixPalette: View {
     private var surface: some View {
         PaletteShell(
             glassID: "palette", icon: "wand.and.sparkles", title: "Fix triage",
-            subject: target.subject, subjectHelp: "\(target.sender) — \(target.subject)",
+            subject: target.subject, subjectHelp: "\(target.sender) · \(target.subject)",
             // Display only the current authoritative decision, never legacy tiers.
             detail: current.map {
                 ($0.kinds + $0.destinations).joined(separator: " · ")
@@ -41,9 +41,12 @@ struct TriageFixPalette: View {
             },
             isEmpty: hits.isEmpty,
             emptyText:
-                "nothing matches “\(query)”. these are the only values the triage pipeline itself uses — anything else could not be learned from.",
+                "nothing matches “\(query)”. these are the only values the triage pipeline itself uses, so anything else could not be learned from.",
             selection: selection, idAt: { hits[safe: $0]?.id },
             listMaxHeight: 300,
+            // Higher than the short palettes, as it always opened: its detail
+            // line and longer list need the room below.
+            topInset: 110,
             verb: "apply",
             note: "stored to refine triage",
             onClose: onClose

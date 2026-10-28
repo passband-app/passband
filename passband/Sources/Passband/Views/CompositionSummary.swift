@@ -94,7 +94,11 @@ struct CompositionSummary<Trailing: View>: View {
     }
 
     private var line: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Space.scaled(9)) {
+        #if os(macOS)
+            // Read here: the guide's closure below is not main-actor isolated.
+            let nameLine = Typo.size(12) * 0.35
+        #endif
+        return HStack(alignment: .firstTextBaseline, spacing: Space.scaled(9)) {
             Text(slot)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
@@ -111,7 +115,7 @@ struct CompositionSummary<Trailing: View>: View {
                     // Centered on line one (the name), not on its baseline.
                     markDisc(deskMark, size: Self.deskMarkSize, glyph: 9)
                         .alignmentGuide(.firstTextBaseline) { d in
-                            d[VerticalAlignment.center] + Typo.size(12) * 0.35
+                            d[VerticalAlignment.center] + nameLine
                         }
                 }
             #endif

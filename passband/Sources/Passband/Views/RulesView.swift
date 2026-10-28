@@ -803,7 +803,7 @@ struct RuleEditor: View {
                 Avatar(sender: sender, size: 30)
                 VStack(alignment: .leading, spacing: Space.s2) {
                     Text(resolved.displayName)
-                        .font(Typo.zoneTitle)
+                        .font(Typo.modalTitle)
                         .foregroundStyle(Palette.ink)
                         .lineLimit(1)
                     if resolved.displayName.lowercased() != SenderID.address(sender) {
@@ -817,7 +817,7 @@ struct RuleEditor: View {
         } else {
             VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 Text(title)
-                    .font(Typo.zoneTitle)
+                    .font(Typo.modalTitle)
                     .foregroundStyle(Palette.ink)
                 subtitle
             }
@@ -1014,7 +1014,7 @@ struct RuleEditor: View {
     /// the buttons on the right. A reason save is shut takes the hints' place
     /// rather than stacking another line on the card.
     private var footer: some View {
-        HStack(spacing: Space.s8) {
+        ModalButtons {
             if let blocked {
                 Text(blocked)
                     .font(Typo.micro)
@@ -1030,7 +1030,7 @@ struct RuleEditor: View {
                     }
                 #endif
             }
-            Spacer(minLength: Space.s8)
+        } buttons: {
             Button("cancel", action: dismiss).buttonStyle(.glass)
             Button(saving ? "saving…" : (mode == .edit ? "update rule" : "save rule")) {
                 Task { await save() }

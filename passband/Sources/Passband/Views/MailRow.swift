@@ -99,13 +99,15 @@ struct MailRow: View {
                 onOpen()
             }
         ) { selected, _ in
-            HStack(spacing: Space.s10) {
+            // Every fixed width and gap here is one of `MailColumns`'s, so
+            // the list's fit arithmetic is the row's own.
+            HStack(spacing: MailColumns.gap) {
                 gutter
                     .lineLimit(1)
                     .fixedSize()
-                    .frame(width: 36, alignment: .leading)
+                    .frame(width: MailColumns.gutter, alignment: .leading)
 
-                Avatar(sender: update.senderString, size: 20)
+                Avatar(sender: update.senderString, size: MailColumns.avatar)
 
                 // ONE WIDTH FOR EVERY ROW, picked from the list's width rather
                 // than flexed per row: a per-row width would start each subject
@@ -125,7 +127,7 @@ struct MailRow: View {
                     .frame(minWidth: MailColumns.subjectFloor, maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(1)
 
-                HStack(spacing: Space.scaled(7)) {
+                HStack(spacing: MailColumns.markGap) {
                     trailing(selected: selected, chip: chip)
                     // ARRIVAL ONLY. A daemon that does not send `received_at`
                     // has no arrival to print, and its listing time (every
@@ -137,7 +139,7 @@ struct MailRow: View {
                         .font(Typo.ui(11.5))
                         .monospacedDigit()
                         .foregroundStyle(emphasized ? Palette.inkDim : Palette.inkFaint)
-                        .frame(width: Typo.measure(78), alignment: .trailing)
+                        .frame(width: MailColumns.time, alignment: .trailing)
                 }
                 .layoutPriority(3)
             }
@@ -159,28 +161,35 @@ struct MailRow: View {
     /// stays), then the zone pill, then everything but the deadline. Every
     /// arrangement hugs the time column, so whichever one a row ends up with,
     /// the pills' and times' right edges still line up down the list.
+    ///
+    /// SELECTION NEVER CHANGES THE PICK. The verb hint is in the fit test on
+    /// every row of a list that has one, drawn only on the selected row: a
+    /// hint that joined the test on selection could tip a borderline row into
+    /// the next arrangement, and selecting a row would change what it shows.
     @ViewBuilder
     private func trailing(selected: Bool, chip: Fmt.DeadlineChip?) -> some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: Space.scaled(7)) {
+            HStack(spacing: MailColumns.markGap) {
                 marks(chip: chip, reminderWords: true)
                 // Left of the pill, so a selected row's hint never pushes
                 // the pill out of line with the rows around it.
-                if selected, let verbHint {
+                if let verbHint {
                     Text(verbHint)
                         .font(Typo.mono(9))
                         .foregroundStyle(Palette.inkFaintest)
+                        .opacity(selected ? 1 : 0)
+                        .accessibilityHidden(!selected)
                 }
                 pill
             }
-            HStack(spacing: Space.scaled(7)) {
+            HStack(spacing: MailColumns.markGap) {
                 marks(chip: chip, reminderWords: false)
                 pill
             }
-            HStack(spacing: Space.scaled(7)) {
+            HStack(spacing: MailColumns.markGap) {
                 marks(chip: chip, reminderWords: false)
             }
-            HStack(spacing: Space.scaled(7)) {
+            HStack(spacing: MailColumns.markGap) {
                 deadline(chip)
             }
             // Nothing at all: a real zero-size leaf, so the last resort
@@ -275,14 +284,56 @@ struct MailColumns: Equatable {
     /// What the subject keeps before the trailing marks start giving way.
     @MainActor static var subjectFloor: CGFloat { Typo.measure(64) }
 
+    // THE ROW'S FIXED PARTS, which the row lays out with and `fitting` adds
+    // up, so the arithmetic is in the row's own units: words in `measure`,
+    // gaps on the spacing curve, the meter in its 10pt type's.
+    /// The meter / done-check slot (`MeterSlot`: it holds 10pt type).
+    @MainActor static var gutter: CGFloat { MeterSlot.width(36) }
+    /// The sender's avatar. An optical size, the same in both densities.
+    static let avatar: CGFloat = 20
+    /// Between the row's columns.
+    @MainActor static var gap: CGFloat { Space.s10 }
+    /// Between the trailing marks, and between them and the time.
+    @MainActor static var markGap: CGFloat { Space.scaled(7) }
+    /// The time column ("Sep 28, 2025" is the widest).
+    @MainActor static var time: CGFloat { Typo.measure(78) }
+
+    /// Everything in a row but the sender column and the trailing marks, at
+    /// the subject's floor: four column gaps, the mark gap the time keeps
+    /// even with no marks beside it.
+    @MainActor static var fixedWidth: CGFloat {
+        gutter + avatar + 4 * gap + subjectFloor + markGap + time
+    }
+
+    /// A width that holds 10pt type, the marks' size (the chips and pills
+    /// are `Typo.micro`): it grows as that type does.
+    @MainActor private static func marks(_ compact: CGFloat) -> CGFloat {
+        compact * Typo.size(10) / 10
+    }
+
+    /// THE LAST MARK'S ROOM: one upcoming deadline chip ("due Sep 28", the
+    /// widest of them) with its capsule's padding. The narrowest columns keep
+    /// it, so the deadline really is the last mark a row gives up.
+    @MainActor static var deadlineRoom: CGFloat { marks(57) + 2 * Space.scaled(7) }
+
+    /// The sender column's floor: a short name ("Amazon.com") whole.
+    @MainActor static var narrowestName: CGFloat { Typo.measure(64) }
+
     /// The columns for a list `width` wide. The rows' words run from the page
     /// gutter on both sides (`DeskRow.listInset` + `DeskRow.hPadding` =
     /// `Space.page`), so the row's own width is the list's less two gutters.
+    ///
+    /// The widest sender column that still leaves the marks their room: the
+    /// full set beside the wide column, a pill and a chip beside the middle
+    /// one, and past that whatever keeps a deadline, down to a floor. At the
+    /// floor (the smallest window with the composer open) a comfortable row
+    /// has no room left for a chip and keeps its subject instead; it never
+    /// overflows (`fixedWidth + narrowestName` fits there in both densities).
     @MainActor static func fitting(listWidth width: CGFloat) -> MailColumns {
-        let row = width - Space.page * 2
-        if row >= Typo.measure(640) { return MailColumns(name: wideName) }
-        if row >= Typo.measure(460) { return MailColumns(name: Typo.measure(128)) }
-        return MailColumns(name: Typo.measure(104))
+        let marksRoom = width - Space.page * 2 - fixedWidth
+        if marksRoom - wideName >= marks(227) { return MailColumns(name: wideName) }
+        if marksRoom - Typo.measure(128) >= marks(87) { return MailColumns(name: Typo.measure(128)) }
+        return MailColumns(name: max(narrowestName, min(Typo.measure(104), marksRoom - deadlineRoom)))
     }
 }
 

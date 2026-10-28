@@ -124,7 +124,10 @@
                     // A write out, or one in doubt: the draft stays in view
                     // as it was sent, and nothing in it takes typing.
                     .disabled(!state.fieldsEditable)
-                    .padding(.horizontal, Space.scaled(18))
+                    // The composer's edges (`ComposeEdge`): the card on the
+                    // panel gutter, the header's and footer's words on the
+                    // card's text line.
+                    .padding(.horizontal, ComposeEdge.card)
                     .padding(.vertical, Space.s14)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 footer(problem: problem, plan: plan)
@@ -194,7 +197,7 @@
                     .foregroundStyle(Palette.inkFaintest)
                 Spacer()
             }
-            .padding(.horizontal, Space.scaled(18))
+            .padding(.horizontal, ComposeEdge.text)
             .padding(.vertical, Space.scaled(13))
             .overlay(alignment: .bottom) { Hairline() }
         }
@@ -729,7 +732,7 @@
                     verbs(problem: problem, plan: plan)
                 }
             }
-            .padding(.horizontal, Space.scaled(18))
+            .padding(.horizontal, ComposeEdge.text)
             .padding(.vertical, Space.s12)
             .overlay(alignment: .top) { Hairline() }
         }

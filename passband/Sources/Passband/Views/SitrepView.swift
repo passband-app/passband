@@ -1432,8 +1432,9 @@ struct FlowLayout: Layout {
                         .frame(maxWidth: .infinity)
                     }
                 }
-                // On the ladder (it was an off-ladder 22): the page gutter's
-                // step, sides and foot alike.
+                // An EDITORIAL card's own inset (see `ModalCard`): roomier
+                // than `Space.modal`, one step on the ladder for the sides
+                // and foot alike.
                 .padding(.horizontal, Space.s24)
                 .padding(.top, Space.scaled(18))
                 .padding(.bottom, Space.s24)
@@ -1442,7 +1443,7 @@ struct FlowLayout: Layout {
             // The strong tint: the stats sit over a busy board, and the
             // board's rows bled through the lighter one.
             .passbandGlass(.pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong)
-            .shadow(color: .black.opacity(0.32), radius: 40, y: 18)
+            .overlayShadow()
         }
 
         /// The phosphor strip, the lock beam, and the ring and check over it.
@@ -1506,7 +1507,10 @@ struct FlowLayout: Layout {
             }
             .frame(height: 140)
             .frame(maxWidth: .infinity)
-            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, topTrailingRadius: 22))
+            // Full bleed at the card's top, so it rounds WITH the card: the
+            // card's own radius, not a near miss that leaves glass slivers.
+            .clipShape(UnevenRoundedRectangle(
+                topLeadingRadius: Radius.modal, topTrailingRadius: Radius.modal))
         }
 
         private func stat(_ n: Int, _ name: String) -> some View {

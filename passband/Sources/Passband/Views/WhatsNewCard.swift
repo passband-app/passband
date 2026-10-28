@@ -108,7 +108,7 @@ struct WhatsNewCard: View {
                 .padding(.horizontal, Space.s12)
             #endif
             .passbandGlass(.pane, cornerRadius: Self.radius, tint: Palette.glassTint)
-            .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
+            .overlayShadow()
         }
         .keyContext(.modal)
         .keyBindings(.modal, [

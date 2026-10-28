@@ -58,8 +58,10 @@ enum Space {
 
     /// THE SIDE-PANEL GUTTER: the edge a right-hand glass panel's title, its
     /// fields, its row words and its footer share. Search / browse
-    /// (`SidePanel`) and the composer (`ComposePane`) are the same glass in
-    /// the same place, so they keep their words the same distance in.
+    /// (`SidePanel`), the composer (`ComposePane`) and the calendar's event
+    /// pane (`CalendarEventPane`, built on the composer's bones, through
+    /// `ComposeEdge`) are the same glass in the same place, so they keep
+    /// their words the same distance in.
     static var panel: CGFloat { s16 }
 
     /// An off-ladder compact value on the same curve. For the tuned numbers
@@ -103,5 +105,15 @@ enum Radius {
     /// laid out (density-scaled), so it stays concentric in comfortable too.
     static func concentric(_ outer: CGFloat, inset: CGFloat) -> CGFloat {
         max(outer - inset, 2)
+    }
+
+    /// AN IMAGE nested in a rounded container: concentric where that still
+    /// leaves a visible curve, never rounder-than-nothing. A picture cut to a
+    /// near-square corner (comfortable's wider padding takes a concentric
+    /// curve down to 2pt) reads as pasted in; one that echoes its container
+    /// reads as part of it. `floor` is the least it keeps: `chip` for a small
+    /// thumbnail, `well` for a picture big enough to carry a card's curve.
+    static func image(in outer: CGFloat, inset: CGFloat, floor: CGFloat = chip) -> CGFloat {
+        max(concentric(outer, inset: inset), floor)
     }
 }

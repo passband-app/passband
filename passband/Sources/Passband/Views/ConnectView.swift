@@ -1626,12 +1626,16 @@ struct Field<Content: View>: View {
     let label: String
     /// A search field: capsule, not well (see `fieldWell`).
     var capsule = false
+    /// The words' inset from the well's edge, when a field must put them on
+    /// a line of its surroundings' (the search panel's hit edge). Nil is the
+    /// well's own.
+    var inset: CGFloat? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.scaled(5)) {
             FieldLabel(label)
-            content.fieldWell(capsule: capsule)
+            content.fieldWell(capsule: capsule, inset: inset)
         }
     }
 }
@@ -1654,12 +1658,14 @@ extension View {
     /// `capsule` is for SEARCH fields, which take the capsule the segmented
     /// controls and filter pills beside them wear (see `Radius`). A field that
     /// holds a value (a name, an address, a key) keeps the well's corner.
+    /// `inset` overrides how far in the words sit (nil: the shape's own).
     @ViewBuilder
-    func fieldWell(capsule: Bool = false) -> some View {
+    func fieldWell(capsule: Bool = false, inset: CGFloat? = nil) -> some View {
         if capsule {
-            wellChrome(Capsule(style: .continuous), inset: Space.s12)
+            wellChrome(Capsule(style: .continuous), inset: inset ?? Space.s12)
         } else {
-            wellChrome(RoundedRectangle(cornerRadius: Radius.well, style: .continuous), inset: Space.s10)
+            wellChrome(
+                RoundedRectangle(cornerRadius: Radius.well, style: .continuous), inset: inset ?? Space.s10)
         }
     }
 

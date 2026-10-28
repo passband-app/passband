@@ -130,7 +130,7 @@ enum MeterSlot {
     enum PhoneRow {
         static var hPadding: CGFloat { Space.s12 }
         static var vPadding: CGFloat { Space.scaled(9) }
-        static let radius: CGFloat = 10
+        static let radius: CGFloat = Radius.well
         /// The screen's side margin, which a zone title, a day heading and a
         /// row's own words all line up on.
         static let gutter: CGFloat = 16
@@ -186,25 +186,32 @@ enum SectionLabelRhythm {
 /// (`AttachmentStrip`), the composer's tray (`AttachmentTray`) and the
 /// outbox preview's read-only chips (`ScheduledPreview`) are the same object
 /// in three states, so they share the padding, the thumb and its corner,
-/// which runs concentric with the chip's `Radius.well` across that padding.
+/// which runs concentric with the chip's `Radius.well` across that padding
+/// and never goes squarer than `Radius.chip` (`Radius.image`).
 @MainActor
 enum AttachmentChip {
     static var padding: CGFloat { Space.s6 }
     /// The tile. Holds an image or a glyph rather than text, but it sits
     /// beside two lines of type, so it follows the spacing curve.
     static var thumb: CGFloat { Space.scaled(38) }
-    static var thumbRadius: CGFloat { Radius.concentric(Radius.well, inset: padding) }
+    static var thumbRadius: CGFloat { Radius.image(in: Radius.well, inset: padding) }
     /// Tile to the words.
     static var gap: CGFloat { Space.scaled(9) }
     /// The document glyph standing in for a thumbnail.
     static var glyph: Font { Typo.ui(18, weight: .light) }
 }
 
-/// THE SIDE PANEL'S BLEEDING LIST ROW: `DeskRow`'s arrangement on the panel
-/// gutter. The search hits, the sender block above them, the recent searches
-/// and the browse board are inset `listInset` and pad `hPadding`, so their
-/// words land on `Space.panel` (the panel title's edge) and the selection
-/// fill reaches out to the left of them.
+/// THE SIDE PANEL'S BLEEDING LIST ROWS, in two envelopes.
+///
+/// THE SEARCH PANEL'S TEXT EDGE is `hitInset + hitPadding` (panel + s16): the
+/// search field's words (its capsule pads `hitPadding`), the recent searches,
+/// the section headers, the sender block and the hits' avatars all start
+/// there, and their selection fills sit on the panel gutter (`hitInset`), the
+/// field capsule's own edge. One edge, so typing does not move the column.
+///
+/// THE BROWSE BOARD keeps `DeskRow`'s tighter arrangement: inset `listInset`,
+/// padded `hPadding`, words on `Space.panel` with the fill reaching out past
+/// them.
 @MainActor
 enum PanelRow {
     static var hPadding: CGFloat { Space.s10 }
@@ -565,7 +572,7 @@ enum ToastMetrics {
     /// in from the window's bottom (and right) edge, so the floating things
     /// pinned to an edge sit off it by the same air.
     static var edge: CGFloat { Space.scaled(18) }
-    static let cornerRadius: CGFloat = Radius.toast
+    // The corner is `Radius.toast`, read directly.
 }
 
 extension View {
@@ -585,7 +592,7 @@ extension View {
     func toastGlass(tint: Color? = Palette.glassTintStrong, interactive: Bool = false) -> some View {
         self
             .passbandGlass(
-                .pane, cornerRadius: ToastMetrics.cornerRadius, tint: tint, interactive: interactive)
+                .pane, cornerRadius: Radius.toast, tint: tint, interactive: interactive)
             .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
     }
 }

@@ -191,7 +191,7 @@ struct ActionLayer: View {
                     }
                     .buttonStyle(.plain)
                     .background(
-                        RoundedRectangle(cornerRadius: ToastMetrics.cornerRadius, style: .continuous)
+                        RoundedRectangle(cornerRadius: Radius.toast, style: .continuous)
                             .fill(.clear)
                     )
                     .toastGlass(tint: tone(toast.tone).opacity(0.16), interactive: true)

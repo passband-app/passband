@@ -79,7 +79,9 @@
         /// 78 points, and the column at the detail's own width (the pane
         /// shows one or the other).
         private var monthTwoPanes: Bool {
-            pageWidth >= Self.monthGridMin + Self.detailWidth + Space.scaled(18) + Space.scaled(44)
+            // The month pads by the page gutter on both sides
+            // (`CalendarMonth`), so that is what it reserves.
+            pageWidth >= Self.monthGridMin + Self.detailWidth + Space.scaled(18) + 2 * Space.page
         }
         private static var monthGridMin: CGFloat { Typo.measure(546) }
 

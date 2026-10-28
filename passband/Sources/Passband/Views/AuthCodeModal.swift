@@ -125,6 +125,8 @@ struct AuthCodeModal: View {
                 }
             }
             .buttonStyle(.glass)
+            // Quieter than copy: dismissing is the way out, not the point.
+            .foregroundStyle(Palette.inkDim)
             if let code, !code.isEmpty {
                 Button(action: copy) {
                     HStack(spacing: Space.s6) {

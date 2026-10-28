@@ -130,10 +130,11 @@ struct GroupEditor: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: Space.s4) {
+            // A utility dialog's title (`ModalCard`'s rules), lowercase like
+            // the rule editor's "new rule" beside it.
             Text(editing ? "edit group" : "new group")
-                .font(Typo.sectionLabel)
+                .font(Typo.modalTitle)
                 .foregroundStyle(Palette.ink)
-                .textCase(.uppercase)
             Text("a set of people you write to together, addressed by name.")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
@@ -226,14 +227,14 @@ struct GroupEditor: View {
                     Spacer()
                 }
             #endif
-            HStack(spacing: Space.s8) {
+            ModalButtons {
                 if let blocked {
                     Text(blocked)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.warn)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: Space.s8)
+            } buttons: {
                 Button(cancelLabel, action: onClose).buttonStyle(.glass)
                 Button(saving ? "saving…" : (editing ? "update group" : "save group")) {
                     Task { await save() }

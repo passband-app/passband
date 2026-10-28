@@ -109,7 +109,8 @@ struct ScheduledPreview: View {
                 .buttonStyle(.textAction)
                 .help("close; it stays scheduled")
             }
-            .padding(.horizontal, Space.s24)
+            // The page gutter, as on every other page's bar.
+            .padding(.horizontal, Space.page)
             .frame(height: TopBar.height)
             .overlay(alignment: .bottom) { Hairline() }
         }

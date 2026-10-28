@@ -144,7 +144,11 @@ struct SearchView: View {
         let expanded = store.search.expanded
 
         VStack(alignment: .leading, spacing: 0) {
-            Field(label: "", capsule: true) {
+            // Its words on the panel's TEXT EDGE (`PanelRow`): the capsule on
+            // the gutter, the words `hitPadding` in, where the recents, the
+            // section headers and the hits' avatars start, so typing the
+            // first letter does not move the column.
+            Field(label: "", capsule: true, inset: PanelRow.hitPadding) {
                 HStack(spacing: Space.s8) {
                     TextField("search mail…", text: $store.search.query)
                         .textFieldStyle(.plain)
@@ -233,9 +237,10 @@ struct SearchView: View {
                     onRun: { run($0) }, onClear: { clearRecents() }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
-                // The rows' own padding takes the words the rest of the way
-                // to the panel gutter (`PanelRow`).
-                .padding(.horizontal, PanelRow.listInset)
+                // The hits' envelope (`PanelRow.hitInset`), so the recents
+                // and the hits that replace them share one fill edge and one
+                // text edge.
+                .padding(.horizontal, PanelRow.hitInset)
             }
             HStack(alignment: .top, spacing: 0) {
                 if bandMounted && expanded {

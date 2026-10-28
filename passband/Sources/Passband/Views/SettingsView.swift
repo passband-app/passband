@@ -648,6 +648,12 @@ struct SearchSortPicker: View {
 ///
 /// STACKED ON THE PHONE. A 390pt line cannot hold a name and a four-way
 /// segmented control side by side, so the control drops under its label there.
+///
+/// AND ON A NARROW MAC CARD (the composer open beside Settings): side by side
+/// only while the label keeps `labelFloor` next to the control, otherwise the
+/// phone's arrangement. Stacked, a control still wider than the card (the
+/// Sound picker's five segments) scrolls sideways inside it rather than run
+/// out past the pane, where the page clips it.
 struct SettingsRow<Control: View>: View {
     let title: String
     var detail: String?
@@ -655,16 +661,32 @@ struct SettingsRow<Control: View>: View {
 
     var body: some View {
         #if os(iOS)
-            VStack(alignment: .leading, spacing: Space.s8) {
-                label
-                control
-            }
+            stacked(control)
         #else
-            HStack(alignment: .center, spacing: Space.scaled(18)) {
-                label
-                control
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: Space.scaled(18)) {
+                    // The fit test asks the label for its floor, not its
+                    // one-line width: a long detail line wraps beside the
+                    // control, as it always did, rather than stack the row.
+                    label
+                        .frame(minWidth: 0, idealWidth: Self.labelFloor, maxWidth: .infinity, alignment: .leading)
+                    control
+                }
+                stacked(
+                    ScrollView(.horizontal, showsIndicators: false) { control }
+                        .scrollBounceBehavior(.basedOnSize, axes: .horizontal))
             }
         #endif
+    }
+
+    /// The least a label keeps beside its control before the row stacks.
+    @MainActor private static var labelFloor: CGFloat { Typo.measure(120) }
+
+    private func stacked(_ control: some View) -> some View {
+        VStack(alignment: .leading, spacing: Space.s8) {
+            label
+            control
+        }
     }
 
     private var label: some View {

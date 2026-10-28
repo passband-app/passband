@@ -2,7 +2,7 @@
 
 use super::super::migrate::{
     canonical_fts_create, create_shipment_order_links, migrate, normalize_fts_sql,
-    rebuild_fts_if_stale,
+    rebuild_fts_if_stale, reindex_calendar_search_if_stale,
 };
 use super::super::*;
 use super::support::*;
@@ -3178,4 +3178,121 @@ fn migrate_gives_every_preexisting_account_the_gmail_provider() {
         })
         .unwrap();
     assert_eq!(provider, "gmail");
+}
+
+/// Calendar search's index (schema.sql, CALENDAR SEARCH) holds exactly one
+/// row per stored event, whichever path writes or deletes it, and a store
+/// whose index is out of step (events written before it existed, or by an
+/// older daemon) is rebuilt at open.
+#[test]
+fn calendar_search_index_follows_every_write_and_is_rebuilt_when_stale() {
+    use crate::gcal::search::{Audience, CalendarQuery, search};
+    use crate::gcal::{CalendarMeta, EventItem, EventRow, PRIMARY};
+    use crate::triage::ghost::EventTime;
+    let (store, acct) = store();
+    let now = Utc::now();
+    store
+        .calendar_set_selection(acct, &[CalendarMeta::primary_only()])
+        .unwrap();
+    let event = |id: &str, title: &str| EventRow {
+        event_id: id.into(),
+        ical_uid: None,
+        tentative: false,
+        summary: Some(title.into()),
+        location: None,
+        start: EventTime::At((now + chrono::Duration::days(2)).fixed_offset()),
+        end: None,
+        start_timezone: None,
+        organizer_email: None,
+        organizer_unreadable: false,
+        organizer_self: true,
+        self_response: None,
+        transparent: false,
+        html_link: None,
+        updated_at: None,
+        color_id: None,
+        description: None,
+        guests: Vec::new(),
+        guests_truncated: false,
+    };
+    let counts = || -> (i64, i64, i64) {
+        let conn = store.lock().unwrap();
+        let n = |sql: &str| conn.query_row(sql, [], |r| r.get(0)).unwrap();
+        (
+            n("SELECT COUNT(*) FROM calendar_events"),
+            n("SELECT COUNT(*) FROM calendar_search_keys"),
+            n("SELECT COUNT(*) FROM calendar_search_fts"),
+        )
+    };
+    let titles = |q: &str| -> Vec<String> {
+        search(
+            &store,
+            acct,
+            &CalendarQuery::parse(q).unwrap(),
+            Audience::Owner,
+            true,
+            now,
+            50,
+        )
+        .unwrap()
+        .hits
+        .into_iter()
+        .map(|h| match h {
+            crate::gcal::search::CalendarHit::Event(e) => e.row.summary.unwrap_or_default(),
+            crate::gcal::search::CalendarHit::Ghost(g) => g.title,
+        })
+        .collect()
+    };
+    let page = |items: Vec<EventItem>| {
+        store
+            .calendar_apply_page(acct, PRIMARY, &items, now)
+            .unwrap();
+    };
+    page(vec![
+        EventItem::Upsert(Box::new(event("a", "Pottery class"))),
+        EventItem::Upsert(Box::new(event("b", "Dentist"))),
+    ]);
+    assert_eq!(counts(), (2, 2, 2));
+    assert_eq!(titles("pottery"), ["Pottery class"]);
+
+    // Rewritten: the old words go, the new ones come, no second row.
+    page(vec![EventItem::Upsert(Box::new(event(
+        "a",
+        "Ceramics class",
+    )))]);
+    assert_eq!(counts(), (2, 2, 2));
+    assert!(titles("pottery").is_empty());
+    assert_eq!(titles("ceramics"), ["Ceramics class"]);
+
+    // Every delete path: a removal in a page, the user's own delete, a
+    // full sync's sweep.
+    page(vec![EventItem::Remove("a".into())]);
+    assert_eq!(counts(), (1, 1, 1));
+    assert!(titles("ceramics").is_empty());
+    store
+        .calendar_put_event(acct, PRIMARY, &event("c", "Flight"))
+        .unwrap();
+    assert_eq!(counts(), (2, 2, 2));
+    store.calendar_remove_event(acct, PRIMARY, "c").unwrap();
+    assert_eq!(counts(), (1, 1, 1));
+    let seen = std::collections::HashSet::new();
+    store
+        .calendar_finish_sync(acct, PRIMARY, Some("tok"), now, Some((&seen, false)))
+        .unwrap();
+    assert_eq!(counts(), (0, 0, 0));
+
+    // Stale: an older daemon wrote events and kept no index.
+    page(vec![EventItem::Upsert(Box::new(event(
+        "d",
+        "Yoga retreat",
+    )))]);
+    {
+        let conn = store.lock().unwrap();
+        conn.execute_batch("DELETE FROM calendar_search_fts; DELETE FROM calendar_search_keys;")
+            .unwrap();
+    }
+    assert!(titles("yoga").is_empty());
+    reindex_calendar_search_if_stale(&store.lock().unwrap()).unwrap();
+    assert_eq!(counts(), (1, 1, 1));
+    assert_eq!(titles("yoga"), ["Yoga retreat"]);
 }

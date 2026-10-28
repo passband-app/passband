@@ -1702,21 +1702,33 @@ by time, and mail keeps its ranking.
 mail parser (`parse_search_query`). `from:`, `to:` and `in:sent`/`from:me` are
 about mail, so a query that has any of them returns no events. `after:` and
 `before:` bound the event's START, not a received date. What is left is
-split into lowercase words of 2+ characters, punctuation dropped. A term
-matches a word of the event when the word starts with it, or when the two
-agree once a plural `s`/`es` is taken off ("dinners" finds "Dinner"). The
-words come from the title, the place, the description, the calendar's name
-and each guest's name and address (a ghost has title and place only). An
-event that matches EVERY term is a hit. When none does and there are 2+
-terms, events missing exactly one term are hits instead (the mail search's
-AND-then-OR, kept tight because the block is three rows). No match on
-operators alone: a query must have at least one term.
+split into lowercase words of 2+ characters, punctuation dropped, and the
+common short words (a, at, the, with, ...) dropped unless they are all there
+is. A term matches a word it begins. Events are matched through a word index
+with porter stemming ("dinners" finds "Dinner", "parties" finds "party"),
+over the title, the place, the description, guests' names and, for the owner
+only, the organizer's and guests' addresses. Ghosts (title and place only, a
+few hundred rows) are matched in Rust, the word's start or a plural `s`/`es`
+taken off. An event that matches EVERY term is a hit. When none does and
+there are 2+ terms, events missing exactly one term are hits instead (the
+mail search's AND-then-OR, kept tight because the block is three rows). No
+match on operators alone: a query must have at least one term. The calendar's
+name is not matched.
 
-No index. `calendar_events` has no stable integer key (its implicit rowid
-can be renumbered by VACUUM), and the table is bounded (5000 events per
-calendar). The store pulls only the rows that contain at least one term
-(`instr` on lowercased text, a superset of the exact test), and the exact
-test runs in Rust. Guests are read only for the kept rows.
+**The index** (schema.sql, CALENDAR SEARCH). First built without one, a
+scan with the exact test in Rust; the probe
+(`store::sqlite::tests::bench::calendar_search_at_the_cap`, 5000 events with
+long descriptions and 20 guests) measured 45 to 140 ms per keystroke with
+SQLite optimized, all of it under the store's one lock. So: FTS5
+`calendar_search_fts`, whose rowid is the id of `calendar_search_keys`,
+because `calendar_events` has no stable integer key (an implicit rowid can
+be renumbered by VACUUM). Written in `upsert_event`, the one way an event is
+written, after its guests and in its transaction; deleted by a trigger on
+`calendar_events`, whichever path deletes. A store whose index does not hold
+one row per event is reindexed at open. Matches are counted per term in the
+index, ordered on their times alone, and the full rows and guests are read
+only for the page served. The probe: under 6 ms per search in a debug build,
+46 ms for a word in all 5000 events.
 
 **Order.** Upcoming first, soonest first (an event in progress counts as
 upcoming), then past events, most recent first. `total` is the number of
@@ -1763,8 +1775,8 @@ page on that event (`selectCalendarItem`, after moving the month so the feed
 covers it). Real events draw with their calendar colour; ghosts draw dashed
 with "from mail". `in:calendar` in the field searches events only (the mail
 search is not run) and lists every hit. The block is drawn only while the
-Calendar page is available. iOS has no Calendar page today, so the phone
-draws the block on the `cal-on-ios` branch only; on main it does nothing.
+Calendar page is available. The phone draws the same block in its Search
+tab; a hit opens the Calendar tab in Day mode on that event's detail.
 
 **The in-app assistant drafts events (BUILT in wave 6).** The founder: "lets
 give the assistant the ability to create events." It has ONE calendar tool,

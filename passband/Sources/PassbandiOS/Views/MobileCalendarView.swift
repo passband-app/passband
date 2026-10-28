@@ -91,19 +91,14 @@ struct MobileCalendarView: View {
                 VStack(spacing: 0) {
                     MobileCalendarStatus()
                         .padding(.horizontal, 16)
-                    MobileMonthGrid(
-                        model: model, now: now, calendar: cal, stepForward: $stepForward,
+                    MobileMonthPager(
+                        items: items, place: place, now: now, calendar: cal,
                         open: { day in
                             Haptics.tick()
                             withAnimation(.snappy) {
                                 store.selectCalendarDay(day, open: false, now: now)
                                 mode = .day
                             }
-                        },
-                        turn: { forward in
-                            stepForward = forward
-                            Haptics.tick()
-                            withAnimation(.snappy) { store.moveCalendarMonth(.months(forward ? 1 : -1), now: now) }
                         })
                 }
                 .background(Palette.canvas)
@@ -1195,14 +1190,12 @@ private struct MobileDayTimeline: View {
 /// as small chips in their calendars' colours, trips as bars across the days
 /// they cover, and "+N" when a day runs out of room. The cells share the
 /// screen's height, so a five-week month has taller days than a six-week one.
-/// A day tapped opens in Day. Sideways turns the month.
+/// A day tapped opens in Day. One page of `MobileMonthPager`.
 private struct MobileMonthGrid: View {
     let model: MonthModel
     let now: Date
     let calendar: Calendar
-    @Binding var stepForward: Bool
     let open: (Date) -> Void
-    let turn: (_ forward: Bool) -> Void
 
     static let numberBand: CGFloat = 24
     static let rowHeight: CGFloat = 15
@@ -1224,31 +1217,11 @@ private struct MobileMonthGrid: View {
                         weekRow(week, cellHeight: cell, cellWidth: width)
                     }
                 }
-                .id(model.month)
-                .transition(
-                    .asymmetric(
-                        insertion: .move(edge: stepForward ? .trailing : .leading).combined(with: .opacity),
-                        removal: .move(edge: stepForward ? .leading : .trailing).combined(with: .opacity)))
             }
             .scrollDisabled(cell * CGFloat(rows) <= geo.size.height + 1)
             .scrollBounceBehavior(.basedOnSize)
         }
         .clipped()
-        .contentShape(Rectangle())
-        // Beside the cells' buttons, not under them (a plain gesture lost
-        // every drag that began on a day). Sideways as on the strip, and
-        // up/down as Google's month does: left or up is the next month.
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 24)
-                .onEnded { value in
-                    let dx = value.translation.width
-                    let dy = value.translation.height
-                    if abs(dx) > abs(dy), abs(dx) > 60 {
-                        turn(dx < 0)
-                    } else if abs(dy) > abs(dx), abs(dy) > 60 {
-                        turn(dy < 0)
-                    }
-                })
     }
 
     private func weekRow(_ week: MonthWeek, cellHeight: CGFloat, cellWidth: CGFloat) -> some View {
@@ -1372,5 +1345,68 @@ private struct MobileMonthGrid: View {
         let titles = day.items.map(\.title)
         let plans = titles.isEmpty ? "" : ", " + titles.joined(separator: ", ")
         return (isToday ? "Today, " : "") + date + plans
+    }
+}
+
+// MARK: - the months, paged
+
+/// THE MONTHS AS PAGES: the whole grid follows the thumb and the next month
+/// slides in beside it, the way a photo does, and lets go onto a page. The
+/// platform's own pager (a page-style TabView), not a drag hand-rolled over
+/// one grid: that one could only jump once the finger lifted.
+///
+/// Ten years either side of this month. The page settled on IS the store's
+/// month (`moveCalendarMonth`), so the title, the request for that month's
+/// plans and the other modes all follow it; Today, or a day picked in Week,
+/// moves the pager the other way. A page off the settled one draws what the
+/// feed already holds for it, and fills in when it lands and its month is
+/// asked for.
+private struct MobileMonthPager: View {
+    @Environment(AppStore.self) private var store
+    let items: [AgendaItem]
+    let place: MonthPlace
+    let now: Date
+    let calendar: Calendar
+    let open: (Date) -> Void
+
+    @State private var page = 0
+
+    static let reach = 120
+
+    private var thisMonth: Date { MonthGrid.monthStart(now, calendar: calendar) }
+
+    private func offset(of month: Date) -> Int {
+        calendar.dateComponents([.month], from: thisMonth, to: MonthGrid.monthStart(month, calendar: calendar))
+            .month ?? 0
+    }
+
+    private func month(_ offset: Int) -> Date {
+        calendar.date(byAdding: .month, value: offset, to: thisMonth) ?? thisMonth
+    }
+
+    var body: some View {
+        TabView(selection: $page) {
+            ForEach(-Self.reach...Self.reach, id: \.self) { offset in
+                MobileMonthGrid(
+                    model: MonthGrid.build(items, month: month(offset), calendar: calendar),
+                    now: now, calendar: calendar, open: open
+                )
+                .tag(offset)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        .onAppear { page = offset(of: place.month) }
+        // Settled on a page: that month becomes the store's.
+        .onChange(of: page) { _, new in
+            let delta = new - offset(of: place.month)
+            guard delta != 0 else { return }
+            Haptics.tick()
+            store.moveCalendarMonth(.months(delta), now: now)
+        }
+        // The month moved from elsewhere (Today, another mode): follow it.
+        .onChange(of: place.month) { _, month in
+            let target = offset(of: month)
+            if target != page { withAnimation(.snappy) { page = target } }
+        }
     }
 }

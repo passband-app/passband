@@ -107,7 +107,7 @@ enum Lane: String, Sendable {
     /// what lets it run unasked: no confirm card can ever appear inside the
     /// search panel, and the lane needs no ActionGate to be safe.
     private static let searchTools: [AgentTools.Tool] = [
-        .searchMail, .getThread, .searchContacts, .getRecords, .showEmails,
+        .searchMail, .getThread, .searchContacts, .getRecords, .showEmails, .searchCalendar,
     ]
 
     /// The names this lane may call, as the run loop checks them. A SET rather

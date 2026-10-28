@@ -53,8 +53,9 @@ Standing rules (DECIDED):
   by `MobileRecordsView.swift` on iOS) lists those records. `CalendarVisibility`
   retires each one 24 hours after its first viewing, because a record has
   nowhere else to live.
-- **No calendar access.** The only Google scopes are the three Gmail ones and
-  the identity pair (`docs/VERIFICATION.md`). Hosted signup and reconnect
+- **No calendar access** (as of this section's writing; signup asks for it
+  since 2026-10-27, see §8). The only Google scopes were the three Gmail ones
+  and the identity pair (`docs/VERIFICATION.md`). Hosted signup and reconnect
   require all three Gmail scopes as a floor (`squelch-control/src/oauth.rs`).
 - **One daemon is one mailbox.** The client holds one active account and keeps
   an event stream open for each of the others. Nothing merges across accounts
@@ -1515,9 +1516,11 @@ event's location too). No key, no bill, the same on Mac and iOS.
 
 - Google verification has not started (2026-09-30). It is not held for
   calendar: the review wants a demonstration of each scope in use and this
-  feature does not exist yet. Gmail is filed first and calendar is added as an
-  amendment. How an amendment is reviewed is to be confirmed with Google's
-  current documentation at filing time.
+  feature does not exist yet. The plan was Gmail first and calendar as an
+  amendment. Since 2026-10-27 signup asks for calendar, so calendar is in the
+  Gmail submission and the calendar feature has to be demoable before filing
+  (or signup stops asking). Trade accepted: every hosted tenant's sealed token
+  can now read and write calendars, unused while the feature is off.
 - Until then the calendar grant runs under the same unverified 100-user cap as
   everything else.
 - `docs/VERIFICATION.md` calls the Gmail mailbox "the entire product surface".

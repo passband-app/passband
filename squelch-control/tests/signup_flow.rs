@@ -1993,7 +1993,9 @@ async fn a_wider_grant_than_we_asked_for_is_accepted() {
     assert!(body.contains("Your mailbox is ready"), "{body}");
 }
 
-/// SIGNUP CARRIES CALENDAR EVEN WITH THE FEATURE OFF. A new tenant has no
+/// SIGNUP CARRIES CALENDAR EVEN WITH THE FEATURE OFF. A REGRESSION GUARD, not
+/// proof of the request (the consent-URL assertions above are that): it fails
+/// if someone later adds a feature gate to signup's install. A new tenant has no
 /// `calendar` feature row, and a signup that granted calendar still provisions
 /// and seals the whole grant: the reconnect pipeline's feature gate is for a
 /// calendar-only consent, not for signup. The daemon holds the scope unused

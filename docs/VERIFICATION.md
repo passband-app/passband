@@ -230,9 +230,10 @@ reviewer needs one continuous frame proving that client ID granted that consent.
    reviewer sees the change actually landed on Google's side.
 6. **`gmail.send` in use.** Compose a message, send it, and show it arrive in
    the recipient's mailbox and in the sender's Gmail Sent folder.
-7. **Calendar (amendment only).** Once filed: the connect card in the app, the
-   consent screen showing the calendar permissions beside Gmail's, and the
-   calendar page showing real events next to ones found in mail.
+7. **Calendar.** Signup asks for it (since 2026-10-27), so it is in this
+   submission: the signup consent screen showing the calendar permissions
+   beside Gmail's, and the calendar page (feature on for the demo account)
+   showing real events next to ones found in mail.
 8. **Revocation.** `myaccount.google.com/permissions`, showing Passband listed
    and revocable. Not required, but it answers the question a reviewer is paid
    to ask.

@@ -1683,8 +1683,88 @@ event, or lets mail move or delete one, these exist:
 
 ## 10. Agents
 
-The agent door stays read-only. Whether `/mcp` serves the timeline (with
-estimates and likelihood marked as such) is open.
+The agent door stays read-only. It does not serve the timeline, but it
+SEARCHES it (§10.1, DECIDED 2026-10-28).
+
+### 10.1 Search (DECIDED 2026-10-28)
+
+The founder: "lets make calendar events searchable by the agent and keyword
+search." Decided with them the same day: an **Events block** in the search
+results (not interleaved, not filter chips), **both** the in-app assistant and
+Agent MCP, and **ghosts included**, drawn as ghosts.
+
+**Why a block and not one list.** A mail hit's date is when it arrived; an
+event's is when it happens. Their scores are not comparable either. Sorted
+together, the list is wrong both ways. So events get their own block, ordered
+by time, and mail keeps its ranking.
+
+**Matching** (`squelch_core::gcal::search`, pure). The query is read by the
+mail parser (`parse_search_query`). `from:`, `to:` and `in:sent`/`from:me` are
+about mail, so a query that has any of them returns no events. `after:` and
+`before:` bound the event's START, not a received date. What is left is
+split into lowercase words of 2+ characters, punctuation dropped. A term
+matches a word of the event when the word starts with it, or when the two
+agree once a plural `s`/`es` is taken off ("dinners" finds "Dinner"). The
+words come from the title, the place, the description, the calendar's name
+and each guest's name and address (a ghost has title and place only). An
+event that matches EVERY term is a hit. When none does and there are 2+
+terms, events missing exactly one term are hits instead (the mail search's
+AND-then-OR, kept tight because the block is three rows). No match on
+operators alone: a query must have at least one term.
+
+No index. `calendar_events` has no stable integer key (its implicit rowid
+can be renumbered by VACUUM), and the table is bounded (5000 events per
+calendar). The store pulls only the rows that contain at least one term
+(`instr` on lowercased text, a superset of the exact test), and the exact
+test runs in Rust. Guests are read only for the kept rows.
+
+**Order.** Upcoming first, soonest first (an event in progress counts as
+upcoming), then past events, most recent first. `total` is the number of
+hits before the limit.
+
+**Ghosts.** A ghost the timeline would list (its supplier message is
+eligible, §3.6) and the user has not dismissed. A ghost that matches a real
+event (`gcal::match_ghosts`, the timeline's display match) is dropped: the
+event is shown and the ghost would be the same thing twice.
+
+**Doors.**
+
+| Door | Route / tool | Gate |
+|---|---|---|
+| Human | `GET /client/calendar/search?q=&limit=` | `calendar` feature (404 off). Real events only while calendar is granted; ghosts always. |
+| In-app assistant | `GET /client/agent/calendar/search?q=&limit=` and the client tool `search_calendar` | Same, plus the agent view below. Mac only, while the Calendar page is available. |
+| Agent MCP | `search_calendar` | Listed and answered only while the `calendar` feature is on. Same agent view. |
+
+Human answer: `{ "items": [ {"event": <timeline event>} | {"ghost": <timeline
+ghost>} ], "total": n, "granted": bool }`, each item exactly as
+`/client/timeline` serves it, so the clients reuse one decoder. `limit`
+defaults to 20, max 50.
+
+Agent answer: `{ "results": [...], "total": n }`, each result:
+`{kind: "event"|"ghost", title, start, end, end_estimated, all_day,
+start_timezone, location, calendar, status, your_response, organizer,
+organizer_is_you, guests: [names], guest_count, description, thread_id,
+likelihood}`. **NO ADDRESS OF ANYONE leaves the agent door from the
+calendar.** Guests appear by name only (a guest with no name is counted, not
+named), the organizer by name or as `organizer_is_you`, and guest addresses
+are not matched either (a term that only an address would match does not
+hit), so a query cannot test "is dan@x.com on this event" one guess at a
+time. The description is cut to 1000 characters and is the user's data like
+any email body: an instruction in it is not one. A ghost's `thread_id` is the
+mail it came from, and a ghost is served only when every source thread passes
+`external_thread_allowed` (sources that do not are dropped, and a ghost whose
+supplier does not is dropped), the same authority `get_thread` asks, so the
+id always opens.
+
+**Client.** An "Events" block between Senders and the mail hits, up to three
+rows, then "N more" which expands the block in place. Rows join the same
+arrow-key column as Senders and hits. Enter (or a click) opens the Calendar
+page on that event (`selectCalendarItem`, after moving the month so the feed
+covers it). Real events draw with their calendar colour; ghosts draw dashed
+with "from mail". `in:calendar` in the field searches events only (the mail
+search is not run) and lists every hit. The block is drawn only while the
+Calendar page is available. iOS has no Calendar page today, so the phone
+draws the block on the `cal-on-ios` branch only; on main it does nothing.
 
 **The in-app assistant drafts events (BUILT in wave 6).** The founder: "lets
 give the assistant the ability to create events." It has ONE calendar tool,
@@ -1732,9 +1812,10 @@ nothing:
   replaced: the tool answers "finish or close the open event first". A
   proposed pane counts as holding something, so it parks instead of closing
   when the user changes page and a second proposal waits its turn.
-- The assistant does not READ the calendar: it gets no event, and a calendar
+- The assistant does not READ the calendar through this tool: a calendar
   name that matches nothing is refused without listing the ones there are.
-  No edit and no delete tool. Nothing on `/mcp` or `/client/agent/*`.
+  No edit and no delete tool. It reads events only through
+  `search_calendar` (§10.1).
 - Offered only on the Mac and only while the Calendar page is
   (`AppStore.calendarPageAvailable`, the gate the guide's calendar topic
   uses). With the page off the tool list and the system prompt are the ones
@@ -1861,6 +1942,7 @@ Each wave is useful on its own and is committed when verified.
   headers-only fetch) or let the timezone inference learn forward only.
 - The month view (hour strips per day, no titles) is the least conventional
   surface and has not been judged by the founder yet.
-- Whether the agent door serves the timeline.
+- Whether the agent door serves the timeline (it SEARCHES it since
+  2026-10-28, §10.1; a listing by date is still open).
 - Google's scope names, their classification, and the amendment process, all
   to be verified at build time.

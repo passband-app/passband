@@ -869,6 +869,10 @@ async fn the_signup_surface_is_unchanged() {
             "https://www.googleapis.com/auth/gmail.send",
             // Asked for on the same screen and optional: name and photo.
             "https://www.googleapis.com/auth/userinfo.profile",
+            // Also optional: calendar, asked for at signup even while the
+            // `calendar` feature is off, so it needs no second consent later.
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
         ],
         "{consent}"
     );

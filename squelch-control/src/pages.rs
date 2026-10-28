@@ -581,7 +581,7 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 /// because by then the code may be one the person typed.
 ///
 /// THE GRANT IS STILL STATED BESIDE THE BUTTON, in one line naming all three
-/// permissions, because the consent screen that follows is Google's and says it
+/// required permissions and the optional calendar, because the consent screen that follows is Google's and says it
 /// in Google's vocabulary. That line is the `<summary>` of the disclosure, so
 /// it is always on screen and is also the way into the detail. The username
 /// rule is not printed: the server's refusal states whichever rule was broken,
@@ -676,13 +676,13 @@ pub fn signup_form(
 <button type="submit">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
 </form>
 <details>
-<summary>Google will ask to read, change, and send your Gmail.</summary>
+<summary>Google will ask to read, change, and send your Gmail, and optionally for your calendar.</summary>
 <ul>
 <li><strong>Read</strong> (<code>gmail.readonly</code>): mail triage.</li>
 <li><strong>Change</strong> (<code>gmail.modify</code>): archiving and labeling, never deletion.</li>
 <li><strong>Send</strong> (<code>gmail.send</code>): replying from the app.</li>
 </ul>
-<p>Passband needs all three, so keep those boxes checked. It also asks for your name and profile photo, to show them in the app; that one is optional. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
+<p>Passband needs all three, so keep those boxes checked. It also asks for your name and profile photo, to show them in the app, and for Google Calendar (<code>calendar.events</code>), which can view and edit your events; both are optional. Calendar is asked for now so it never needs a second consent, and nothing touches your calendar until calendar is available on your account. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
 </details>
 {links_html}"#,
             error_html = error_html,

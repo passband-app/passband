@@ -110,8 +110,9 @@
 
     <h2>Google user data</h2>
     <p>
-      Passband accesses Gmail through Google APIs with your consent, using
-      OAuth. It requests exactly these scopes and nothing else:
+      Passband accesses Gmail, and optionally Google Calendar, through Google
+      APIs with your consent, using OAuth. It requests exactly these scopes and
+      nothing else:
     </p>
     <table>
       <tr><th>Scope</th><th>What it is used for</th></tr>
@@ -146,6 +147,24 @@
           untick it on Google's consent screen and everything else works. The
           photo is copied once to your daemon and served to your own devices
           from there.
+        </td>
+      </tr>
+      <tr>
+        <td><code>calendar.events</code></td>
+        <td>
+          Optional. Read the events on your calendars, and create, change, or
+          delete an event only when you do it in Passband (adding guests sends
+          Google's own invitation). Asked for at signup so it never needs a
+          second consent; until calendar is available on your account, nothing
+          reads or writes your calendar with it. You can untick it on Google's
+          consent screen and everything else works.
+        </td>
+      </tr>
+      <tr>
+        <td><code>calendar.calendarlist.readonly</code></td>
+        <td>
+          Optional. List your calendars and their colours, so events show on
+          the right calendar. Read only.
         </td>
       </tr>
       <tr>

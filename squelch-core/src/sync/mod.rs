@@ -11177,8 +11177,8 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let day = now.format("%Y-%m-%d").to_string();
         let mut sent = std::collections::BTreeMap::new();
-        // One job per claim, in the claim's own order; each failed job is
-        // parked past this claim time after it runs, so each is seen once.
+        // One job per claim, in the claim's own order; a failed step's retry
+        // is scheduled past this claim time, so each is seen exactly once.
         // A job makes several requests (every step the agent retries before
         // giving the job up), all at the one effort.
         for _ in 0..5 {
@@ -11199,15 +11199,7 @@ mod tests {
                 (t, _) => t.to_string(),
             };
             let before = efforts.lock().unwrap().len();
-            let ran = job.clone();
             engine.process_agent_job(job, &llm, &day).await;
-            // Its retry is due at once now; park it so the next claim is
-            // the next job, which is what this test walks.
-            store.execute_batch_for_test(&format!(
-                "UPDATE agent_triage_jobs SET available_at='{}' WHERE id={}",
-                (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(),
-                ran.id
-            ));
             // An empty answer is the job's failure, not a provider outage:
             // nothing here may put the account on a cooldown that would
             // keep the next job from making its request.
@@ -11267,9 +11259,8 @@ mod tests {
         use crate::store::agent_triage::AgentTriageStore;
         for (status, retry_after, lo, hi) in [
             (StatusCode::TOO_MANY_REQUESTS, Some("7"), 6, 23),
-            // No number from the provider: the first failure retries at once.
-            (StatusCode::TOO_MANY_REQUESTS, None, -1, 0),
-            (StatusCode::SERVICE_UNAVAILABLE, None, -1, 0),
+            (StatusCode::TOO_MANY_REQUESTS, None, 14, 30),
+            (StatusCode::SERVICE_UNAVAILABLE, None, 14, 30),
             (StatusCode::FORBIDDEN, None, 284, 300),
         ] {
             let (store, account) = store_at_cursor(Some(100));
@@ -11389,12 +11380,9 @@ mod tests {
         )
         .await;
         let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
-        assert!(
-            (-1..=0).contains(&wait),
-            "first rung retries at once: {wait}s"
-        );
+        assert!((14..=30).contains(&wait), "first rung: stood off {wait}s");
         assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 1);
-        for rung in [15, 30, 60, 120, 240, 285, 285] {
+        for rung in [30, 60, 120, 240, 285, 285] {
             // The previous cooldown has lapsed: this probe is admitted.
             engine.agent_retry_after.store(0, Ordering::Relaxed);
             let job = claim();
@@ -11465,9 +11453,20 @@ mod tests {
         .await;
         assert!(dropped.is_err(), "the run was still in flight");
         // Handed back at once, due after the retry ladder's wait for the
-        // attempt it took, which for the first attempt is no wait at all.
+        // attempt it took: not re-run on the spot.
+        assert!(
+            store
+                .claim_agent_job(account, "investigation", Utc::now(), lease)
+                .unwrap()
+                .is_none()
+        );
         let again = store
-            .claim_agent_job(account, "investigation", Utc::now(), lease)
+            .claim_agent_job(
+                account,
+                "investigation",
+                Utc::now() + ChronoDuration::hours(2),
+                lease,
+            )
             .unwrap()
             .expect("handed back the moment the run was dropped");
         assert_eq!(again.id, id);
@@ -11587,7 +11586,7 @@ mod tests {
             at: Utc::now(),
         };
         let (_, wait) = engine.open_cooldown(asked, false, start, true);
-        assert!((119..=135).contains(&wait), "the fifth rung: {wait}s");
+        assert!((239..=255).contains(&wait), "the fifth rung: {wait}s");
         assert_eq!(engine.agent_throttle_strikes.load(Ordering::Relaxed), 5);
         // And a probe that itself ran long before failing is still that
         // episode's probe: its start is what is measured.
@@ -11602,7 +11601,7 @@ mod tests {
             at: DateTime::from_timestamp(lapsed + 1, 0).unwrap(),
         };
         let (_, wait) = engine.open_cooldown(asked, false, start, true);
-        assert!((119..=135).contains(&wait), "still the fifth rung: {wait}s");
+        assert!((239..=255).contains(&wait), "still the fifth rung: {wait}s");
     }
 
     /// The access lane's failures climb a ladder of their own, the
@@ -11615,7 +11614,7 @@ mod tests {
         use super::triage_worker::JobStart;
         let (store, account) = store_at_cursor(Some(100));
         let engine = engine(store.clone(), account, "http://127.0.0.1:1");
-        for rung in [0, 15, 30] {
+        for rung in [15, 30, 60] {
             engine.agent_retry_after.store(0, Ordering::Relaxed);
             let start = JobStart {
                 generation: engine.agent_last_cooldown_end.load(Ordering::Relaxed),
@@ -12034,10 +12033,8 @@ mod tests {
             "one cooldown, one strike"
         );
         let wait = engine.agent_retry_after.load(Ordering::Relaxed) - Utc::now().timestamp();
-        // The opener's rung is the first, an immediate retry; the sibling
-        // waits that, not the second rung.
         assert!(
-            (-2..=0).contains(&wait),
+            (14..=30).contains(&wait),
             "the sibling waits the opener's rung: {wait}s"
         );
         server.abort();
@@ -12299,9 +12296,6 @@ mod tests {
         let mut engine = engine(store, account, "http://127.0.0.1:1");
         engine.stage2_llm = Some(llm);
         engine.config.triage.agent.concurrency = 4;
-        // A lapsed cooldown is never the first strike: that one retries at
-        // once and opens none. This is the probe after it.
-        engine.agent_throttle_strikes.store(1, Ordering::Relaxed);
         engine
             .agent_retry_after
             .store(Utc::now().timestamp() - 1, Ordering::Relaxed);

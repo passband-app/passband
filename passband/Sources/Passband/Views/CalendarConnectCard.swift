@@ -50,6 +50,11 @@ struct CalendarConnectCard: View {
                     }
                 }
             }
+            #if os(iOS)
+                // A phone's gutter: ModalCard's glass otherwise meets the
+                // screen's edges.
+                .padding(.horizontal, Space.s16)
+            #endif
         }
         .keyContext(.modal)
         .keyBindings(.modal, [

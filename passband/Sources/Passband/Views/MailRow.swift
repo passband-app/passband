@@ -162,24 +162,39 @@ struct MailRow: View {
     /// arrangement hugs the time column, so whichever one a row ends up with,
     /// the pills' and times' right edges still line up down the list.
     ///
-    /// SELECTION NEVER CHANGES THE PICK. The verb hint is in the fit test on
-    /// every row of a list that has one, drawn only on the selected row: a
-    /// hint that joined the test on selection could tip a borderline row into
-    /// the next arrangement, and selecting a row would change what it shows.
+    /// SELECTION NEVER CHANGES THE PICK, and costs the other rows nothing.
+    /// The verb hint sits OUTSIDE the fit test and only in a wide list, whose
+    /// sender column was chosen with room for the full set of marks and the
+    /// hint (`MailColumns.fitting`). In a narrow list it is not drawn at all:
+    /// there, a hint arriving on selection could tip a borderline row into the
+    /// next arrangement, and reserving its room on every row would leave a
+    /// blank gap on all of them.
     @ViewBuilder
     private func trailing(selected: Bool, chip: Fmt.DeadlineChip?) -> some View {
+        HStack(spacing: MailColumns.markGap) {
+            // Left of the marks and pill, so a selected row's hint never
+            // pushes the pill out of line with the rows around it.
+            if selected, wideList, let verbHint {
+                Text(verbHint)
+                    .font(Typo.mono(9))
+                    .foregroundStyle(Palette.inkFaintest)
+                    .fixedSize()
+            }
+            arrangements(chip: chip)
+        }
+    }
+
+    /// The list is at its usual width (or not measured yet).
+    private var wideList: Bool {
+        guard let columns else { return true }
+        return columns.name >= MailColumns.wideName
+    }
+
+    @ViewBuilder
+    private func arrangements(chip: Fmt.DeadlineChip?) -> some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: MailColumns.markGap) {
                 marks(chip: chip, reminderWords: true)
-                // Left of the pill, so a selected row's hint never pushes
-                // the pill out of line with the rows around it.
-                if let verbHint {
-                    Text(verbHint)
-                        .font(Typo.mono(9))
-                        .foregroundStyle(Palette.inkFaintest)
-                        .opacity(selected ? 1 : 0)
-                        .accessibilityHidden(!selected)
-                }
                 pill
             }
             HStack(spacing: MailColumns.markGap) {
@@ -231,14 +246,21 @@ struct MailRow: View {
 
     /// Kept on finished mail too, quietly: the Deadlines lens lists it, and a
     /// row that matches with no visible reason reads as a mistake.
+    ///
+    /// In a NARROW list an overdue chip says just "overdue" (still filled
+    /// red; the span is in its tooltip). "12 HOURS PAST DUE" is wider than
+    /// the room the narrow columns keep (`MailColumns.deadlineRoom`), so at
+    /// full length the most urgent mark was the first one to drop.
     @ViewBuilder
     private func deadline(_ chip: Fmt.DeadlineChip?) -> some View {
         if let chip {
+            let short = chip.overdue && !wideList
             Chip(
-                text: chip.text,
+                text: short ? "overdue" : chip.text,
                 tone: finished
                     ? Palette.inkFaintest : chip.overdue ? Palette.danger : Palette.warn,
                 filled: chip.overdue && !finished)
+            .help(short ? chip.text : "")
         }
     }
 
@@ -311,10 +333,12 @@ struct MailColumns: Equatable {
         compact * Typo.size(10) / 10
     }
 
-    /// THE LAST MARK'S ROOM: one upcoming deadline chip ("due Sep 28", the
-    /// widest of them) with its capsule's padding. The narrowest columns keep
-    /// it, so the deadline really is the last mark a row gives up.
-    @MainActor static var deadlineRoom: CGFloat { marks(57) + 2 * Space.scaled(7) }
+    /// THE LAST MARK'S ROOM: one deadline chip with its capsule's padding,
+    /// sized for the widest a narrow list draws: an upcoming date ("due May
+    /// 30", 57.6pt at 10pt) or the narrow list's short "overdue". The
+    /// narrowest columns keep it, so the deadline really is the last mark a
+    /// row gives up, overdue or not.
+    @MainActor static var deadlineRoom: CGFloat { marks(59) + 2 * Space.scaled(7) }
 
     /// The sender column's floor: a short name ("Amazon.com") whole.
     @MainActor static var narrowestName: CGFloat { Typo.measure(64) }

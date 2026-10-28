@@ -45,12 +45,12 @@ use squelch_core::error::CoreError;
 use squelch_core::store::{AgentDraftOutcome, DraftFields, NewAuditEntry, Store};
 
 use crate::error::ApiError;
-use crate::gmail_write::{count_addrs, reply_subject};
 use crate::handlers::{
     SendBody, SendGuard, SendOutcome, audit_action, composition_kinds, guard_verdict, no_store,
     perform_send, store_call, validate_send,
 };
 use crate::state::ApiState;
+use crate::write::mime::{count_addrs, reply_subject};
 
 /// Actor written to the audit log for everything an agent writes through
 /// [`ApiAgentMailer`]. The same word the agent door's `set_sender_rule` uses.

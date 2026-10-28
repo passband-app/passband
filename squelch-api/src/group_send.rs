@@ -24,9 +24,10 @@ use squelch_core::store::sqlite::groups::{GroupSendRecipient, GroupSendStatus};
 use squelch_core::types::GroupMode;
 
 use crate::error::ApiError;
-use crate::gmail_write::{GmailWriteClient, MailAttachment, ReplyParts, build_reply_rfc822};
 use crate::handlers::{audit_action, store_call};
 use crate::state::ApiState;
+use crate::write::gmail::GmailWriteClient;
+use crate::write::mime::{MailAttachment, ReplyParts, build_reply_rfc822};
 
 /// Gap between the messages of one fan-out.
 ///

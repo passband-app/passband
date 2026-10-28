@@ -32,15 +32,17 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::error::ApiError;
-use crate::gmail_write::{
-    ForwardParts, ForwardedOriginal, GmailWriteClient, MailAttachment, ReplyParts, SentRef,
-    WriteError, addrs_excluding, build_forward_rfc822, build_references, build_reply_rfc822,
-    cc_excluding, count_addrs, derive_reply_recipients, forward_subject, mark_inline, outbox_token,
-    parse_addr_list, parse_forwarded_original, reply_subject,
-};
 use crate::group_send;
 use crate::guard;
 use crate::state::ApiState;
+use crate::write::gmail::GmailWriteClient;
+use crate::write::mime::{
+    ForwardParts, ForwardedOriginal, MailAttachment, ReplyParts, addrs_excluding,
+    build_forward_rfc822, build_references, build_reply_rfc822, cc_excluding, count_addrs,
+    derive_reply_recipients, forward_subject, mark_inline, outbox_token, parse_addr_list,
+    parse_forwarded_original, reply_subject,
+};
+use crate::write::{SentRef, WriteError};
 
 /// Default page size when `limit` is omitted, and the hard ceiling we clamp to.
 const DEFAULT_LIMIT: u32 = 50;
@@ -5032,11 +5034,11 @@ pub struct SendBody {
     /// the rest of its To/Cc minus this account. Requires
     /// `reply_to_message_id` — there is no audience to widen without a parent —
     /// and absent means today's single-recipient reply, so every existing caller
-    /// is unchanged. See [`crate::gmail_write::derive_reply_recipients`].
+    /// is unchanged. See [`crate::write::mime::derive_reply_recipients`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) reply_all: bool,
     /// BLIND copies, comma-joined, for a send whose audience must not see each
-    /// other. Never derived from anything (see [`crate::gmail_write::ReplyParts`])
+    /// other. Never derived from anything (see [`crate::write::mime::ReplyParts`])
     /// and nothing ever will derive it — no header of a parent records who was
     /// blind-copied on it, which is what blind means, so absent and `""` are the
     /// same thing here, unlike `cc`. Filtered against `to`/`cc` before it

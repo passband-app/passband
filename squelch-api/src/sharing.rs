@@ -663,7 +663,7 @@ pub async fn post_invites(
             },
         );
         let parts = invite_mail::compose(&email, &subject, &filled);
-        let raw = match crate::gmail_write::build_reply_rfc822(&parts) {
+        let raw = match crate::write::mime::build_reply_rfc822(&parts) {
             Ok(raw) => raw,
             Err(_) => {
                 audit_action(&state, "invite", None, "failed:compose").await;

@@ -38,7 +38,6 @@ use squelch_core::types::GroupMode;
 use std::time::Duration;
 
 use crate::error::ApiError;
-use crate::gmail_write::{GmailWriteClient, SCAN_SLACK, SentRef, WriteError, send_budget};
 use crate::group_send;
 use crate::handlers::{
     Fire, MAX_FORWARD_RAW_BYTES, OutboundAttachmentView, SendBody, SendGuard, SendOutcome,
@@ -47,6 +46,8 @@ use crate::handlers::{
     send_target, store_call, validate_send, write_client,
 };
 use crate::state::ApiState;
+use crate::write::gmail::{GmailWriteClient, SCAN_SLACK};
+use crate::write::{SentRef, WriteError, send_budget};
 
 /// Audit action for scheduling, and for every refusal on the way to it.
 const AUDIT_SCHEDULE: &str = "schedule";
@@ -149,7 +150,7 @@ async fn no_store_layer(mut resp: Response) -> Response {
 
 /// The `Message-ID` a scheduled send goes out with, minted NOW. Its 48-hex
 /// local part is also the row's outbox token (`X-Passband-Outbox`, see
-/// [`crate::gmail_write::outbox_token`]): together they are what answers "did
+/// [`crate::write::mime::outbox_token`]): together they are what answers "did
 /// it go out?" after a crash mid-send (the worker's recovery asks Gmail before
 /// any retry). 24 bytes of OS entropy as hex, so the id is plain `atext` and
 /// neither search needs quoting. The host is DOTTED (`passband.app`): a
@@ -1902,7 +1903,7 @@ mod tests {
         let local = &a[1..a.len() - "@passband.app>".len()];
         assert_eq!(local.len(), 48);
         assert!(local.bytes().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(crate::gmail_write::outbox_token(&a), local);
+        assert_eq!(crate::write::mime::outbox_token(&a), local);
     }
 
     #[test]

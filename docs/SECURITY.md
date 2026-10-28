@@ -833,7 +833,7 @@ pre-echo status quo. The read-back is also capped at **5s**
 (`ECHO_FETCH_TIMEOUT_SECS`): the client's POST timeout is 15s and `action_send` has
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo's failures audited and swallowed; keep it out of core's write
-surface (the fetch lives in `squelch-api/src/gmail_write.rs`, core takes bytes).
+surface (the fetch lives in `squelch-api/src/write/gmail.rs`, core takes bytes).
 
 **Scheduled send (audit contract).** The outbox door audits under three actions of
 its own, target = the message a reply or forward is about (`schedule`) or the row id

@@ -4,7 +4,8 @@
 //! source's change feed is walked for BOTH folders — the inbox for incoming
 //! mail, sent for whatever the user wrote from another client — an expired
 //! cursor falling back to a full catch-up. The source is picked from the
-//! account's `provider` row; Gmail ([`crate::mail::gmail`]) is the only one.
+//! account's `provider` row: Gmail ([`crate::mail::gmail`]) or IMAP
+//! ([`crate::mail::imap`], read only).
 //! Tokens, headers and bodies are NEVER logged; ingest seals first (SECURITY.md).
 
 pub mod html;
@@ -25,6 +26,7 @@ use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
 use crate::gmail_budget::GmailBudget;
 use crate::mail::gmail::{GMAIL_QUOTA_RETRY_CAP, GmailSource, GmailSourceParts};
+use crate::mail::imap::{IMAP_ACCOUNT_SETTING, ImapAccountConfig, ImapPassword, ImapSource};
 use crate::mail::{
     Changes, ChangesError, FetchedMessage, Folder, Listing, MailProvider, MailSource, Placement,
     RawBody, SourceRefusals, SyncCursor, Urgency,
@@ -1116,16 +1118,37 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
         let built: Arc<dyn MailSource> = match self.store.account_provider(self.account_id)? {
             MailProvider::Gmail => Arc::new(GmailSource::new(self.gmail_parts())),
-            // The source exists (`mail::imap`) but the account's server and
-            // password are not stored anywhere yet: refuse, like an unknown
-            // provider, until `squelchd auth --imap` lands.
-            MailProvider::Imap => {
-                return Err(CoreError::InvalidInput(
-                    "mail provider \"imap\" is not wired into sync in this build yet".into(),
-                ));
-            }
+            MailProvider::Imap => Arc::new(self.imap_source()?),
         };
         Ok(self.source.get_or_init(|| built).clone())
+    }
+
+    /// An IMAP account's source, from what `squelchd auth --imap` stored: the
+    /// server config with the account, the password in the credential store.
+    /// Never `self.creds`, which is a Google token store: nothing Google is
+    /// read for this account. The store is the source's location table.
+    fn imap_source(&self) -> Result<ImapSource> {
+        let stored = self
+            .store
+            .get_app_setting(self.account_id, IMAP_ACCOUNT_SETTING)?
+            .ok_or_else(|| {
+                CoreError::InvalidInput(
+                    "this imap account has no server stored: run `squelchd auth --imap`".into(),
+                )
+            })?;
+        let config = ImapAccountConfig::from_json(&stored)?;
+        let password = crate::credentials::load_imap_password_backend(
+            self.config.credential_backend,
+            &self.config.resolve_credentials_path(),
+            &self.account_email,
+        )?;
+        ImapSource::from_config(
+            self.account_id,
+            &config,
+            ImapPassword::new(password),
+            self.store.clone(),
+            self.archive.refusals.clone(),
+        )
     }
 
     /// What this engine's Gmail source is built from, as the engine stands.
@@ -6015,11 +6038,52 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &eng.source().unwrap()), "built once");
     }
 
-    /// AN IMAP ACCOUNT IS REFUSED UNTIL ITS SOURCE IS WIRED (issue #575,
-    /// phase 2): the provider parses, but no server or password is stored
-    /// for it yet, so the engine refuses it the way it refuses an unknown one.
+    /// AN IMAP ACCOUNT BUILDS AN IMAP SOURCE from what `squelchd auth --imap`
+    /// stores: the server with the account, the password in the credential
+    /// file. Building connects to nothing (the server here is a dead port).
     #[tokio::test]
-    async fn an_imap_account_is_refused_until_its_source_is_wired() {
+    async fn an_imap_account_with_a_stored_server_gets_an_imap_source() {
+        let (store, acct) = store_at_cursor(None);
+        let creds = std::env::temp_dir().join(format!(
+            "squelch-imap-engine-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        crate::credentials::store_imap_password_backend(
+            crate::config::CredentialBackend::File,
+            &creds,
+            "me@example.com",
+            "pw",
+        )
+        .unwrap();
+        let account = ImapAccountConfig {
+            server: crate::mail::imap::ImapServer {
+                host: "127.0.0.1".into(),
+                port: 9,
+                tls: crate::mail::imap::ImapTls::Plain,
+                username: "me@example.com".into(),
+            },
+            ca_file: None,
+        };
+        store
+            .set_app_setting(acct, IMAP_ACCOUNT_SETTING, &account.to_json().unwrap())
+            .unwrap();
+        store
+            .set_account_provider(acct, MailProvider::Imap)
+            .unwrap();
+        let mut config = Config::default();
+        config.credential_backend = crate::config::CredentialBackend::File;
+        config.credentials_path = Some(creds.clone());
+        let eng = engine_with_config(store, acct, "http://127.0.0.1:9", config);
+        assert_eq!(eng.source().unwrap().provider(), MailProvider::Imap);
+        let _ = std::fs::remove_file(&creds);
+    }
+
+    /// AN IMAP ACCOUNT WITH NOTHING STORED IS REFUSED: the provider row says
+    /// imap but `squelchd auth --imap` never stored a server, so the engine
+    /// refuses it the way it refuses an unknown provider, never as Gmail.
+    #[tokio::test]
+    async fn an_imap_account_without_a_stored_server_is_refused() {
         let (store, acct) = store_at_cursor(None);
         store.execute_batch_for_test(&format!(
             "UPDATE accounts SET provider = 'imap' WHERE id = {acct}"

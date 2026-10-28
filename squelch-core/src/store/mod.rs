@@ -1530,7 +1530,11 @@ impl ArchiveDisk {
 /// SECURITY: every method that can feed the MCP surface (`thread_view`,
 /// `deadlines`, the agent listings) MUST exclude `sensitivity = 'sealed'` in the SQL
 /// itself. `sealed_messages` is the sole local-only escape hatch (TUI).
-pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
+/// [`crate::mail::imap::MessageLocations`] is a supertrait so the engine can
+/// hand its store to an IMAP source as that source's lookup table.
+pub trait Store:
+    agent_triage::AgentTriageStore + crate::mail::imap::MessageLocations + Send + Sync
+{
     /// Insert or update a message (and its FTS body + derived contacts).
     /// Returns the local message id.
     fn upsert_message(&self, msg: &NewMessage) -> Result<i64>;

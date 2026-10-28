@@ -102,6 +102,59 @@ pub struct ImapServer {
     pub username: String,
 }
 
+/// The `app_settings` key an IMAP account's [`ImapAccountConfig`] is stored
+/// under, as JSON. Written by `squelchd auth --imap` only.
+pub const IMAP_ACCOUNT_SETTING: &str = "imap_account";
+
+/// Everything about an IMAP account but its password: what `squelchd auth
+/// --imap` stores with the account (the password goes to the credential
+/// store) and what the engine builds the source from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImapAccountConfig {
+    #[serde(flatten)]
+    pub server: ImapServer,
+    /// A PEM CA to trust IN ADDITION to the public web PKI, for a server
+    /// whose certificate a private CA signed (the Dovecot test bed, a home
+    /// server). Verification is never off: this adds one trust anchor the
+    /// owner named, it does not accept an unverified chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<std::path::PathBuf>,
+}
+
+impl ImapAccountConfig {
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string(self).map_err(|e| CoreError::Other(e.into()))
+    }
+
+    pub fn from_json(s: &str) -> Result<Self> {
+        serde_json::from_str(s)
+            .map_err(|e| CoreError::InvalidInput(format!("stored imap account config: {e}")))
+    }
+
+    /// The extra trust anchors `ca_file` names, read now.
+    fn extra_roots(&self) -> Result<Vec<CertificateDer<'static>>> {
+        use tokio_rustls::rustls::pki_types::pem::PemObject;
+        let Some(path) = &self.ca_file else {
+            return Ok(Vec::new());
+        };
+        let pem = std::fs::read(path).map_err(|e| {
+            CoreError::InvalidInput(format!("imap ca file {}: {e}", path.display()))
+        })?;
+        let roots: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&pem)
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| {
+                CoreError::InvalidInput(format!("imap ca file {}: {e:?}", path.display()))
+            })?;
+        if roots.is_empty() {
+            return Err(CoreError::InvalidInput(format!(
+                "imap ca file {} holds no certificate",
+                path.display()
+            )));
+        }
+        Ok(roots)
+    }
+}
+
 /// The account's (app) password. Never in `Debug`, never in an error.
 #[derive(Clone)]
 pub struct ImapPassword(String);
@@ -173,6 +226,13 @@ type ImapSession = Session<Transport>;
 fn host_is_loopback(host: &str) -> bool {
     let h = host.trim_start_matches('[').trim_end_matches(']');
     h.eq_ignore_ascii_case("localhost") || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// May an account on `host` skip TLS? Only when it is this machine (contract
+/// §9). `squelchd auth --imap` asks before it prompts for the password; the
+/// source refuses the rest on its own.
+pub fn plaintext_allowed(host: &str) -> bool {
+    host_is_loopback(host)
 }
 
 // ---- errors ---------------------------------------------------------------
@@ -853,6 +913,44 @@ impl ImapSource {
         refusals: Arc<SourceRefusals>,
     ) -> Result<Self> {
         Self::with_roots(account_id, server, password, locations, refusals, &[])
+    }
+
+    /// A source for a stored account ([`ImapAccountConfig`]), trusting its
+    /// `ca_file` on top of the web PKI.
+    pub fn from_config(
+        account_id: AccountId,
+        config: &ImapAccountConfig,
+        password: ImapPassword,
+        locations: Arc<dyn MessageLocations>,
+        refusals: Arc<SourceRefusals>,
+    ) -> Result<Self> {
+        let roots = config.extra_roots()?;
+        Self::with_roots(
+            account_id,
+            config.server.clone(),
+            password,
+            locations,
+            refusals,
+            &roots,
+        )
+    }
+
+    /// THE TEST LOGIN `squelchd auth --imap` runs before it stores anything:
+    /// connect, `LOGIN`, `LIST`, and resolve the folder roles. Returns each
+    /// role and the folder it resolved to (`None`: the server has none).
+    pub async fn check_login(&self) -> Result<Vec<(&'static str, Option<String>)>> {
+        let roles = self
+            .with_conn(|c| Box::pin(async move { Ok(c.roles.clone()) }))
+            .await?;
+        Ok(vec![
+            ("inbox", Some(INBOX.to_string())),
+            ("sent", roles.sent),
+            ("junk", roles.junk),
+            ("archive", roles.archive),
+            ("all mail", roles.all),
+            ("trash", roles.trash),
+            ("drafts", roles.drafts),
+        ])
     }
 
     /// The same, also trusting `extra_roots`. Crate-private: the test bed's

@@ -28,6 +28,15 @@ UID each message was last seen at (`imap_locations`, behind the narrow
 `MessageLocations` trait the store implements), because an IMAP stable id is a
 hash and cannot be turned back into a place to fetch from.
 
+**Setting up an IMAP account** (self-host, read only until SMTP lands):
+`squelchd auth --imap [--ca-file PEM]` prompts for host, TLS mode, port,
+username and app password, logs in and lists the folders, and only then
+stores: the password in the credential backend's `<email>#imap` slot (the same
+keyring entry or sealed file the OAuth tokens use), the server as JSON in
+`app_settings` under `imap_account`, and `accounts.provider = 'imap'` last.
+An IMAP account never touches Google: the engine builds its source from those
+two, and the profile fetch, calendar sync and shredder are skipped for it.
+
 `MailSource` is derived from what the engine actually asked Gmail for:
 
 | Method | Gmail call | Engine callers |

@@ -4624,6 +4624,19 @@ mod tests {
                 "{field}: the guard echoed the secret: {text}"
             );
         }
+        // The guard's audit rows say what was blocked, never the secret.
+        let audit = store.list_audit(account, 100).expect("audit");
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.detail.as_deref() == Some("blocked:guard")),
+            "control: the blocks were audited: {audit:?}"
+        );
+        for entry in &audit {
+            let row = format!("{:?} {:?} {:?}", entry.action, entry.target, entry.detail);
+            assert!(!row.contains(key), "audit row carries the secret: {row}");
+        }
+
         let (text, reply) = session
             .tool(
                 "send_email",

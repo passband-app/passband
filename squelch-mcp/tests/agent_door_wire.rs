@@ -16,21 +16,18 @@
 //! words. One plainly allowed row is the control: it must appear, or the test
 //! would pass on a door that serves nothing.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::json;
 use squelch_core::store::agent_triage::{AgentCommitOutcome, AgentTriageStore as _};
 use squelch_core::store::{SqliteStore, Store as _};
 use squelch_core::sync::ingest::{RawFetched, ingest_with_rules};
 use squelch_core::triage::decision::MessageDecision;
 use squelch_core::types::AccountId;
+use squelch_mcp::testing::wire::{Session, refused};
 use squelch_mcp::{AgentDoorAuth, agent_door_router};
 use tokio_util::sync::CancellationToken;
-use tower::ServiceExt as _;
 
 const ACCOUNT: &str = "me@localhost";
 /// Open mode keeps rmcp's loopback-only Host guard.
@@ -162,109 +159,6 @@ fn seeded_door() -> axum::Router {
     .expect("router")
 }
 
-/// One MCP session over the real transport.
-struct Session {
-    app: axum::Router,
-    id: String,
-    next: u64,
-}
-
-impl Session {
-    async fn open(app: axum::Router) -> Self {
-        let resp = app
-            .clone()
-            .oneshot(post(
-                None,
-                json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
-                    "protocolVersion":"2025-06-18","capabilities":{},
-                    "clientInfo":{"name":"wire-test","version":"1"}}}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let id = resp
-            .headers()
-            .get("mcp-session-id")
-            .expect("stateful transport issues a session id")
-            .to_str()
-            .unwrap()
-            .to_owned();
-        drop(body_text(resp).await);
-        let resp = app
-            .clone()
-            .oneshot(post(
-                Some(&id),
-                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            ))
-            .await
-            .unwrap();
-        assert!(resp.status().is_success(), "{}", resp.status());
-        Self { app, id, next: 1 }
-    }
-
-    /// One request; returns the raw response text and the parsed JSON-RPC
-    /// message. The raw text is what the canary check reads, so nothing the
-    /// transport adds around the result escapes it.
-    async fn call(&mut self, method: &str, params: Value) -> (String, Value) {
-        let id = self.next;
-        self.next += 1;
-        let resp = self
-            .app
-            .clone()
-            .oneshot(post(
-                Some(&self.id),
-                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "{method}");
-        let text = body_text(resp).await;
-        let message = text
-            .lines()
-            .filter_map(|l| l.strip_prefix("data:"))
-            .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
-            .find(|m| m["id"] == json!(id))
-            .or_else(|| serde_json::from_str::<Value>(&text).ok())
-            .unwrap_or_else(|| panic!("{method}: no JSON-RPC response in {text:?}"));
-        (text, message)
-    }
-
-    async fn tool(&mut self, name: &str, arguments: Value) -> String {
-        let (text, message) = self
-            .call("tools/call", json!({"name": name, "arguments": arguments}))
-            .await;
-        assert!(
-            message.get("result").is_some() || message.get("error").is_some(),
-            "{name}: {message}"
-        );
-        text
-    }
-}
-
-fn post(session: Option<&str>, body: Value) -> Request<Body> {
-    let mut b = Request::builder()
-        .method("POST")
-        .uri("/mcp")
-        .header(header::HOST, HOST)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "application/json, text/event-stream");
-    if let Some(id) = session {
-        b = b.header("mcp-session-id", id);
-    }
-    b.body(Body::from(body.to_string())).unwrap()
-}
-
-async fn body_text(resp: axum::response::Response) -> String {
-    let bytes = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        axum::body::to_bytes(resp.into_body(), usize::MAX),
-    )
-    .await
-    .expect("response body completes")
-    .unwrap();
-    String::from_utf8(bytes.to_vec()).unwrap()
-}
-
 fn assert_no_canary(tool: &str, text: &str) {
     for word in FORBIDDEN {
         assert!(
@@ -276,15 +170,8 @@ fn assert_no_canary(tool: &str, text: &str) {
 
 #[tokio::test]
 async fn the_door_offers_exactly_the_read_tools_without_a_mail_pipeline() {
-    let mut session = Session::open(seeded_door()).await;
-    let (_, listed) = session.call("tools/list", json!({})).await;
-    let names: BTreeSet<&str> = listed["result"]["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, READ_ONLY_TOOLS.into_iter().collect::<BTreeSet<_>>());
+    let mut session = Session::open(seeded_door(), HOST, None).await;
+    assert_eq!(session.tool_names().await, READ_ONLY_TOOLS);
 
     // A tool that is not offered is not callable either.
     for name in [
@@ -294,35 +181,34 @@ async fn the_door_offers_exactly_the_read_tools_without_a_mail_pipeline() {
         "archive",
         "delete",
     ] {
-        let (text, message) = session
-            .call("tools/call", json!({"name": name, "arguments": {}}))
-            .await;
-        let refused = message.get("error").is_some() || message["result"]["isError"] == json!(true);
-        assert!(refused, "{name} was callable: {text}");
+        let (text, reply) = session.tool(name, json!({})).await;
+        assert!(refused(&reply), "{name} was callable: {text}");
     }
 }
 
 #[tokio::test]
 async fn no_read_tool_serves_hidden_mail_over_the_wire() {
-    let mut session = Session::open(seeded_door()).await;
+    let mut session = Session::open(seeded_door(), HOST, None).await;
     let since = "2000-01-01T00:00:00Z";
 
     // Control first: the door does serve the allowed row.
     let inbox = session
         .tool("get_inbox_updates", json!({"since": since}))
-        .await;
+        .await
+        .0;
     assert!(
         inbox.contains(VISIBLE),
         "control: the allowed row must reach the agent:\n{inbox}"
     );
     assert_no_canary("get_inbox_updates", &inbox);
 
-    let reading = session.tool("get_reading", json!({"since": since})).await;
+    let reading = session.tool("get_reading", json!({"since": since})).await.0;
     assert_no_canary("get_reading", &reading);
 
     let visible_thread = session
         .tool("get_thread", json!({"id": format!("t-{VISIBLE}")}))
-        .await;
+        .await
+        .0;
     assert!(
         visible_thread.contains(VISIBLE),
         "control:\n{visible_thread}"
@@ -343,13 +229,15 @@ async fn no_read_tool_serves_hidden_mail_over_the_wire() {
                         "search_mail",
                         json!({"query": query, "k": 50, "order": order}),
                     )
-                    .await;
+                    .await
+                    .0;
                 assert_no_canary(&format!("search_mail({query:?}, {order})"), &found);
             }
         }
         let thread = session
             .tool("get_thread", json!({"id": format!("t-{word}")}))
-            .await;
+            .await
+            .0;
         if word != VISIBLE {
             assert_no_canary(&format!("get_thread(t-{word})"), &thread);
         }
@@ -360,7 +248,7 @@ async fn no_read_tool_serves_hidden_mail_over_the_wire() {
         ("get_shipments", json!({"include_delivered": true})),
         ("list_sender_rules", json!({})),
     ] {
-        let text = session.tool(name, args).await;
+        let text = session.tool(name, args).await.0;
         assert_no_canary(name, &text);
     }
 }

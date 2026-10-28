@@ -51,12 +51,14 @@ base64 = { workspace = true }
 http-body = "1"
 # Only for the `testing` feature's endless-body stub.
 futures = { workspace = true, optional = true }
+# Only for the `testing` feature's MCP session driver (`testing::wire`).
+tower = { version = "0.5", features = ["util"], optional = true }
 
 [features]
 # Exposes `squelch_mcp::testing` (fixture keys, a token signer, a stub JWKS
 # server) to OTHER crates' tests, chiefly squelchd's router tests. Only ever
 # enabled from a [dev-dependencies] entry, so no shipped binary carries it.
-testing = ["dep:futures"]
+testing = ["dep:futures", "dep:tower"]
 
 [dev-dependencies]
 # A recording `AgentMailer` in the server tests.

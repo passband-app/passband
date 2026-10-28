@@ -1968,17 +1968,24 @@ fn report_tracking_posture(config: &Config) {
     }
 
     eprintln!("squelchd: read tracking enabled, pixel at {base}/t/{{token}}");
-    if config
+    match config
         .pusher
         .relay_url
         .as_deref()
         .map(str::trim)
-        .is_none_or(str::is_empty)
+        .filter(|u| !u.is_empty())
     {
-        eprintln!(
+        None => eprintln!(
             "squelchd:   no relay configured, so opens are recorded ONLY if that URL reaches THIS daemon's /t/ route. \
              If it points at a relay, opens will buffer there and never be collected."
-        );
+        ),
+        // Every hosted tenant: its own vhost serves the pixel, and the relay
+        // is held for iOS push alone.
+        Some(relay) if !squelch_core::tracking::pixel_lands_on_relay(base, relay) => eprintln!(
+            "squelchd:   the pixel is not on the configured relay, so opens are recorded ONLY if that URL reaches THIS daemon's /t/ route; \
+             the relay is used for push alone and its opens buffer is never drained from here."
+        ),
+        Some(_) => {}
     }
 }
 
@@ -2634,7 +2641,7 @@ fn cmd_serve(
             }
             None => {
                 eprintln!(
-                    "squelchd: opens poller disabled (needs both SQUELCH_RELAY_URL / [pusher] relay_url and SQUELCH_TRACK_URL / [tracking] base_url)"
+                    "squelchd: opens poller disabled (needs SQUELCH_RELAY_URL / [pusher] relay_url, and SQUELCH_TRACK_URL / [tracking] base_url pointing at that relay)"
                 );
                 None
             }

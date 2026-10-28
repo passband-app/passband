@@ -315,9 +315,14 @@
       <tr>
         <td><strong>Read receipts</strong> (opt-in)</td>
         <td>
-          If you enable open tracking on mail you send, the relay briefly
-          buffers an opaque token, a timestamp, and a user agent string until
-          your daemon collects them. Only your daemon can map a token back to a
+          If you enable open tracking on mail you send, the pixel records an
+          opaque token, a timestamp, and a user agent string. On a hosted
+          account the pixel is served by your own daemon at your account's
+          address, so these never pass through the relay; the recipient's mail
+          client fetches it from that address, which therefore appears in the
+          tracked email. On a self-hosted
+          daemon that uses our relay, the relay briefly buffers them until your
+          daemon collects them. Only your daemon can map a token back to a
           message. Collected entries are deleted from the relay, and uncollected
           ones after 90 days.
         </td>

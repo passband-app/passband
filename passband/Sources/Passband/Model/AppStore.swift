@@ -5503,8 +5503,12 @@ final class AppStore {
     func openAgentDraft(_ signal: AgentOpenSignal, accountId: UUID) {
         // A request that sat in a sleeping Mac's connection is not a request
         // any more.
-        guard signal.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
-        Task { await showAgentDraft(signal.open_draft, accountId: accountId, link: nil) }
+        // The Mac's alone: the phone never subscribes to these (see
+        // `EventStream`), and is told by a push instead.
+        #if os(macOS)
+            guard signal.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
+            Task { await showAgentDraft(signal.open_draft, accountId: accountId, link: nil) }
+        #endif
     }
 
     /// When a `passband://draft` link was last acted on. Links come from
@@ -5521,6 +5525,14 @@ final class AppStore {
         if let last = lastDraftLinkAt, Date().timeIntervalSince(last) < 5 { return }
         lastDraftLinkAt = Date()
         Task { await showAgentDraft(link.draftId, accountId: active, link: link) }
+    }
+
+    /// A tap on the phone's "your agent left a draft" banner. The push named
+    /// the draft by id and creation second; it opens only if this account's
+    /// daemon still holds an agent's draft created at exactly that second.
+    /// Delivered by `Notifier` once `accountId` is the account on screen.
+    func openAgentDraftFromPush(draftId: Int, created: Int, accountId: UUID) {
+        Task { await showAgentDraft(draftId, accountId: accountId, link: nil, pushCreated: created) }
     }
 
     /// ⌘Enter was pressed on a composer whose keyboard send is locked.
@@ -5554,73 +5566,85 @@ final class AppStore {
     /// `link` is set for a link, which somebody clicked and so deserves an
     /// answer when it leads nowhere; a relayed signal that leads nowhere says
     /// nothing.
-    private func showAgentDraft(_ draftId: Int, accountId: UUID, link: AgentDraftLink?) async {
-        #if os(macOS)
-            guard !RehearsalMode.isEnabled, !accountActionsBlocked else { return }
-            let asked = link != nil
-            guard AccountManager.shared.activeId == accountId else {
-                pushToast("Your agent left a draft in another account. Switch to it to open the draft.")
+    private func showAgentDraft(
+        _ draftId: Int, accountId: UUID, link: AgentDraftLink?, pushCreated: Int? = nil
+    ) async {
+        guard !RehearsalMode.isEnabled, !accountActionsBlocked else { return }
+        let asked = link != nil || pushCreated != nil
+        guard AccountManager.shared.activeId == accountId else {
+            pushToast("Your agent left a draft in another account. Switch to it to open the draft.")
+            return
+        }
+        if let mailbox = link?.mailbox {
+            // Checked against an address this app actually KNOWS. Right
+            // after launch or a switch it may not have one yet, so it is
+            // asked for; a link whose mailbox cannot be confirmed opens
+            // nothing, since draft ids repeat across mailboxes.
+            var own = stats?.account_email
+            if own == nil { own = (try? await APIClient.shared.getStats())?.account_email }
+            let known = own?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            guard AccountManager.shared.activeId == accountId else { return }
+            guard known == mailbox else {
+                pushToast(
+                    known.isEmpty
+                        ? "Could not check which account that draft belongs to. Try the link again."
+                        : "That draft belongs to another account. Switch to it and open the link again.")
                 return
             }
-            if let mailbox = link?.mailbox {
-                // Checked against an address this app actually KNOWS. Right
-                // after launch or a switch it may not have one yet, so it is
-                // asked for; a link whose mailbox cannot be confirmed opens
-                // nothing, since draft ids repeat across mailboxes.
-                var own = stats?.account_email
-                if own == nil { own = (try? await APIClient.shared.getStats())?.account_email }
-                let known = own?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-                guard AccountManager.shared.activeId == accountId else { return }
-                guard known == mailbox else {
-                    pushToast(
-                        known.isEmpty
-                            ? "Could not check which account that draft belongs to. Try the link again."
-                            : "That draft belongs to another account. Switch to it and open the link again.")
-                    return
-                }
+        }
+        let e = epoch
+        let rows = await fetchDrafts()
+        // The account on screen must still be the one this was for: the
+        // drafts just listed are whichever daemon the client is pointed
+        // at NOW.
+        guard e == epoch, AccountManager.shared.activeId == accountId else { return }
+        guard let rows else {
+            if asked { pushToast("Could not reach the server to open that draft.", .error) }
+            return
+        }
+        guard let draft = rows.first(where: { $0.id == draftId }), draft.from_agent == true,
+            link?.names(draftCreatedAt: draft.created_at) ?? true,
+            pushCreated.map({ EventBanner.draftSecond(draft.created_at) == $0 }) ?? true,
+            !isDeleting(draft.id)
+        else {
+            if asked { pushToast("That draft is not here any more.") }
+            return
+        }
+        // Already the one on screen, or already on its way out.
+        guard !isInert(draft), !isHeld(draft) else { return }
+        // Mail being written, OR AN EVENT (verify7 D5): a pane with
+        // something in it, parked or frozen, is the user's writing too.
+        // Coming forward over it would hand a typed-ahead ↵ or ⌘↵ to a
+        // pane that adds an event and can invite its guests.
+        let writing = mailBeingWritten(agentRows: rows) || eventPaneHeldByUser
+        guard !writing else {
+            pushToast("Your agent left a draft. It is in your drafts when you are done here.")
+            return
+        }
+        openDraft(draft)
+        // NOTHING COMES FORWARD FOR A DRAFT THE COMPOSER DID NOT TAKE.
+        // `openDraft` can decline (the composer refused, the parent gone)
+        // and a forward opens only after a fetch.
+        lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
+        var holds = agentDraftOnScreen(draft)
+        if !holds, draft.forward_of_message_id != nil {
+            for _ in 0..<12 where !holds {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard e == epoch else { return }
+                holds = agentDraftOnScreen(draft)
+                lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
             }
-            let e = epoch
-            let rows = await fetchDrafts()
-            // The account on screen must still be the one this was for: the
-            // drafts just listed are whichever daemon the client is pointed
-            // at NOW.
-            guard e == epoch, AccountManager.shared.activeId == accountId else { return }
-            guard let rows else {
-                if asked { pushToast("Could not reach the server to open that draft.", .error) }
-                return
-            }
-            guard let draft = rows.first(where: { $0.id == draftId }), draft.from_agent == true,
-                link?.names(draftCreatedAt: draft.created_at) ?? true,
-                !isDeleting(draft.id)
-            else {
-                if asked { pushToast("That draft is not here any more.") }
-                return
-            }
-            // Already the one on screen, or already on its way out.
-            guard !isInert(draft), !isHeld(draft) else { return }
-            // Mail being written, OR AN EVENT (verify7 D5): a pane with
-            // something in it, parked or frozen, is the user's writing too.
-            // Coming forward over it would hand a typed-ahead ↵ or ⌘↵ to a
-            // pane that adds an event and can invite its guests.
-            let writing = mailBeingWritten(agentRows: rows) || eventPaneHeldByUser
-            guard !writing else {
-                pushToast("Your agent left a draft. It is in your drafts when you are done here.")
-                return
-            }
-            openDraft(draft)
-            // NOTHING COMES FORWARD FOR A DRAFT THE COMPOSER DID NOT TAKE.
-            // `openDraft` can decline (the composer refused, the parent gone)
-            // and a forward opens only after a fetch.
+        }
+        #if os(iOS)
+            // The phone has no window to bring forward and no keyboard
+            // typing into another app: the tap already put Passband on
+            // screen. Marked once more for a reply, whose inline composer
+            // fills a moment after the thread opens.
+            try? await Task.sleep(for: .milliseconds(700))
+            guard e == epoch else { return }
             lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
-            var holds = agentDraftOnScreen(draft)
-            if !holds, draft.forward_of_message_id != nil {
-                for _ in 0..<12 where !holds {
-                    try? await Task.sleep(for: .milliseconds(150))
-                    guard e == epoch else { return }
-                    holds = agentDraftOnScreen(draft)
-                    lockKeyboardSend(draftId: draft.id, replyTo: draft.reply_to_message_id)
-                }
-            }
+        #endif
+        #if os(macOS)
             // Asked again after any wait: an event may have been started.
             guard
                 EventPaneTravel.agentDraftMayComeForward(writing: eventPaneHeldByUser, composerHoldsIt: holds)

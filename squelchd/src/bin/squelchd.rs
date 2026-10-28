@@ -2547,7 +2547,9 @@ fn cmd_serve(
             Some(pusher) => {
                 eprintln!("squelchd: APNs pusher enabled (relay configured)");
                 sync_metrics.set_apns_pusher_enabled(true);
-                let pusher = pusher.with_metrics(sync_metrics.clone());
+                let pusher = pusher
+                    .with_metrics(sync_metrics.clone())
+                    .with_draft_pings(api_state.subscribe_draft_pings());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await

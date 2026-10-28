@@ -127,8 +127,11 @@ impl DraftPing {
         })
     }
 
+    /// Carries the creation second as well as the id: draft ids are small
+    /// per-mailbox row ids, so two mailboxes on one phone both have a draft 3,
+    /// and APNs would let one's banner silently replace the other's.
     fn collapse_id(&self) -> String {
-        format!("draft-{}", self.draft_id)
+        format!("draft-{}-{}", self.draft_id, self.created)
     }
 }
 
@@ -916,7 +919,7 @@ mod tests {
             serde_json::to_value(ping.event_id(Some("acct-a")).unwrap()).unwrap(),
             serde_json::json!("acct-a:draft:12:1790000000")
         );
-        assert_eq!(ping.collapse_id(), "draft-12");
+        assert_eq!(ping.collapse_id(), "draft-12-1790000000");
     }
 
     fn route(tag: Option<&str>, environment: Option<&str>) -> Route {

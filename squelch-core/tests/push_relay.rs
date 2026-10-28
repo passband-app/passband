@@ -1455,7 +1455,7 @@ async fn a_draft_ping_goes_to_tagged_devices_once() {
         json!("3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32:draft:12:1790000000")
     );
     assert_eq!(body["kind"], json!("draft"));
-    assert_eq!(body["collapse_id"], json!("draft-12"));
+    assert_eq!(body["collapse_id"], json!("draft-12-1790000000"));
     assert_eq!(h.cursor(), cursor, "a draft ping is not an event");
 
     h.stop().await;

@@ -847,12 +847,25 @@ async fn open_draft_tells_the_phone_once_per_draft() {
         .unwrap()
         .unwrap();
 
-    // No pusher (no relay configured): nothing is told, and the draft is not
-    // marked as told, so a pusher that comes up later still gets it.
-    let unheard = f.mailer.open_draft(created.draft_id).await.unwrap();
-    assert!(!unheard.on_phone);
-
+    // A pusher but no phone it can route to (an untagged row): not told,
+    // and the draft not marked, so a phone that registers later still is.
     let mut pings = f.state.subscribe_draft_pings();
+    f.store
+        .upsert_device(f.acct, &"aa".repeat(32), "ios", None, None)
+        .unwrap();
+    let no_phone = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(!no_phone.on_phone);
+    assert!(pings.try_recv().is_err());
+
+    f.store
+        .upsert_device(
+            f.acct,
+            &"bb".repeat(32),
+            "ios",
+            Some("3F2A9C1E-7B44-4D0A-9E21-8C5B6D0F1A32"),
+            None,
+        )
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
     let told = f.mailer.open_draft(created.draft_id).await.unwrap();
     assert!(told.on_phone);
@@ -866,8 +879,27 @@ async fn open_draft_tells_the_phone_once_per_draft() {
     assert!(!again.on_phone, "one push per draft");
     assert!(pings.try_recv().is_err());
 
+    // A SECOND draft right after is inside the phone's own spacing: the Mac
+    // may still be asked, the phone is not, and the draft stays untold.
+    let second = f.mailer.create_draft(compose("again")).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    let spaced = f.mailer.open_draft(second.draft_id).await.unwrap();
+    assert!(!spaced.on_phone, "the phone's buzz budget is its own");
+    assert!(pings.try_recv().is_err());
+
     let rows = audit_details(&f);
     assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:phone".into())));
+}
+
+/// An agent may not reorder text on the owner's screen.
+#[tokio::test]
+async fn a_bidi_override_in_a_subject_is_refused() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    for bad in ["Locked\u{202E}lla", "a\u{2066}b\u{2069}"] {
+        let mut c = compose("hello");
+        c.subject = Some(bad.into());
+        assert!(f.mailer.create_draft(c).await.is_err(), "{bad:?}");
+    }
 }
 
 /// A connection that did not ask (an older Mac app, the phone) is not "a Mac

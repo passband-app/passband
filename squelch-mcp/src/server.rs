@@ -397,13 +397,14 @@ const OPENED_ON_MAC: &str = "Passband on the owner's Mac was asked to bring this
      It does not replace a message they are in the middle of writing; if they do not see it, \
      give them the link.";
 /// Added when the owner's phone was sent a notification for the draft.
-const ALSO_ON_PHONE: &str = " Passband also sent a notification to their phone; tapping it \
-     opens the draft there, ready to review and send. That is not proof they saw it.";
+const ALSO_ON_PHONE: &str = " Passband also sent a notification to their iPhone; tapping it \
+     opens the draft there, ready to review and send. It may not have arrived, and it is not \
+     proof they saw it.";
 /// What an open request answers when no Mac was listening but the phone was
 /// notified.
 const ON_PHONE_ONLY: &str = "No Passband Mac app is open for this mailbox, so nothing was \
-     shown on a Mac. Passband sent a notification to their phone; tapping it opens the draft \
-     there, ready to review and send. That is not proof they saw it. The draft is saved, and \
+     shown on a Mac. Passband sent a notification to their iPhone; tapping it opens the draft \
+     there, ready to review and send. It may not have arrived, and it is not proof they saw it. The draft is saved, and \
      the link opens it in Passband on their Mac.";
 
 /// The note for one open request, from what it reached.
@@ -1562,7 +1563,8 @@ impl SquelchServer {
                        it. Opens only; it never sends. Works only for drafts an agent \
                        created (pass the draft_id create_draft returned). Passband comes \
                        to the front, so use this when the human should look now, not in \
-                       the background. The phone is notified once per draft. The result \
+                       the background. The phone is notified at most once per draft, and not when \
+                       several drafts are asked for in quick succession. The result \
                        says what was reached: `opened_on_mac` and `notified_phone`. If \
                        neither is true, tell the human the draft is saved and give them \
                        `link`, which opens it in Passband.",

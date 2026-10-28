@@ -97,29 +97,52 @@ impl ApiAgentMailer {
         }
     }
 
-    /// Tell the owner's phone about one draft, ONCE per draft: `true` when a
-    /// push was handed to the pusher just now. A second request for the same
-    /// draft is not a second buzz, and with no pusher running (no relay
-    /// configured) nothing hears it and the draft is not marked, so a pusher
-    /// that comes up later can still deliver the next request.
-    fn ping_phone(&self, draft_id: i64, created: i64) -> bool {
+    /// Tell the owner's phone about one draft: `true` when a push was handed
+    /// to the pusher just now. `false`, and the draft NOT marked as told, when
+    /// no tagged phone is registered (`has_phone`), no pusher is running (no
+    /// relay configured), or the phone's buzz budget is spent; so a later
+    /// request can still reach it. A draft already told about is never told
+    /// again. See [`crate::state::DraftPingLedger`].
+    fn ping_phone(&self, draft_id: i64, created: i64, has_phone: bool) -> bool {
         const REMEMBERED: usize = 256;
-        let mut pinged = self
+        const SPACING: std::time::Duration = std::time::Duration::from_secs(30);
+        const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
+        const PER_HOUR: usize = 10;
+        if !has_phone {
+            return false;
+        }
+        let mut ledger = self
             .state
             .draft_pinged
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if pinged.contains(&(draft_id, created)) {
+        if ledger.told.contains(&(draft_id, created)) {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        while ledger
+            .sent_at
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= HOUR)
+        {
+            ledger.sent_at.pop_front();
+        }
+        let too_soon = ledger
+            .sent_at
+            .back()
+            .is_some_and(|at| now.duration_since(*at) < SPACING);
+        if too_soon || ledger.sent_at.len() >= PER_HOUR {
             return false;
         }
         let ping = squelch_core::push::DraftPing { draft_id, created };
         if self.state.draft_pings.send(ping).is_err() {
             return false;
         }
-        if pinged.len() >= REMEMBERED {
-            pinged.pop_front();
+        if ledger.told.len() >= REMEMBERED {
+            ledger.told.pop_front();
         }
-        pinged.push_back((draft_id, created));
+        ledger.told.push_back((draft_id, created));
+        ledger.sent_at.push_back(now);
         true
     }
 
@@ -223,10 +246,15 @@ fn validate_shape(compose: &AgentCompose) -> Result<(), AgentWriteError> {
         // CR/LF are not the only characters a mail system will break a line
         // on. No control character and no Unicode line separator belongs in
         // an address list or a subject.
-        if value
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
-        {
+        if value.chars().any(|c| {
+            c.is_control()
+                    || matches!(c, '\u{2028}' | '\u{2029}')
+                    // Bidi embeddings, overrides and isolates: they reorder
+                    // text on screen, so a subject could read as something
+                    // it does not say (in the composer, and on the phone's
+                    // lock screen when the owner is asked to review it).
+                    || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        }) {
             return Err(AgentWriteError::Invalid(format!(
                 "{name} must be a single line of plain text"
             )));
@@ -427,13 +455,19 @@ impl AgentMailer for ApiAgentMailer {
                 Some(draft) if draft.from_agent => Ok(Some((
                     store.account_email(account_id)?,
                     draft.created_at.timestamp(),
+                    // A phone the pusher can route a draft to: untagged rows
+                    // are skipped by it, so they do not count as a phone.
+                    store
+                        .list_devices(account_id)?
+                        .iter()
+                        .any(|d| d.tag.is_some()),
                 ))),
                 _ => Ok(None),
             }
         })
         .await
         .map_err(|_| internal())?;
-        let Some((mailbox, created)) = found else {
+        let Some((mailbox, created, has_phone)) = found else {
             return Err(self
                 .refuse(
                     AUDIT_OPEN,
@@ -450,7 +484,7 @@ impl AgentMailer for ApiAgentMailer {
         // still counts for a while, which is why the frame is dated and the
         // app drops a stale one (see `events::open_draft_frame`).
         let on_mac = self.state.draft_opens.send(draft_id).is_ok();
-        let on_phone = self.ping_phone(draft_id, created);
+        let on_phone = self.ping_phone(draft_id, created, has_phone);
         let outcome = match (on_mac, on_phone) {
             (true, true) => "ok:mac+phone",
             (true, false) => "ok:mac",

@@ -539,13 +539,22 @@ struct SealedEventTests {
     static func aDraftBannerSaysWhoAndWhat() {
         typealias K = EventBanner
         let newMail = K.agentDraftCopy(
-            to: "Maya Okafor <maya@example.com>, b@example.com", subject: "Vendor contract",
+            to: "Maya Okafor <maya.okafor@example.com>, b@example.com", subject: "Vendor contract",
             isReply: false, parentFrom: nil)
         expect(newMail.title == "Your agent left a draft", "title")
         expect(newMail.body == "To Maya Okafor: Vendor contract", "new mail names its first recipient: \(newMail.body)")
         let reply = K.agentDraftCopy(
             to: "", subject: "Re: Vendor contract", isReply: true, parentFrom: "Maya Okafor <maya@example.com>")
         expect(reply.body == "Reply to Maya Okafor: Re: Vendor contract", "reply falls back to the parent: \(reply.body)")
+        // The agent's display name never reaches the lock screen, nor does a
+        // raw address, nor a reordering control, nor an unbounded subject.
+        let spoof = K.agentDraftCopy(
+            to: "\"Passband Security\" <x@evil.example>", subject: "Locked\u{202E}321 llac" + String(repeating: "x", count: 500),
+            isReply: false, parentFrom: nil)
+        expect(!spoof.body.contains("Passband Security"), "agent display name shown: \(spoof.body)")
+        expect(!spoof.body.contains("@"), "raw address shown: \(spoof.body)")
+        expect(!spoof.body.unicodeScalars.contains { $0.value == 0x202E }, "bidi override survived")
+        expect(spoof.body.count < 220, "subject not capped: \(spoof.body.count)")
         let bare = K.agentDraftCopy(to: "", subject: "  ", isReply: false, parentFrom: nil)
         expect(!bare.body.isEmpty, "never an empty body")
         for copy in [newMail, reply, bare] {

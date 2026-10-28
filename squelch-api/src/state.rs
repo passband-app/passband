@@ -169,11 +169,8 @@ pub struct ApiState {
     /// `draft_opens`; with no pusher running (no relay configured) a send
     /// finds no receiver and is simply the answer "no phone was told".
     pub(crate) draft_pings: tokio::sync::broadcast::Sender<squelch_core::push::DraftPing>,
-    /// The drafts whose review request has already reached the phone, as
-    /// `(id, created)`. ONE PUSH PER DRAFT: asking again may bring the draft
-    /// up on the Mac again, but never buzzes the phone a second time. Bounded
-    /// (oldest dropped first); unsent agent drafts are capped far below it.
-    pub(crate) draft_pinged: Arc<std::sync::Mutex<std::collections::VecDeque<(i64, i64)>>>,
+    /// What the phone has already been told; see [`DraftPingLedger`].
+    pub(crate) draft_pinged: Arc<std::sync::Mutex<DraftPingLedger>>,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
@@ -1526,4 +1523,18 @@ impl ApiState {
     pub fn account_id(&self) -> AccountId {
         self.account_id
     }
+}
+
+/// The phone's side of the agent door's review requests: which drafts it was
+/// already told about, and when. ONE PUSH PER DRAFT (asking again may bring a
+/// draft up on the Mac again, never buzz the phone again), and a buzz budget of
+/// its own, much tighter than the Mac's five-second clock: an agent looping
+/// over `create_draft open:true` must not be able to ring the owner's phone
+/// once per draft it can hold. Both lists are bounded.
+#[derive(Debug, Default)]
+pub(crate) struct DraftPingLedger {
+    /// `(draft id, created)`, oldest first.
+    pub(crate) told: std::collections::VecDeque<(i64, i64)>,
+    /// When each push in the last hour went out, oldest first.
+    pub(crate) sent_at: std::collections::VecDeque<std::time::Instant>,
 }

@@ -93,6 +93,8 @@ enum EventBanner {
         if let push = draftPush(userInfo["event_id"] as? String) {
             return .agentDraft(accountId: push.accountId, draftId: push.draftId, created: push.created)
         }
+        // A draft banner that lost its binding opens nothing at all.
+        if route == agentDraftRoute { return .thread(nil) }
         let messageId =
             (userInfo[messageKey] as? Int) ?? (userInfo[messageKey] as? String).flatMap(Int.init)
         let flagged = (userInfo[authKey] as? Bool) ?? false
@@ -172,12 +174,24 @@ enum EventBanner {
     {
         // Quote-aware: `"Okafor, Maya" <maya@x>` is one recipient.
         let firstTo = SenderID.recipients(to).first ?? ""
-        let named = firstTo.isEmpty ? (parentFrom ?? "") : firstTo
-        let who =
-            named.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "" : SenderID.resolve(named).displayName
-        let topic = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lead = who.isEmpty ? "" : (isReply ? "Reply to \(who)" : "To \(who)")
+        // THE AGENT'S DISPLAY NAME IS NOT SHOWN. Every word of `to` is the
+        // agent's, and an agent steered by mail it read could write
+        // `"Passband Security" <x@evil>` to put that name under Passband's own
+        // banner. So an address the agent typed is read by its ADDRESS alone;
+        // a reply's parent sender is read the way every mail banner reads a
+        // sender (it is the mail's own From, not the agent's words). Never a
+        // raw address on the lock screen either way.
+        let who: String
+        if !firstTo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            who = SenderID.readableName(SenderID.parse(firstTo).addr)
+        } else if let parentFrom, !parentFrom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            who = SenderID.readableName(parentFrom)
+        } else {
+            who = ""
+        }
+        let topic = flatten(stripBidi(subject), max: 120)
+        let name = flatten(stripBidi(who), max: 64)
+        let lead = name.isEmpty ? "" : (isReply ? "Reply to \(name)" : "To \(name)")
         let body: String
         switch (lead.isEmpty, topic.isEmpty) {
         case (false, false): body = "\(lead): \(topic)"
@@ -429,6 +443,15 @@ enum EventBanner {
 
     /// Collapse to one line and cap the length: notification text is a small
     /// fixed box.
+    /// Bidirectional embedding, override and isolate controls removed: they
+    /// let text reorder itself on screen, which is a way to make a banner
+    /// read as something other than what it says.
+    static func stripBidi(_ s: String) -> String {
+        String(
+            String.UnicodeScalarView(
+                s.unicodeScalars.filter { !(0x202A...0x202E).contains($0.value) && !(0x2066...0x2069).contains($0.value) }))
+    }
+
     static func flatten(_ s: String, max: Int) -> String {
         let flat = s.split(whereSeparator: { $0.isNewline || $0 == "\t" })
             .joined(separator: " ")

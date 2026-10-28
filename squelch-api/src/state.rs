@@ -163,6 +163,17 @@ pub struct ApiState {
     /// clone of the state, rather than on the mailer: it rations the owner's
     /// screen, of which there is one per mailbox however many mailers exist.
     pub(crate) draft_open_clock: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// The same requests, for the owner's PHONE: handed to the APNs pusher
+    /// (see [`squelch_core::push::DraftPing`]), which pushes them to every
+    /// registered iPhone. Not durable either, for the same reason as
+    /// `draft_opens`; with no pusher running (no relay configured) a send
+    /// finds no receiver and is simply the answer "no phone was told".
+    pub(crate) draft_pings: tokio::sync::broadcast::Sender<squelch_core::push::DraftPing>,
+    /// The drafts whose review request has already reached the phone, as
+    /// `(id, created)`. ONE PUSH PER DRAFT: asking again may bring the draft
+    /// up on the Mac again, but never buzzes the phone a second time. Bounded
+    /// (oldest dropped first); unsent agent drafts are capped far below it.
+    pub(crate) draft_pinged: Arc<std::sync::Mutex<std::collections::VecDeque<(i64, i64)>>>,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
@@ -625,6 +636,8 @@ impl ApiState {
             event_notifier: None,
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
+            draft_pings: tokio::sync::broadcast::channel(16).0,
+            draft_pinged: Default::default(),
             shutdown: None,
             scheduled_wake: Arc::new(tokio::sync::Notify::new()),
             worker_clock_skew: chrono::Duration::zero(),
@@ -817,6 +830,14 @@ impl ApiState {
     /// replays and holds the connection, it just never goes live.
     ///
     /// [`SqliteStore::attach_event_notifier`]: squelch_core::store::SqliteStore::attach_event_notifier
+    /// The APNs pusher's end of the agent door's draft review requests (see
+    /// [`squelch_core::push::Pusher::with_draft_pings`]).
+    pub fn subscribe_draft_pings(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<squelch_core::push::DraftPing> {
+        self.draft_pings.subscribe()
+    }
+
     pub fn with_event_notifier(mut self, tx: tokio::sync::broadcast::Sender<i64>) -> Self {
         self.event_notifier = Some(tx);
         self

@@ -135,6 +135,9 @@ struct Fixture {
     readable: i64,
     /// A message the agent may NOT read.
     restricted: i64,
+    /// The state the mailer and router were built from, for reaching the
+    /// channels a running daemon wires elsewhere (the pusher's draft pings).
+    state: squelch_api::ApiState,
 }
 
 async fn fixture(access: AgentWriteAccess, with_write_credential: bool) -> Fixture {
@@ -156,7 +159,8 @@ async fn fixture(access: AgentWriteAccess, with_write_credential: bool) -> Fixtu
     };
     Fixture {
         mailer: state.agent_mailer(),
-        app: router(state),
+        app: router(state.clone()),
+        state,
         store,
         acct,
         gmail,
@@ -828,6 +832,42 @@ async fn open_draft_reaches_a_listening_mac_and_says_so() {
     let rows = audit_details(&f);
     assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:no_mac".into())));
     assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:mac".into())));
+}
+
+/// With a pusher running, a review request also goes to the phone, as the
+/// draft's id and creation second, and only ONCE per draft: asking again may
+/// bring it up on the Mac again but never buzzes the phone again.
+#[tokio::test]
+async fn open_draft_tells_the_phone_once_per_draft() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    let created = f.mailer.create_draft(compose("hello")).await.unwrap();
+    let stored = f
+        .store
+        .draft_by_id(f.acct, created.draft_id)
+        .unwrap()
+        .unwrap();
+
+    // No pusher (no relay configured): nothing is told, and the draft is not
+    // marked as told, so a pusher that comes up later still gets it.
+    let unheard = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(!unheard.on_phone);
+
+    let mut pings = f.state.subscribe_draft_pings();
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    let told = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(told.on_phone);
+    assert!(!told.on_mac);
+    let ping = pings.try_recv().expect("a draft ping");
+    assert_eq!(ping.draft_id, created.draft_id);
+    assert_eq!(ping.created, stored.created_at.timestamp());
+
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    let again = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(!again.on_phone, "one push per draft");
+    assert!(pings.try_recv().is_err());
+
+    let rows = audit_details(&f);
+    assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:phone".into())));
 }
 
 /// A connection that did not ask (an older Mac app, the phone) is not "a Mac

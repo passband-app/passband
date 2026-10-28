@@ -96,6 +96,40 @@ pub struct PushRequest<'a> {
     pub topic: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<&'a str>,
+    /// Which of the relay's FIXED fallback lines the alert carries: absent for
+    /// mail, `"draft"` for a [`DraftPing`]. A closed set the relay enforces;
+    /// it picks a line and can never carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+}
+
+/// An agent asked its owner to review one of its drafts (the agent door's
+/// `open_draft`). Not an [`Event`]: there is no received message behind it,
+/// nothing to replay, and a review request from an hour ago is not one
+/// anybody wants buzzing their phone. So it is NOT DURABLE: handed to a running
+/// pusher over a channel, tried once, and dropped if the relay is down.
+///
+/// On the wire it is `"<tag>:draft:<draft_id>:<created>"`. `created` (Unix
+/// seconds) binds the push to ONE draft, as it does the `passband://draft`
+/// link: draft ids are reused row ids, so the phone opens the push only for a
+/// draft created at exactly that second. Untagged devices are skipped; the
+/// phone cannot route a draft without knowing which account it is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DraftPing {
+    pub draft_id: i64,
+    pub created: i64,
+}
+
+impl DraftPing {
+    fn event_id(&self, tag: Option<&str>) -> Option<PushEventId> {
+        tag.map(|tag| {
+            PushEventId::Tagged(format!("{tag}:draft:{}:{}", self.draft_id, self.created))
+        })
+    }
+
+    fn collapse_id(&self) -> String {
+        format!("draft-{}", self.draft_id)
+    }
 }
 
 /// One token's outcome, as the relay reports it. `status` is the APNs HTTP
@@ -294,6 +328,9 @@ pub struct Pusher {
     /// Per-token outcome counters. A private registry until
     /// [`Pusher::with_metrics`] hands it the process's one.
     metrics: Arc<SyncMetrics>,
+    /// Review requests from the agent door; see [`DraftPing`]. `None` until
+    /// [`Pusher::with_draft_pings`] hands it the human door's channel.
+    draft_pings: Option<broadcast::Receiver<DraftPing>>,
 }
 
 impl Pusher {
@@ -327,6 +364,7 @@ impl Pusher {
             environment: normalize_environment(config.pusher.environment.as_deref()),
             http,
             metrics: SyncMetrics::new(),
+            draft_pings: None,
         }))
     }
 
@@ -345,12 +383,19 @@ impl Pusher {
             // otherwise the redirect test would prove nothing about production.
             http: http_client().expect("test http client"),
             metrics: SyncMetrics::new(),
+            draft_pings: None,
         }
     }
 
     /// Report per-token outcomes into the process's metrics registry.
     pub fn with_metrics(mut self, metrics: Arc<SyncMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Listen for agent draft review requests (see [`DraftPing`]).
+    pub fn with_draft_pings(mut self, pings: broadcast::Receiver<DraftPing>) -> Self {
+        self.draft_pings = Some(pings);
         self
     }
 
@@ -519,10 +564,69 @@ impl Pusher {
     /// it would re-push the event to devices that already have it and forget
     /// their 410s. [`Pusher::drain`] decides what the cursor does with it.
     async fn push_event(&self, ev: &Event, devices: &[(Route, String)]) -> PushOutcome {
-        let collapse = collapse_id(&ev.thread_id);
+        self.fan_out(devices, collapse_id(&ev.thread_id), None, |tag| {
+            Some(PushEventId::new(tag, ev.id))
+        })
+        .await
+    }
+
+    /// Push one [`DraftPing`] to every tagged device, ONCE. Best effort by
+    /// design (see [`DraftPing`]): a relay failure is logged and the ping is
+    /// gone. A 410 still retires the device, because that answer is the same
+    /// whatever the push was about.
+    async fn push_draft(&self, ping: DraftPing) {
+        let devices: Vec<(Route, String)> = match self.store.list_devices(self.account_id) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|d| d.tag.is_some())
+                .map(|d| {
+                    (
+                        Route {
+                            tag: d.tag,
+                            environment: d.environment,
+                        },
+                        d.token,
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!("squelch: APNs pusher could not list devices for a draft ping: {e}");
+                return;
+            }
+        };
+        if devices.is_empty() {
+            return;
+        }
+        let outcome = self
+            .fan_out(&devices, ping.collapse_id(), Some("draft"), |tag| {
+                ping.event_id(tag)
+            })
+            .await;
+        for token in &outcome.dead {
+            if let Err(e) = self.store.delete_device_by_token(self.account_id, token) {
+                eprintln!("squelch: APNs pusher could not drop a device: {e}");
+            }
+        }
+        if outcome.relay_failed || outcome.nothing_landed() {
+            eprintln!("squelch: a draft review ping reached no device; not retried");
+        }
+    }
+
+    /// POST one payload to every device it has an id for: one request per
+    /// (tag, environment) bucket, each chunked to the relay's ceiling. A bucket
+    /// `id_for` answers `None` is skipped.
+    async fn fan_out(
+        &self,
+        devices: &[(Route, String)],
+        collapse: String,
+        kind: Option<&'static str>,
+        id_for: impl Fn(Option<&str>) -> Option<PushEventId>,
+    ) -> PushOutcome {
         let mut outcome = PushOutcome::default();
         for (route, tokens) in by_route(devices) {
-            let event_id = PushEventId::new(route.tag.as_deref(), ev.id);
+            let Some(event_id) = id_for(route.tag.as_deref()) else {
+                continue;
+            };
             // The device's OWN environment wins: it is a fact about the token.
             // The configured one is only the fallback for rows that never said,
             // and with neither the field is omitted for the relay's default.
@@ -534,6 +638,7 @@ impl Pusher {
                     collapse_id: Some(collapse.clone()),
                     topic: self.topic.as_deref(),
                     environment,
+                    kind,
                 };
                 let mut req = self.http.post(&self.push_url).json(&body);
                 if let Some(token) = &self.relay_token {
@@ -607,10 +712,11 @@ impl Pusher {
     /// shutdown may cut the backoff short — a wake must not turn a dead relay
     /// into a hot retry loop.
     pub async fn run(
-        self,
+        mut self,
         mut wake: broadcast::Receiver<i64>,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<()> {
+        let mut pings = self.draft_pings.take();
         let mut backoff: Option<Duration> = None;
         loop {
             if *shutdown.borrow() {
@@ -631,11 +737,20 @@ impl Pusher {
             }
 
             match backoff {
+                // A draft ping during the backoff is still tried, once: it is
+                // not durable, so waiting it out would only lose it. It does
+                // not end the backoff.
                 Some(delay) => {
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => {}
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() { return Ok(()); }
+                    let until = tokio::time::Instant::now() + delay;
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(until) => break,
+                            Some(ping) = next_ping(&mut pings) => {
+                                if let Some(ping) = ping { self.push_draft(ping).await; }
+                            }
+                            _ = shutdown.changed() => {
+                                if *shutdown.borrow() { return Ok(()); }
+                            }
                         }
                     }
                 }
@@ -649,12 +764,34 @@ impl Pusher {
                                 return Ok(());
                             }
                         }
+                        Some(ping) = next_ping(&mut pings) => {
+                            if let Some(ping) = ping { self.push_draft(ping).await; }
+                        }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() { return Ok(()); }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/// The next draft ping: `Some(Some(p))` for a ping, `Some(None)` when some
+/// were missed (lagged: dropped, they are not durable), and pending forever
+/// once there is no channel, so a `select!` arm on it simply never fires.
+async fn next_ping(
+    pings: &mut Option<broadcast::Receiver<DraftPing>>,
+) -> Option<Option<DraftPing>> {
+    let Some(rx) = pings else {
+        return std::future::pending().await;
+    };
+    match rx.recv().await {
+        Ok(ping) => Some(Some(ping)),
+        Err(broadcast::error::RecvError::Lagged(_)) => Some(None),
+        Err(broadcast::error::RecvError::Closed) => {
+            *pings = None;
+            Some(None)
         }
     }
 }
@@ -700,6 +837,7 @@ mod tests {
             collapse_id: Some(collapse_id(&ev.thread_id)),
             topic: Some("dev.squelch.ios"),
             environment: Some("production"),
+            kind: None,
         };
         let json = serde_json::to_value(&body).unwrap();
         let obj = json.as_object().unwrap();
@@ -745,6 +883,7 @@ mod tests {
             collapse_id: None,
             topic: None,
             environment: None,
+            kind: None,
         };
         let json = serde_json::to_value(&body).unwrap();
         let obj = json.as_object().unwrap();
@@ -762,6 +901,22 @@ mod tests {
 
         let tagged = serde_json::to_value(PushEventId::new(Some("acct-a"), 41)).unwrap();
         assert_eq!(tagged, serde_json::json!("acct-a:41"));
+    }
+
+    /// A draft ping names the draft and its creation second, never anything
+    /// it says, and only to a device that can tell which account it is in.
+    #[test]
+    fn a_draft_ping_is_tagged_only_and_carries_its_binding() {
+        let ping = DraftPing {
+            draft_id: 12,
+            created: 1_790_000_000,
+        };
+        assert_eq!(ping.event_id(None), None);
+        assert_eq!(
+            serde_json::to_value(ping.event_id(Some("acct-a")).unwrap()).unwrap(),
+            serde_json::json!("acct-a:draft:12:1790000000")
+        );
+        assert_eq!(ping.collapse_id(), "draft-12");
     }
 
     fn route(tag: Option<&str>, environment: Option<&str>) -> Route {

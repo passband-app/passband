@@ -111,7 +111,29 @@ actor RehearsalAPI {
             stagedSent = sent
             stagedScheduled = scheduled
         }
+
+        /// A timeline, and the stats that open the calendar to it (the hidden
+        /// `calendar` feature, a daemon that serves a timeline, a granted
+        /// Google Calendar). The lesson never claims one; only the phone's
+        /// screenshot harness stages this (`--fixture-calendar`).
+        private var stagedTimeline: TimelineFeed?
+        func stage(timeline: TimelineFeed) {
+            stagedTimeline = timeline
+        }
     #endif
+
+    private func withStagedCalendar(_ stats: StoreStats) -> StoreStats {
+        #if DEBUG
+            guard stagedTimeline != nil else { return stats }
+            var out = stats
+            out.features = ["calendar"]
+            out.timeline = true
+            out.calendar = CalendarAccess(granted: true)
+            return out
+        #else
+            return stats
+        #endif
+    }
 
     /// Confirm the saved rule, not the editor's requested/default disposition,
     /// actually governs and suppresses this sample after specificity is resolved.
@@ -200,7 +222,7 @@ actor RehearsalAPI {
                 // is not stubbed here: every practice save would fail
                 // silently under a "kept in drafts" toast.
                 drafts_v2: true)
-            data = try encode(stats)
+            data = try encode(withStagedCalendar(stats))
         case ("GET", "/client/updates"):
             var rows = query["band"].map { bandRows($0) } ?? allUpdates()
             if let tier = query["tier"] { rows = rows.filter { $0.tier.rawValue == tier } }
@@ -295,6 +317,8 @@ actor RehearsalAPI {
                 data = try encode(["items": stagedSent])
             case ("GET", "/client/scheduled") where !stagedScheduled.isEmpty:
                 data = try encode(stagedScheduled)
+            case ("GET", "/client/timeline") where stagedTimeline != nil:
+                data = try encode(stagedTimeline)
         #endif
         case ("GET", "/client/sent"):
             data = try json(["items": []])

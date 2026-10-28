@@ -348,6 +348,14 @@
         static var railOut: Bool { scene == "chain-swipe" }
         /// The composer's recipient fields, already open (`chain-recipients`).
         static var recipientsOpen: Bool { scene == "chain-recipients" }
+        /// The first contact card the reader mounts, opened by itself
+        /// (`chain-contact`). Handed out ONCE: the sender's name, avatar and
+        /// every recipient each carry a card, and only one can be up.
+        private static var contactCardOwed = scene == "chain-contact"
+        static func takeContactCard() -> Bool {
+            defer { contactCardOwed = false }
+            return contactCardOwed
+        }
 
         /// Every door the composer has, open: the fixture daemon advertises
         /// none of them, and a composer staged without its paperclip, clock
@@ -366,6 +374,28 @@
             store.inlineReply?.recipients = set
             store.inlineReply?.seededRecipients = set
             store.inlineReply?.recipientsStated = true
+        }
+
+        private static func longChain(
+            opener: ClientMessage, mine: ClientMessage, theirs: ClientMessage
+        ) -> [ClientMessage] {
+            let paragraph =
+                "<p>Picking this back up with the notes from today. The vendor confirmed the "
+                + "revised timeline, the budget line moved into the second quarter, and the "
+                + "review is now on the calendar for the week after next.</p>"
+            return (0..<30).map { i in
+                var m = i.isMultiple(of: 2) ? theirs : mine
+                m.id = 9100 + i
+                if i.isMultiple(of: 3) {
+                    m = opener
+                    m.id = 9100 + i
+                    let count = [2, 24, 6, 40, 3][i / 3 % 5]
+                    m.html = "<p>Round \(i + 1).</p>" + String(repeating: paragraph, count: count)
+                } else {
+                    m.content = "Message \(i + 1). " + m.content
+                }
+                return m
+            }
         }
 
         /// A thread in French under a real practice thread's id, staged in the
@@ -426,12 +456,19 @@
             // a seeded reader is a different (and rarer) path than the load
             // every practice thread takes. This way the reader mounts empty,
             // and its own load finds the conversation waiting.
+            // `chain-long`: THIRTY MESSAGES, the long thread a phone has to
+            // land on and hold while every card above it measures. Every
+            // third one is a long html email, so the guesses are wrong by
+            // thousands of points, which is what a real chain does.
+            let messages =
+                scene == "chain-long"
+                ? longChain(opener: opener, mine: mine, theirs: theirs) : [opener, mine, theirs]
             store.openThread(first.thread_id, queue: store.sitrep.standing, from: .sitrep)
             ThreadPrefetch.shared.note(
                 first.thread_id,
                 ClientThreadView(
                     cache_allowed: true, thread_id: real.thread_id, subject: real.subject,
-                    messages: [opener, mine, theirs]))
+                    messages: messages))
             switch scene {
             case "chain-reply", "chain-recipients": await openReply(on: 9002, store)
             case "chain-replyall": await openReply(on: 9002, replyAll: true, store)

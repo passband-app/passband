@@ -4761,6 +4761,11 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
     match provider {
         // Over the state's one shared HTTP client (see `ApiState::write_http`);
         // what is built per action is two `Arc` clones and a base URL.
+        // Read only in phase 2 (issue #575): no SMTP writer yet, so the door
+        // answers 501 for an IMAP account exactly as for an unknown provider.
+        MailProvider::Imap => Err(writer_unavailable(CoreError::InvalidInput(
+            "mail provider \"imap\" has no write path in this build".into(),
+        ))),
         MailProvider::Gmail => Ok(Arc::new(
             GmailWriteClient::with_http(
                 creds,
@@ -7549,7 +7554,7 @@ mod write_client_tests {
             .with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:9".into());
         assert!(write_client(&state).await.is_ok());
         // What a second read would now see: a provider this build refuses.
-        fx.set_provider("imap");
+        fx.set_provider("outlook");
         assert!(
             write_client(&state.clone()).await.is_ok(),
             "the cached read stands, on every clone of the state"
@@ -7598,13 +7603,31 @@ mod write_client_tests {
     #[tokio::test]
     async fn a_provider_this_build_does_not_know_is_refused_not_treated_as_gmail() {
         let fx = Fixture::new("unknown");
-        fx.set_provider("imap");
+        fx.set_provider("outlook");
         let (base, handle) = mock_api().await;
         let state = fx
             .state()
             .with_write_test_harness(Arc::new(StubCreds), base);
         let err = match write_client(&state).await {
             Ok(_) => panic!("an unknown provider must not get a writer"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(handle.await.unwrap(), None, "nothing reached the API");
+    }
+
+    /// An IMAP account is read only in phase 2 (issue #575): the door has no
+    /// writer for it and says 501, and nothing goes to Gmail.
+    #[tokio::test]
+    async fn an_imap_account_has_no_writer_yet() {
+        let fx = Fixture::new("imap");
+        fx.set_provider("imap");
+        let (base, handle) = mock_api().await;
+        let state = fx
+            .state()
+            .with_write_test_harness(Arc::new(StubCreds), base);
+        let err = match write_client(&state).await {
+            Ok(_) => panic!("an imap account must not get a writer"),
             Err(e) => e,
         };
         assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);

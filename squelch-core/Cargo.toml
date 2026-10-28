@@ -38,6 +38,13 @@ reqwest = { workspace = true, features = ["blocking"] }
 mail-parser = { workspace = true }
 base64 = { workspace = true }
 ammonia = "4"
+# THE IMAP SOURCE (`mail/imap.rs`, issue #575). async-imap on tokio, default
+# features off because the default runtime is async-std. TLS is rustls with
+# RING, the workspace's one crypto backend (see squelch-control), over the
+# webpki root set reqwest already trusts: no native-tls/openssl in the tree.
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+webpki-roots = "1"
 sha2 = "0.10"
 # OS entropy for read-tracking tokens. Deliberately the raw syscall wrapper
 # rather than a PRNG crate: a tracking token is minted once and must be

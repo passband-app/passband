@@ -1116,6 +1116,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
         let built: Arc<dyn MailSource> = match self.store.account_provider(self.account_id)? {
             MailProvider::Gmail => Arc::new(GmailSource::new(self.gmail_parts())),
+            // The source exists (`mail::imap`) but the account's server and
+            // password are not stored anywhere yet: refuse, like an unknown
+            // provider, until `squelchd auth --imap` lands.
+            MailProvider::Imap => {
+                return Err(CoreError::InvalidInput(
+                    "mail provider \"imap\" is not wired into sync in this build yet".into(),
+                ));
+            }
         };
         Ok(self.source.get_or_init(|| built).clone())
     }
@@ -1226,6 +1234,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             "squelch: {} sync starting for <redacted account>",
             match source.provider() {
                 MailProvider::Gmail => "gmail REST",
+                MailProvider::Imap => "imap",
             }
         );
 
@@ -2307,6 +2316,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if let Ok(source) = self.source() {
             match source.provider() {
                 MailProvider::Gmail => self.refresh_profile().await,
+                // No Google profile behind an IMAP account.
+                MailProvider::Imap => {}
             }
         }
         // BEFORE the walk, for the same reason: the sweep is purely local —
@@ -6004,6 +6015,19 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &eng.source().unwrap()), "built once");
     }
 
+    /// AN IMAP ACCOUNT IS REFUSED UNTIL ITS SOURCE IS WIRED (issue #575,
+    /// phase 2): the provider parses, but no server or password is stored
+    /// for it yet, so the engine refuses it the way it refuses an unknown one.
+    #[tokio::test]
+    async fn an_imap_account_is_refused_until_its_source_is_wired() {
+        let (store, acct) = store_at_cursor(None);
+        store.execute_batch_for_test(&format!(
+            "UPDATE accounts SET provider = 'imap' WHERE id = {acct}"
+        ));
+        let eng = engine(store, acct, "http://127.0.0.1:9");
+        assert!(matches!(eng.source(), Err(CoreError::InvalidInput(_))));
+    }
+
     /// AN ACCOUNT THIS BUILD CANNOT SYNC IS NEVER SYNCED AS GMAIL. A database
     /// a newer build set up an IMAP account in must cost that account nothing
     /// here: no request to Gmail with its credential, no cursor, no rows; every
@@ -6012,7 +6036,7 @@ mod tests {
     async fn an_account_whose_provider_this_build_does_not_know_never_reaches_gmail() {
         let (store, acct) = store_at_cursor(None);
         store.execute_batch_for_test(&format!(
-            "UPDATE accounts SET provider = 'imap' WHERE id = {acct}"
+            "UPDATE accounts SET provider = 'outlook' WHERE id = {acct}"
         ));
         let g = MockGmail::default();
         g.listing(LABEL_INBOX, &["a"])

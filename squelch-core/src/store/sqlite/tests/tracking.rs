@@ -316,3 +316,39 @@ fn deleting_a_tracker_does_not_cross_accounts() {
     assert_eq!(store.message_opens(mine, message_id).unwrap().len(), 1);
     assert!(store.tracked_message(mine, "tok-abc").unwrap().is_some());
 }
+
+/// Opens stored before the probable-scanner label existed are relabelled when
+/// the store opens, and the relabel leaves a person's open alone.
+#[test]
+fn stored_scanner_opens_are_relabelled_by_the_migration() {
+    let (store, acct) = store();
+    let message_id = tracked(&store, acct, "tok-scan");
+    let bot = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0";
+    for ua in [bot, "Apple Mail/16.0"] {
+        assert!(
+            store
+                .record_open(acct, "tok-scan", 1_100, Some(ua), "unknown")
+                .unwrap()
+        );
+    }
+    {
+        let conn = store.lock().unwrap();
+        crate::store::sqlite::migrate::migrate(&conn).unwrap();
+        // Twice: idempotent.
+        crate::store::sqlite::migrate::migrate(&conn).unwrap();
+    }
+    let mut got: Vec<(String, String)> = store
+        .message_opens(acct, message_id)
+        .unwrap()
+        .into_iter()
+        .map(|o| (o.user_agent.unwrap(), o.classification))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("Apple Mail/16.0".to_string(), "unknown".to_string()),
+            (bot.to_string(), "scanner".to_string()),
+        ]
+    );
+}

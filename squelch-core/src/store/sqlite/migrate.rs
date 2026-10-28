@@ -61,6 +61,35 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
     Ok(n as usize == tables.len())
 }
 
+/// Opens recorded before the probable-scanner classification existed are
+/// relabelled with today's classifier, so a scanner's fetch stops counting
+/// without waiting for a new one. Idempotent: only `unknown` rows are read, and
+/// a row the classifier still calls `unknown` is left alone. The table is
+/// small (capped per token, retired with its tracker), so this runs on every
+/// open of the store rather than behind a version flag.
+fn relabel_scanner_opens(conn: &Connection) -> Result<()> {
+    if !has_columns(conn, "message_opens", &["user_agent", "classification"])? {
+        return Ok(());
+    }
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, user_agent FROM message_opens
+             WHERE classification = 'unknown' AND user_agent IS NOT NULL",
+        )?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for (id, ua) in rows {
+        if crate::tracking::is_probable_scanner(&ua) {
+            conn.execute(
+                "UPDATE message_opens SET classification = ?1 WHERE id = ?2",
+                rusqlite::params![crate::store::OPEN_SCANNER, id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Additive, idempotent migrations for pre-existing DBs. New tables and most
 /// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; this seam
 /// carries new COLUMNS on an existing table, plus any index that NAMES such a
@@ -68,6 +97,7 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
 /// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
+    relabel_scanner_opens(conn)?;
     retire_preference_retriage(conn)?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
     add_column_if_missing(

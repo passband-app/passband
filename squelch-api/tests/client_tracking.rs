@@ -137,6 +137,33 @@ async fn a_direct_pixel_open_appends_one_opened_event() {
     assert_eq!(store.events_after(acct, 0, 100).unwrap().len(), before + 1);
 }
 
+/// A probable scanner's fetch is recorded (the popover lists it) but wakes
+/// nobody, so the one nudge per message is still there for a person's open.
+#[tokio::test]
+async fn a_scanner_fetch_is_recorded_but_notifies_nobody() {
+    let Harness { app, store, acct } = harness(|store, acct| {
+        tracked_send(store, acct, KNOWN);
+    });
+    let before = store.events_after(acct, 0, 100).unwrap().len();
+    let bot = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0";
+    app.clone()
+        .oneshot(pixel_request(KNOWN, Some(bot)))
+        .await
+        .unwrap();
+    let message_id = store.search(acct, "noon", 10, 0).unwrap()[0].id;
+    let opens = store.message_opens(acct, message_id).unwrap();
+    assert_eq!(opens.len(), 1);
+    assert_eq!(opens[0].classification, "scanner");
+    assert_eq!(store.events_after(acct, 0, 100).unwrap().len(), before);
+
+    // The person's open after it still gets its nudge.
+    app.clone()
+        .oneshot(pixel_request(KNOWN, Some("Apple Mail/16.0")))
+        .await
+        .unwrap();
+    assert_eq!(store.events_after(acct, 0, 100).unwrap().len(), before + 1);
+}
+
 /// THE INVARIANT: an unknown token is INDISTINGUISHABLE from a known one on the
 /// wire — same status, same bytes, same headers — and leaves no row behind.
 #[tokio::test]

@@ -50,6 +50,16 @@ private enum ReceiptCopy {
     static let proxyCaveat =
         "Fetched by Gmail's image proxy, which sometimes loads images before "
         + "the recipient reads the message."
+    static let scannerCaveat =
+        "Probable scanners are security tools that load a message's images "
+        + "the moment it arrives. They are not counted as opens."
+
+    /// "3 opens", "1 open", or, when nothing but scanners fetched the pixel,
+    /// "1 probable scanner": never a zero that hides what happened.
+    static func count(opens: Int, scanners: Int) -> String {
+        if opens > 0 { return opens == 1 ? "1 open" : "\(opens) opens" }
+        return scanners == 1 ? "1 probable scanner" : "\(scanners) probable scanners"
+    }
 
     /// "just now" / "3h ago" — the chip's own phrasing, reused per row.
     static func age(_ open: MessageOpen) -> String {
@@ -78,17 +88,26 @@ struct OpensLink: View {
     @State private var detailOpen = false
     @State private var hovering = false
 
+    /// Opens that may be a person: everything but probable scanners.
+    private var counted: [MessageOpen] { opens.filter { !$0.probableScanner } }
+    private var scanners: Int { opens.count - counted.count }
+
     var body: some View {
-        if let latest = opens.last {
+        if let latest = counted.last ?? opens.last {
             Button { detailOpen.toggle() } label: {
                 HStack(spacing: Space.scaled(3)) {
-                    Image(systemName: "eye")
+                    // Only scanners so far: the eye is struck through and the
+                    // line drops a shade, so it never reads as "opened".
+                    Image(systemName: counted.isEmpty ? "eye.slash" : "eye")
                         .font(Typo.ui(compact ? 8 : 9, weight: .semibold))
-                    Text(opens.count == 1 ? "1 open" : "\(opens.count) opens")
+                    Text(ReceiptCopy.count(opens: counted.count, scanners: scanners))
                         .font(Typo.num(compact ? 10 : 11))
                         .underline(hovering)
                 }
-                .foregroundStyle(hovering || detailOpen ? Palette.inkDim : Palette.inkFaint)
+                .foregroundStyle(
+                    hovering || detailOpen
+                        ? Palette.inkDim
+                        : (counted.isEmpty ? Palette.inkFaintest : Palette.inkFaint))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -98,7 +117,9 @@ struct OpensLink: View {
             #endif
             .help(tooltip(latest))
             .accessibilityLabel(
-                opens.count == 1 ? "opened once" : "opened \(opens.count) times")
+                counted.isEmpty
+                    ? ReceiptCopy.count(opens: 0, scanners: scanners)
+                    : (counted.count == 1 ? "opened once" : "opened \(counted.count) times"))
             // Downward: the line sits in a message's header, so the space
             // below it is the message body, the one direction with room.
             .popover(isPresented: $detailOpen, arrowEdge: .bottom) {
@@ -120,6 +141,10 @@ struct OpensLink: View {
 
     /// The exact stamp of the latest open, plus the caveat when it applies.
     private func tooltip(_ latest: MessageOpen) -> String {
+        if latest.probableScanner {
+            return "fetched by a probable scanner \(Fmt.dateTime(latest.date)). "
+                + ReceiptCopy.scannerCaveat
+        }
         let head = "latest open \(Fmt.dateTime(latest.date))"
         guard latest.viaProxy else { return head }
         return head + ". " + ReceiptCopy.proxyCaveat
@@ -144,10 +169,20 @@ private struct OpensDetail: View {
     /// summarizes.
     private var newestFirst: [MessageOpen] { opens.reversed() }
     private var anyProxied: Bool { opens.contains(where: \.viaProxy) }
+    private var scanners: Int { opens.filter(\.probableScanner).count }
+
+    /// "2 opens · 1 probable scanner", each half only when it is non-zero.
+    private var heading: String {
+        let counted = opens.count - scanners
+        var parts: [String] = []
+        if counted > 0 { parts.append(ReceiptCopy.count(opens: counted, scanners: 0)) }
+        if scanners > 0 { parts.append(ReceiptCopy.count(opens: 0, scanners: scanners)) }
+        return parts.joined(separator: " · ")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.scaled(9)) {
-            Text(opens.count == 1 ? "1 open" : "\(opens.count) opens")
+            Text(heading)
                 .font(Typo.sectionLabel)
                 .foregroundStyle(Palette.inkFaint)
                 .textCase(.uppercase)
@@ -174,12 +209,20 @@ private struct OpensDetail: View {
             }
             .frame(maxHeight: 240)
 
-            if anyProxied {
+            if anyProxied || scanners > 0 {
                 Hairline()
-                Text(ReceiptCopy.proxyCaveat)
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkFaintest)
-                    .fixedSize(horizontal: false, vertical: true)
+                if anyProxied {
+                    Text(ReceiptCopy.proxyCaveat)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if scanners > 0 {
+                    Text(ReceiptCopy.scannerCaveat)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(Space.s14)
@@ -207,12 +250,15 @@ private struct OpensDetail: View {
             HStack(spacing: Space.s6) {
                 Text(Fmt.dateTime(open.date))
                     .font(Typo.num(11))
-                    .foregroundStyle(Palette.ink)
+                    // A scanner's row is a footnote, not an open.
+                    .foregroundStyle(open.probableScanner ? Palette.inkFaint : Palette.ink)
                 Text(ReceiptCopy.age(open))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                 if open.viaProxy {
                     Chip(text: "via proxy", tone: Palette.inkFaintest)
+                } else if open.probableScanner {
+                    Chip(text: "probable scanner", tone: Palette.inkFaintest)
                 }
                 Spacer(minLength: 0)
             }

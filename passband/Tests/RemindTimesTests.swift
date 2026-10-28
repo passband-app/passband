@@ -30,6 +30,7 @@ struct RemindTimesTests {
         theWeekendIsTwoDays()
         detailNamesTheAbsoluteTime()
         ordinalDaysComeAroundAgain()
+        bareTimesComeAroundAgain()
         duplicatesCollapse()
 
         if failures > 0 {
@@ -67,6 +68,36 @@ struct RemindTimesTests {
     }
 
     // MARK: - cases
+
+    /// "noon" got NO row at all: the detector answers nothing for a bare time
+    /// word. And "3pm" asked after 3pm went empty, because the detector
+    /// resolves it to today and the past-drop threw it out. Both now mean the
+    /// next time the clock reads that.
+    static func bareTimesComeAroundAgain() {
+        func first(_ q: String, now at: Date? = nil) -> RemindHit? {
+            RemindTimes.match(q, now: at ?? now, calendar: cal).first
+        }
+        // now is 14:30, so noon has gone by today.
+        equal(first("noon")?.date, moment(2026, 8, 20, 12), "noon after noon is tomorrow")
+        equal(first("noon")?.label, "at noon", "and it says so")
+        equal(first("noon", now: moment(2026, 8, 19, 10, 59))?.date, moment(2026, 8, 19, 12),
+            "noon before noon is today")
+        equal(first("at noon")?.date, moment(2026, 8, 20, 12), "'at noon' is the same")
+        equal(first("midday")?.date, moment(2026, 8, 20, 12), "midday is noon")
+        equal(first("midnight")?.date, moment(2026, 8, 20, 0), "midnight is the coming one")
+        equal(first("3pm")?.date, moment(2026, 8, 19, 15), "3pm still ahead is today")
+        equal(first("2pm")?.date, moment(2026, 8, 20, 14), "2pm gone by is tomorrow, not nothing")
+        equal(first("at 3:45 pm")?.date, moment(2026, 8, 19, 15, 45), "minutes and a spaced marker")
+        equal(first("16:15")?.date, moment(2026, 8, 19, 16, 15), "a 24-hour clock")
+        equal(first("12am")?.date, moment(2026, 8, 20, 0), "12am is midnight")
+        equal(first("12pm")?.date, moment(2026, 8, 20, 12), "12pm is noon")
+        equal(
+            RemindTimes.match("13pm", now: now, calendar: cal).contains { $0.label == "at 13pm" },
+            false, "13pm is not a time")
+        equal(
+            RemindTimes.match("5", now: now, calendar: cal).contains { $0.label.hasPrefix("at ") },
+            false, "a bare number is not a clock")
+    }
 
     /// Every pick, against the same afternoon. 09:00 for morning-ish picks and
     /// 18:00 for evening ones is the whole contract of the table.

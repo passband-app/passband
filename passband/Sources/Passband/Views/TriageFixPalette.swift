@@ -20,7 +20,12 @@ struct TriageFixPalette: View {
         surface
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
-            .onAppear { focused = true }
+            .onAppear {
+                // A tick late: on the frame the palette appears the field is
+                // not in the window yet, and the reader's web view keeps the
+                // keyboard, so a same-frame focus is dropped.
+                DispatchQueue.main.async { focused = true }
+            }
             .task { current = try? await APIClient.shared.getAgentTriage(target.messageId).decision }
             .onChange(of: hits.count) { _, count in
                 selection = max(0, min(selection, max(0, count - 1)))

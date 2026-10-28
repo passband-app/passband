@@ -34,7 +34,10 @@ struct RemindPalette: View {
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
             .onAppear {
-                focused = true
+                // A tick late: on the frame the palette appears the field is
+                // not in the window yet, and the reader's web view keeps the
+                // keyboard, so a same-frame focus is dropped.
+                DispatchQueue.main.async { focused = true }
                 refreshHits()
             }
     }

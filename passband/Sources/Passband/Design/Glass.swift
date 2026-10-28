@@ -495,15 +495,24 @@ struct PaletteShell<Field: View, Rows: View>: View {
                 GlassEffectContainer(spacing: 8) {
                     palette
                         .frame(width: Typo.measure(PaletteMetrics.width))
-                        // NEVER TALLER THAN THE WINDOW. The list is the one
-                        // flexible part (see `list`), so this squeezes it and
-                        // leaves the header, field and footer whole.
-                        .frame(maxHeight: roomHeight > 0
-                            ? max(0, roomHeight - topInset - PaletteMetrics.bottomMargin) : nil)
                         .passbandGlass(
                             .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                             id: glassID, in: paletteGlass)
                         .overlayShadow()
+                        // NEVER TALLER THAN THE WINDOW. The list is the one
+                        // flexible part (see `list`), so this squeezes it and
+                        // leaves the header, field and footer whole.
+                        //
+                        // OUTSIDE THE GLASS, top-aligned. A max-only frame
+                        // takes all the height it is offered up to the cap,
+                        // so wrapped INSIDE the glass it stretched the card
+                        // to the window with the content floating mid-card.
+                        // Out here the glass hugs the palette and the frame's
+                        // spare height is empty, untappable space over the scrim.
+                        .frame(
+                            maxHeight: roomHeight > 0
+                                ? max(0, roomHeight - topInset - PaletteMetrics.bottomMargin) : nil,
+                            alignment: .top)
                 }
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { roomHeight = $0 }

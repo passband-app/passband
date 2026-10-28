@@ -168,13 +168,17 @@ enum RemindTimes {
         add(rel)
         let ord = ordinal(query, now: now, calendar: calendar)
         add(ord)
+        let clock = timeOfDay(query, now: now, calendar: calendar)
+        add(clock)
 
         // The open world, asked last and only when no closed source had an
         // exact answer. Every guard matters: "mon" is the picks', "in 2 hours"
         // is the relative parser's, "the 24th" is the ordinal's — letting the
         // detector also answer any of them would put a second, subtly different
         // row under the one that was already right.
-        if rel == nil, ord == nil, !hits.contains(where: { $0.score >= exactScore }) {
+        if rel == nil, ord == nil, clock == nil,
+            !hits.contains(where: { $0.score >= exactScore })
+        {
             for hit in detected(query, now: now, calendar: calendar) { add(hit) }
         }
         return out
@@ -291,6 +295,75 @@ enum RemindTimes {
         return RemindHit(
             label: "in \(count) \(word)\(count == 1 ? "" : "s")", date: date,
             detail: detail(date, now: now, calendar: calendar))
+    }
+
+    // MARK: - "noon", "3pm"
+
+    /// A bare time of day: "noon", "midnight", "3pm", "3:30 pm", "15:30", each
+    /// optionally after "at". Resolves to the NEXT time the clock reads that:
+    /// today while it is still ahead, else tomorrow.
+    ///
+    /// Ours rather than the detector's for two reasons. The detector answers
+    /// nothing at all for a bare "noon" or "midnight". And for "3pm" it answers
+    /// TODAY even at 4pm, which the past-drop in `match` then throws away, so
+    /// the list went empty for a time that comes around again tomorrow.
+    ///
+    /// A bare number is refused, as in `ordinal`: "5" could be an hour, a count
+    /// or the start of "5 days". The am/pm or the colon commits it to a clock.
+    private static func timeOfDay(_ query: String, now: Date, calendar: Calendar) -> RemindHit? {
+        var text = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if text.hasPrefix("at ") { text = String(text.dropFirst(3)) }
+        text = text.trimmingCharacters(in: .whitespaces)
+
+        let hour: Int
+        var minute = 0
+        let label: String
+        switch text {
+        case "noon", "midday":
+            (hour, label) = (12, "at noon")
+        case "midnight":
+            (hour, label) = (0, "at midnight")
+        default:
+            var rest = Substring(text)
+            var digits = ""
+            while let c = rest.first, c.isNumber {
+                digits.append(c)
+                rest = rest.dropFirst()
+            }
+            guard (1...2).contains(digits.count), var h = Int(digits) else { return nil }
+            var hadColon = false
+            if rest.first == ":" {
+                rest = rest.dropFirst()
+                let mins = String(rest.prefix(while: \.isNumber))
+                guard mins.count == 2, let m = Int(mins), m < 60 else { return nil }
+                minute = m
+                rest = rest.dropFirst(2)
+                hadColon = true
+            }
+            let marker = rest.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ".", with: "")
+            switch marker {
+            case "am", "a":
+                guard (1...12).contains(h) else { return nil }
+                if h == 12 { h = 0 }
+            case "pm", "p":
+                guard (1...12).contains(h) else { return nil }
+                if h != 12 { h += 12 }
+            case "" where hadColon:
+                guard h <= 23 else { return nil }
+            default:
+                return nil
+            }
+            hour = h
+            label = "at \(text)"
+        }
+
+        guard
+            let date = calendar.nextDate(
+                after: now,
+                matching: DateComponents(hour: hour, minute: minute, second: 0),
+                matchingPolicy: .nextTime)
+        else { return nil }
+        return RemindHit(label: label, date: date, detail: detail(date, now: now, calendar: calendar))
     }
 
     // MARK: - "the 24th"

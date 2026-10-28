@@ -15,7 +15,7 @@ use squelch_core::sync::{GMAIL_API_BASE, GmailMessage, LABEL_INBOX};
 use squelch_core::types::AccountId;
 
 use super::mime::{OUTBOX_HEADER, bare_message_id, outbox_token};
-use super::{FetchedRaw, ParentHeaders, SentRef, WriteError, send_budget};
+use super::{FetchedRaw, MailWriter, ParentHeaders, SentRef, WriteError, send_budget};
 
 /// The modify JSON body. Empty arrays are still sent (harmless no-ops) so the
 /// shape is uniform.
@@ -256,9 +256,12 @@ impl GmailWriteClient {
             .await
             .map_err(|e| WriteError::Transport(format!("gmail json decode: {e}")))
     }
+}
 
+#[async_trait::async_trait]
+impl MailWriter for GmailWriteClient {
     /// `messages.modify`: add/remove labels on a Gmail message.
-    pub async fn modify(
+    async fn modify(
         &self,
         gmail_msg_id: &str,
         add: &[String],
@@ -270,7 +273,7 @@ impl GmailWriteClient {
     }
 
     /// Archive: remove the INBOX label.
-    pub async fn archive(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
+    async fn archive(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
         self.modify(gmail_msg_id, &[], &[LABEL_INBOX.to_string()])
             .await
     }
@@ -279,7 +282,7 @@ impl GmailWriteClient {
     /// Trashed mail is recoverable for 30 days, and permanent delete requires
     /// the full `https://mail.google.com/` scope, which squelch never requests:
     /// the blast radius is capped by the OAuth scope, not by our restraint.
-    pub async fn trash(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
+    async fn trash(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
         let url = format!("{}/messages/{gmail_msg_id}/trash", self.base);
         self.post_json(&url, &serde_json::json!({}))
             .await
@@ -292,7 +295,7 @@ impl GmailWriteClient {
     /// ONE fetch serves both uses: a reply-all send threads and derives its
     /// audience from the same response, so asking for the address headers costs
     /// no extra round trip even when nobody wants them.
-    pub async fn parent_headers(&self, gmail_msg_id: &str) -> Result<ParentHeaders, WriteError> {
+    async fn parent_headers(&self, gmail_msg_id: &str) -> Result<ParentHeaders, WriteError> {
         let url = format!(
             "{}/messages/{gmail_msg_id}\
              ?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References\
@@ -335,7 +338,7 @@ impl GmailWriteClient {
 
     /// `messages.send`: send a raw RFC822 message, optionally threaded. Returns
     /// what Gmail echoed about the created message (see [`SentRef`]).
-    pub async fn send(&self, raw: &[u8], thread_id: Option<&str>) -> Result<SentRef, WriteError> {
+    async fn send(&self, raw: &[u8], thread_id: Option<&str>) -> Result<SentRef, WriteError> {
         let url = format!("{}/messages/send", self.base);
         let body = send_body(raw, thread_id);
         let v = self
@@ -349,7 +352,7 @@ impl GmailWriteClient {
 
     /// Read a just-sent message with the WRITE token, to echo it into the local
     /// store: the read credential does not see Sent mail between polls.
-    pub async fn fetch_raw(&self, gmail_msg_id: &str) -> Result<FetchedRaw, WriteError> {
+    async fn fetch_raw(&self, gmail_msg_id: &str) -> Result<FetchedRaw, WriteError> {
         let url = format!("{}/messages/{gmail_msg_id}?format=raw", self.base);
         let msg: GmailMessage = self.get_json(&url).await?;
         Ok(FetchedRaw {
@@ -368,7 +371,7 @@ impl GmailWriteClient {
     /// [`Self::find_scheduled_send`], the question recovery actually asks).
     /// The search includes Spam and Trash; an error is an error, never "not
     /// found".
-    pub async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError> {
+    async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError> {
         let url = rfc822msgid_search_url(&self.base, msgid);
         let list: MessageIdList = self.get_json(&url).await?;
         Ok(list.messages.into_iter().next().map(|m| m.id))
@@ -404,7 +407,7 @@ impl GmailWriteClient {
     /// (the daemon's shutdown), which is checked before every request after
     /// the first: a scan is up to 1 + 4 + 100 of them, too many for a
     /// shutdown to wait out.
-    pub async fn find_scheduled_send(
+    async fn find_scheduled_send(
         &self,
         message_id: &str,
         window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
@@ -446,7 +449,9 @@ impl GmailWriteClient {
             "sent scan reached its page cap without ruling the mail out".into(),
         ))
     }
+}
 
+impl GmailWriteClient {
     /// Whether Gmail message `gmail_id` is the fired send: its
     /// [`OUTBOX_HEADER`] is `token`, or its `Message-ID` is the minted one
     /// (free, it rides the same metadata get). Exact after trimming.

@@ -29,6 +29,7 @@ use squelch_core::types::{
     AccountId, AttentionStatus, Disposition, GroupMode, SenderRule, ShredStats, Tier, TriageAxis,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::ApiError;
@@ -42,7 +43,7 @@ use crate::write::mime::{
     derive_reply_recipients, forward_subject, mark_inline, outbox_token, parse_addr_list,
     parse_forwarded_original, reply_subject,
 };
-use crate::write::{SentRef, WriteError};
+use crate::write::{MailWriter, SentRef, WriteError};
 
 /// Default page size when `limit` is omitted, and the hard ceiling we clamp to.
 const DEFAULT_LIMIT: u32 = 50;
@@ -4728,20 +4729,22 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
 }
 
 /// Resolve the WRITE-bound gmail client, or 403 with a hint if none configured.
-pub(crate) fn write_client(state: &ApiState) -> Result<GmailWriteClient, ApiError> {
+pub(crate) fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>, ApiError> {
     match state.write_creds() {
         // Over the state's one shared HTTP client (see `ApiState::write_http`);
         // what is built per action is two `Arc` clones and a base URL.
-        Some(creds) => Ok(GmailWriteClient::with_http(
-            creds.clone(),
-            state.account_id,
-            state
-                .write_api_base()
-                .map(str::to_string)
-                .unwrap_or_else(|| squelch_core::sync::GMAIL_API_BASE.to_string()),
-            state.write_http(),
-        )
-        .with_budget(state.gmail_budget().cloned())),
+        Some(creds) => Ok(Arc::new(
+            GmailWriteClient::with_http(
+                creds.clone(),
+                state.account_id,
+                state
+                    .write_api_base()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| squelch_core::sync::GMAIL_API_BASE.to_string()),
+                state.write_http(),
+            )
+            .with_budget(state.gmail_budget().cloned()),
+        )),
         None => Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "write credential not configured; run `squelchd auth --write`",
@@ -4811,7 +4814,7 @@ async fn guarded_action<F, Fut>(
     call: F,
 ) -> Result<(), ApiError>
 where
-    F: FnOnce(GmailWriteClient, ActionMessageRef) -> Fut,
+    F: FnOnce(Arc<dyn MailWriter>, ActionMessageRef) -> Fut,
     Fut: std::future::Future<Output = Result<(), WriteError>>,
 {
     let target = Some(message_id.to_string());
@@ -5122,7 +5125,7 @@ pub struct SendBody {
 /// outbox row the mail went out from (see [`fired`]), as its `send` row is.
 pub(crate) async fn echo_sent(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     target: Option<String>,
     sent: &SentRef,
     fire: Option<Fire<'_>>,
@@ -5386,7 +5389,7 @@ pub(crate) async fn guard_verdict(
 #[allow(clippy::too_many_arguments)]
 async fn finish_send(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     raw: &[u8],
     thread_id: Option<String>,
     resolve: Option<i64>,
@@ -5810,7 +5813,7 @@ pub(crate) async fn perform_send(
         return forward_send(
             state,
             body,
-            &client,
+            &*client,
             target,
             original_id,
             owed,
@@ -6066,7 +6069,7 @@ pub(crate) async fn perform_send(
     let outcome = fired_outcome(fire, outcome);
     let result = finish_send(
         state,
-        &client,
+        &*client,
         &raw,
         thread_id,
         // A cold send has no target row to resolve.
@@ -6260,7 +6263,7 @@ fn forward_raw_too_large(len: usize) -> bool {
 /// scheduled send is being fired (see [`fired`]).
 pub(crate) async fn read_forward_original(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     action: &'static str,
     target: Option<String>,
     original_id: i64,
@@ -6411,7 +6414,7 @@ pub(crate) fn forward_original_kinds(original: &ForwardedOriginal) -> Vec<&'stat
 async fn forward_send(
     state: &ApiState,
     body: &SendBody,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     target: Option<String>,
     original_id: i64,
     owed: SendGuard,

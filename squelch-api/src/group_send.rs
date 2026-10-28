@@ -26,7 +26,7 @@ use squelch_core::types::GroupMode;
 use crate::error::ApiError;
 use crate::handlers::{audit_action, store_call};
 use crate::state::ApiState;
-use crate::write::gmail::GmailWriteClient;
+use crate::write::MailWriter;
 use crate::write::mime::{MailAttachment, ReplyParts, build_reply_rfc822};
 
 /// Gap between the messages of one fan-out.
@@ -228,7 +228,7 @@ async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
         if i > 0 {
             tokio::time::sleep(FAN_OUT_GAP).await;
         }
-        match send_one(&state, &client, &plan, addr).await {
+        match send_one(&state, &*client, &plan, addr).await {
             Ok(message_id) => {
                 sent += 1;
                 settle(
@@ -272,7 +272,7 @@ async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
 /// upstream detail never rides along in it.
 async fn send_one(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     plan: &FanOut,
     addr: &str,
 ) -> Result<Option<i64>, String> {

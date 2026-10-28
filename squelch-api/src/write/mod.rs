@@ -2,9 +2,11 @@
 //! squelch. Lives here, not in squelch-core, so the sync/triage core stays
 //! provably write-free.
 //!
-//! The provider-neutral half is this module and [`mime`]: the types the write
-//! path speaks and the RFC 822 composition every provider sends. [`gmail`] is
-//! the Gmail REST implementation, and the only one today.
+//! The provider-neutral half is this module and [`mime`]: the [`MailWriter`]
+//! seam every action calls through, the types it speaks, and the RFC 822
+//! composition every provider sends. [`gmail`] is the Gmail REST
+//! implementation, and the only one today; which writer an account gets is
+//! decided by its `accounts.provider` row (`handlers::write_client`).
 
 pub mod gmail;
 pub mod mime;
@@ -89,4 +91,60 @@ pub struct FetchedRaw {
     pub thread_id: Option<String>,
     /// Milliseconds since epoch as a decimal string (Gmail's `internalDate`).
     pub internal_date: Option<String>,
+}
+
+/// What the write door asks of a mailbox, whichever provider holds it. Every
+/// action route, the scheduled-send worker and the group fan-out reach the
+/// mailbox through this and nothing else; [`gmail::GmailWriteClient`] is the
+/// one implementation today.
+///
+/// Message ids are the provider's own (`messages.gmail_msg_id` for a Gmail
+/// account), opaque to the caller.
+///
+/// WHAT IS STILL GMAIL-SHAPED, deliberately, until a second provider needs it
+/// otherwise: [`Self::modify`] takes label ids, [`FetchedRaw`] carries the raw
+/// message base64url-encoded the way Gmail returns it, and a send's
+/// `thread_id` is a provider thread id. [`Self::find_scheduled_send`]'s window
+/// is sized by the caller with Gmail's clock-skew slack
+/// ([`gmail::SCAN_SLACK`]).
+#[async_trait::async_trait]
+pub trait MailWriter: Send + Sync {
+    /// Add and remove labels (provider label ids) on one message.
+    async fn modify(
+        &self,
+        msg_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<(), WriteError>;
+
+    /// Take a message out of the inbox.
+    async fn archive(&self, msg_id: &str) -> Result<(), WriteError>;
+
+    /// Move a message to the trash: recoverable, never a permanent delete.
+    async fn trash(&self, msg_id: &str) -> Result<(), WriteError>;
+
+    /// The threading and recipient headers of a message being replied to.
+    async fn parent_headers(&self, msg_id: &str) -> Result<ParentHeaders, WriteError>;
+
+    /// Send a raw RFC 822 message, threaded onto `thread_id` when there is one.
+    async fn send(&self, raw: &[u8], thread_id: Option<&str>) -> Result<SentRef, WriteError>;
+
+    /// One message's raw RFC 822 bytes (see [`FetchedRaw`] for the encoding).
+    async fn fetch_raw(&self, msg_id: &str) -> Result<FetchedRaw, WriteError>;
+
+    /// The id of the message whose `Message-ID` header is `msgid`, or `None`
+    /// when the mailbox has none. A hit is proof; a miss is not.
+    async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError>;
+
+    /// The id of the fired scheduled send whose minted `Message-ID` is
+    /// `message_id`, looking inside `window`, or `None` when the mailbox holds
+    /// no such mail. Any doubt is `Err`, never `None`: a wrong `None` is a
+    /// double send. `stopping` is the daemon's shutdown, checked between
+    /// requests.
+    async fn find_scheduled_send(
+        &self,
+        message_id: &str,
+        window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+        stopping: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<Option<String>, WriteError>;
 }

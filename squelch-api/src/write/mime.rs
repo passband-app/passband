@@ -71,7 +71,7 @@ pub struct ReplyParts {
     ///
     /// `Some` is a FIRED scheduled send: the 48-hex of its minted Message-ID
     /// ([`outbox_token`]). A header Gmail has no reason to touch, read back by
-    /// [`super::gmail::GmailWriteClient::find_scheduled_send`] from the Sent copy.
+    /// [`super::MailWriter::find_scheduled_send`] from the Sent copy.
     pub outbox_token: Option<String>,
 }
 

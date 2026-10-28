@@ -35,6 +35,7 @@ use squelch_core::store::{
     ScheduledSendState, SearchClock, TOO_MANY_SCHEDULED,
 };
 use squelch_core::types::GroupMode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::ApiError;
@@ -46,8 +47,8 @@ use crate::handlers::{
     send_target, store_call, validate_send, write_client,
 };
 use crate::state::ApiState;
-use crate::write::gmail::{GmailWriteClient, SCAN_SLACK};
-use crate::write::{SentRef, WriteError, send_budget};
+use crate::write::gmail::SCAN_SLACK;
+use crate::write::{MailWriter, SentRef, WriteError, send_budget};
 
 /// Audit action for scheduling, and for every refusal on the way to it.
 const AUDIT_SCHEDULE: &str = "schedule";
@@ -70,7 +71,7 @@ const MAX_SCHEDULE_AHEAD: chrono::Duration = chrono::Duration::days(366);
 /// recovery asks Gmail by Message-ID before anything is retried.
 ///
 /// THE PRE-FIRE LOOKUP CAN OUTRUN THIS: after a `rfc822msgid:` miss it is a
-/// paged Sent scan ([`GmailWriteClient::find_scheduled_send`]), at worst
+/// paged Sent scan ([`MailWriter::find_scheduled_send`]), at worst
 /// 1 + 4 + 100 requests, which a lease sized for three calls does not cover.
 /// That is still safe, because a lapse during the lookup can hand nobody the
 /// row mid-send: the pass loop is sequential (recovery runs before the claims,
@@ -270,7 +271,7 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
         let staged: usize = attachments.iter().map(|a| a.data.len()).sum();
         let (_, original) = read_forward_original(
             state,
-            &client,
+            &*client,
             AUDIT_SCHEDULE,
             target.clone(),
             original_id,
@@ -399,7 +400,7 @@ fn parse_send_at(raw: Option<&str>, now: DateTime<Utc>) -> Result<DateTime<Utc>,
 async fn require_write_client(
     state: &ApiState,
     target: Option<String>,
-) -> Result<GmailWriteClient, ApiError> {
+) -> Result<Arc<dyn MailWriter>, ApiError> {
     match write_client(state) {
         Ok(c) => Ok(c),
         Err(e) => {
@@ -956,7 +957,7 @@ enum Asking {
 }
 
 /// The `(after, before)` instants the Sent scan of
-/// [`GmailWriteClient::find_scheduled_send`] searches between, [`SCAN_SLACK`]
+/// [`MailWriter::find_scheduled_send`] searches between, [`SCAN_SLACK`]
 /// included on both sides.
 ///
 /// FLOOR: the earliest of `send_at`, the last attempt's end and the lease's
@@ -1034,7 +1035,7 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
             .await
         {
             Ok(Some(gmail_id)) => {
-                if settle_recovered(state, &client, &row, gmail_id).await {
+                if settle_recovered(state, &*client, &row, gmail_id).await {
                     report.recovered_sent += 1;
                 }
             }
@@ -1131,7 +1132,7 @@ async fn cannot_recover(
 /// row's claim. NO SECOND SEND. `true` when the row moved.
 async fn settle_recovered(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     row: &ScheduledSend,
     gmail_id: String,
 ) -> bool {
@@ -1236,7 +1237,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             .await
         {
             Ok(Some(gmail_id)) => {
-                if settle_recovered(state, &client, &row, gmail_id).await {
+                if settle_recovered(state, &*client, &row, gmail_id).await {
                     report.recovered_sent += 1;
                 }
                 return;

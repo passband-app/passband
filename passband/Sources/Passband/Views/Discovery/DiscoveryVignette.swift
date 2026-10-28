@@ -72,8 +72,8 @@
 //   300pt. Check every vignette at both ends: at the small end the story must
 //   still read, at the large end nothing may look like a thumbnail blown up.
 //
-// DRAWN: all eight. `flow` is here, the reference; `clear`, `later`, `teach`,
-// `find`, `glance`, `read` and `write` each have a file in `Vignettes/` and a
+// DRAWN: all seven. `flow` is here, the reference; `clear`, `later`, `teach`,
+// `find`, `read` and `sweep` each have a file in `Vignettes/` and a
 // case in `DiscoveryVignette.scene`. A new set gets the same: its own file
 // and a case. The shared parts (`mail`, `row`, `miniMail`, `cardGround`,
 // `bar`, `halo`, `check`, `keycap`) are in `VignetteParts` below.
@@ -170,9 +170,8 @@ struct DiscoveryVignette: View {
         case .later: LaterVignette.self
         case .teach: TeachVignette.self
         case .find: FindVignette.self
-        case .glance: GlanceVignette.self
         case .read: ReadVignette.self
-        case .write: WriteVignette.self
+        case .sweep: SweepVignette.self
         }
     }
 

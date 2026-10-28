@@ -11,7 +11,7 @@
 // its picture large, its line and its keys, under "Start here" (or "Try this
 // next" once a few are unlocked). Everything else is a name beside a small
 // still, so the page reads as one suggestion and a short index, not a list of
-// eight things to get through.
+// seven things to get through.
 //
 // TWO SECTIONS. What has not been unlocked yet is on top: no lock, no grey, no
 // count of what is left. Under "Unlocked" are the sets that have been found,

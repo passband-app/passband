@@ -86,8 +86,7 @@ struct DiscoveryLedgerTests {
             expect(covered.contains(set), "\(set) has at least one move")
         }
         expect(Move.tourCompleted.set == .clear, "the tour is clear")
-        expect(Move.codeCopied.set == .glance, "a copied code is glance")
-        expect(Move.groupSent.set == .write, "a group send is write")
+        expect(Move.smartCleared.set == .sweep, "a smart clear is sweep")
         expect(Move.walkFinished.set == .flow, "a finished walk is flow")
     }
 
@@ -143,7 +142,7 @@ struct DiscoveryLedgerTests {
         _ = l.note(.emailDone, day: "d1", now: now)
         _ = l.note(.emailDone, day: "d2", now: now)
         _ = l.note(.emailDone, day: "d3", now: now)
-        _ = l.note(.codeCopied, day: "d3", now: now)
+        _ = l.note(.smartCleared, day: "d3", now: now)
         l.lastCelebratedDay = "d3"
         let back = DiscoveryLedger.decoded(from: l.encoded())
         expect(back == l, "encode/decode round trips")
@@ -176,9 +175,9 @@ struct DiscoveryLedgerTests {
         for day in ["d1", "d2", "d3"] {
             for move in oneMovePerSet.dropLast() { _ = l.note(move, day: day, now: now) }
         }
-        expect(!l.allKept, "seven of eight kept is not all")
+        expect(!l.allKept, "six of seven kept is not all")
         for day in ["d1", "d2", "d3"] { _ = l.note(oneMovePerSet.last!, day: day, now: now) }
-        expect(l.allKept, "eight of eight is")
+        expect(l.allKept, "seven of seven is")
     }
 
     static func theDebugOverride() {

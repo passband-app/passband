@@ -230,7 +230,7 @@ enum ProductGuide {
 
     private static let gettingAroundTail = """
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
-        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the at a glance cards, the reading stack, writing) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
+        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the reading stack, smart clear) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
         Moving:
         - ⌘[ goes back and ⌘] goes forward.

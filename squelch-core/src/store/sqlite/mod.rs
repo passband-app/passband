@@ -226,14 +226,17 @@ macro_rules! revisit_answer_sql {
 /// sitrep inventory and the stats run it over the whole window.
 ///
 /// DRIVEN FROM THOSE FEW ROWS, PINNED: `auth_hold CROSS JOIN messages`, so
-/// each held message is one rowid probe. Left to choose, the planner on a
-/// store with statistics (every store, an hour after the daemon starts)
-/// had no row for the empty `auth_verdicts`, took the union for a large
-/// table, and ran it the other way round: every message in the store, each
-/// probed into an automatic index built over the union. That was 300 ms on
-/// a 50k store, in every read that carries this CTE, where pinned it is a
-/// fraction of a millisecond. `auth_fye_threads_drive_from_the_held_messages`
-/// pins the plan, with and without statistics.
+/// each held message is one rowid probe. Left to choose, a store with
+/// statistics (every store, from the first pass a minute after the daemon
+/// starts) ran it the other way round for as long as `auth_verdicts` is
+/// empty, which on most stores is always: ANALYZE writes no row for an empty
+/// table, the planner took the union for a large one, and it scanned every
+/// message in the store, each probed into an automatic index built over the
+/// union. That was 300 ms on a 50k store, in every read that carries this
+/// CTE, where pinned it is a fraction of a millisecond. The window function
+/// keeps the CTE from being flattened into an outer query, so the pin holds
+/// in every reader. `auth_fye_threads_drive_from_the_held_messages` pins the
+/// plan, with and without statistics.
 ///
 /// NO REVISION CHECK: it reads the message's standing decision, so a
 /// critical change or a "Not me" stays in FYE through a body heal or a

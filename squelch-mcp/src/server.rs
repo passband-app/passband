@@ -2023,6 +2023,63 @@ mod tests {
         assert!(!has(&bare, "create_draft") && !has(&bare, "send_email"));
     }
 
+    /// `search_calendar` exists only while the `calendar` feature is on:
+    /// unlisted and refused like an unknown tool when it is off, and the
+    /// flag is read at each call, not at construction.
+    #[tokio::test]
+    async fn search_calendar_follows_the_calendar_feature() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        store.ensure_account("me@localhost").unwrap();
+        let features = squelch_core::features::Features::none();
+        let server = SquelchServer::new(store, "me@localhost")
+            .unwrap()
+            .with_calendar(CalendarDoor {
+                features: features.clone(),
+                credentials: None,
+            });
+        let params = || {
+            Parameters(SearchCalendarParams {
+                query: "dinner".into(),
+                k: None,
+            })
+        };
+        assert!(
+            !server
+                .offered_tool_names()
+                .iter()
+                .any(|n| n == "search_calendar")
+        );
+        assert!(server.search_calendar(params()).await.is_err());
+
+        features.replace_granted([squelch_core::features::CALENDAR]);
+        assert!(
+            server
+                .offered_tool_names()
+                .iter()
+                .any(|n| n == "search_calendar")
+        );
+        let answer = server.search_calendar(params()).await.unwrap();
+        let text = format!("{:?}", answer.content);
+        assert!(text.contains("total"), "{text}");
+        // A query no event can answer is the agent's to fix, not an empty page.
+        let mail_only = Parameters(SearchCalendarParams {
+            query: "from:sam".into(),
+            k: None,
+        });
+        assert!(server.search_calendar(mail_only).await.is_err());
+
+        // The standalone binary's default: never listed.
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        store.ensure_account("me@localhost").unwrap();
+        let bare = SquelchServer::new(store, "me@localhost").unwrap();
+        assert!(
+            !bare
+                .offered_tool_names()
+                .iter()
+                .any(|n| n == "search_calendar")
+        );
+    }
+
     /// A mailbox whose owner never opened the setting: drafts are offered,
     /// sending is not, and the instructions say so.
     #[test]
@@ -4393,10 +4450,15 @@ mod tests {
         let old = seed_old(&store, account, "old", "g-old", "heron ledger");
         let (server, _mailer) = {
             let mailer = Arc::new(RecordingMailer::default());
+            let calendar = CalendarDoor::default();
+            calendar
+                .features
+                .replace_granted([squelch_core::features::CALENDAR]);
             let server = SquelchServer::new(store.clone(), "me@localhost")
                 .unwrap()
                 .with_archive_surfacing(archive_on())
-                .with_mailer(Some(mailer.clone() as Arc<dyn AgentMailer>));
+                .with_mailer(Some(mailer.clone() as Arc<dyn AgentMailer>))
+                .with_calendar(calendar);
             (server, mailer)
         };
         let mut tools: Vec<String> = server
@@ -4417,12 +4479,19 @@ mod tests {
                 "get_thread",
                 "list_sender_rules",
                 "open_draft",
+                "search_calendar",
                 "search_mail",
                 "send_email",
                 "set_sender_rule",
             ]
         );
         for round in 0..2 {
+            let _ = server
+                .search_calendar(Parameters(SearchCalendarParams {
+                    query: "heron ledger".into(),
+                    k: None,
+                }))
+                .await;
             let _ = search_response(&server, "heron").await;
             let _ = thread(&server, "old").await;
             let _ = thread(&server, &old.to_string()).await;

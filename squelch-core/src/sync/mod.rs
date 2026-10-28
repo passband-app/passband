@@ -1149,7 +1149,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// for the reason [`Self::with_api_base`] is.
     #[cfg(test)]
     fn with_source(self, source: Arc<dyn MailSource>) -> Self {
-        let _ = self.source.set(source);
+        assert!(
+            self.source.set(source).is_ok(),
+            "with_source after the source was built would be ignored"
+        );
         self
     }
 
@@ -5468,7 +5471,7 @@ mod tests {
         e.gmail_quota_backoff = Duration::ZERO;
         assert!(
             e.gmail_source()
-                .get_json_with_retry::<Value>(&format!("{base}/messages/a"), Urgency::Window)
+                .test_get_json_with_retry::<Value>(&format!("{base}/messages/a"), Urgency::Window)
                 .await
                 .is_err()
         );
@@ -5494,7 +5497,7 @@ mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(2),
             e.gmail_source()
-                .get_json_with_retry::<Value>(&format!("{base}/messages/a"), Urgency::Window),
+                .test_get_json_with_retry::<Value>(&format!("{base}/messages/a"), Urgency::Window),
         )
         .await
         .expect("Retry-After held this call open");
@@ -5563,7 +5566,7 @@ mod tests {
         let e = engine(store, acct, &base).with_gmail_budget(shared.clone());
         let _ = e
             .gmail_source()
-            .get_json::<Value>(&format!("{base}/messages/b"))
+            .test_get_json::<Value>(&format!("{base}/messages/b"))
             .await;
         assert_eq!(
             shared.unit(),
@@ -5572,7 +5575,7 @@ mod tests {
         );
         let _ = e
             .gmail_source()
-            .get_json::<Value>(&format!("{base}/messages/a"))
+            .test_get_json::<Value>(&format!("{base}/messages/a"))
             .await;
         assert_eq!(
             shared.unit(),
@@ -5599,7 +5602,7 @@ mod tests {
         assert_eq!(shared.unit(), Duration::from_micros(20));
         let e = engine(store, acct, &base).with_gmail_budget(shared.clone());
         e.gmail_source()
-            .get_json::<Value>(&format!("{base}/profile"))
+            .test_get_json::<Value>(&format!("{base}/profile"))
             .await
             .unwrap();
         assert_eq!(shared.unit(), Duration::from_micros(18));
@@ -5626,7 +5629,7 @@ mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             e.gmail_source()
-                .get_json_with_retry::<Value>(&format!("{base}/messages/a"), Urgency::Window),
+                .test_get_json_with_retry::<Value>(&format!("{base}/messages/a"), Urgency::Window),
         )
         .await
         .expect("the hold is seconds, not forever");
@@ -5649,7 +5652,7 @@ mod tests {
         let e = engine(store, acct, &base);
         assert!(
             e.gmail_source()
-                .get_json::<Value>(&format!("{base}/messages/a"))
+                .test_get_json::<Value>(&format!("{base}/messages/a"))
                 .await
                 .is_err()
         );
@@ -5674,7 +5677,7 @@ mod tests {
         assert!(Arc::ptr_eq(e.gmail_budget(), &shared));
         let _ = e
             .gmail_source()
-            .get_json::<Value>(&format!("{base}/messages/a"))
+            .test_get_json::<Value>(&format!("{base}/messages/a"))
             .await;
         let started = tokio::time::Instant::now();
         shared.admit("GET", "/profile").await;
@@ -5695,8 +5698,8 @@ mod tests {
         let url = format!("{base}/profile");
         let source = e.gmail_source();
         let (a, b) = tokio::join!(
-            source.get_json::<Value>(&url),
-            source.get_json::<Value>(&url)
+            source.test_get_json::<Value>(&url),
+            source.test_get_json::<Value>(&url)
         );
         a.unwrap();
         b.unwrap();

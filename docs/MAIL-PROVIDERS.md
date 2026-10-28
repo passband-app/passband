@@ -61,15 +61,20 @@ The engine stores whatever `SyncCursor` the source hands it in `sync_cursor`
 historyId; an IMAP source's would carry `UIDVALIDITY` and a `UID` (and
 `MODSEQ`) per folder.
 
-For a Gmail account the legacy `sync_state` `'history'` row stays in charge,
-because three things depend on it: the stats page's `last_history_id`, a
-rolled-back build (which reads nothing else), and the re-ingest drill in
-[SECURITY.md](SECURITY.md) §1 (delete the row, restart, the window is
-re-fetched). So every write lands in both rows in one transaction; no legacy
-row means no cursor; an install upgraded from before the table adopts the
-legacy row; and with both present the later historyId wins, so no version
-change steps the feed backwards. A Gmail cursor that is not a historyId is
+For a Gmail account the legacy `sync_state` `'history'` row **is** the
+cursor, because three things depend on it: the stats page's
+`last_history_id`, a rolled-back build (which reads nothing else), and an
+operator's hand on it (the re-ingest drill in [SECURITY.md](SECURITY.md) §1
+deletes it; lowering it replays history; 0 forces a catch-up). So a read
+returns the legacy row exactly as the engine always read it, every write lands
+in both rows in one transaction, and the `sync_cursor` row is a mirror that is
+never read for a Gmail account. A Gmail cursor that is not a historyId is
 refused on write. No other provider's cursor is ever parsed or mirrored.
+
+**Downgrades past the first non-Gmail account are not safe.** A build from
+before `accounts.provider` ignores the column and would sync an IMAP account
+as Gmail. When the first other provider ships, it should also bump something
+older builds refuse to open, or say plainly that downgrading is unsupported.
 
 `Store::has_message` exists and is **unwired on purpose**. When a source wires
 it, it goes on the incremental path only: the backfill and the catch-up

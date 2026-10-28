@@ -318,11 +318,11 @@ impl<C: CredentialStore + ?Sized> GmailSource<C> {
     /// Authenticated GET returning parsed JSON. A 404 surfaces as
     /// [`CoreError::NotFound`] so callers can branch on it (the
     /// expired-historyId fallback). Header and body are NEVER logged.
-    pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
+    async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
         self.get_json_with_retry(url, Urgency::Live).await
     }
 
-    pub(crate) async fn get_json_with_retry<T: for<'de> Deserialize<'de>>(
+    async fn get_json_with_retry<T: for<'de> Deserialize<'de>>(
         &self,
         url: &str,
         retry: Urgency,
@@ -413,6 +413,25 @@ impl<C: CredentialStore + ?Sized> GmailSource<C> {
             )));
         }
         unreachable!("the final attempt returns")
+    }
+
+    /// [`Self::get_json`] for the engine's request-layer tests. Test-only: a
+    /// crate-visible method that attaches the bearer token to any URL it is
+    /// handed would be the exfiltration primitive `api_base` is guarded
+    /// against.
+    #[cfg(test)]
+    pub(crate) async fn test_get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
+        self.get_json(url).await
+    }
+
+    /// [`Self::get_json_with_retry`], test-only for the same reason.
+    #[cfg(test)]
+    pub(crate) async fn test_get_json_with_retry<T: for<'de> Deserialize<'de>>(
+        &self,
+        url: &str,
+        retry: Urgency,
+    ) -> Result<T> {
+        self.get_json_with_retry(url, retry).await
     }
 
     /// Send a GET with a Bearer token, retrying once on 401 with a fresh token.

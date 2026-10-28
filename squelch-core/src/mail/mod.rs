@@ -149,8 +149,9 @@ pub enum RawBody {
     Bytes(Vec<u8>),
     /// The provider answered without a body.
     Missing,
-    /// The provider's body could not be decoded. The text names the failure,
-    /// never the content.
+    /// The provider's body could not be decoded. The text is the decoder's
+    /// error, logged as it always was: a failure kind and an offset, and at
+    /// most the one offending input byte, never the message.
     Undecodable(String),
 }
 

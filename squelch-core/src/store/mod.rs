@@ -2183,19 +2183,19 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// The sync engine's change-feed cursor for the account, opaque, or `None`
     /// before the first one is stored (a first run).
     ///
-    /// FOR A GMAIL ACCOUNT THE LEGACY `sync_state` `'history'` ROW STAYS IN
-    /// CHARGE: no legacy row is no cursor (a first run, or the re-ingest drill
-    /// in docs/SECURITY.md §1, which deletes that row), an install upgraded
-    /// from before `sync_cursor` adopts it, and when both rows exist the later
-    /// historyId wins, so neither direction of a version change steps the
-    /// feed backwards. See `store/sqlite/sync_cursor.rs`.
+    /// FOR A GMAIL ACCOUNT THE LEGACY `sync_state` `'history'` ROW IS THE
+    /// CURSOR, read exactly as the engine always read it, so an upgraded
+    /// install resumes, a rolled-back build's progress is kept, and an
+    /// operator's edit of it (the re-ingest drill in docs/SECURITY.md §1, a
+    /// rewind, a zero) still works. See `store/sqlite/sync_cursor.rs`.
     fn sync_cursor(&self, account_id: AccountId) -> Result<Option<crate::mail::SyncCursor>>;
 
     /// Store the account's change-feed cursor. For a Gmail account the cursor
     /// must be a historyId (anything else is refused, nothing written), and
     /// the legacy `sync_state` `'history'` row is written in the same
     /// transaction, so a build from before `sync_cursor` resumes from the same
-    /// point.
+    /// point. [`CoreError::NotFound`](crate::error::CoreError::NotFound) for an
+    /// unknown account.
     fn set_sync_cursor(
         &self,
         account_id: AccountId,

@@ -39,8 +39,7 @@ pinned to `noopener noreferrer`.
 - `body_html` is **baked at ingest** — a sanitizer change does not retroactively fix
   stored mail. Delete the `sync_state` `history` row and restart `squelchd` to
   re-ingest (triage is preserved). The `sync_cursor` row needs no edit: for a
-  Gmail account the `history` row decides whether a cursor exists
-  (`store/sqlite/sync_cursor.rs`).
+  Gmail account the `history` row is the cursor (`store/sqlite/sync_cursor.rs`).
 
 ## 2. Rendering sandbox
 

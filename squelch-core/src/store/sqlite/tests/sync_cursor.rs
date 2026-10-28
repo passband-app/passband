@@ -102,20 +102,34 @@ fn a_gmail_cursor_write_is_mirrored_into_the_legacy_row() {
     assert_eq!(stats.last_history_id, Some(4242));
 }
 
-/// A rolled-back build that kept polling advanced the legacy row past this
-/// table's; coming back, the later one wins, so no mail is walked twice and,
-/// more to the point, no cursor ever moves backwards across a version change.
+/// THE LEGACY ROW IS THE CURSOR, whichever way it moved: a rolled-back build
+/// that kept polling advanced it, and an operator lowered it to replay history
+/// or zeroed it to force a catch-up. Both are honoured, as they always were.
 #[test]
-fn the_later_history_id_wins_when_a_rolled_back_build_advanced_the_legacy_row() {
+fn the_legacy_row_is_read_as_it_stands_whichever_way_it_moved() {
     let (store, acct) = store();
     store
         .set_sync_cursor(acct, &SyncCursor::new("100"))
         .unwrap();
     set_legacy(&store, acct, 250);
-    assert_eq!(cursor(&store, acct), Some("250".into()));
-    // And the other way round: a legacy row behind this table never wins.
+    assert_eq!(cursor(&store, acct), Some("250".into()), "advanced");
     set_legacy(&store, acct, 50);
-    assert_eq!(cursor(&store, acct), Some("100".into()));
+    assert_eq!(cursor(&store, acct), Some("50".into()), "rewound by hand");
+    set_legacy(&store, acct, 0);
+    assert_eq!(cursor(&store, acct), Some("0".into()), "zeroed: a catch-up");
+}
+
+#[test]
+fn a_cursor_for_an_unknown_account_is_refused() {
+    let (store, _) = store();
+    assert!(matches!(
+        store.set_sync_cursor(9_999, &SyncCursor::new("1")),
+        Err(CoreError::NotFound)
+    ));
+    assert_eq!(
+        store.query_i64_for_test("SELECT COUNT(*) FROM sync_cursor"),
+        Some(0)
+    );
 }
 
 /// The adoption is Gmail's alone. Another provider's cursor is opaque: never

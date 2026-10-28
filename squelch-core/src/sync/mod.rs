@@ -12,7 +12,9 @@ pub mod ingest;
 pub mod notify_lane;
 mod profile;
 mod translate_pass;
-pub(crate) mod triage_worker;
+/// Public for `squelch-eval`, which replays triage through the production
+/// evidence reader and snapshot builder rather than copies of them.
+pub mod triage_worker;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};

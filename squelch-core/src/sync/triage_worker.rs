@@ -9,11 +9,39 @@ use crate::triage::agent_config::DEADLINE_SLACK_SECS;
 use crate::triage::context::{ContextSnapshot, EvidenceReader, EvidenceRequest, EvidenceResult};
 use std::collections::BTreeMap;
 
-struct StoreEvidence<'a, S: Store> {
+/// The production evidence reader: every triage tool call is served from the
+/// store through this, recording each source it exposes so the commit can
+/// check them. Public so an offline replay (`squelch-eval`) serves tools
+/// through the same code.
+pub struct StoreEvidence<'a, S: Store> {
     store: &'a S,
     account: AccountId,
     limit: usize,
     sources: std::sync::Mutex<Vec<AgentSourceSnapshot>>,
+}
+
+impl<'a, S: Store> StoreEvidence<'a, S> {
+    /// `limit` caps the messages any one read returns
+    /// (`context.max_related_messages` in production).
+    pub fn new(store: &'a S, account: AccountId, limit: usize) -> Self {
+        Self {
+            store,
+            account,
+            limit,
+            sources: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Seed the sources the initial snapshot already exposed.
+    pub fn with_sources(self, sources: Vec<AgentSourceSnapshot>) -> Self {
+        *self.sources.lock().expect("evidence sources") = sources;
+        self
+    }
+
+    /// Every source exposed so far: the seed plus each read's.
+    pub fn sources(&self) -> Vec<AgentSourceSnapshot> {
+        self.sources.lock().expect("evidence sources").clone()
+    }
 }
 
 fn read_job(account: AccountId, message_id: i64) -> AgentJob {
@@ -219,8 +247,9 @@ fn fed_back(
 
 /// The agent's starting context. `clock` is this run's "now" in the owner's
 /// zone (#526): fixed once per run, so a zone that changes mid-run cannot
-/// change an answer already given.
-fn snapshot(
+/// change an answer already given. Public so an offline replay builds its
+/// input with the same function production does.
+pub fn snapshot(
     context: &AgentContext,
     job: &AgentJob,
     limit: usize,
@@ -1768,12 +1797,7 @@ mod budget_tests {
     #[test]
     fn read_thread_initializes_only_exposed_source_assessments() {
         let (store, account, ids) = evidence_fixture();
-        let reader = StoreEvidence {
-            store: &store,
-            account,
-            limit: 2,
-            sources: std::sync::Mutex::new(Vec::new()),
-        };
+        let reader = StoreEvidence::new(&store, account, 2);
         let result = reader
             .read(&EvidenceRequest::ReadThread {
                 thread_id: "thread".into(),
@@ -1831,12 +1855,7 @@ mod budget_tests {
         assert!(initial.contains("Kept summary"), "{initial}");
         assert!(!initial.contains("PLANTED-DONE-REASON"), "{initial}");
         assert!(snapshot.initial["previous_decision"]["done"].is_null());
-        let reader = StoreEvidence {
-            store: &store,
-            account,
-            limit: 8,
-            sources: std::sync::Mutex::new(Vec::new()),
-        };
+        let reader = StoreEvidence::new(&store, account, 8);
         let read = reader
             .read(&EvidenceRequest::ReadThread {
                 thread_id: "thread".into(),

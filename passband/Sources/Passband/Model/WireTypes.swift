@@ -1765,6 +1765,54 @@ enum GuestResponse: String, LenientRawEnum {
     static var unknownFallback: GuestResponse { .pending }
 }
 
+/// `GET /client/calendar/search` (docs/CALENDAR.md §10.1): the events and
+/// ghosts a query matches, upcoming soonest first, then past, most recent
+/// first. Each item is exactly what `/client/timeline` serves for it, so one
+/// decoder reads both. `total` counts the hits before the daemon's limit.
+struct CalendarSearchPage: Decodable, Sendable, Hashable {
+    var items: [CalendarSearchItem]
+    var total: Int
+    var granted: Bool
+
+    init(items: [CalendarSearchItem] = [], total: Int = 0, granted: Bool = false) {
+        self.items = items
+        self.total = total
+        self.granted = granted
+    }
+
+    /// LENIENT PER ITEM, as the timeline is: a row that does not decode
+    /// costs that row, not the block.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        items = (try c.decodeIfPresent([CalendarSearchItem].self, forKey: .items) ?? [])
+            .filter { $0.event != nil || $0.ghost != nil }
+        total = (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? items.count
+        granted = (try? c.decodeIfPresent(Bool.self, forKey: .granted)) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey { case items, total, granted }
+}
+
+/// One hit: `{"event": ...}` or `{"ghost": ...}`. Both nil when the row did
+/// not decode; the page drops those.
+struct CalendarSearchItem: Decodable, Sendable, Hashable {
+    var event: TimelineEvent?
+    var ghost: TimelineGhost?
+
+    init(event: TimelineEvent? = nil, ghost: TimelineGhost? = nil) {
+        self.event = event
+        self.ghost = ghost
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        event = try? c.decodeIfPresent(TimelineEvent.self, forKey: .event)
+        ghost = event == nil ? (try? c.decodeIfPresent(TimelineGhost.self, forKey: .ghost)) : nil
+    }
+
+    private enum CodingKeys: String, CodingKey { case event, ghost }
+}
+
 /// Wave 5: one person on an event. Only the address is required; a row
 /// without one is dropped, and it costs the event nothing.
 struct TimelineGuest: Codable, Sendable, Hashable {

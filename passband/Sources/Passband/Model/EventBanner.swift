@@ -48,6 +48,13 @@ enum EventBanner {
     /// A new Passband version is ready. The tap fronts the window, where the
     /// update card is already waiting, and is not a mail open either.
     static let updateRoute = "update"
+    /// An agent left a draft and asked the owner to review it. The banner
+    /// names a draft by its row id AND its creation second, which together
+    /// bind the tap to one draft: ids are reused once a draft is sent or
+    /// discarded (see `AgentDraftLink`). No thread, no event.
+    static let agentDraftRoute = "agent_draft"
+    static let draftKey = "passband.draft_id"
+    static let draftCreatedKey = "passband.draft_created"
 
     /// Where a notification tap goes, decided from its userInfo alone. Pure,
     /// so the one rule that matters most here is pinned by a test: a tap on
@@ -56,6 +63,10 @@ enum EventBanner {
     enum TapRoute: Equatable, Sendable {
         case update
         case test
+        /// An agent's draft to review. `accountId` nil only when an enriched
+        /// banner lost its account key, which the tap queue reads as "the
+        /// active account".
+        case agentDraft(accountId: UUID?, draftId: Int, created: Int)
         case reveal(messageId: Int, threadId: String, sender: String)
         case authPage
         case message(Int)
@@ -67,6 +78,21 @@ enum EventBanner {
         let route = userInfo[routeKey] as? String
         if route == updateRoute { return .update }
         if route == testRoute { return .test }
+        // BEFORE anything else reads the payload: a draft push carries no
+        // message, thread or event, and must never fall through to them.
+        if route == agentDraftRoute {
+            let id = (userInfo[draftKey] as? Int) ?? (userInfo[draftKey] as? String).flatMap(Int.init)
+            let created =
+                (userInfo[draftCreatedKey] as? Int) ?? (userInfo[draftCreatedKey] as? String).flatMap(Int.init)
+            if let id, id > 0, let created, created > 0 {
+                return .agentDraft(
+                    accountId: (userInfo[accountKey] as? String).flatMap(UUID.init(uuidString:)),
+                    draftId: id, created: created)
+            }
+        }
+        if let push = draftPush(userInfo["event_id"] as? String) {
+            return .agentDraft(accountId: push.accountId, draftId: push.draftId, created: push.created)
+        }
         let messageId =
             (userInfo[messageKey] as? Int) ?? (userInfo[messageKey] as? String).flatMap(Int.init)
         let flagged = (userInfo[authKey] as? Bool) ?? false
@@ -95,6 +121,71 @@ enum EventBanner {
             let account = UUID(uuidString: String(raw[..<colon])),
             let event = Int(raw[raw.index(after: colon)...]), event > 0 else { return nil }
         return UnresolvedPush(accountId: account, eventId: event)
+    }
+
+    /// The pusher's draft ping, `"<account>:draft:<id>:<created>"`: the tag
+    /// the client registered, a literal, the draft's row id, and its creation
+    /// time in Unix seconds. STRICT like `AgentDraftLink`: exactly that shape,
+    /// numbers written the one plain way, nothing looser.
+    ///
+    /// Distinct from an event push by construction: `unresolvedPush` splits at
+    /// the LAST colon, so this shape's account half is never a UUID there.
+    struct DraftPush: Equatable, Sendable {
+        var accountId: UUID
+        var draftId: Int
+        var created: Int
+    }
+
+    static func draftPush(_ raw: String?) -> DraftPush? {
+        guard let raw, raw.count <= 256 else { return nil }
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4, parts[1] == "draft",
+            let account = UUID(uuidString: String(parts[0])),
+            let id = plainNumber(parts[2], maxDigits: 12),
+            let created = plainNumber(parts[3], maxDigits: 11)
+        else { return nil }
+        return DraftPush(accountId: account, draftId: id, created: created)
+    }
+
+    /// A positive integer written the one plain way: ASCII digits, no sign,
+    /// no leading zero.
+    private static func plainNumber(_ text: Substring, maxDigits: Int) -> Int? {
+        guard !text.isEmpty, text.count <= maxDigits, text.first != "0",
+            text.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(text), n > 0
+        else { return nil }
+        return n
+    }
+
+    /// A draft's `created_at` (RFC 3339, with or without fractional seconds)
+    /// as the whole Unix second a push or link names it by. nil when the
+    /// stamp cannot be read, which never matches anything.
+    static func draftSecond(_ createdAt: String) -> Int? {
+        guard let date = eventDate(createdAt) else { return nil }
+        return Int(date.timeIntervalSince1970.rounded(.down))
+    }
+
+    /// What the banner for an agent's draft says. Who it is to and what it is
+    /// about, both the agent's own words in the owner's mailbox; never the
+    /// body. Short, because a lock screen truncates.
+    static func agentDraftCopy(to: String, subject: String, isReply: Bool, parentFrom: String?)
+        -> (title: String, body: String)
+    {
+        // Quote-aware: `"Okafor, Maya" <maya@x>` is one recipient.
+        let firstTo = SenderID.recipients(to).first ?? ""
+        let named = firstTo.isEmpty ? (parentFrom ?? "") : firstTo
+        let who =
+            named.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "" : SenderID.resolve(named).displayName
+        let topic = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lead = who.isEmpty ? "" : (isReply ? "Reply to \(who)" : "To \(who)")
+        let body: String
+        switch (lead.isEmpty, topic.isEmpty) {
+        case (false, false): body = "\(lead): \(topic)"
+        case (false, true): body = lead
+        case (true, false): body = topic
+        case (true, true): body = "Open it to read it and send."
+        }
+        return ("Your agent left a draft", body)
     }
 
     // MARK: - routing

@@ -355,6 +355,8 @@ final class Notifier {
         case auth
         /// Auth mail with a message id: the audited reveal, never the reader.
         case reveal(messageId: Int, threadId: String, sender: String)
+        /// An agent's draft to review, bound to its creation second.
+        case agentDraft(draftId: Int, created: Int)
     }
 
     /// A tap: front the app, restore the window if it was closed, open the
@@ -371,6 +373,14 @@ final class Notifier {
     func handleRevealTap(messageId: Int, threadId: String, sender: String, accountId: UUID?) {
         Analytics.capture("notification_opened", ["has_thread": true])
         deliver(.reveal(messageId: messageId, threadId: threadId, sender: sender), accountId: accountId)
+    }
+
+    /// A tap on "your agent left a draft": the composer, holding that draft,
+    /// in the account the push came from. Counted as a banner opened with no
+    /// thread, which is what it is.
+    func handleAgentDraftTap(draftId: Int, created: Int, accountId: UUID?) {
+        Analytics.capture("notification_opened", ["has_thread": false])
+        deliver(.agentDraft(draftId: draftId, created: created), accountId: accountId)
     }
 
     func handleMessageTap(messageId: Int, accountId: UUID?) {
@@ -484,6 +494,11 @@ final class Notifier {
                 store.sealedMeta(message: messageId)
                     ?? AuthPolicy.revealMeta(messageId: messageId, threadId: threadId, sender: sender),
                 source: RevealSource.notification)
+        case .agentDraft(let draftId, let created):
+            // Delivered only once the account on screen is the push's, so
+            // the active account is the one it was for.
+            guard let account = AccountManager.shared.activeId else { return }
+            AppStore.shared.openAgentDraftFromPush(draftId: draftId, created: created, accountId: account)
         }
     }
 }
@@ -611,6 +626,9 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
             // posting at all.
             case .test:
                 Notifier.shared.front()
+            case .agentDraft(let account, let draftId, let created):
+                Notifier.shared.handleAgentDraftTap(
+                    draftId: draftId, created: created, accountId: account ?? accountId)
             case .reveal(let messageId, let threadId, let sender):
                 Notifier.shared.handleRevealTap(
                     messageId: messageId, threadId: threadId, sender: sender, accountId: accountId)

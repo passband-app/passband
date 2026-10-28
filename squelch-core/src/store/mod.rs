@@ -868,6 +868,11 @@ pub struct MessageOpen {
 pub const OPEN_PROXIED: &str = "proxied";
 /// Open classification for every other fetcher.
 pub const OPEN_UNKNOWN: &str = "unknown";
+/// Open classification for a fetch whose agent marks it as a machine: a
+/// security scanner or link checker that fetches a mail's images on delivery.
+/// Stored and listed, but never counted as an open and never notified. See
+/// [`crate::tracking::classify_user_agent`].
+pub const OPEN_SCANNER: &str = "scanner";
 
 /// The message a tracking token points at, resolved in one hop from the token.
 /// Only ever `Some` when the tracker exists, belongs to the account, and its
@@ -2172,6 +2177,44 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// Upsert the sync cursor for a mailbox key.
     fn set_sync_state(&self, account_id: AccountId, mailbox: &str, state: &SyncState)
     -> Result<()>;
+
+    /// Which kind of mailbox the account is (`accounts.provider`).
+    /// [`CoreError::NotFound`](crate::error::CoreError::NotFound) for an
+    /// unknown account, and an error for a provider this build does not know:
+    /// never a default, so an account a newer build set up is refused rather
+    /// than synced as the wrong kind.
+    fn account_provider(&self, account_id: AccountId) -> Result<crate::mail::MailProvider>;
+
+    /// The sync engine's change-feed cursor for the account, opaque, or `None`
+    /// before the first one is stored (a first run).
+    ///
+    /// FOR A GMAIL ACCOUNT THE LEGACY `sync_state` `'history'` ROW IS THE
+    /// CURSOR, read exactly as the engine always read it, so an upgraded
+    /// install resumes, a rolled-back build's progress is kept, and an
+    /// operator's edit of it (the re-ingest drill in docs/SECURITY.md §1, a
+    /// rewind, a zero) still works. See `store/sqlite/sync_cursor.rs`.
+    fn sync_cursor(&self, account_id: AccountId) -> Result<Option<crate::mail::SyncCursor>>;
+
+    /// Store the account's change-feed cursor. For a Gmail account the cursor
+    /// must be a historyId (anything else is refused, nothing written), and
+    /// the legacy `sync_state` `'history'` row is written in the same
+    /// transaction, so a build from before `sync_cursor` resumes from the same
+    /// point. [`CoreError::NotFound`](crate::error::CoreError::NotFound) for an
+    /// unknown account.
+    fn set_sync_cursor(
+        &self,
+        account_id: AccountId,
+        cursor: &crate::mail::SyncCursor,
+    ) -> Result<()>;
+
+    /// Whether the account already stores the message the provider calls
+    /// `provider_msg_id`, in any tier.
+    ///
+    /// UNWIRED ON PURPOSE. When a source wires it, it goes on the INCREMENTAL
+    /// path only: the backfill and catch-up re-fetch mail already stored, and
+    /// that re-fetch is how a sanitizer change reaches `body_html`, which is
+    /// baked at ingest.
+    fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool>;
 
     /// The last Gmail INBOX unread counts the sync loop stored, or `None` when
     /// none were ever fetched (old DB, or every fetch so far has failed). `None`

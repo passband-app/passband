@@ -15,7 +15,6 @@ mod console;
 mod devices;
 mod error;
 mod events;
-pub mod gmail_write;
 mod group_send;
 mod groups;
 pub mod guard;
@@ -38,6 +37,7 @@ mod unsub_fetch;
 mod unsub_html;
 mod unsub_job;
 pub mod unsubscribe;
+pub mod write;
 
 pub use assistant::AssistantRelay;
 pub use auth::{DEVICE_AUTH_CONCURRENCY, require_bearer};

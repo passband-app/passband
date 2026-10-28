@@ -840,6 +840,221 @@ fn stats_bands_and_last_surfaced_at() {
     assert!(s1.last_surfaced_at.is_some());
 }
 
+/// THE INVENTORY IS REUSED UNTIL SOMETHING IS WRITTEN. A count planted in the
+/// memo comes back while nothing has been written, which is the proof a poll
+/// read none of it again; the next write, through any store method, drops it.
+#[test]
+fn stats_reuse_the_inventory_until_something_is_written() {
+    let (store, acct) = store();
+    let since = Utc::now() - chrono::Duration::days(30);
+    ingest_normal(&store, acct, "g1", "t1", Tier::Signal, 70, Utc::now());
+    let first = store.stats(acct, since).unwrap();
+
+    store
+        .inventory_memo
+        .lock()
+        .unwrap()
+        .as_mut()
+        .expect("the first call kept its inventory")
+        .counts
+        .sealed = 9999;
+    assert_eq!(store.stats(acct, since).unwrap().sealed, 9999, "reused");
+
+    ingest_normal(&store, acct, "g2", "t2", Tier::Signal, 70, Utc::now());
+    let after = store.stats(acct, since).unwrap();
+    assert_eq!(after.sealed, first.sealed, "read again after a write");
+    assert_eq!(after.total, first.total + 1);
+}
+
+/// A write by ANOTHER connection to the same file (`squelchd token`, `pair`,
+/// a standalone `squelch-mcp`) is seen too: the token carries the file's
+/// data version, not only this connection's own changes.
+#[test]
+fn stats_see_a_write_by_another_process() {
+    let (store, acct, dir) = file_store("stats-memo");
+    // Removed on every path out, a failed assertion included.
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = RemoveOnDrop(dir.clone());
+    let since = Utc::now() - chrono::Duration::days(30);
+    ingest_normal(&store, acct, "g1", "t1", Tier::Signal, 70, Utc::now());
+    let before = store.stats(acct, since).unwrap();
+
+    let other = SqliteStore::open(dir.join("store.sqlite3")).unwrap();
+    ingest_normal(&other, acct, "g2", "t2", Tier::Signal, 70, Utc::now());
+    drop(other);
+
+    assert_eq!(store.stats(acct, since).unwrap().total, before.total + 1);
+}
+
+/// What is reused is the account's own all-time inventory and nothing else:
+/// the bands follow the window they are asked for with no write in between,
+/// and another account is never served this one's counts.
+#[test]
+fn stats_reuse_neither_the_bands_nor_another_accounts_counts() {
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    ingest_normal(
+        &store,
+        acct,
+        "g1",
+        "t1",
+        Tier::Signal,
+        70,
+        Utc::now() - chrono::Duration::days(10),
+    );
+
+    let wide = store
+        .stats(acct, Utc::now() - chrono::Duration::days(30))
+        .unwrap();
+    let narrow = store
+        .stats(acct, Utc::now() - chrono::Duration::days(5))
+        .unwrap();
+    assert_eq!((wide.bands.new, narrow.bands.new), (1, 0));
+    assert_eq!(wide.total, narrow.total);
+
+    let theirs = store
+        .stats(other, Utc::now() - chrono::Duration::days(30))
+        .unwrap();
+    assert_eq!((theirs.total, theirs.bands.new), (0, 0));
+    let mine = store
+        .stats(acct, Utc::now() - chrono::Duration::days(30))
+        .unwrap();
+    assert_eq!(mine.total, wide.total);
+}
+
+/// THE BAND COUNTS READ ONLY THE WINDOW, AND COUNT THE SAME. The full-scan
+/// form they replace is the oracle: over mail inside and outside the
+/// window, threads and singles, every tier, done and open, sent, spam,
+/// archived, reminders set and fired, at windows from a day to everything,
+/// the two agree exactly.
+#[test]
+fn band_counts_match_the_unwindowed_scan() {
+    use super::super::attention::{BANDS_SQL, LIVE_OR_REMINDER, STANDING_BAND, WITHIN_WINDOW};
+    let (store, acct) = store();
+    let now = Utc::now();
+    let tiers = [Tier::Signal, Tier::Deadline, Tier::Noise, Tier::PastDue];
+    for i in 0..48i64 {
+        let thread = if i % 3 == 0 {
+            String::new()
+        } else {
+            format!("t{}", i % 7)
+        };
+        let id = ingest_normal(
+            &store,
+            acct,
+            &format!("g{i}"),
+            &thread,
+            tiers[(i % 4) as usize],
+            (i * 2) as u8,
+            now - chrono::Duration::days(i * 3),
+        );
+        let conn = store.lock().unwrap();
+        let set = |sql: &str| conn.execute(sql, params![id]).unwrap();
+        match i % 8 {
+            1 => set("UPDATE triage SET status='done' WHERE message_id=?1"),
+            2 => set(
+                "UPDATE triage SET status='open', surfaced_at=received_at FROM messages WHERE triage.message_id=?1 AND messages.id=?1",
+            ),
+            3 => {
+                set("UPDATE triage SET reminded_at='2026-01-01T00:00:00+00:00' WHERE message_id=?1")
+            }
+            4 => set(
+                "UPDATE triage SET remind_at='2099-01-01T00:00:00+00:00', status='done' WHERE message_id=?1",
+            ),
+            5 => set("UPDATE messages SET is_archive=1 WHERE id=?1"),
+            6 => set("UPDATE messages SET is_spam=1 WHERE id=?1"),
+            7 => set("UPDATE messages SET is_sent=1 WHERE id=?1"),
+            _ => 0,
+        };
+    }
+    let scan = format!(
+        "SELECT
+             COUNT(DISTINCT CASE WHEN t.standing = 1 THEN tkey END),
+             COUNT(DISTINCT CASE WHEN t.surfaced_at IS NULL
+                 AND t.status != 'done' THEN tkey END),
+             COUNT(DISTINCT CASE WHEN t.status = 'open' THEN tkey END)
+         FROM (SELECT t.*, COALESCE(NULLIF(m.thread_id, ''), 'msg-' || m.id) AS tkey,
+                      ({STANDING_BAND}) AS standing
+               FROM triage t
+               JOIN messages m ON m.id = t.message_id
+               WHERE t.account_id = ?1
+                 AND m.is_sent = 0
+                 AND m.is_spam = 0
+                 AND {LIVE_OR_REMINDER}
+                 AND {WITHIN_WINDOW}) t"
+    );
+    let conn = store.lock().unwrap();
+    let count = |sql: &str, days: i64| -> (i64, i64, i64) {
+        conn.query_row(
+            sql,
+            params![acct, (now - chrono::Duration::days(days)).to_rfc3339()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+    // Every arm of the window admits rows no other arm does, so a branch
+    // missing from WINDOW_ROWS would show as a mismatch below.
+    let only = |arm: &str| -> i64 {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM triage t JOIN messages m ON m.id = t.message_id
+                 WHERE t.account_id = ?1 AND {arm}"
+            ),
+            params![acct, (now - chrono::Duration::days(7)).to_rfc3339()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(only("m.received_at < ?2 AND t.remind_at IS NOT NULL AND t.reminded_at IS NULL") > 0);
+    assert!(only("m.received_at < ?2 AND t.reminded_at IS NOT NULL AND t.remind_at IS NULL") > 0);
+    assert!(only("m.received_at >= ?2 AND t.remind_at IS NULL AND t.reminded_at IS NULL") > 0);
+    let mut nonzero = false;
+    for days in [1, 7, 30, 60, 100, 200, 10_000] {
+        let expected = count(&scan, days);
+        nonzero |= expected != (0, 0, 0);
+        assert_eq!(count(&BANDS_SQL, days), expected, "window of {days} days");
+    }
+    assert!(nonzero, "the fixture reaches every band");
+}
+
+/// The windowed band count seeks the window and the two reminder indexes,
+/// then probes `triage` and `messages` by rowid. It never scans either.
+#[test]
+fn band_counts_seek_the_window() {
+    use super::super::attention::BANDS_SQL;
+    let (store, _) = store();
+    let conn = store.lock().unwrap();
+    let steps = plan(&conn, &BANDS_SQL);
+    for index in [
+        "idx_messages_received",
+        "idx_triage_remind_at",
+        "idx_triage_reminded_at",
+    ] {
+        assert!(
+            steps.iter().any(|s| s.contains(index)),
+            "{index}: {steps:?}"
+        );
+    }
+    for probe in [
+        "SEARCH t USING INTEGER PRIMARY KEY (rowid=?)",
+        "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)",
+    ] {
+        assert!(steps.iter().any(|s| s == probe), "{probe}: {steps:?}");
+    }
+    assert!(
+        !steps.iter().any(|s| s.starts_with("SCAN t")
+            || s.starts_with("SCAN m")
+            || s.starts_with("SCAN triage")
+            || s.starts_with("SCAN messages")),
+        "{steps:?}"
+    );
+}
+
 // ---- reminders: "remind me about this later" -----------------------------
 
 /// `(status, remind_at)` straight off the row, as raw strings.

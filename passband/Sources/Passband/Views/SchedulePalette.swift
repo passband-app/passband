@@ -171,7 +171,6 @@ struct SchedulePalette: View {
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
             .onAppear {
-                focused = true
                 refreshHits()
             }
             // The composer it was setting a time FOR went away underneath it
@@ -189,6 +188,7 @@ struct SchedulePalette: View {
 
     private var surface: some View {
         PaletteShell(
+            focus: $focused,
             glassID: "schedule", icon: "clock",
             title: composer?.sendAt == nil ? "Send later" : "Move the send time",
             // What it is set to now, when this is a move: the one fact the

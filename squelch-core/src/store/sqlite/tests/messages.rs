@@ -970,6 +970,12 @@ fn sent_listing_shows_only_sent_mail_newest_first_with_recipients_and_opens() {
             .record_open(acct, "tok-1", 1_100, Some("Apple Mail/16.0"), "unknown")
             .unwrap()
     );
+    // A probable scanner is recorded and listed, but never counted.
+    assert!(
+        store
+            .record_open(acct, "tok-1", 1_090, Some("curl/8.4.0"), "scanner")
+            .unwrap()
+    );
 
     let rows = store.sent_listing(acct, 50, 0).unwrap();
     let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();

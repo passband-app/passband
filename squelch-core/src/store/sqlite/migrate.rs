@@ -61,6 +61,60 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
     Ok(n as usize == tables.len())
 }
 
+/// Every stored `unknown` and `scanner` open is relabelled with TODAY'S
+/// classifier, in BOTH directions: a scanner recorded before the label existed
+/// stops counting, and a person's open hidden by a marker that has since been
+/// removed comes back. `proxied` is left alone. Idempotent, one savepoint (one
+/// commit, not one per row), and only rows whose label changes are written.
+/// The table is small (capped per token, retired with its tracker), so this
+/// runs on every open of the store rather than behind a version flag.
+fn relabel_scanner_opens(conn: &Connection) -> Result<()> {
+    if !has_columns(conn, "message_opens", &["user_agent", "classification"])? {
+        return Ok(());
+    }
+    let rows: Vec<(i64, Option<String>, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, user_agent, classification FROM message_opens
+             WHERE classification IN ('unknown', 'scanner')",
+        )?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let changes: Vec<(i64, &str)> = rows
+        .into_iter()
+        .filter_map(|(id, ua, was)| {
+            let now = crate::tracking::classify_user_agent(ua.as_deref());
+            // `proxied` is never written here: only these two labels move.
+            let now = if now == crate::store::OPEN_SCANNER {
+                crate::store::OPEN_SCANNER
+            } else {
+                crate::store::OPEN_UNKNOWN
+            };
+            (now != was).then_some((id, now))
+        })
+        .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch("SAVEPOINT relabel_scanner_opens")?;
+    let applied = changes.iter().try_for_each(|(id, label)| {
+        conn.execute(
+            "UPDATE message_opens SET classification = ?1 WHERE id = ?2",
+            rusqlite::params![label, id],
+        )
+        .map(|_| ())
+    });
+    match applied {
+        Ok(()) => conn.execute_batch("RELEASE relabel_scanner_opens")?,
+        Err(e) => {
+            let _ = conn
+                .execute_batch("ROLLBACK TO relabel_scanner_opens; RELEASE relabel_scanner_opens");
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
 /// Additive, idempotent migrations for pre-existing DBs. New tables and most
 /// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; this seam
 /// carries new COLUMNS on an existing table, plus any index that NAMES such a
@@ -68,7 +122,16 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
 /// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
+    relabel_scanner_opens(conn)?;
     retire_preference_retriage(conn)?;
+    // The account's mail provider. 'gmail' on every pre-existing row, which is
+    // the honest reading: Gmail was the only provider this daemon ever had.
+    add_column_if_missing(
+        conn,
+        "accounts",
+        "provider",
+        "TEXT NOT NULL DEFAULT 'gmail'",
+    )?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
     add_column_if_missing(
         conn,

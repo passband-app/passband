@@ -531,60 +531,6 @@ fn spawn_statistics_refresh(store: Arc<SqliteStore>) {
     });
 }
 
-/// How long after boot the history retention pass first runs. Past the
-/// startup burst (the poll catching up, the first triage round) and clear of
-/// the statistics pass's early ticks, so the three never queue on the store
-/// mutex together.
-const HISTORY_RETENTION_AFTER_SECS: u64 = 1200;
-/// Then every six hours. A pass with nothing due reads up to the window, a
-/// page or a few, and costs a millisecond or two; six hours rather than a day
-/// because the timer counts
-/// time awake (a laptop that sleeps most of the day would stretch "daily"
-/// into days) and starts over on every restart.
-const HISTORY_RETENTION_EVERY_SECS: u64 = 6 * 3600;
-/// A failed pass (a sibling process holding the file past the busy timeout)
-/// is tried again sooner.
-const HISTORY_RETENTION_RETRY_SECS: u64 = 3600;
-
-/// Spawn the history retention pass ([`SqliteStore::prune_history`]): run
-/// diagnostics and fast-lane assessments past their window are deleted, in
-/// short pages. Both long-lived modes, like the statistics pass, and for the
-/// same reasons: behind the mutex via `spawn_blocking`, never fatal, and not
-/// shutdown-aware because the next tick is hours away.
-fn spawn_history_retention(store: Arc<SqliteStore>) {
-    tokio::spawn(async move {
-        let mut wait = HISTORY_RETENTION_AFTER_SECS;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-            wait = HISTORY_RETENTION_EVERY_SECS;
-            let store = store.clone();
-            let Ok((pruned, outcome)) =
-                tokio::task::spawn_blocking(move || store.prune_history(chrono::Utc::now())).await
-            else {
-                eprintln!("squelchd: history retention pass panicked");
-                continue;
-            };
-            // Counts only, and the pages committed before any error count.
-            if pruned != Default::default() {
-                eprintln!(
-                    "squelchd: history retention removed {} run record(s) and {} notification \
-                     assessment(s) older than {} days, and slimmed {} kept revisit answer(s)",
-                    pruned.runs,
-                    pruned.assessments,
-                    squelch_core::store::sqlite::HISTORY_RETENTION_DAYS,
-                    pruned.runs_trimmed,
-                );
-            }
-            if let Err(e) = outcome {
-                eprintln!(
-                    "squelchd: history retention pass stopped short (retrying in an hour): {e}"
-                );
-                wait = HISTORY_RETENTION_RETRY_SECS;
-            }
-        }
-    });
-}
-
 fn build_runtime() -> Result<tokio::runtime::Runtime, squelch_core::CoreError> {
     let parallelism = available_parallelism();
     let env_override = std::env::var(WORKER_THREADS_ENV).ok();
@@ -1902,7 +1848,10 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
         });
 
         spawn_statistics_refresh(store.clone());
-        spawn_history_retention(store.clone());
+        // No history retention pass: `SqliteStore::prune_history` exists and
+        // is tested, but nothing schedules it. Run diagnostics and fast-lane
+        // assessments are kept until it is decided what the triage eval and
+        // cost work need from them (see `store/sqlite/retention.rs`).
 
         let mut engine = SyncEngine::new(store, creds, account_id, email, config);
         if let Some(e) = embedder {
@@ -2598,7 +2547,9 @@ fn cmd_serve(
             Some(pusher) => {
                 eprintln!("squelchd: APNs pusher enabled (relay configured)");
                 sync_metrics.set_apns_pusher_enabled(true);
-                let pusher = pusher.with_metrics(sync_metrics.clone());
+                let pusher = pusher
+                    .with_metrics(sync_metrics.clone())
+                    .with_draft_pings(api_state.subscribe_draft_pings());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await
@@ -2840,7 +2791,10 @@ fn cmd_serve(
         }
 
         spawn_statistics_refresh(store.clone());
-        spawn_history_retention(store.clone());
+        // No history retention pass: `SqliteStore::prune_history` exists and
+        // is tested, but nothing schedules it. Run diagnostics and fast-lane
+        // assessments are kept until it is decided what the triage eval and
+        // cost work need from them (see `store/sqlite/retention.rs`).
 
         // SCHEDULED SEND fires here for the same reason the shredder runs
         // here: it sends on the WRITE credential (docs/SCHEDULED-SEND.md §4).

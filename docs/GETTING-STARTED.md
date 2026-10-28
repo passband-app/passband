@@ -284,22 +284,13 @@ One caveat: on plain HTTP over the LAN, that session cookie travels in the clear
 like the bearer token does. If that bothers you, the Tailscale route from step 2
 is what puts the console behind TLS.
 
-**Write actions.** Archive, label, and send need a second credential that only
-the human door's action handlers load. Sync and triage never touch it, and the
-agent door has no write tools at all. Mint it by exporting with `--write`, which
-runs two consent screens and carries both credentials in one blob (again no
-`-t`, for the same stream-merging reason as step 3):
-
-```sh
-umask 077
-docker run --rm -p 8847:8847 \
-  -e SQUELCH_CLIENT_ID=<client id> -e SQUELCH_CLIENT_SECRET=<client secret> \
-  ghcr.io/passband-app/squelchd:latest \
-  auth --export --write --expose-consent-listener > cred.txt
-```
-
-Import it the same way. Approve both screens with the same Google account, since
-one blob names one mailbox.
+**Write actions.** Archive, label, and send need nothing more: the credential
+from step 3 already covers them. `squelchd auth` asks Google for one Gmail
+scope, `gmail.modify`, and stores that token in two separate slots, Read for
+sync and Write for the human door's action handlers. Sync and triage can only
+ever load the Read slot, and the agent door has no write tools at all. (Older
+versions of this guide said to export again with `--write`; that flag is still
+accepted and changes nothing.)
 
 **Google Calendar.** The calendar is a hidden feature, off until you turn it on:
 start squelchd with `SQUELCH_FEATURES=calendar` (in the compose file's

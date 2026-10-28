@@ -298,11 +298,12 @@ also refresh the existing last-success metric.
 The fast notification assessment also persists auth classification, score,
 reason, model, prompt version, and timestamp for the human inspector.
 Applied runs record prompt version, model, configuration, token usage, model-turn
-and tool-call counts, and source IDs. Both are kept for 90 days: a pass every
-six hours deletes older assessments and runs. A message's newest applied
-revisit run is the exception, because the revisit pass reads it to tell an
-answered question from an unanswered one: it is kept, with its metadata
-emptied. Reported usage is retained for refusals,
+and tool-call counts, and source IDs. Both are kept indefinitely. A retention
+pass that deletes them after `HISTORY_RETENTION_DAYS` (keeping each message's
+newest applied revisit run, slimmed, because the revisit pass reads it) exists
+as `SqliteStore::prune_history`, but nothing schedules it: this history is the
+raw material for triage evaluation and cost work, and stays until that work
+decides what it needs. Reported usage is retained for refusals,
 truncation and invalid output as well. Truncation returns to the bounded caller
 instead of silently making another paid transport call. Missing usage remains
 unknown; the existing ledger is not durable per-call monetary settlement. Raw provider failures are not persisted as

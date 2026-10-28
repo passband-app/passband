@@ -20,7 +20,6 @@ struct TriageFixPalette: View {
         surface
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
-            .onAppear { focused = true }
             .task { current = try? await APIClient.shared.getAgentTriage(target.messageId).decision }
             .onChange(of: hits.count) { _, count in
                 selection = max(0, min(selection, max(0, count - 1)))
@@ -32,6 +31,7 @@ struct TriageFixPalette: View {
     /// which brings its own scrim and its own dismissal (see `PaletteShell`).
     private var surface: some View {
         PaletteShell(
+            focus: $focused,
             glassID: "palette", icon: "wand.and.sparkles", title: "Fix triage",
             subject: target.subject, subjectHelp: "\(target.sender) · \(target.subject)",
             // Display only the current authoritative decision, never legacy tiers.

@@ -6,7 +6,11 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS accounts (
     id         INTEGER PRIMARY KEY,
     email      TEXT UNIQUE NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- Which kind of mailbox this is (`crate::mail::MailProvider`): the sync
+    -- engine and the write door pick their provider from it. Every account
+    -- before providers existed was Gmail, which is what the default says.
+    provider   TEXT NOT NULL DEFAULT 'gmail'
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -861,15 +865,29 @@ CREATE INDEX IF NOT EXISTS idx_triage_revisits_due
 CREATE INDEX IF NOT EXISTS idx_triage_revisits_msg
     ON triage_revisits(account_id, message_id);
 
--- Gmail sync cursor, keyed by a logical mailbox string. Exactly one row is
--- stored, keyed mailbox='history': uidvalidity is unused (0) and last_uid holds
--- the account's historyId (a u64 that fits SQLite's i64 INTEGER).
+-- Gmail sync cursor, keyed by a logical mailbox string. The engine's cursor
+-- row is keyed mailbox='history': uidvalidity is unused (0) and last_uid holds
+-- the account's historyId (a u64 that fits SQLite's i64 INTEGER). The engine
+-- now reads and writes `sync_cursor` below; for a Gmail account that row is
+-- still written alongside it, so a rolled-back build resumes where this one
+-- stopped. The one-time sweeps keep their own done flags here.
 CREATE TABLE IF NOT EXISTS sync_state (
     account_id  INTEGER NOT NULL,
     mailbox     TEXT NOT NULL,
     uidvalidity INTEGER NOT NULL,
     last_uid    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, mailbox)
+);
+
+-- THE SYNC ENGINE'S CURSOR, one per account, opaque: whatever the account's
+-- mail source (`crate::mail::MailSource`) encodes its change-feed position as.
+-- Gmail's is the decimal historyId; nothing outside the source reads inside it.
+-- A Gmail account written before this table existed has no row here and is
+-- adopted from `sync_state` mailbox='history' on read.
+CREATE TABLE IF NOT EXISTS sync_cursor (
+    account_id INTEGER PRIMARY KEY,
+    cursor     TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 -- GMAIL-SIDE INBOX UNREAD COUNTS (labels/INBOX messagesUnread/threadsUnread),
@@ -1799,9 +1817,8 @@ CREATE TABLE IF NOT EXISTS agent_triage_runs (
     metadata_json TEXT NOT NULL DEFAULT '{}',
     completed_at TEXT NOT NULL
 );
--- One row per run, kept for HISTORY_RETENTION_DAYS (`retention.rs`; a
--- message's newest answered revisit is kept past it, slimmed, because the
--- revisit pass reads it),
+-- One row per run, kept indefinitely (`retention.rs` can prune it to
+-- HISTORY_RETENTION_DAYS, but nothing schedules that pass),
 -- so without this the diagnostics read (`agent_diagnostics`: the newest 25
 -- runs for one message) is a scan of the whole window. The first open after
 -- this shipped built it over the whole table, synchronously, before the
@@ -2182,7 +2199,8 @@ CREATE TABLE IF NOT EXISTS sender_zones (
 );
 
 -- Independent model assessments for human notification diagnostics. Multiple
--- attempts remain inspectable for HISTORY_RETENTION_DAYS (`retention.rs`);
+-- attempts remain inspectable indefinitely (`retention.rs` can prune them, but
+-- nothing schedules that pass);
 -- the notification ledger still records delivery, and it, not
 -- this table, is what stops a second model call.
 CREATE TABLE IF NOT EXISTS notification_assessments (

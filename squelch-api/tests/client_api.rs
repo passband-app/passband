@@ -8711,7 +8711,7 @@ async fn forward_success_sends_a_new_conversation_carrying_the_original() {
     assert!(!mime.contains("References"), "{mime}");
     // The note, then the quoted block, in both alternatives. Read DECODED: a
     // forward's body parts ride quoted-printable, because what they carry is a
-    // stranger's mail (see gmail_write::qp_encode).
+    // stranger's mail (see write::mime::qp_encode).
     let (text, html) = forward_bodies(&mime);
     assert!(text.contains("worth a read"));
     assert_eq!(

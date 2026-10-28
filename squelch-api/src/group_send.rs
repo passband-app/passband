@@ -17,6 +17,7 @@
 //! goes, because twelve identical 422s for one composition would read as the
 //! first override having been ignored.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -24,9 +25,10 @@ use squelch_core::store::sqlite::groups::{GroupSendRecipient, GroupSendStatus};
 use squelch_core::types::GroupMode;
 
 use crate::error::ApiError;
-use crate::gmail_write::{GmailWriteClient, MailAttachment, ReplyParts, build_reply_rfc822};
 use crate::handlers::{audit_action, store_call};
 use crate::state::ApiState;
+use crate::write::MailWriter;
+use crate::write::mime::{MailAttachment, ReplyParts, build_reply_rfc822};
 
 /// Gap between the messages of one fan-out.
 ///
@@ -161,7 +163,11 @@ pub(crate) struct FanOut {
 /// row is written BEFORE the task spawns and before any mail moves: a batch that
 /// dies between the two must leave a record of an audience it did not reach, not
 /// no record at all.
-pub(crate) async fn start(state: &ApiState, plan: FanOut) -> Result<i64, ApiError> {
+pub(crate) async fn start(
+    state: &ApiState,
+    client: Arc<dyn MailWriter>,
+    plan: FanOut,
+) -> Result<i64, ApiError> {
     let group_id = plan.audience.group_id;
     let subject = plan.subject.clone();
     let pending: Vec<GroupSendRecipient> = plan
@@ -197,7 +203,7 @@ pub(crate) async fn start(state: &ApiState, plan: FanOut) -> Result<i64, ApiErro
     .await;
 
     let state = state.clone();
-    tokio::spawn(async move { run(state, group_send_id, plan).await });
+    tokio::spawn(async move { run(state, client, group_send_id, plan).await });
     Ok(group_send_id)
 }
 
@@ -207,27 +213,18 @@ pub(crate) async fn start(state: &ApiState, plan: FanOut) -> Result<i64, ApiErro
 /// the audience is a list of people and one bad address is not a reason to stop
 /// writing to the other eleven. Each outcome is settled as it happens, so a
 /// daemon that dies halfway leaves a truthful record of how far it got.
-async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
-    let client = match crate::handlers::write_client(&state) {
-        Ok(c) => c,
-        Err(_) => {
-            // The credential was there when the route checked it and is not now.
-            // Fail the whole batch loudly rather than leaving it pending forever.
-            let _ = store_call(&state, move |store, account_id| {
-                store.fail_pending_group_sends(account_id, "write credential unavailable")
-            })
-            .await;
-            return;
-        }
-    };
-
+///
+/// THE WRITER IS THE ONE THE ROUTE ALREADY GOT, not a second lookup: the
+/// credential and the provider were checked before the batch was accepted, and
+/// a fresh read here could only fail a fan-out the route had promised.
+async fn run(state: ApiState, client: Arc<dyn MailWriter>, group_send_id: i64, plan: FanOut) {
     let total = plan.audience.addrs.len();
     let mut sent = 0usize;
     for (i, addr) in plan.audience.addrs.iter().enumerate() {
         if i > 0 {
             tokio::time::sleep(FAN_OUT_GAP).await;
         }
-        match send_one(&state, &client, &plan, addr).await {
+        match send_one(&state, &*client, &plan, addr).await {
             Ok(message_id) => {
                 sent += 1;
                 settle(
@@ -271,7 +268,7 @@ async fn run(state: ApiState, group_send_id: i64, plan: FanOut) {
 /// upstream detail never rides along in it.
 async fn send_one(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     plan: &FanOut,
     addr: &str,
 ) -> Result<Option<i64>, String> {

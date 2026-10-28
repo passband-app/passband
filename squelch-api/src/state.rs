@@ -167,6 +167,14 @@ pub struct ApiState {
     /// channel its banners reach the Mac on, and the wake the event stream
     /// pokes when a Mac arrives. See the module for the contract.
     pub(crate) renotify: crate::renotify::RenotifyShared,
+    /// The same requests, for the owner's PHONE: handed to the APNs pusher
+    /// (see [`squelch_core::push::DraftPing`]), which pushes them to every
+    /// registered iPhone. Not durable either, for the same reason as
+    /// `draft_opens`; with no pusher running (no relay configured) a send
+    /// finds no receiver and is simply the answer "no phone was told".
+    pub(crate) draft_pings: tokio::sync::broadcast::Sender<squelch_core::push::DraftPing>,
+    /// What the phone has already been told; see [`DraftPingLedger`].
+    pub(crate) draft_pinged: Arc<std::sync::Mutex<DraftPingLedger>>,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
@@ -281,6 +289,12 @@ pub struct ApiState {
     /// The mailbox's Gmail quota budget, shared with the sync engines. `None`
     /// when no daemon wired one (tests); the write door is then unpaced.
     pub(crate) gmail_budget: Option<Arc<squelch_core::gmail_budget::GmailBudget>>,
+    /// The account's mail provider once `handlers::write_client` has read it.
+    /// It cannot change under a running door (nothing writes the column yet),
+    /// so after the first successful read no write action pays a store call
+    /// for it, or can fail on one. Shared by every clone of the state; a
+    /// failed read is not cached.
+    pub(crate) mail_provider: Arc<std::sync::OnceLock<squelch_core::mail::MailProvider>>,
     /// THE ESCAPE HATCH, from `[console] allow_insecure_cookie` /
     /// `SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE`: the operator's declaration that
     /// this console is served over plain http on an origin that is not loopback.
@@ -630,6 +644,8 @@ impl ApiState {
             draft_opens: tokio::sync::broadcast::channel(16).0,
             draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
             renotify: crate::renotify::RenotifyShared::default(),
+            draft_pings: tokio::sync::broadcast::channel(16).0,
+            draft_pinged: Default::default(),
             shutdown: None,
             scheduled_wake: Arc::new(tokio::sync::Notify::new()),
             worker_clock_skew: chrono::Duration::zero(),
@@ -658,6 +674,7 @@ impl ApiState {
             audit_actor: crate::handlers::ACTION_ACTOR,
             sync_metrics: None,
             gmail_budget: None,
+            mail_provider: Arc::new(std::sync::OnceLock::new()),
             console_allow_insecure_cookie: false,
             console_signin_limiter: Arc::new(std::sync::Mutex::new(
                 ConsoleRateLimiter::per_minute(crate::console::CONSOLE_SIGNIN_REQUESTS_PER_MINUTE),
@@ -822,6 +839,14 @@ impl ApiState {
     /// replays and holds the connection, it just never goes live.
     ///
     /// [`SqliteStore::attach_event_notifier`]: squelch_core::store::SqliteStore::attach_event_notifier
+    /// The APNs pusher's end of the agent door's draft review requests (see
+    /// [`squelch_core::push::Pusher::with_draft_pings`]).
+    pub fn subscribe_draft_pings(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<squelch_core::push::DraftPing> {
+        self.draft_pings.subscribe()
+    }
+
     pub fn with_event_notifier(mut self, tx: tokio::sync::broadcast::Sender<i64>) -> Self {
         self.event_notifier = Some(tx);
         self
@@ -1323,7 +1348,7 @@ impl ApiState {
     /// for every clone of this state. See the field.
     pub(crate) fn write_http(&self) -> reqwest::Client {
         self.write_http
-            .get_or_init(crate::gmail_write::GmailWriteClient::build_http)
+            .get_or_init(crate::write::gmail::GmailWriteClient::build_http)
             .clone()
     }
 
@@ -1518,4 +1543,18 @@ impl ApiState {
     pub fn account_id(&self) -> AccountId {
         self.account_id
     }
+}
+
+/// The phone's side of the agent door's review requests: which drafts it was
+/// already told about, and when. ONE PUSH PER DRAFT (asking again may bring a
+/// draft up on the Mac again, never buzz the phone again), and a buzz budget of
+/// its own, much tighter than the Mac's five-second clock: an agent looping
+/// over `create_draft open:true` must not be able to ring the owner's phone
+/// once per draft it can hold. Both lists are bounded.
+#[derive(Debug, Default)]
+pub(crate) struct DraftPingLedger {
+    /// `(draft id, created)`, oldest first.
+    pub(crate) told: std::collections::VecDeque<(i64, i64)>,
+    /// When each push in the last hour went out, oldest first.
+    pub(crate) sent_at: std::collections::VecDeque<std::time::Instant>,
 }

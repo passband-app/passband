@@ -13,6 +13,7 @@ pub mod error;
 pub mod features;
 pub mod gcal;
 pub mod gmail_budget;
+pub mod mail;
 pub mod mem;
 pub mod metrics;
 pub mod owner_clock;

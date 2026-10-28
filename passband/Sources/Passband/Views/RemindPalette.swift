@@ -34,7 +34,6 @@ struct RemindPalette: View {
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
             .onAppear {
-                focused = true
                 refreshHits()
             }
     }
@@ -48,6 +47,7 @@ struct RemindPalette: View {
 
     private var surface: some View {
         PaletteShell(
+            focus: $focused,
             glassID: "remind", icon: "bell.badge",
             title: rescheduling ? "Move the reminder" : "Remind me",
             subject: target.subject, subjectHelp: "\(target.sender) · \(target.subject)",

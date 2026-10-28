@@ -454,6 +454,9 @@ struct PaletteRow<Content: View>: View {
 /// On the Mac it is a top-anchored command bar over a scrim; on a phone the
 /// caller presents it as a sheet, and the shell is the sheet's page.
 struct PaletteShell<Field: View, Rows: View>: View {
+    /// The field's focus. The caller puts `.focused` on its own field; the
+    /// shell is what raises it when the palette opens (see `body`).
+    let focus: FocusState<Bool>.Binding
     /// The glass id, unique per palette.
     let glassID: String
     let icon: String
@@ -488,22 +491,45 @@ struct PaletteShell<Field: View, Rows: View>: View {
     @Namespace private var paletteGlass
     /// The scrim's height, which is the window's: what the card may fill.
     @State private var roomHeight: CGFloat = 0
+    /// The rows' natural height, so the list can be exactly that tall.
+    @State private var rowsHeight: CGFloat = 0
 
     var body: some View {
+        shell
+            .onAppear {
+                // A TICK LATE. On the frame the palette appears its field is
+                // not in the window yet, and the reader's web view keeps the
+                // keyboard, so a same-frame focus is dropped and every key
+                // typed goes to the email underneath.
+                DispatchQueue.main.async { focus.wrappedValue = true }
+            }
+    }
+
+    @ViewBuilder
+    private var shell: some View {
         #if os(macOS)
             OverlayScrim(alignment: .top, topInset: topInset, onDismiss: onClose) {
                 GlassEffectContainer(spacing: 8) {
                     palette
                         .frame(width: Typo.measure(PaletteMetrics.width))
-                        // NEVER TALLER THAN THE WINDOW. The list is the one
-                        // flexible part (see `list`), so this squeezes it and
-                        // leaves the header, field and footer whole.
-                        .frame(maxHeight: roomHeight > 0
-                            ? max(0, roomHeight - topInset - PaletteMetrics.bottomMargin) : nil)
                         .passbandGlass(
                             .pane, cornerRadius: Radius.modal, tint: Palette.glassTintStrong,
                             id: glassID, in: paletteGlass)
                         .overlayShadow()
+                        // NEVER TALLER THAN THE WINDOW. The list is the one
+                        // flexible part (see `list`), so this squeezes it and
+                        // leaves the header, field and footer whole.
+                        //
+                        // OUTSIDE THE GLASS, top-aligned. A max-only frame
+                        // takes all the height it is offered up to the cap,
+                        // so wrapped INSIDE the glass it stretched the card
+                        // to the window with the content floating mid-card.
+                        // Out here the glass hugs the palette and the frame's
+                        // spare height is empty, untappable space over the scrim.
+                        .frame(
+                            maxHeight: roomHeight > 0
+                                ? max(0, roomHeight - topInset - PaletteMetrics.bottomMargin) : nil,
+                            alignment: .top)
                 }
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { roomHeight = $0 }
@@ -596,8 +622,16 @@ struct PaletteShell<Field: View, Rows: View>: View {
                 }
                 .padding(.horizontal, PaletteMetrics.listInset)
                 .padding(.vertical, Space.s6)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    rowsHeight = $0
+                }
             }
-            .frame(maxHeight: Space.scaled(listMaxHeight))
+            // AS TALL AS THE ROWS, up to the cap. A ScrollView takes every
+            // point it is offered, so a cap alone left one row ("noon") alone
+            // in a 230pt well. Still a max, not a height, so a short window
+            // can squeeze it (see `layoutPriority` in `palette`).
+            .frame(maxHeight: rowsHeight > 0
+                ? min(rowsHeight, Space.scaled(listMaxHeight)) : Space.scaled(listMaxHeight))
             .onChange(of: selection) { _, i in
                 guard let id = idAt(i) else { return }
                 withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(id, anchor: .center) }

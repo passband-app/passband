@@ -560,13 +560,14 @@ final class AppStore {
             if connStatus == .loading || connStatus == .connected { leftSavedConnectionWait = false }
             // A launch that lands on a gate paints no board: its interval
             // ends here, not whenever a pull finally lands.
-            if connStatus == .disconnected || connStatus == .error { LaunchSignpost.end(.gate) }
+            if connStatus == .disconnected || connStatus == .error { LaunchSignpost.end(.skipped) }
         }
     }
     /// Set to the epoch of a launch painted from disk (`restorePersistedBoard`)
     /// until its capabilities probe answers: the shell is up, but nothing has
     /// vouched yet for the credentials or the daemon's contract. A new epoch
-    /// (a switch, a connect) is its own flow's to verify.
+    /// (a switch, a connect) is its own flow's to verify, and so is any new
+    /// `settings`, which ends the probe (see its didSet).
     @ObservationIgnored private var unverifiedEpoch: Int?
     /// Whether the daemon has vouched for the connection on screen. False only
     /// between a launch from disk and its probe's answer; the Notifier holds
@@ -588,6 +589,11 @@ final class AppStore {
         didSet {
             capabilityRecoveryTask?.cancel()
             capabilityRecoveryTask = nil
+            // The probe a launch from disk was waiting on is the one just
+            // cancelled. Every writer of these probes them first (re-validate,
+            // connect, a switch) or is tearing the connection down, so the
+            // connection is no longer waiting on that answer.
+            unverifiedEpoch = nil
         }
     }
     @ObservationIgnored private var capabilityRecoveryTask: Task<Void, Never>?
@@ -632,7 +638,13 @@ final class AppStore {
     /// Model/Badge.swift.
     var sitrep = SitrepData() {
         didSet {
-            scheduleBoardSave()
+            // The sealed list is never on disk, so a change to it alone is not
+            // the file's business.
+            if sitrep.standing != oldValue.standing || sitrep.new != oldValue.new
+                || sitrep.open != oldValue.open || sitrep.totalCount != oldValue.totalCount
+            {
+                scheduleBoardSave()
+            }
             // The threads `ThreadPrefetch` refuses follow both signals: the
             // sealed list and the feed rows' own decisions. (Verdict writes
             // settle in `AuthDecisions.listed`, which the poller calls.)
@@ -640,11 +652,10 @@ final class AppStore {
                 noteAuthThreads()
             }
             guard sitrep.standing != oldValue.standing else { return }
-            // A board repainted from a snapshot (disk or a switch) is not the
-            // daemon's count, and the icon may hold a fresher one from the
-            // notification extension. The pull that confirms it sets the
-            // badge (`Badge.set` in the poller, on every pull).
-            if !boardIsSnapshot { Badge.refresh(sitrep.standing) }
+            // Not for the board painted from disk at launch: the icon may hold
+            // a fresher count from the notification extension, and the first
+            // pull sets the badge (`Badge.set` in the poller, on every pull).
+            if !paintingFromDisk { Badge.refresh(sitrep.standing) }
             noteHeadlineBand()
         }
     }
@@ -761,7 +772,9 @@ final class AppStore {
     // MARK: sitrep zones — see SitrepZoneCache
     var zones = SitrepZoneCache() {
         didSet {
-            scheduleBoardSave()
+            if zones.calendar != oldValue.calendar || zones.shipments != oldValue.shipments {
+                scheduleBoardSave()
+            }
             // A zone pass writes each zone apart; only Reading's moves this.
             guard zones.reading != oldValue.reading else { return }
             noteReadingThreads()
@@ -1902,7 +1915,10 @@ final class AppStore {
     }
 
     func loadSettings() async {
-        guard !RehearsalMode.isEnabled else { return }
+        guard !RehearsalMode.isEnabled else {
+            LaunchSignpost.end(.skipped)
+            return
+        }
         // The index says WHICH account's credentials to read, and repairs a
         // pre-multi-account install on the way through. Off the main actor for
         // the same reason the load below is.
@@ -1915,9 +1931,6 @@ final class AppStore {
             connStatus = .disconnected
             return
         }
-        // Boards nothing will paint go first: other accounts' gone stale,
-        // and any of an account no longer here.
-        BoardFile.sweep(keeping: Set(index.accounts.map(\.id)))
         // The last board on disk is read beside the credentials rather than
         // after them; it is painted only once they are in.
         async let keptBoard = BoardFile.load(account: active.id)
@@ -1937,7 +1950,7 @@ final class AppStore {
                     AccountManager.shared.activeId == active.id, connStatus == .loading,
                     !RehearsalMode.isEnabled
                 {
-                    restorePersistedBoard(board, for: active.id)
+                    restorePersistedBoard(board)
                     connError = nil
                     unverifiedEpoch = epoch
                     connStatus = .connected
@@ -1954,6 +1967,10 @@ final class AppStore {
             connStatus = .disconnected
             connError = "Passband couldn’t unlock your saved mailbox connection. Try again or reconnect."
         }
+        // Then the boards nothing will paint: other accounts' gone stale, and
+        // any of an account no longer here. Behind the paint, not in front of
+        // it on the queue.
+        BoardFile.sweep(keeping: Set(index.accounts.map(\.id)))
     }
 
     /// Take a `passband://` URL the OS handed us. Never acted on here — it is
@@ -1997,11 +2014,11 @@ final class AppStore {
     /// so this runs beside the first pull instead of in front of it, and moves
     /// nothing on screen unless the daemon refuses outright (credentials gone,
     /// a daemon too old for this build). That ends at the same error gate the
-    /// wait would have, and takes the board on disk with it. A daemon that is
-    /// only not answering leaves the board up under the stale banner, which
-    /// the poller's failing pulls raise, exactly as on a switch to one; the
-    /// probe keeps trying behind it, so a held notification tap and the
-    /// phone's push registration still follow the first answer.
+    /// wait would have. A daemon that is only not answering is the poller's to
+    /// report (its failing first pull is the down pane, as for any launch
+    /// whose daemon drops), and the probe keeps trying behind it, so a held
+    /// notification tap and the phone's push registration still follow the
+    /// first answer.
     private func recoverSavedConnection(
         _ stored: ConnectionSettings, accountId: UUID, behindBoard: Bool = false
     ) {
@@ -2041,13 +2058,16 @@ final class AppStore {
                     guard !Task.isCancelled, isCurrent(recoveryEpoch),
                         AccountManager.shared.activeId == accountId else { return }
                     guard CapabilityProbeRetry.isTransient(error) else {
-                        if behindBoard { refuseBoardFromDisk(accountId) }
+                        // Refused credentials take the board kept under them,
+                        // painted or not (a locked phone cannot read it).
+                        discardBoardFile(accountId)
+                        if behindBoard { refuseBoardFromDisk() }
                         connStatus = .error
                         connError = Self.connectErrorText(error)
                         return
                     }
-                    // Behind a board the stale banner says it; the text is
-                    // the loading gate's.
+                    // The text is the loading gate's; behind a board, the
+                    // poller's failing pulls say it.
                     if !behindBoard {
                         connError = "Server temporarily unavailable. Retrying automatically…"
                     }
@@ -2060,13 +2080,12 @@ final class AppStore {
 
     /// The daemon refused the credentials a launch painted its board from
     /// disk under. The epoch moves, so a pull still in flight lands nowhere
-    /// and nothing writes the board again, and the file is deleted. What is
-    /// on screen stays in memory behind the error gate (a reply being typed
-    /// with it), as the Connect gate's world does, until a reconnect wipes it.
-    private func refuseBoardFromDisk(_ accountId: UUID) {
+    /// and nothing writes the board again. What is on screen stays in memory
+    /// behind the error gate (a reply being typed with it), as the Connect
+    /// gate's world does, until a reconnect wipes it.
+    private func refuseBoardFromDisk() {
         unverifiedEpoch = nil
         epoch &+= 1
-        discardBoardFile(accountId)
     }
 
     /// Ask the saved daemon again now instead of sitting out the loop's sleep:
@@ -2231,10 +2250,11 @@ final class AppStore {
             statsEpoch = nil
             zonesLoadedAt = nil
             mailLoadedAt = [:]
-            // And the board on disk, and what vouched for it: the next launch
-            // must not paint the replaced server's rows under these
-            // credentials.
-            boardAnswered = nil
+            // And the board on disk. Nothing is written again under this
+            // epoch: a pull asked of the replaced server may still land in it,
+            // and the next launch must not paint that server's rows under
+            // these credentials.
+            boardWritesRefusedEpoch = epoch
             discardBoardFile(account.id)
             #if os(iOS)
                 await PushRegistration.shared.registerAndSync()
@@ -2683,8 +2703,8 @@ final class AppStore {
     /// IN MEMORY ONLY, and only for accounts that are NOT live: an entry is
     /// made when its account leaves the screen and taken when it comes back.
     /// The copy a LAUNCH paints is kept on disk by `BoardFile`, under its own
-    /// rules (no sealed list, no auth row, no money zones; see that file and
-    /// `persistableBoard`), and comes in through this cache's restore.
+    /// rules (no sealed list, no auth mail, no money cards, no stats; see that
+    /// file and `persistableBoard`), and is painted by the same `paintBoard`.
     @ObservationIgnored private var boardSnapshots: [UUID: BoardSnapshot] = [:]
 
     /// True from a snapshot's repaint until the daemon has answered for the
@@ -2734,9 +2754,7 @@ final class AppStore {
             // from a daemon that pages by arrival. One that pages by cursor
             // gets its cursor from a head fetched over an EMPTY page, and a
             // repainted head would leave the scroll with nowhere to go.
-            mailPages: mailKeyset
-                ? mailPages.compactMapValues { $0.value.map { Array($0.prefix(Self.mailLimit)) } }
-                : [:],
+            mailPages: mailKeyset ? Self.pageHeads(mailPages) : [:],
             mailKeyset: mailKeyset, selectedId: selectedId, lastRefresh: lastRefresh)
     }
 
@@ -2746,9 +2764,12 @@ final class AppStore {
     /// snapshot is simply the rows they compare against.
     private func restoreBoardSnapshot(for id: UUID) {
         guard let kept = boardSnapshots.removeValue(forKey: id) else { return }
-        // First, so everything the assignments below set off already knows
-        // the board is not the daemon's (the badge, above all).
-        boardIsSnapshot = true
+        paintBoard(kept)
+    }
+
+    /// Paint `kept` over an emptied world: a switch back's snapshot, or the
+    /// board from disk at launch (`restorePersistedBoard`).
+    private func paintBoard(_ kept: BoardSnapshot) {
         sitrep = kept.sitrep
         stats = kept.stats
         // These ARE this account's stats, which is all the stamp claims.
@@ -2762,6 +2783,7 @@ final class AppStore {
         // The account's own last sync, not the one just left: a daemon that
         // has since gone quiet shows this board as stale, which it is.
         lastRefresh = kept.lastRefresh
+        boardIsSnapshot = true
         // What a zone pass does once its rows are in, done for these rows:
         // the caches were wiped with the last account, and the cards are on
         // screen a round trip before the pass that would refill them.
@@ -2804,6 +2826,10 @@ final class AppStore {
     /// changes before a save that is not a quit writes it anyway.
     private static let boardRestampAfter: TimeInterval = 600
     @ObservationIgnored private var boardSaveTask: Task<Void, Never>?
+    /// True only while `restorePersistedBoard` assigns the board from disk.
+    @ObservationIgnored private var paintingFromDisk = false
+    /// An epoch under which nothing is written to disk (`revalidate`).
+    @ObservationIgnored private var boardWritesRefusedEpoch: Int?
     /// Something on the board changed since the last write.
     @ObservationIgnored private var boardDirty = true
     /// The last write: whose, under which epoch, dated when.
@@ -2856,7 +2882,8 @@ final class AppStore {
     /// (`mailLoadedAt`), so a page painted from disk and never visited is not
     /// restamped either.
     private func persistableBoard() -> PersistedBoard? {
-        guard boardHasAnswered(.bands), let board = liveBoard(), let lastRefresh = board.lastRefresh
+        guard boardHasAnswered(.bands), boardWritesRefusedEpoch != epoch, let board = liveBoard(),
+            let lastRefresh = board.lastRefresh
         else { return nil }
         var pages: [String: [AttentionUpdate]] = [:]
         for (mode, rows) in board.mailPages where mailLoadedAt[mode] != nil {
@@ -2864,7 +2891,7 @@ final class AppStore {
         }
         return PersistedBoard(
             standing: board.sitrep.standing, new: board.sitrep.new, open: board.sitrep.open,
-            totalCount: board.sitrep.totalCount, stats: board.stats,
+            totalCount: board.sitrep.totalCount,
             fyeHeadline: board.fyeHeadline, fyeHeadlineKey: board.fyeHeadlineKey,
             calendar: boardHasAnswered(.calendar) ? board.zones.calendar : [],
             shipments: boardHasAnswered(.shipments) ? board.zones.shipments : [],
@@ -2893,16 +2920,29 @@ final class AppStore {
     func saveBoardNow(waitingForDisk: Bool = false, evenIfUnchanged: Bool = false) {
         boardSaveTask?.cancel()
         boardSaveTask = nil
-        guard let id = AccountManager.shared.activeId, let board = persistableBoard() else { return }
+        // Whatever this call does or skips, a write queued before it (the
+        // resign just ahead of the phone's backgrounding) is on disk before a
+        // waiting caller goes on.
+        defer { if waitingForDisk { BoardFile.flush() } }
+        guard let id = AccountManager.shared.activeId else { return }
+        // Unchanged since the last write, checked before anything is built.
         if !evenIfUnchanged, !boardDirty, let written = boardWritten, written.account == id,
-            written.epoch == epoch,
-            board.lastRefresh.timeIntervalSince(written.lastRefresh) < Self.boardRestampAfter
+            written.epoch == epoch, let lastRefresh,
+            lastRefresh.timeIntervalSince(written.lastRefresh) < Self.boardRestampAfter
         {
             return
         }
+        guard let board = persistableBoard() else { return }
         boardDirty = false
+        if board.standing.isEmpty, !sitrep.standing.isEmpty {
+            // Every row of the band is auth mail. Painted from the file, the
+            // board would read as all clear; none is kept instead, and the
+            // next launch waits for the daemon.
+            discardBoardFile(id)
+            return
+        }
         boardWritten = (id, epoch, board.lastRefresh)
-        BoardFile.save(board, account: id, wait: waitingForDisk)
+        BoardFile.save(board, account: id)
     }
 
     /// Delete `id`'s board on disk, and forget that it was written, so the
@@ -2912,31 +2952,36 @@ final class AppStore {
         BoardFile.discard(account: id)
     }
 
-    /// Paint `id`'s board from disk over the empty world of a launch, through
-    /// the same restore a switch back uses: the board is a snapshot until the
-    /// daemon answers for it, every refresh still asks, and the stale banner
-    /// dates it from the daemon's last answer. Its auth fence goes up with it,
-    /// before any row can be hovered or warmed. The Reading zone and the money
-    /// zones are not on disk, so they come with the first zone pass; the
-    /// selection is not kept across a launch.
-    private func restorePersistedBoard(_ board: PersistedBoard, for id: UUID) {
+    /// Paint the board from disk over the empty world of a launch, through
+    /// the paint a switch back uses: the board is a snapshot until the daemon
+    /// answers for it, and every refresh still asks. Its auth fence goes up
+    /// with it, before any row can be hovered or warmed. ROWS ONLY: no stats
+    /// and no `lastRefresh`, so the shell mounts as on a launch with no board
+    /// for everything that waits on the daemon's first answer (the
+    /// capabilities, the first sync's prompts, the down pane or stale banner,
+    /// a switch's snapshot, which needs a board answered this session). The
+    /// Reading zone and the money zones are not on disk, so they come with the
+    /// first zone pass; the selection is not kept across a launch.
+    private func restorePersistedBoard(_ board: PersistedBoard) {
         restoredAuthThreads = Set(board.authThreads)
         noteAuthThreads()
-        var kept = SitrepZoneCache()
-        kept.calendar = board.calendar
-        kept.shipments = board.shipments
+        var diskZones = SitrepZoneCache()
+        diskZones.calendar = board.calendar
+        diskZones.shipments = board.shipments
         var pages: [MailMode: [AttentionUpdate]] = [:]
         for (key, rows) in board.mailPages {
             if let mode = MailMode(rawValue: key) { pages[mode] = rows }
         }
-        boardSnapshots[id] = BoardSnapshot(
-            sitrep: SitrepData(
-                standing: board.standing, new: board.new, open: board.open,
-                sealed: [], totalCount: board.totalCount),
-            stats: board.stats, fyeHeadline: board.fyeHeadline, fyeHeadlineKey: board.fyeHeadlineKey,
-            zones: kept, mailPages: pages, mailKeyset: board.mailKeyset, selectedId: nil,
-            lastRefresh: board.lastRefresh)
-        restoreBoardSnapshot(for: id)
+        paintingFromDisk = true
+        paintBoard(
+            BoardSnapshot(
+                sitrep: SitrepData(
+                    standing: board.standing, new: board.new, open: board.open,
+                    sealed: [], totalCount: board.totalCount),
+                stats: nil, fyeHeadline: board.fyeHeadline, fyeHeadlineKey: board.fyeHeadlineKey,
+                zones: diskZones, mailPages: pages, mailKeyset: board.mailKeyset, selectedId: nil,
+                lastRefresh: nil))
+        paintingFromDisk = false
         LaunchSignpost.end(.disk)
     }
 
@@ -3968,7 +4013,16 @@ final class AppStore {
     /// the store they survive navigation, and `Loadable` keeps the last rows through
     /// a reload, so even a stale revisit paints rows first and updates underneath.
     private var mailPages: [MailMode: Loadable<[AttentionUpdate]>] = [:] {
-        didSet { scheduleBoardSave() }
+        // The heads are what the file keeps; a loading flag or a scrolled-in
+        // tail is not.
+        didSet { if Self.pageHeads(mailPages) != Self.pageHeads(oldValue) { scheduleBoardSave() } }
+    }
+
+    /// The head of each loaded page: what a snapshot keeps of `mailPages`.
+    private static func pageHeads(
+        _ pages: [MailMode: Loadable<[AttentionUpdate]>]
+    ) -> [MailMode: [AttentionUpdate]] {
+        pages.compactMapValues { $0.value.map { Array($0.prefix(mailLimit)) } }
     }
     /// Which page the emails tab is on. Here for the same reason as the pages
     /// themselves: a trip to the sitrep and back has to land where you left off.

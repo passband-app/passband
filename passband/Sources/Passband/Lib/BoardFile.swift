@@ -8,12 +8,18 @@
 // replaces a board repainted on an account switch.
 //
 // WHAT IS KEPT is `PersistedBoard`: the bands, the calendar and shipment zones,
-// the stats, the hero's headline, the head of each mail page, when the daemon
-// last answered for them, and the ids (ids only) of the threads that hold auth
-// mail, so the prefetch fence stands before the sealed list is fetched again.
+// the hero's headline, the head of each mail page, when the daemon last
+// answered for them (which ages the file out, and nothing else), and the ids
+// (ids only) of the threads that hold auth mail, so the prefetch fence stands
+// before the sealed list is fetched again. NOT the stats: the shell mounts on
+// rows alone, and everything that waits for the daemon's first answer (the
+// stats' capabilities, the first sync's prompts, the clock the stale banner
+// reads) waits for it exactly as on a launch with no board.
 //
-// WHAT IS NEVER KEPT. The sealed list and the money zones (banking, receipts)
-// have no field at all. AUTH MAIL is kept out by every signal there is for it,
+// WHAT IS NEVER KEPT. The sealed list and the banking and receipt cards (the
+// amounts and balances extracted from that mail) have no field at all; that
+// mail's own rows on a mail page are kept like any other mail. AUTH MAIL is
+// kept out by every signal there is for it,
 // because a row's preview can be the code itself: the row's own decision
 // (`auth_kinds`, which only the feed's rows carry), its zone (`placement`
 // "auth", which the mail pages' rows carry), and the threads the store already
@@ -21,8 +27,11 @@
 // Every row of a thread any of those names goes, from every band, page and
 // zone. A mail-page row triage has not placed yet goes too: it is the newest
 // mail, which is exactly where a code that just arrived sits, and nothing has
-// said yet whether it is one. The rules run on the way in and again on the way
-// back out, so a file written any other way still cannot paint auth mail.
+// said yet whether it is one. A page is cut at its first such row rather than
+// holed, because the scroll pages on from a head's last row and would never
+// refill a gap; a page cut to nothing is not kept, so it paints as loading,
+// not as empty. The rules run on the way in and again on the way back out, so
+// a file written any other way still cannot paint auth mail.
 //
 // THE SAME PROTECTIONS AS THE SAVED CHATS (`PrivateFile`), because this is mail
 // content too: subjects, senders, the triage's one-line summaries. Application
@@ -61,7 +70,6 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     var new: [AttentionUpdate]
     var open: [AttentionUpdate]
     var totalCount: Int?
-    var stats: StoreStats?
     var fyeHeadline: String?
     var fyeHeadlineKey: String?
     var calendar: [CalendarUpdate]
@@ -72,8 +80,8 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     /// The threads that hold auth mail, sorted: what `ThreadPrefetch` refuses
     /// from the moment this board is painted. Ids, never content.
     var authThreads: [String]
-    /// When the daemon last answered for this board: what the stale banner
-    /// dates the board from, and what ages it out.
+    /// When the daemon last answered for this board: what ages it out. Not
+    /// painted as the store's `lastRefresh`, which only a pull sets.
     var lastRefresh: Date
 
     /// A board to keep, with the auth mail taken out (see the file header).
@@ -81,7 +89,7 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     /// it.
     init(
         standing: [AttentionUpdate], new: [AttentionUpdate], open: [AttentionUpdate],
-        totalCount: Int?, stats: StoreStats?, fyeHeadline: String?, fyeHeadlineKey: String?,
+        totalCount: Int?, fyeHeadline: String?, fyeHeadlineKey: String?,
         calendar: [CalendarUpdate], shipments: [Shipment],
         mailPages: [String: [AttentionUpdate]], mailKeyset: Bool,
         authThreads: Set<String>, lastRefresh: Date
@@ -90,7 +98,6 @@ struct PersistedBoard: Codable, Sendable, Equatable {
         self.new = new
         self.open = open
         self.totalCount = totalCount
-        self.stats = stats
         self.fyeHeadline = fyeHeadline
         self.fyeHeadlineKey = fyeHeadlineKey
         self.calendar = calendar
@@ -123,14 +130,16 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     }
 
     /// A mail-page row also needs a zone: one triage has not placed yet may be
-    /// a code that just arrived.
+    /// a code that just arrived. A page keeps its rows only down to the first
+    /// that fails this (`withoutAuthMail`).
     static func keepsPageRow(_ row: AttentionUpdate, fence: Set<String>) -> Bool {
         row.placement != nil && keepsBandRow(row, fence: fence)
     }
 
     /// Take every auth row out, and every row of a thread that holds one,
-    /// from the bands, the pages and the zones. The headline goes with any
-    /// band row taken out: it was written about the band as it stood, and
+    /// from the bands, the pages and the zones; cut each page at its first
+    /// row that goes, and drop a page cut to nothing. The headline goes with
+    /// any band row taken out: it was written about the band as it stood, and
     /// may be about the mail just removed.
     private mutating func withoutAuthMail() {
         var fence = Set(authThreads)
@@ -143,7 +152,9 @@ struct PersistedBoard: Codable, Sendable, Equatable {
         standing = standing.filter { Self.keepsBandRow($0, fence: fence) }
         new = new.filter { Self.keepsBandRow($0, fence: fence) }
         open = open.filter { Self.keepsBandRow($0, fence: fence) }
-        mailPages = mailPages.mapValues { $0.filter { Self.keepsPageRow($0, fence: fence) } }
+        mailPages = mailPages
+            .mapValues { rows in Array(rows.prefix(while: { Self.keepsPageRow($0, fence: fence) })) }
+            .filter { !$0.value.isEmpty }
         calendar = calendar.filter { card in !(card.thread_id.map { fence.contains($0) } ?? false) }
         shipments = shipments.filter { card in !(card.thread_id.map { fence.contains($0) } ?? false) }
         if standing.count != before {
@@ -208,13 +219,14 @@ enum BoardFile {
     /// The board kept for `id`, if there is one that may be painted now. A
     /// file that is there but stale, of another version, or corrupt is
     /// deleted: nothing will ever paint it. One that cannot be read at all
-    /// (the phone locked) is left for a later launch.
+    /// (the phone locked) is left for a later launch. At the launch's own
+    /// priority, not the queue's: the first paint is waiting on it.
     static func load(
         account id: UUID, now: Date = Date(), in directory: URL = BoardFile.directory()
     ) async -> PersistedBoard? {
         let url = fileURL(for: id, in: directory)
         return await withCheckedContinuation { continuation in
-            queue.async { continuation.resume(returning: read(url, now: now)) }
+            queue.async(qos: .userInitiated) { continuation.resume(returning: read(url, now: now)) }
         }
     }
 
@@ -270,7 +282,14 @@ enum BoardFile {
         }
     }
 
-    /// Returns once everything queued before it has run. For the tests.
+    /// Returns once everything queued before it has run: a save that must be
+    /// on disk before the caller goes on (quitting, the phone backgrounded).
+    /// Never from the queue itself.
+    static func flush() {
+        queue.sync {}
+    }
+
+    /// The same, without blocking. For the tests.
     static func settle() async {
         await withCheckedContinuation { continuation in
             queue.async { continuation.resume() }
@@ -307,12 +326,12 @@ enum BoardFile {
 /// board" under Points of Interest, the client measurement
 /// docs/PERFORMANCE.md §4 asks for. Begun when the store is made and ended
 /// once, by whichever comes first: the board painted from disk, the first
-/// pull to land, or a gate (no board at all, so not a sample). Its end
-/// message says which, so one build measures both kinds of launch (one with
-/// no board kept is the network's).
+/// pull to land, or a launch that is not a sample (a gate, the practice
+/// inbox). Its end message says which, so one build measures both kinds of
+/// launch (one with no board kept is the network's).
 @MainActor
 enum LaunchSignpost {
-    enum Outcome { case disk, network, gate }
+    enum Outcome { case disk, network, skipped }
 
     private static let signposter = OSSignposter(
         subsystem: "app.passband.client", category: .pointsOfInterest)
@@ -331,7 +350,7 @@ enum LaunchSignpost {
         switch outcome {
         case .disk: signposter.endInterval("first board", state, "from disk")
         case .network: signposter.endInterval("first board", state, "from the network")
-        case .gate: signposter.endInterval("first board", state, "no board, a gate")
+        case .skipped: signposter.endInterval("first board", state, "not a sample: a gate or practice")
         }
     }
 }

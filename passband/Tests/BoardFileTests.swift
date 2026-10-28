@@ -68,7 +68,7 @@ struct BoardFileTests {
     ) -> PersistedBoard {
         let rows = rows ?? [row(1), row(2)]
         return PersistedBoard(
-            standing: rows, new: [], open: [], totalCount: rows.count, stats: nil,
+            standing: rows, new: [], open: [], totalCount: rows.count,
             fyeHeadline: "Two things today", fyeHeadlineKey: "k", calendar: calendar, shipments: [],
             mailPages: ["inbox": pages ?? rows], mailKeyset: true, authThreads: authThreads,
             lastRefresh: lastRefresh)
@@ -85,23 +85,30 @@ struct BoardFileTests {
     /// Every signal for auth mail keeps a row out, and every row of its
     /// thread with it: the feed's decision (a band row), the zone (a page row,
     /// which never carries the decision), the store's own fence (the sealed
-    /// list's threads), and a page row triage has not placed yet. What is
-    /// left of the bytes holds no trace of any of them.
+    /// list's threads), and a page row triage has not placed yet. A page is
+    /// cut at its first such row, never holed, and a page cut to nothing is
+    /// not kept. What is left of the bytes holds no trace of any of them.
     static func authMailNeverReachesTheFile() {
         let kept = board(
             rows: [row(1), row(7, auth: true), row(8, thread: "t7"), row(2)],
             pages: [
                 row(1),
-                row(20, placement: "auth"),  // an OTP in the inbox: no auth_kinds on a page row
-                row(21, thread: "t20"),  // the same thread
-                row(22, placement: nil),  // not placed yet: the code that just arrived
-                row(23, thread: "sealed"),  // a thread the sealed list holds
                 row(24, placement: "eyes"),
+                row(20, placement: "auth"),  // an OTP in the inbox: no auth_kinds on a page row
+                row(25),  // below the cut: kept off too, or the scroll would leave a hole
             ],
             calendar: [card(30, thread: "sealed"), card(31, thread: "t31")],
             authThreads: ["sealed"])
         check(kept.standing.map(\.id) == [1, 2], "an auth band row and its thread are out of the band")
-        check(kept.mailPages["inbox"]?.map(\.id) == [1, 24], "and every auth signal is out of the page")
+        check(kept.mailPages["inbox"]?.map(\.id) == [1, 24], "a page is cut at its first auth row")
+        for (what, top) in [
+            ("its thread", row(21, thread: "t20")),
+            ("an unplaced row", row(22, placement: nil)),
+            ("a fenced thread", row(23, thread: "sealed")),
+        ] {
+            let cut = board(pages: [top, row(1)], authThreads: ["sealed", "t20"])
+            check(cut.mailPages["inbox"] == nil, "a page headed by \(what) is not kept at all")
+        }
         check(kept.calendar.map(\.id) == [31], "a card from a fenced thread is out of its zone")
         check(kept.authThreads == ["sealed", "t20", "t7"], "the fence keeps every auth thread, by id")
         check(kept.fyeHeadline == nil && kept.fyeHeadlineKey == nil,
@@ -109,7 +116,7 @@ struct BoardFileTests {
         guard let bytes = try? PersistedBoard.encode(kept),
             let text = String(data: bytes, encoding: .utf8)
         else { return fail("a board encodes") }
-        for gone in [7, 8, 20, 21, 22, 23] {
+        for gone in [7, 8, 20, 25] {
             check(!text.contains("preview text \(gone)\""), "no trace of row \(gone) in the bytes")
         }
         check(!text.contains("otp"), "nor of an auth kind")
@@ -137,7 +144,7 @@ struct BoardFileTests {
             let back = PersistedBoard.decode(doctored, now: Date())
         else { return fail("the doctored file still reads") }
         check(back.standing.map(\.id) == [1, 2], "an auth row in the file is not painted")
-        check(back.open.isEmpty && back.mailPages["inbox"]?.isEmpty == true, "from any band or page")
+        check(back.open.isEmpty && back.mailPages["inbox"] == nil, "from any band or page")
     }
 
     static func aBoardRoundTrips() {

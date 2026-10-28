@@ -121,6 +121,8 @@ named.
 | `sealed_revealed` (M) | | Sealed mail opened. |
 | `shipment_cleared` | | The card's context-menu clear. |
 | `notification_opened` (M) | `has_thread` | Banner taps. |
+| `renotify_shown` (M) | `trigger`: `client_online` `meeting_end`; `items`, `due_soon`, `foreground` | A smart re-notify banner posted (docs/RENOTIFY.md). `items` is how many messages it named; `due_soon` is whether any of them came back because its due date is near; `foreground` is that the app was frontmost with its window up, so the system filed it into Notification Center with no banner. Posted, not seen: Focus and Do Not Disturb are invisible from here. A frame dropped as stale is not counted. |
+| `renotify_opened` (M) | `trigger`, `items` | A re-notify banner tapped. Kept apart from `notification_opened` so that one still means first banners only; the open it leads to is `thread_opened` with `source: notification`. |
 
 **`thread_opened.source`** (`OpenSource`): `sitrep` (for-your-eyes rows),
 `sitrep_card` (record zones: banking, shipments, receipts, calendar),

@@ -609,6 +609,21 @@ run_suite sealed-event \
   Sources/Passband/Model/EventBanner.swift \
   Tests/SealedEventTests.swift
 
+# Smart re-notify's banner (docs/RENOTIFY.md): the `renotify` frame beside
+# open_draft on the Mac stream, its freshness, its copy, an identity no first
+# banner can swallow or replace, and a tap that opens the first message.
+run_suite renotify-banner \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/AuthLabels.swift \
+  Sources/Passband/Lib/AgentDraftLink.swift \
+  Sources/Passband/Model/EventBanner.swift \
+  Sources/Passband/Model/RenotifyBanner.swift \
+  Tests/RenotifyBannerTests.swift
+
 # What auth mail asks of the owner (docs/AUTH-MAIL-HANDLING.md, "Clients"): the
 # sealed row from both daemon versions, which kinds open a question and for
 # how long, explained alerts, new-device bursts, critical changes, and the move

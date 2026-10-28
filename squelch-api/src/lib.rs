@@ -24,6 +24,7 @@ mod invite_mail;
 pub mod limits;
 mod markdown;
 mod pair;
+mod renotify;
 mod scheduled_send;
 mod serve;
 mod sharing;
@@ -49,6 +50,10 @@ pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
 pub use limits::{
     LONG_REQUEST_TIMEOUT, REQUEST_TIMEOUT, ROUTE_CEILINGS, RequestCeiling, RequestTimeouts,
     STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
+};
+/// Smart re-notify's worker and its pass (issue #625).
+pub use renotify::{
+    PassOutcome, RenotifyTiming, close_stale_renotify_sessions, renotify_worker, run_renotify_pass,
 };
 /// The scheduled-send worker and its pass. Exported for the daemon for the
 /// same reason as the shredder: it sends on the WRITE credential.
@@ -356,6 +361,13 @@ fn client_router(state: ApiState) -> Router {
         // Human door only — the agent door gains no access to the event log.
         .route("/client/events", get(events::events_stream))
         .route("/client/events/{id}", get(events::get_event))
+        // Smart re-notify: the app's tap report and the habit stats. Human
+        // door only, and 404 with the `renotify` feature off.
+        .route(
+            "/client/renotify/{id}/opened",
+            post(renotify::renotify_opened),
+        )
+        .route("/client/renotify/stats", get(renotify::renotify_stats))
         // Push-device registration. Human door only — the agent door never
         // learns a device exists.
         .route("/client/devices", post(devices::register_device))

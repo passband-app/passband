@@ -21,13 +21,14 @@ use std::time::Duration;
 use axum::{
     Json,
     extract::{Path, Query, State},
+    http::HeaderMap,
     response::{
         IntoResponse, Sse,
         sse::{Event as SseEvent, KeepAlive},
     },
 };
 use serde::Deserialize;
-use squelch_core::store::Store;
+use squelch_core::store::{CLIENT_HEADER, ClientPlatform, ClientTag, Store};
 use squelch_core::types::Event;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::StreamExt;
@@ -122,6 +123,13 @@ fn open_draft_frame(draft_id: i64) -> SseEvent {
         .data(format!("{{\"open_draft\":{draft_id},\"at\":{at}}}"))
 }
 
+/// A smart re-notify banner ([`crate::renotify`]), as an SSE frame. Like
+/// [`open_draft_frame`]: no `id:`, so it moves no cursor, and a payload an
+/// [`Event`] decoder rejects, so an app that does not know it carries on.
+fn renotify_frame(payload: &str) -> SseEvent {
+    SseEvent::default().event("renotify").data(payload)
+}
+
 /// Send every event past `cursor`, oldest first, in bounded batches. `None`
 /// means the connection is over (client hung up, or a store read failed — a
 /// failed read ends the stream rather than retrying, since the client reconnects
@@ -177,6 +185,7 @@ async fn run(
     mut wake: broadcast::Receiver<i64>,
     _anchor: Option<broadcast::Sender<i64>>,
     mut opens: Option<broadcast::Receiver<i64>>,
+    mut banners: Option<broadcast::Receiver<Arc<str>>>,
     tx: mpsc::Sender<Result<SseEvent, Infallible>>,
 ) {
     // Replay first — a no-op for a live-only connection.
@@ -206,6 +215,15 @@ async fn run(
             Some(open) = next_open(&mut opens) => {
                 if let Some(draft_id) = open
                     && tx.send(Ok(open_draft_frame(draft_id))).await.is_err()
+                {
+                    return;
+                }
+            }
+            // A re-notify banner, for a Mac stream. A lag is a missed banner:
+            // it was about a moment that has passed.
+            Some(banner) = next_banner(&mut banners) => {
+                if let Some(payload) = banner
+                    && tx.send(Ok(renotify_frame(&payload))).await.is_err()
                 {
                     return;
                 }
@@ -245,12 +263,32 @@ async fn shutting_down(shutdown: Option<watch::Receiver<bool>>) {
     }
 }
 
+/// [`next_open`] for re-notify banners.
+async fn next_banner(
+    banners: &mut Option<broadcast::Receiver<Arc<str>>>,
+) -> Option<Option<Arc<str>>> {
+    let Some(rx) = banners else {
+        return std::future::pending().await;
+    };
+    match rx.recv().await {
+        Ok(payload) => Some(Some(payload)),
+        Err(broadcast::error::RecvError::Lagged(_)) => Some(None),
+        Err(broadcast::error::RecvError::Closed) => {
+            *banners = None;
+            Some(None)
+        }
+    }
+}
+
 /// `GET /client/events` — the live notification feed, `text/event-stream`.
 /// `?after=<id>` replays past that cursor then follows; without it there is NO
-/// replay (see [`start_cursor`]). Nothing about the connection is persisted.
+/// replay (see [`start_cursor`]). Nothing about the connection is persisted,
+/// except that a Mac stream (`opens=1`) is a `client_sessions` row while the
+/// `renotify` feature is on ([`crate::renotify::MacSession`]).
 pub async fn events_stream(
     State(state): State<ApiState>,
     Query(q): Query<EventsQuery>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     // SUBSCRIBE BEFORE READING THE CURSOR: anything appended in between lands in
     // the broadcast queue and is re-read past our cursor, so the replay/live
@@ -270,7 +308,24 @@ pub async fn events_stream(
 
     // Subscribed for the life of the connection, and dropped with it: the
     // receiver count IS the number of Macs listening.
-    let opens = (q.opens.as_deref() == Some("1")).then(|| state.draft_opens.subscribe());
+    let mac = q.opens.as_deref() == Some("1");
+    let opens = mac.then(|| state.draft_opens.subscribe());
+    // A MAC STREAM is also smart re-notify's signal and its delivery path
+    // ([`crate::renotify`]): subscribed BEFORE the session is recorded, so a
+    // worker the arrival wakes already counts this connection as listening.
+    // Both are inert with the feature off: no banner is ever sent, and no
+    // session is written.
+    let banners = mac.then(|| state.renotify.frames.subscribe());
+    let session = if mac {
+        let platform = headers
+            .get(CLIENT_HEADER)
+            .and_then(|h| h.to_str().ok())
+            .and_then(ClientTag::parse)
+            .map_or(ClientPlatform::Macos, |tag| tag.platform);
+        crate::renotify::MacSession::open(&state, platform.as_str()).await
+    } else {
+        None
+    };
     // ONE MORE CLIENT LISTENING, for the life of the response body: the
     // guard rides inside the stream below, so a dropped connection is a
     // decrement the moment the body goes, not when the pump next notices.
@@ -286,12 +341,13 @@ pub async fn events_stream(
         // reconnect.
         tokio::select! {
             _ = shutting_down(shutdown) => {}
-            _ = run(pump_state, start, wake, anchor, opens, tx) => {}
+            _ = run(pump_state, start, wake, anchor, opens, banners, tx) => {}
         }
     });
 
     let body = ReceiverStream::new(rx).map(move |frame| {
         let _listening = &listening;
+        let _session = &session;
         frame
     });
     Ok(Sse::new(body).keep_alive(KeepAlive::new().interval(KEEPALIVE)))

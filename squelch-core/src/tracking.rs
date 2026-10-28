@@ -52,10 +52,12 @@ pub fn pixel_lands_on_relay(base_url: &str, relay_url: &str) -> bool {
     let (Some(a), Some(b)) = (parse(base_url), parse(relay_url)) else {
         return false;
     };
-    // `Url` already lowercases the scheme and a domain host.
+    // `Url` already lowercases the scheme and a domain host; a fully
+    // qualified trailing dot names the same host.
+    let host = |u: &url::Url| u.host_str().map(|h| h.trim_end_matches('.').to_string());
     a.scheme() == b.scheme()
-        && a.host_str().is_some()
-        && a.host_str() == b.host_str()
+        && host(&a).is_some_and(|h| !h.is_empty())
+        && host(&a) == host(&b)
         && a.port_or_known_default() == b.port_or_known_default()
 }
 
@@ -150,6 +152,45 @@ fn http_client() -> reqwest::Result<reqwest::Client> {
 /// all no bearer — the class of failure is already on stderr.
 fn relay_failure() -> CoreError {
     CoreError::Other(anyhow::anyhow!("relay opens poll failed"))
+}
+
+/// Append the `opened` event that wakes the existing SSE + APNs pipeline, for
+/// an open just recorded by EITHER path: the relay poller, or the daemon's own
+/// `/t/` route (every hosted tenant). Call it only when `record_open` said the
+/// row was new.
+/// BEST-EFFORT: the open is already durable, and `events` is UNIQUE on
+/// `message_id`, so the second open of a message is silently collapsed into
+/// the first — one nudge per message, not per pixel fetch.
+pub fn notify_open<S: Store + ?Sized>(store: &S, account_id: AccountId, token: &str) {
+    let tracked = match store.tracked_message(account_id, token) {
+        // The tracker exists but its echo never backfilled a local message
+        // id: the open is recorded, there is just nothing to point a
+        // notification at.
+        Ok(None) => return,
+        Ok(Some(t)) => t,
+        Err(e) => {
+            eprintln!("squelch: could not resolve a tracked message: {e}");
+            return;
+        }
+    };
+    let ev = NewEvent {
+        account_id,
+        message_id: tracked.message_id,
+        thread_id: tracked.thread_id,
+        kind: EventKind::Opened,
+        tier: Tier::Signal,
+        importance: OPENED_IMPORTANCE,
+        sender: tracked.from_addr,
+        one_line: tracked.subject,
+        deadline: None,
+        // An open receipt is about the user's OWN sent mail; nothing here is
+        // sealed and nothing routes to the reveal flow.
+        is_auth: false,
+        sealed_kind: None,
+    };
+    if let Err(e) = store.append_event(&ev) {
+        eprintln!("squelch: could not append an opened event: {e}");
+    }
 }
 
 /// The opens poller task. Construct with [`OpensPoller::from_config`], which
@@ -334,44 +375,8 @@ impl OpensPoller {
                 }
             }
             for token in &newly_opened {
-                self.notify_open(token);
+                notify_open(self.store.as_ref(), self.account_id, token);
             }
-        }
-    }
-
-    /// Append the `opened` event that wakes the existing SSE + APNs pipeline.
-    /// BEST-EFFORT: the open is already durable, and `events` is UNIQUE on
-    /// `message_id`, so the second open of a message is silently collapsed into
-    /// the first — one nudge per message, not per pixel fetch.
-    fn notify_open(&self, token: &str) {
-        let tracked = match self.store.tracked_message(self.account_id, token) {
-            // The tracker exists but its echo never backfilled a local message
-            // id: the open is recorded, there is just nothing to point a
-            // notification at.
-            Ok(None) => return,
-            Ok(Some(t)) => t,
-            Err(e) => {
-                eprintln!("squelch: opens poller could not resolve a tracked message: {e}");
-                return;
-            }
-        };
-        let ev = NewEvent {
-            account_id: self.account_id,
-            message_id: tracked.message_id,
-            thread_id: tracked.thread_id,
-            kind: EventKind::Opened,
-            tier: Tier::Signal,
-            importance: OPENED_IMPORTANCE,
-            sender: tracked.from_addr,
-            one_line: tracked.subject,
-            deadline: None,
-            // An open receipt is about the user's OWN sent mail; nothing here is
-            // sealed and nothing routes to the reveal flow.
-            is_auth: false,
-            sealed_kind: None,
-        };
-        if let Err(e) = self.store.append_event(&ev) {
-            eprintln!("squelch: opens poller could not append an opened event: {e}");
         }
     }
 
@@ -534,6 +539,7 @@ mod tests {
         assert!(pixel_lands_on_relay("https://relay.squelch.sh/", relay));
         assert!(pixel_lands_on_relay(" HTTPS://RELAY.squelch.sh ", relay));
         assert!(pixel_lands_on_relay("https://relay.squelch.sh:443", relay));
+        assert!(pixel_lands_on_relay("https://relay.squelch.sh./", relay));
         // A hosted tenant: its own vhost, with the relay held for push alone.
         assert!(!pixel_lands_on_relay(
             "https://ethan-2.passband.email",

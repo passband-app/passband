@@ -439,7 +439,7 @@ struct EmailWebView: View {
             // a floor so a one-word bubble does not squeeze the note.
             // Conditional as a whole, or an empty row would still cost the
             // stack's spacing.
-            if hasQuoted || prepared.trackers > 0 {
+            if hasQuoted || showsTrackerNote {
               HStack(spacing: Space.s10) {
                 if hasQuoted {
                     Button {
@@ -456,10 +456,15 @@ struct EmailWebView: View {
                     .buttonStyle(.textAction)
                     .help("the quoted reply chain below this message")
                 }
-                Spacer(minLength: 0)
+                if showsTrackerNote, frameWidth > 0 {
+                    Spacer(minLength: 0)
+                }
                 trackerNote
               }
-              .frame(maxWidth: frameWidth > 0 ? max(frameWidth, 240) : .infinity)
+              // Only a row carrying the note spans the frame. Without one the
+              // toggle hugs its own side (a sent bubble's right) as before,
+              // and before the first width arrives nothing widens the stack.
+              .frame(maxWidth: showsTrackerNote && frameWidth > 0 ? max(frameWidth, 240) : nil)
             }
         }
         .onAppear {
@@ -743,9 +748,20 @@ struct EmailWebView: View {
     /// remote-images offer, stays above. Pixels left in for a known sender
     /// used to be a pill up there too; it is the same kind of note about how
     /// the mail was rendered, so it lives here, as faint as the blocked one.
+    ///
+    /// "Allowed" is said only while remote images are actually on: a pixel left
+    /// in place still needs remote images to fetch, so with the images-blocked
+    /// offer showing nothing can see the open, and the note would be false.
+    private var showsTrackerNote: Bool {
+        guard prepared.trackers > 0 else { return false }
+        return !prepared.trackersAllowed || allowRemote || !prepared.hasRemoteCandidates
+    }
+
     @ViewBuilder
     private var trackerNote: some View {
-        if prepared.trackers > 0, prepared.trackersAllowed {
+        if !showsTrackerNote {
+            EmptyView()
+        } else if prepared.trackersAllowed {
             // Muted, not green: nothing was protected here. This sender is
             // someone the user writes to, so they may see the open.
             Label("trackers allowed (known sender)", systemImage: "eye")
@@ -755,7 +771,7 @@ struct EmailWebView: View {
                 .help(
                     "\(prepared.trackers) tracking pixel\(prepared.trackers == 1 ? "" : "s") left in place: you have emailed this sender, so they may see that you opened this"
                 )
-        } else if prepared.trackers > 0 {
+        } else {
             Label(
                 "\(prepared.trackers) tracker\(prepared.trackers == 1 ? "" : "s") blocked",
                 systemImage: "eye.slash"

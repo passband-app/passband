@@ -1909,7 +1909,11 @@ mod tests {
     /// with a relay for push still records opens directly.
     #[test]
     fn every_tenant_mints_pixels_against_its_own_vhost() {
-        for relay in [None, Some("https://relay.squelch.sh")] {
+        for relay in [
+            None,
+            Some("https://relay.squelch.sh"),
+            Some("https://relay.squelch.sh/"),
+        ] {
             let mut c = test_config();
             c.relay_url = relay.map(str::to_string);
             let env = daemon_env_of(&c, "alice");
@@ -1922,7 +1926,8 @@ mod tests {
             // https with a scheme, or the daemon mints nothing.
             assert!(url.starts_with("https://"));
             if let Some(relay) = relay {
-                assert_ne!(url, relay, "the pixel is never the relay");
+                let origin = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+                assert_ne!(origin(url), origin(relay), "the pixel is never the relay");
             }
         }
         assert!(HUMAN_DOOR_PREFIXES.contains(&"/t"));

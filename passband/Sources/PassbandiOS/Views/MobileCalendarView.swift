@@ -112,10 +112,11 @@ struct MobileCalendarView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
                     .padding(.bottom, 28)
-                    // A new list starts at its top: a new day for the month's
-                    // list and the day's hours, a new week for the week's.
-                    .id(listKey(place: place, week: week))
                 }
+                // A new list starts at its top: a new day for the day's hours,
+                // a new week for the week's. On the scroll view itself: a new
+                // identity for its content alone keeps the old offset.
+                .id(listKey(place: place, week: week))
                 .scrollDismissesKeyboard(.never)
                 .background(Palette.canvas)
                 .onChange(of: place.day) { _, day in
@@ -137,7 +138,9 @@ struct MobileCalendarView: View {
                         expanded: mode == .month, stepForward: $stepForward)
                 }
             }
-            .navigationTitle(MonthGrid.title(place.month, calendar: cal))
+            // The month of what is on screen: the grid's month, or in Day and
+            // Week the picked day's (which can be a greyed day of the next).
+            .navigationTitle(MonthGrid.title(mode == .month ? place.month : place.day, calendar: cal))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -525,6 +528,7 @@ private struct MobileCalendarStrip: View {
                     isToday: calendar.isDate(day.day, inSameDayAs: now),
                     selected: calendar.isDate(day.day, inSameDayAs: place.day),
                     dots: Array((covering + day.items).prefix(3)),
+                    total: covering.count + day.items.count,
                     calendar: calendar
                 ) {
                     Haptics.tick()
@@ -563,6 +567,8 @@ private struct DayCell: View {
     let isToday: Bool
     let selected: Bool
     let dots: [AgendaItem]
+    /// Everything on the day, of which `dots` are the first three.
+    let total: Int
     let calendar: Calendar
     let action: () -> Void
 
@@ -604,8 +610,7 @@ private struct DayCell: View {
 
     private var accessibility: String {
         let date = Agenda.format(day, "EEEE MMMM d", calendar)
-        let count = dots.count
-        let things = count == 0 ? "" : count == 1 ? ", 1 plan" : ", \(count) or more plans"
+        let things = total == 0 ? "" : total == 1 ? ", 1 plan" : ", \(total) plans"
         return (isToday ? "Today, " : "") + date + things
     }
 
@@ -1051,7 +1056,7 @@ private struct MobileDayTimeline: View {
                         .frame(width: lane + 4, height: 0.5)
                         .offset(x: Self.gutter, y: y)
                 }
-                ForEach(column.blocks) { block in
+                ForEach(visualBlocks) { block in
                     blockView(block, laneWidth: lane)
                 }
                 nowLine(width: lane)
@@ -1060,6 +1065,22 @@ private struct MobileDayTimeline: View {
         .frame(height: height + 8)
         .accessibilityElement(children: .contain)
     }
+
+    /// The blocks laid out by the height they are DRAWN at, not their
+    /// minutes: a 15-minute event is drawn 24 points tall, so two back to
+    /// back would stack one over the other's title if they shared a lane.
+    private var visualBlocks: [ColumnBlock] {
+        let minimum = Double(Self.minBlock / height)
+        let widened = column.blocks.map { b -> DaySegment in
+            let s = b.segment
+            return DaySegment(
+                item: s.item, part: s.part, lo: min(s.lo, 1 - minimum), hi: max(s.hi, min(1, s.lo + minimum)),
+                continuesBefore: s.continuesBefore, continuesAfter: s.continuesAfter)
+        }
+        return MonthGrid.lanes(widened)
+    }
+
+    static let minBlock: CGFloat = 24
 
     private func hourLabel(_ hour: Int) -> String {
         let h = hour % 12 == 0 ? 12 : hour % 12
@@ -1071,7 +1092,7 @@ private struct MobileDayTimeline: View {
         let item = segment.item
         let width = laneWidth / CGFloat(max(1, block.lanes))
         let top = CGFloat(segment.lo) * height
-        let h = max(24, CGFloat(segment.hi - segment.lo) * height - 2)
+        let h = max(Self.minBlock, CGFloat(segment.hi - segment.lo) * height - 2)
         let style = CalendarColor.style(item)
         let inks = ChipColors.inks(style.hue)
         let r: CGFloat = 8
@@ -1192,7 +1213,8 @@ private struct MobileDayTimeline: View {
 /// screen's height, so a five-week month has taller days than a six-week one.
 /// A day tapped opens in Day. One page of `MobileMonthPager`.
 private struct MobileMonthGrid: View {
-    let model: MonthModel
+    let items: [AgendaItem]
+    let month: Date
     let now: Date
     let calendar: Calendar
     let open: (Date) -> Void
@@ -1207,6 +1229,7 @@ private struct MobileMonthGrid: View {
     static var minCell: CGFloat { numberBand + 2 * (rowHeight + rowGap) + foot }
 
     var body: some View {
+        let model = MonthGrid.build(items, month: month, calendar: calendar)
         GeometryReader { geo in
             let rows = max(1, model.weeks.count)
             let cell = max(Self.minCell, floor(geo.size.height / CGFloat(rows)))
@@ -1238,6 +1261,9 @@ private struct MobileMonthGrid: View {
                             rows: fit.rows[column],
                             barLanes: MonthGrid.barLanes(fit.bars, column: column),
                             hiddenSpans: fit.overflow[column], slots: slots),
+                        spans: week.spans
+                            .filter { $0.firstColumn <= column && column <= $0.lastColumn }
+                            .map(\.item),
                         width: cellWidth, height: cellHeight)
                 }
             }
@@ -1257,7 +1283,7 @@ private struct MobileMonthGrid: View {
     }
 
     private func cellView(
-        _ day: MonthDay, rows: [Int], fold: CellFold, width: CGFloat, height: CGFloat
+        _ day: MonthDay, rows: [Int], fold: CellFold, spans: [AgendaItem], width: CGFloat, height: CGFloat
     ) -> some View {
         let isToday = calendar.isDate(day.day, inSameDayAs: now)
         return Button {
@@ -1295,7 +1321,7 @@ private struct MobileMonthGrid: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(Palette.hairline).frame(width: 0.5)
         }
-        .accessibilityLabel(accessibility(day, isToday: isToday))
+        .accessibilityLabel(accessibility(day, spans: spans, isToday: isToday))
     }
 
     private func spanBar(_ bar: SpanSegment, cellWidth: CGFloat) -> some View {
@@ -1306,6 +1332,8 @@ private struct MobileMonthGrid: View {
         return chip(bar.item, sub: label.sub, width: width, flatLeading: !bar.startsHere, flatTrailing: !bar.endsHere)
             .offset(x: CGFloat(bar.firstColumn) * cellWidth + lead, y: y(bar.lane))
             .allowsHitTesting(false)
+            // Each day's own label names the trips over it.
+            .accessibilityHidden(true)
     }
 
     /// One plan in a cell: its calendar's fill, its title clipped rather than
@@ -1340,9 +1368,11 @@ private struct MobileMonthGrid: View {
         .clipShape(shape)
     }
 
-    private func accessibility(_ day: MonthDay, isToday: Bool) -> String {
+    private func accessibility(_ day: MonthDay, spans: [AgendaItem], isToday: Bool) -> String {
         let date = Agenda.format(day.day, "EEEE MMMM d", calendar)
-        let titles = day.items.map(\.title)
+        // Everything on the day, spoken whole: the trips over it, then its
+        // own plans, including what the "+N" folded away.
+        let titles = (spans + day.items).map(\.title)
         let plans = titles.isEmpty ? "" : ", " + titles.joined(separator: ", ")
         return (isToday ? "Today, " : "") + date + plans
     }
@@ -1369,43 +1399,66 @@ private struct MobileMonthPager: View {
     let calendar: Calendar
     let open: (Date) -> Void
 
-    @State private var page = 0
+    /// Pages are ABSOLUTE month numbers (year * 12 + month), never offsets
+    /// from today: an offset meant something else after midnight on the
+    /// 31st, and the pager drifted off the store's month.
+    @State private var page: Int
+    /// The middle of the range, fixed when the pager is made.
+    @State private var anchor: Int
 
-    static let reach = 120
+    static let reach = 60
 
-    private var thisMonth: Date { MonthGrid.monthStart(now, calendar: calendar) }
-
-    private func offset(of month: Date) -> Int {
-        calendar.dateComponents([.month], from: thisMonth, to: MonthGrid.monthStart(month, calendar: calendar))
-            .month ?? 0
+    init(
+        items: [AgendaItem], place: MonthPlace, now: Date, calendar: Calendar,
+        open: @escaping (Date) -> Void
+    ) {
+        self.items = items
+        self.place = place
+        self.now = now
+        self.calendar = calendar
+        self.open = open
+        // Seeded here, not in onAppear: a page-style TabView can ignore (or
+        // write back over) a selection changed before its first layout.
+        let start = Self.number(place.month, calendar)
+        _page = State(initialValue: start)
+        _anchor = State(initialValue: start)
     }
 
-    private func month(_ offset: Int) -> Date {
-        calendar.date(byAdding: .month, value: offset, to: thisMonth) ?? thisMonth
+    static func number(_ month: Date, _ calendar: Calendar) -> Int {
+        let c = calendar.dateComponents([.year, .month], from: month)
+        return (c.year ?? 2000) * 12 + (c.month ?? 1) - 1
+    }
+
+    private func month(_ number: Int) -> Date {
+        var c = DateComponents()
+        c.year = number / 12
+        c.month = number % 12 + 1
+        c.day = 1
+        return calendar.date(from: c) ?? place.month
     }
 
     var body: some View {
         TabView(selection: $page) {
-            ForEach(-Self.reach...Self.reach, id: \.self) { offset in
+            ForEach((anchor - Self.reach)...(anchor + Self.reach), id: \.self) { number in
+                // The grid builds its own month, in its own body: only the
+                // pages the pager realises pay for MonthGrid.build.
                 MobileMonthGrid(
-                    model: MonthGrid.build(items, month: month(offset), calendar: calendar),
-                    now: now, calendar: calendar, open: open
+                    items: items, month: month(number), now: now, calendar: calendar, open: open
                 )
-                .tag(offset)
+                .tag(number)
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
-        .onAppear { page = offset(of: place.month) }
         // Settled on a page: that month becomes the store's.
         .onChange(of: page) { _, new in
-            let delta = new - offset(of: place.month)
-            guard delta != 0 else { return }
+            let current = Self.number(place.month, calendar)
+            guard new != current else { return }
             Haptics.tick()
-            store.moveCalendarMonth(.months(delta), now: now)
+            store.moveCalendarMonth(.months(new - current), now: now)
         }
         // The month moved from elsewhere (Today, another mode): follow it.
-        .onChange(of: place.month) { _, month in
-            let target = offset(of: month)
+        .onChange(of: place.month) { _, moved in
+            let target = Self.number(moved, calendar)
             if target != page { withAnimation(.snappy) { page = target } }
         }
     }

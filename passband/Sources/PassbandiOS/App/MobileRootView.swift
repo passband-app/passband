@@ -198,7 +198,14 @@ private struct MobileShell: View {
 
     /// The calendar holds the bar's second slot: the hidden feature is on for
     /// this mailbox and the daemon serves a timeline (`CalendarGate`).
-    private var calendarTab: Bool { store.calendarPageAvailable }
+    ///
+    /// UNTIL THE STATS LAND, THE LAST ANSWER. The gate reads false until the
+    /// first poll, so a cold launch drew Quick Look and swapped it for
+    /// Calendar a second later, and a login-code notification tapped at
+    /// launch was carried off with it. The bar is drawn from what it was last
+    /// time, and corrected (rarely) when the stats say otherwise.
+    private var calendarTab: Bool { store.hasStats ? store.calendarPageAvailable : lastCalendarTab }
+    @AppStorage("mobileCalendarTab") private var lastCalendarTab = false
 
     // No `@Bindable` shadow here: every modal below is presented off a derived
     // Binding that funnels dismissal through the store's own close verb, so
@@ -327,8 +334,12 @@ private struct MobileShell: View {
         // The feature turned on or off under a tab that just left the bar:
         // the slot's new occupant, rather than a selection nothing draws.
         .onChange(of: calendarTab) { _, on in
-            if on, tab == .records { tab = .calendar }
-            if !on, tab == .calendar { tab = .records }
+            if store.hasStats, lastCalendarTab != on { lastCalendarTab = on }
+            // The login codes go where the records go: up on the sitrep with
+            // the flag on, on Quick Look with it off. Whoever was looking at
+            // them follows them rather than losing the page.
+            if on, tab == .records { tab = showAuth ? .sitrep : .calendar }
+            if !on, tab == .calendar || showAuth { tab = .records }
         }
         .onChange(of: tab, initial: true) { _, _ in syncReaders() }
         .onChange(of: door.pane) { _, _ in syncReaders() }

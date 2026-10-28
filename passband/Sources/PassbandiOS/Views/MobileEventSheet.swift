@@ -41,65 +41,70 @@ struct MobileEventSheet: View {
         let problem = problem(draft, now: now)
         NavigationStack {
             Form {
-                Section {
-                    TextField("Title", text: titleBinding(now: now), axis: .vertical)
-                        .font(Typo.ui(17, weight: .semibold))
-                        .focused($titleFocused)
-                        .submitLabel(.done)
-                    if request.event == nil, !draft.title.isEmpty,
-                        let reading = EventForm.titleReading(draft, today: now, calendar: cal), reading.filled,
-                        reading.title != EventForm.trimmed(draft.title)
-                    {
-                        // What the title will be saved as, once the words
-                        // that named the day and the time come out of it.
-                        Text("Saves as \u{201C}\(reading.title)\u{201D}")
-                            .font(Typo.ui(12))
-                            .foregroundStyle(Palette.inkFaint)
-                    }
-                }
-                Section {
-                    Toggle("All day", isOn: field(\.allDay))
-                    DatePicker(
-                        draft.allDay ? "Starts" : "Day", selection: dayBinding(draft, now: now),
-                        displayedComponents: .date)
-                    if draft.allDay {
-                        DatePicker(
-                            "Ends", selection: endDayBinding(draft, now: now),
-                            in: (EventForm.parseDate(draft.date, today: now, calendar: cal) ?? now)...,
-                            displayedComponents: .date)
-                    } else {
-                        DatePicker(
-                            "Starts", selection: timeBinding(draft, now: now, end: false),
-                            displayedComponents: .hourAndMinute)
-                        DatePicker(
-                            "Ends", selection: timeBinding(draft, now: now, end: true),
-                            displayedComponents: .hourAndMinute)
-                    }
-                } footer: {
-                    if case .success(let when) = EventForm.when(draft, today: now, calendar: cal) {
-                        Text(EventForm.summary(when, now: now, calendar: cal))
-                    }
-                }
-                Section {
-                    TextField("Place", text: field(\.location))
-                    if store.calendarWritable.count > 1 || request.event == nil {
-                        calendarPicker(draft)
-                    }
-                    TextField("Notes", text: field(\.notes), axis: .vertical)
-                        .lineLimit(3...8)
-                }
-                if let problem, state == .editing {
+                Group {
                     Section {
-                        Text(problem.text)
-                            .font(Typo.ui(13))
-                            .foregroundStyle(Palette.inkFaint)
+                        TextField("Title", text: titleBinding(now: now), axis: .vertical)
+                            .font(Typo.ui(17, weight: .semibold))
+                            .focused($titleFocused)
+                            .submitLabel(.done)
+                        if request.event == nil, !draft.title.isEmpty,
+                            let reading = EventForm.titleReading(draft, today: now, calendar: cal), reading.filled,
+                            reading.title != EventForm.trimmed(draft.title)
+                        {
+                            // What the title will be saved as, once the words
+                            // that named the day and the time come out of it.
+                            Text("Saves as \u{201C}\(reading.title)\u{201D}")
+                                .font(Typo.ui(12))
+                                .foregroundStyle(Palette.inkFaint)
+                        }
+                    }
+                    Section {
+                        Toggle("All day", isOn: allDayBinding(now: now))
+                        DatePicker(
+                            draft.allDay ? "Starts" : "Day", selection: dayBinding(draft, now: now),
+                            displayedComponents: .date)
+                        if draft.allDay {
+                            DatePicker(
+                                "Ends", selection: endDayBinding(draft, now: now),
+                                in: (EventForm.parseDate(draft.date, today: now, calendar: cal) ?? now)...,
+                                displayedComponents: .date)
+                        } else {
+                            DatePicker(
+                                "Starts", selection: timeBinding(draft, now: now, end: false),
+                                displayedComponents: .hourAndMinute)
+                            DatePicker(
+                                "Ends", selection: timeBinding(draft, now: now, end: true),
+                                displayedComponents: .hourAndMinute)
+                        }
+                    } footer: {
+                        if case .success(let when) = EventForm.when(draft, today: now, calendar: cal) {
+                            Text(EventForm.summary(when, now: now, calendar: cal))
+                        }
+                    }
+                    Section {
+                        TextField("Place", text: field(\.location))
+                        if store.calendarWritable.count > 1 || request.event == nil {
+                            calendarPicker(draft)
+                        }
+                        TextField("Notes", text: field(\.notes), axis: .vertical)
+                            .lineLimit(3...8)
+                    }
+                    if let problem, state == .editing {
+                        Section {
+                            Text(problem.text)
+                                .font(Typo.ui(13))
+                                .foregroundStyle(Palette.inkFaint)
+                        }
                     }
                 }
+                // The FIELDS freeze, never the frozen controls: those sit
+                // outside this, or a 504 would leave nothing to press but
+                // Cancel (and a second add would make a duplicate).
+                .disabled(!editable)
                 if state.frozen {
                     frozen(state)
                 }
             }
-            .disabled(!editable)
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle(request.event == nil ? "New event" : "Edit event")
             .navigationBarTitleDisplayMode(.inline)
@@ -152,11 +157,16 @@ struct MobileEventSheet: View {
 
     private func save(_ draft: EventDraft, via control: SaveControl) {
         Haptics.tick()
-        Task {
-            if await store.saveEvent(draft, request, via: control) {
-                store.closeEventEditor()
-            }
-        }
+        // The store closes the editor on every success (and keeps it, frozen
+        // or editable, on anything else): nothing to close from here, and a
+        // close from here could land on a newer sheet.
+        Task { await store.saveEvent(draft, request, via: control) }
+    }
+
+    /// The guest terms the save will use, so the problem line judges the
+    /// draft exactly as `saveEvent` will.
+    private func terms(_ draft: EventDraft) -> GuestTerms {
+        store.guestPlan(draft, request).terms(owner: store.calendarAccountEmail)
     }
 
     /// "add event" on the Mac's footer, "Add event" as a button here.
@@ -167,9 +177,11 @@ struct MobileEventSheet: View {
     private func problem(_ draft: EventDraft, now: Date) -> EventDraftProblem? {
         switch request.mode {
         case .create:
-            return EventForm.problem(draft, today: now, calendar: cal)
+            return EventForm.problem(draft, today: now, calendar: cal, guests: terms(draft))
         case .edit:
-            if case .failure(let p) = EventForm.patch(draft, from: request.initial, today: now, calendar: cal) {
+            if case .failure(let p) = EventForm.patch(
+                draft, from: request.initial, today: now, calendar: cal, guests: terms(draft))
+            {
                 return p
             }
             return nil
@@ -177,21 +189,30 @@ struct MobileEventSheet: View {
     }
 
     /// Google may have made the change and the page has not shown it: the
-    /// fields freeze, and only these three things are on offer.
+    /// fields freeze, and only the Mac pane's frozen controls are on offer
+    /// (`EventPaneState.frozenControls`), with its words for them.
     private func frozen(_ state: EventPaneState) -> some View {
-        Section {
+        let controls = state.frozenControls
+        return Section {
             Text(CalendarWrite.uncertainUnseenText)
                 .font(Typo.ui(14))
                 .foregroundStyle(Palette.inkDim)
-            Button("Check again") {
-                Task { if await store.checkEventAgain(request) { store.closeEventEditor() } }
+            if controls.contains(.checkAgain) {
+                Button("Check again") {
+                    Task { await store.checkEventAgain(request) }
+                }
+                .disabled(store.calendarWriting)
             }
-            Button("Send again") {
-                Task { if await store.sendEventAgain(request) { store.closeEventEditor() } }
+            if controls.contains(.sendAgain), let sent = store.calendarPaneSent {
+                Button(sentence(EventPaneState.sendAgainLabel(sent))) {
+                    Task { await store.sendEventAgain(request) }
+                }
+                .disabled(store.calendarWriting)
             }
-            Button("Close", role: .cancel) { store.closeEventEditor() }
+            if controls.contains(.close) {
+                Button("Close", role: .cancel) { store.closeEventEditor() }
+            }
         }
-        .disabled(state == .sending(again: true))
     }
 
     // MARK: the calendar
@@ -225,6 +246,26 @@ struct MobileEventSheet: View {
         Binding(
             get: { (store.calendarDraft ?? request.initial)[keyPath: path] },
             set: { value in update { $0[keyPath: path] = value } })
+    }
+
+    /// The Mac pane's rule (`setAllDay`): turning all day off fills in the
+    /// hours an all-day event never had and lets the end day follow the start
+    /// again, so a three-day run does not become a three-day meeting. The
+    /// title is read again either way.
+    private func allDayBinding(now: Date) -> Binding<Bool> {
+        Binding(
+            get: { (store.calendarDraft ?? request.initial).allDay },
+            set: { on in
+                update { d in
+                    d.allDay = on
+                    if !on {
+                        if EventForm.trimmed(d.start).isEmpty { d.start = "9am" }
+                        if EventForm.trimmed(d.end).isEmpty { d.end = "10am" }
+                        d.endDate = ""
+                    }
+                    d = EventForm.refilled(d, today: now, calendar: cal)
+                }
+            })
     }
 
     /// The title, read for a day and a time on a new event.
@@ -275,7 +316,9 @@ struct MobileEventSheet: View {
         let base = day(draft, now: now)
         return Binding(
             get: {
-                cal.date(byAdding: .minute, value: minutes(draft, end: end) % 1440, to: base) ?? base
+                // From the wall clock, not minutes after midnight: on a
+                // daylight-saving day those are an hour apart.
+                EventForm.at(base, minutes(draft, end: end) % 1440, cal) ?? base
             },
             set: { value in
                 let parts = cal.dateComponents([.hour, .minute], from: value)

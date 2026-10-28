@@ -209,5 +209,8 @@ struct UnverifiedMark: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
             .help("The mail this came from did not pass sender authentication, so Passband cannot confirm who sent it.")
+            // A phone has no hover: the reason is spoken instead, and written
+            // out in the detail's Sender row.
+            .accessibilityHint("The mail this came from did not pass sender authentication.")
     }
 }

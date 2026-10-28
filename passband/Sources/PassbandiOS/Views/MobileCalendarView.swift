@@ -871,6 +871,9 @@ private struct MobileEventPage: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let id: String
+    /// A destructive answer was given and its delete is (or is about to be)
+    /// out. Cleared when the write settles.
+    @State private var answered = false
 
     private var item: AgendaItem? {
         guard let feed = store.calendarFeed else { return nil }
@@ -884,10 +887,19 @@ private struct MobileEventPage: View {
         return EventGuests.deleteWording(ask.event, feed: store.calendarFeed)
     }
 
+    /// THE QUESTION STAYS ASKED UNTIL IT IS SETTLED, as on the Mac: a delete
+    /// answered here is out, and only `eventDeleted` clears the question (a
+    /// failure leaves it up and the dialog comes back). SwiftUI writes false
+    /// to this binding right after a button's action, before the delete's
+    /// task has even started, so an answered question must not read that as
+    /// "cancel": `answered` is set synchronously by the destructive buttons.
     private var deleteAsked: Binding<Bool> {
         Binding(
             get: { deleteWording != nil && !store.calendarWriting },
-            set: { if !$0, store.calendarDeleteAsk != nil, !store.calendarWriting { store.cancelDeleteEvent() } })
+            set: { shown in
+                guard !shown, !answered, store.calendarDeleteAsk != nil, !store.calendarWriting else { return }
+                store.cancelDeleteEvent()
+            })
     }
 
     private func sentence(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
@@ -916,19 +928,32 @@ private struct MobileEventPage: View {
             if let ask = store.calendarDeleteAsk, let words = deleteWording {
                 if let tell = words.tell {
                     Button(sentence(tell), role: .destructive) {
+                        answered = true
                         Task { await store.deleteEvent(ask.event, tellGuests: true) }
                     }
                 }
                 Button(sentence(words.quiet), role: .destructive) {
+                    answered = true
                     Task { await store.deleteEvent(ask.event) }
                 }
             }
-            Button("Cancel", role: .cancel) { store.cancelDeleteEvent() }
+            Button("Cancel", role: .cancel) {
+                answered = false
+                store.cancelDeleteEvent()
+            }
         } message: {
             Text(deleteWording?.detail ?? "")
         }
+        .onChange(of: store.calendarWriting) { _, writing in
+            if !writing { answered = false }
+        }
         .onChange(of: item == nil) { _, gone in
-            if gone { dismiss() }
+            guard gone else { return }
+            // Gone under an open question (deleted elsewhere, say): the
+            // question goes with the page, or every later "+" would be
+            // refused by a question nobody can see.
+            if deleteWording != nil, !store.calendarWriting { store.cancelDeleteEvent() }
+            dismiss()
         }
     }
 }
@@ -1095,7 +1120,8 @@ private struct MobileDayTimeline: View {
                         guard let create else { return }
                         let hours = max(0, Double(point.y) / Double(Self.hourHeight))
                         let minutes = MonthGrid.dayFromHour * 60 + Int(hours * 2) * 30
-                        create(min(23 * 60 + 30, minutes))
+                        // An hour long, always: the last start is 11pm.
+                        create(min(23 * 60, minutes))
                     }
                 // The hour lines, each labelled in the gutter. Midnight closes
                 // the well without a label of its own.

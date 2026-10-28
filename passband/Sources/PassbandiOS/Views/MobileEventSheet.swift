@@ -231,20 +231,32 @@ struct MobileEventSheet: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             } footer: {
-                if plan.silent {
-                    Text(EventGuests.silentLine)
-                } else if plan.after > 0 {
-                    Text(
-                        plan.after == 1
-                            ? "Google emails your guest only when you press the button that says so."
-                            : "Google emails your \(plan.after) guests only when you press the button that says so.")
-                }
+                // The email keyboard has no comma on its first layer: say how
+                // addresses are separated, or a space reads as one bad address.
+                Text(
+                    plan.after == 0
+                        ? "Separate addresses with commas or new lines."
+                        : "Separate addresses with commas or new lines. Google emails "
+                            + (plan.after == 1 ? "your guest" : "your \(plan.after) guests")
+                            + " only when you press the button that says so.")
             }
         case .closed(let bar):
             Section {
+                // Who is on it, read-only: whoever "Save and tell guests"
+                // would email.
+                if let event = request.event, let names = EventGuests.names(event) {
+                    Text(names)
+                        .font(Typo.ui(14))
+                        .foregroundStyle(Palette.ink)
+                }
                 Text(bar.text)
                     .font(Typo.ui(13))
                     .foregroundStyle(Palette.inkFaint)
+                if plan.silent {
+                    Text(EventGuests.silentLine)
+                        .font(Typo.ui(13))
+                        .foregroundStyle(Palette.inkFaint)
+                }
             }
         case .none:
             EmptyView()

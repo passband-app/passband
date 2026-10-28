@@ -32,11 +32,29 @@
 
 import SwiftUI
 
+/// The phone's three ways of drawing the calendar, the desktop's switch at a
+/// phone's size: the month's grid, one week's days, one day's hours. Not the
+/// Mac's `CalendarViewMode`: the phone has no agenda mode (every mode lists),
+/// and the Mac has no day mode (its month has a day column beside it).
+enum PhoneCalendarMode: String, CaseIterable, Identifiable {
+    case month, week, day
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .month: "Month"
+        case .week: "Week"
+        case .day: "Day"
+        }
+    }
+}
+
 struct MobileCalendarView: View {
     @Environment(AppStore.self) private var store
 
-    /// The strip is the whole month rather than one week.
-    @State private var expanded = false
+    /// Kept across launches, like the Mac's mode: the way you like to look at
+    /// your week is not a choice to make again every morning.
+    @AppStorage("phoneCalendarMode") private var mode: PhoneCalendarMode = .week
     /// Folds opened, by day: "u" + day for unlikely, "e" + day for earlier.
     @State private var openFolds: Set<String> = []
     /// The direction the strip last moved, for the slide.
@@ -49,46 +67,47 @@ struct MobileCalendarView: View {
     #endif
 
     var body: some View {
-        // A minute clock: "Next, in 50 min", the earlier fold and today's dot
-        // all move with it. The feed changes on the poll's cadence (below).
+        // A minute clock: "Next, in 50 min", the earlier fold, the now line and
+        // today's dot all move with it. The feed changes on the poll's cadence.
         TimelineView(.everyMinute) { context in
             let now = context.date
             let cal = Calendar.current
             let place = store.calendarMonthPlace(now: now, calendar: cal)
             let items = memo.items(store.calendarFeed, calendar: cal)
             let model = memo.month(items, month: place.month, calendar: cal)
-            let days = Agenda.days(items, now: now, calendar: cal, from: place.day)
-            let onToday = cal.isDate(place.day, inSameDayAs: now)
-            let next = onToday ? Agenda.next(days, now: now) : nil
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 20) {
-                    MobileCalendarStatus()
-                    if let next {
-                        MobileNextCard(
-                            item: next.item,
-                            lead: Agenda.nextLead(next.item, ongoing: next.ongoing, now: now, calendar: cal),
-                            span: span(next.item, cal))
+            let week = model.weeks.first { w in w.days.contains { cal.isDate($0.day, inSameDayAs: place.day) } }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 20) {
+                        MobileCalendarStatus()
+                        content(items: items, model: model, week: week, place: place, now: now, cal: cal)
                     }
-                    ForEach(days) { day in
-                        daySection(day, now: now, cal: cal)
-                    }
-                    footnote(model: model, cal: cal)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .padding(.bottom, 28)
+                    // A new list starts at its top: a new day for the month's
+                    // list and the day's hours, a new week for the week's.
+                    .id(listKey(place: place, week: week))
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 4)
-                .padding(.bottom, 28)
-                // A new day picked is a new list: it starts at its top.
-                .id(place.day)
+                .scrollDismissesKeyboard(.never)
+                .background(Palette.canvas)
+                .onChange(of: place.day) { _, day in
+                    // The week lists the day picked; bring it up.
+                    if mode == .week {
+                        withAnimation(.snappy) { proxy.scrollTo(day, anchor: .top) }
+                    }
+                }
             }
-            .scrollDismissesKeyboard(.never)
-            .background(Palette.canvas)
             // THE STRIP RIDES THE BAR. A safe-area bar, not a pinned header:
             // the list scrolls under it with the platform's own edge effect,
             // the way it scrolls under the navigation bar above it.
             .safeAreaBar(edge: .top) {
-                MobileCalendarStrip(
-                    model: model, place: place, now: now, calendar: cal,
-                    expanded: $expanded, stepForward: $stepForward)
+                VStack(spacing: 10) {
+                    modePicker
+                    MobileCalendarStrip(
+                        model: model, place: place, now: now, calendar: cal,
+                        expanded: mode == .month, stepForward: $stepForward)
+                }
             }
             .navigationTitle(MonthGrid.title(place.month, calendar: cal))
             .navigationBarTitleDisplayMode(.inline)
@@ -96,7 +115,9 @@ struct MobileCalendarView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     // Only off today: a Today that does nothing is a button
                     // that teaches you to stop pressing it.
-                    if !onToday || !cal.isDate(place.month, equalTo: now, toGranularity: .month) {
+                    if !cal.isDate(place.day, inSameDayAs: now)
+                        || !cal.isDate(place.month, equalTo: now, toGranularity: .month)
+                    {
                         Button("Today") {
                             Haptics.tick()
                             stepForward = place.day < cal.startOfDay(for: now)
@@ -114,7 +135,9 @@ struct MobileCalendarView: View {
             .navigationDestination(item: $fixtureDetail) { id in MobileEventPage(id: id) }
             .task {
                 if FixtureStage.on {
-                    expanded = FixtureStage.calendarMonthOpen
+                    if let staged = FixtureStage.calendarMode.flatMap(PhoneCalendarMode.init(rawValue:)) {
+                        mode = staged
+                    }
                     try? await Task.sleep(for: .seconds(1.5))
                     fixtureDetail = FixtureStage.calendarDetail
                 }
@@ -138,21 +161,92 @@ struct MobileCalendarView: View {
             // The phone always draws a grid's place, so the request always
             // covers the strip's month (`calendarRequestMonth`).
             if !store.calendarMode.isGrid { store.setCalendarMode(.month) }
-            // The vocabulary is closed: the phone reports the mode it draws.
+            // The vocabulary is closed: the phone reports the store's mode.
             Analytics.capture(
                 "calendar_opened",
                 ["granted": store.calendarGranted, "view": store.calendarMode.rawValue])
         }
     }
 
+    /// Month | Week | Day, the desktop's switch.
+    private var modePicker: some View {
+        Picker("View", selection: Binding(
+            get: { mode },
+            set: { new in
+                Haptics.tick()
+                withAnimation(.snappy) { mode = new }
+            }
+        )) {
+            ForEach(PhoneCalendarMode.allCases) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 16)
+    }
+
+    private func listKey(place: MonthPlace, week: MonthWeek?) -> String {
+        switch mode {
+        case .week: "w\(week?.id.timeIntervalSince1970 ?? 0)"
+        case .month, .day: "\(mode.rawValue)\(place.day.timeIntervalSince1970)"
+        }
+    }
+
+    @ViewBuilder
+    private func content(
+        items: [AgendaItem], model: MonthModel, week: MonthWeek?, place: MonthPlace, now: Date,
+        cal: Calendar
+    ) -> some View {
+        switch mode {
+        case .month:
+            // The grid picks the day; the list runs on from it.
+            let days = Agenda.days(items, now: now, calendar: cal, from: place.day)
+            nextCard(cal.isDate(place.day, inSameDayAs: now) ? days : [], now: now, cal: cal)
+            ForEach(days) { day in
+                daySection(day, now: now, cal: cal)
+            }
+            footnote(model: model, cal: cal)
+        case .week:
+            // Every day of the strip's week, a quiet one as a single line.
+            let first = week?.days.first?.day ?? place.day
+            let days = Agenda.run(items, now: now, calendar: cal, from: first, count: 7)
+            let hasToday = days.contains { cal.isDate($0.day, inSameDayAs: now) }
+            nextCard(hasToday ? days.filter { $0.day >= cal.startOfDay(for: now) } : [], now: now, cal: cal)
+            ForEach(days) { day in
+                daySection(day, now: now, cal: cal, compactEmpty: true)
+                    .id(day.day)
+            }
+        case .day:
+            MobileDayTimeline(
+                column: MonthGrid.column(items, day: place.day, calendar: cal),
+                now: now, calendar: cal,
+                step: { forward in
+                    stepForward = forward
+                    Haptics.tick()
+                    withAnimation(.snappy) { store.moveCalendarMonth(.days(forward ? 1 : -1), now: now) }
+                })
+        }
+    }
+
+    @ViewBuilder
+    private func nextCard(_ days: [AgendaDay], now: Date, cal: Calendar) -> some View {
+        if let next = Agenda.next(days, now: now) {
+            MobileNextCard(
+                item: next.item,
+                lead: Agenda.nextLead(next.item, ongoing: next.ongoing, now: now, calendar: cal),
+                span: span(next.item, cal))
+        }
+    }
+
     // MARK: - a day
 
     @ViewBuilder
-    private func daySection(_ day: AgendaDay, now: Date, cal: Calendar) -> some View {
+    private func daySection(
+        _ day: AgendaDay, now: Date, cal: Calendar, compactEmpty: Bool = false
+    ) -> some View {
         let title = Agenda.dayTitle(day.day, now: now, calendar: cal)
         let isToday = cal.isDate(day.day, inSameDayAs: now)
         let earlierKey = "e\(day.day.timeIntervalSince1970)"
         let unlikelyKey = "u\(day.day.timeIntervalSince1970)"
+        let quiet = compactEmpty && day.isEmpty
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title.title)
@@ -162,40 +256,54 @@ struct MobileCalendarView: View {
                     .font(Typo.ui(13))
                     .foregroundStyle(Palette.inkFaint)
                 Spacer(minLength: 0)
+                // A quiet day in the week is this one line, no empty card.
+                if quiet {
+                    Text("Nothing on")
+                        .font(Typo.ui(13))
+                        .foregroundStyle(Palette.inkFaintest)
+                }
             }
             .padding(.horizontal, 4)
             .accessibilityAddTraits(.isHeader)
+            if !quiet {
+                card(day, isToday: isToday, cal: cal, earlierKey: earlierKey, unlikelyKey: unlikelyKey)
+            }
+        }
+    }
 
-            VStack(spacing: 0) {
-                if day.isEmpty {
-                    Text(isToday ? "Nothing else on today." : "Nothing on.")
-                        .font(Typo.ui(14))
-                        .foregroundStyle(Palette.inkFaint)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
-                }
-                if !day.earlier.isEmpty {
-                    fold(
-                        "\(day.earlier.count) earlier today", key: earlierKey,
-                        first: true)
-                    if openFolds.contains(earlierKey) {
-                        rows(day.earlier, on: day.day, thin: false, cal: cal, leadingRule: true)
-                    }
-                }
-                rows(day.visible, on: day.day, thin: false, cal: cal, leadingRule: !day.earlier.isEmpty)
-                if !day.unlikely.isEmpty {
-                    fold(
-                        "\(day.unlikely.count) unlikely", key: unlikelyKey,
-                        first: day.earlier.isEmpty && day.visible.isEmpty)
-                    if openFolds.contains(unlikelyKey) {
-                        rows(day.unlikely, on: day.day, thin: true, cal: cal, leadingRule: true)
-                    }
+    @ViewBuilder
+    private func card(
+        _ day: AgendaDay, isToday: Bool, cal: Calendar, earlierKey: String, unlikelyKey: String
+    ) -> some View {
+        VStack(spacing: 0) {
+            if day.isEmpty {
+                Text(isToday ? "Nothing else on today." : "Nothing on.")
+                    .font(Typo.ui(14))
+                    .foregroundStyle(Palette.inkFaint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+            }
+            if !day.earlier.isEmpty {
+                fold(
+                    "\(day.earlier.count) earlier today", key: earlierKey,
+                    first: true)
+                if openFolds.contains(earlierKey) {
+                    rows(day.earlier, on: day.day, thin: false, cal: cal, leadingRule: true)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
+            rows(day.visible, on: day.day, thin: false, cal: cal, leadingRule: !day.earlier.isEmpty)
+            if !day.unlikely.isEmpty {
+                fold(
+                    "\(day.unlikely.count) unlikely", key: unlikelyKey,
+                    first: day.earlier.isEmpty && day.visible.isEmpty)
+                if openFolds.contains(unlikelyKey) {
+                    rows(day.unlikely, on: day.day, thin: true, cal: cal, leadingRule: true)
+                }
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .passbandGlass(.pane, cornerRadius: Radius.pane, tint: Palette.glassTint)
     }
 
     @ViewBuilder
@@ -299,7 +407,8 @@ private struct MobileCalendarStrip: View {
     let place: MonthPlace
     let now: Date
     let calendar: Calendar
-    @Binding var expanded: Bool
+    /// The whole month (Month) rather than the picked day's week.
+    let expanded: Bool
     @Binding var stepForward: Bool
 
     var body: some View {
@@ -319,10 +428,10 @@ private struct MobileCalendarStrip: View {
                 .asymmetric(
                     insertion: .move(edge: stepForward ? .trailing : .leading).combined(with: .opacity),
                     removal: .move(edge: stepForward ? .leading : .trailing).combined(with: .opacity)))
-            handle
         }
         .padding(.horizontal, 12)
-        .padding(.top, 4)
+        .padding(.top, 2)
+        .padding(.bottom, 8)
         .clipped()
         .contentShape(Rectangle())
         .gesture(swipe)
@@ -370,26 +479,7 @@ private struct MobileCalendarStrip: View {
         }
     }
 
-    /// Pull it open, push it shut: the month behind the week.
-    private var handle: some View {
-        Button {
-            Haptics.tick()
-            withAnimation(.snappy) { expanded.toggle() }
-        } label: {
-            Capsule()
-                .fill(Palette.hairlineStrong)
-                .frame(width: 36, height: 4)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 2)
-                .padding(.bottom, 6)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(expanded ? "Show one week" : "Show the whole month")
-    }
-
-    /// Sideways turns the week (or the month); down opens the month, up
-    /// closes it. Whichever way the finger mostly went wins.
+    /// Sideways turns the week (or, on the month, the month).
     private var swipe: some Gesture {
         DragGesture(minimumDistance: 24)
             .onEnded { value in
@@ -403,11 +493,6 @@ private struct MobileCalendarStrip: View {
                         store.moveCalendarMonth(
                             expanded ? .months(forward ? 1 : -1) : .days(forward ? 7 : -7), now: now)
                     }
-                } else if abs(dy) > 40 {
-                    let open = dy > 0
-                    guard open != expanded else { return }
-                    Haptics.tick()
-                    withAnimation(.snappy) { expanded = open }
                 }
             }
     }
@@ -773,5 +858,269 @@ private final class MobileCalendarMemo {
         monthKey = (items, month, calendar.timeZone)
         monthBuilt = model
         return model
+    }
+}
+
+// MARK: - the day's hours
+
+/// One day as hours, 7am to midnight: the Mac's day column at a phone's width
+/// (`MonthGrid.column`, the same lanes, the same night fold). All-day plans
+/// and trips sit above the hours as chips; anything before 7am folds into one
+/// line of its own rather than spending seven empty hours of scroll; unlikely
+/// plans are a count. Swipe the hours sideways for the day before or after.
+private struct MobileDayTimeline: View {
+    let column: DayColumn
+    let now: Date
+    let calendar: Calendar
+    let step: (_ forward: Bool) -> Void
+
+    @State private var showUnlikely = false
+
+    static let hourHeight: CGFloat = 56
+    static let gutter: CGFloat = 48
+    private var hours: Int { 24 - MonthGrid.dayFromHour }
+    private var height: CGFloat { CGFloat(hours) * Self.hourHeight }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if !column.allDay.isEmpty {
+                VStack(spacing: 6) {
+                    ForEach(column.allDay) { item in
+                        allDayChip(item)
+                    }
+                }
+            }
+            if !column.night.isEmpty {
+                nightLine
+            }
+            hoursWell
+                .gesture(swipe)
+            if !column.unlikely.isEmpty {
+                unlikelyFold
+            }
+        }
+    }
+
+    // MARK: above the hours
+
+    private func allDayChip(_ item: AgendaItem) -> some View {
+        let style = CalendarColor.style(item)
+        let inks = ChipColors.inks(style.hue)
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        let sub = Agenda.endLabel(item, on: column.day, calendar: calendar)?.text ?? "all day"
+        return NavigationLink(value: MobileCalendarRoute(id: item.id)) {
+            HStack(spacing: 8) {
+                Text(item.title)
+                    .font(Typo.ui(14, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                    .strikethrough(style.struck, color: Palette.inkFaint)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(sub)
+                    .font(Typo.ui(12))
+                    .foregroundStyle(Palette.inkDim)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(ChipFill(style: style, inks: inks, shape: shape))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Before 7am, said in one line: "5:30am  Flight to Denver".
+    private var nightLine: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Before \(Agenda.clock(dayStart, calendar))")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .textCase(.uppercase)
+                .tracking(0.5)
+            ForEach(column.night) { block in
+                let item = block.segment.item
+                NavigationLink(value: MobileCalendarRoute(id: item.id)) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        AgendaMark(
+                            fill: item.fill, estimated: item.endEstimated, thin: item.cancelled,
+                            hue: ChipColors.inks(item).edge)
+                            .frame(width: 10, height: 10)
+                            .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                        Text(item.title)
+                            .font(Typo.ui(14, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text(MonthGrid.rangeText(item, on: column.day, calendar: calendar))
+                            .font(Typo.ui(12))
+                            .foregroundStyle(Palette.inkDim)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Palette.hairline, lineWidth: 1)
+        )
+    }
+
+    private var dayStart: Date {
+        calendar.date(byAdding: .hour, value: MonthGrid.dayFromHour, to: column.day) ?? column.day
+    }
+
+    // MARK: the hours
+
+    private var hoursWell: some View {
+        GeometryReader { geo in
+            let lane = max(0, geo.size.width - Self.gutter - 4)
+            ZStack(alignment: .topLeading) {
+                // The hour lines, each labelled in the gutter. Midnight closes
+                // the well without a label of its own.
+                ForEach(0...hours, id: \.self) { i in
+                    let y = CGFloat(i) * Self.hourHeight
+                    if i < hours {
+                        Text(hourLabel(MonthGrid.dayFromHour + i))
+                            .font(Typo.num(11))
+                            .foregroundStyle(Palette.inkFaint)
+                            .frame(width: Self.gutter - 8, alignment: .trailing)
+                            .offset(y: y - 7)
+                    }
+                    Rectangle()
+                        .fill(Palette.hairline)
+                        .frame(width: lane + 4, height: 0.5)
+                        .offset(x: Self.gutter, y: y)
+                }
+                ForEach(column.blocks) { block in
+                    blockView(block, laneWidth: lane)
+                }
+                nowLine(width: lane)
+            }
+        }
+        .frame(height: height + 8)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func hourLabel(_ hour: Int) -> String {
+        let h = hour % 12 == 0 ? 12 : hour % 12
+        return hour == 12 ? "noon" : "\(h)\(hour < 12 ? "am" : "pm")"
+    }
+
+    private func blockView(_ block: ColumnBlock, laneWidth: CGFloat) -> some View {
+        let segment = block.segment
+        let item = segment.item
+        let width = laneWidth / CGFloat(max(1, block.lanes))
+        let top = CGFloat(segment.lo) * height
+        let h = max(24, CGFloat(segment.hi - segment.lo) * height - 2)
+        let style = CalendarColor.style(item)
+        let inks = ChipColors.inks(style.hue)
+        let r: CGFloat = 8
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: segment.continuesBefore ? 0 : r,
+            bottomLeadingRadius: segment.continuesAfter ? 0 : r,
+            bottomTrailingRadius: segment.continuesAfter ? 0 : r,
+            topTrailingRadius: segment.continuesBefore ? 0 : r, style: .continuous)
+        let roomy = h >= 44
+        return NavigationLink(value: MobileCalendarRoute(id: item.id)) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    if item.isGhost, item.fill == .solid {
+                        Image(systemName: "envelope")
+                            .font(Typo.ui(10, weight: .medium))
+                            .foregroundStyle(inks.ink)
+                    }
+                    Text(item.title)
+                        .font(Typo.ui(13, weight: item.fill == .outline ? .medium : .semibold))
+                        .foregroundStyle(Palette.ink)
+                        .strikethrough(style.struck, color: Palette.inkFaint)
+                        .lineLimit(roomy ? 2 : 1)
+                }
+                if roomy {
+                    Text(
+                        [MonthGrid.rangeText(item, on: column.day, calendar: calendar), item.location]
+                            .compactMap { $0 }.joined(separator: ", ")
+                    )
+                    .font(Typo.ui(11))
+                    .foregroundStyle(Palette.inkDim)
+                    .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, roomy ? 6 : 3)
+            .frame(width: max(0, width - 3), height: h, alignment: .topLeading)
+            .background(ChipFill(style: style, inks: inks, shape: shape))
+            .clipShape(shape)
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .offset(x: Self.gutter + 4 + CGFloat(block.lane) * width, y: top + 1)
+        .accessibilityLabel("\(item.title), \(MonthGrid.rangeText(item, on: column.day, calendar: calendar))")
+    }
+
+    /// Now, on today only: a blue line with a dot at the gutter, blue being
+    /// state.
+    @ViewBuilder
+    private func nowLine(width: CGFloat) -> some View {
+        if let mark = MonthGrid.nowMark(now, day: column.day, calendar: calendar), mark.part == .day {
+            let y = CGFloat(mark.at) * height
+            HStack(spacing: 0) {
+                Circle().fill(Palette.accent).frame(width: 8, height: 8)
+                Rectangle().fill(Palette.accent).frame(width: width, height: 1.5)
+            }
+            .offset(x: Self.gutter - 4, y: y - 4)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private var unlikelyFold: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                Haptics.tick()
+                withAnimation(.snappy) { showUnlikely.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Text("\(column.unlikely.count) unlikely")
+                    Image(systemName: "chevron.right")
+                        .font(Typo.ui(10, weight: .semibold))
+                        .rotationEffect(.degrees(showUnlikely ? 90 : 0))
+                }
+                .font(Typo.ui(13, weight: .medium))
+                .foregroundStyle(Palette.inkFaint)
+            }
+            .buttonStyle(.plain)
+            if showUnlikely {
+                ForEach(column.unlikely) { item in
+                    NavigationLink(value: MobileCalendarRoute(id: item.id)) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            AgendaMark(fill: item.fill, thin: true, hue: ChipColors.inks(item).edge)
+                                .frame(width: 10, height: 10)
+                                .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                            Text(item.title)
+                                .font(Typo.ui(14))
+                                .foregroundStyle(Palette.ink)
+                            Spacer(minLength: 8)
+                            Text(Agenda.timeLabel(item, on: column.day, calendar: calendar))
+                                .font(Typo.ui(12))
+                                .foregroundStyle(Palette.inkDim)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private var swipe: some Gesture {
+        DragGesture(minimumDistance: 24)
+            .onEnded { value in
+                let dx = value.translation.width
+                guard abs(dx) > abs(value.translation.height), abs(dx) > 60 else { return }
+                step(dx < 0)
+            }
     }
 }

@@ -117,37 +117,39 @@ struct MobileSitrepView: View {
         let overflow = ranked.count - Self.eyesVisible
 
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // ABOVE THE HERO, because it outranks it, as on the Mac: "what
-                // needs you today" is worthless while the mailbox behind it
-                // has been frozen since Tuesday.
-                banner
-                hero
-                if !ranked.isEmpty {
-                    // Auth mail stays off the reader's queue: it opens in the
-                    // one-time reveal, never in the reader.
-                    forYourEyes(
-                        visible: visible, overflow: overflow,
-                        queue: ranked.filter { store.authMeta(for: $0) == nil })
-                } else if isClear {
-                    // An empty board is the best state this app has, and it
-                    // should not look like a broken one.
-                    ClearNote()
-                        .padding(.horizontal, 4)
-                        .transition(.opacity)
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 16) {
+                    // ABOVE THE HERO, because it outranks it, as on the Mac: "what
+                    // needs you today" is worthless while the mailbox behind it
+                    // has been frozen since Tuesday.
+                    banner
+                    hero
+                    if !ranked.isEmpty {
+                        // Auth mail stays off the reader's queue: it opens in the
+                        // one-time reveal, never in the reader.
+                        forYourEyes(
+                            visible: visible, overflow: overflow,
+                            queue: ranked.filter { store.authMeta(for: $0) == nil })
+                    } else if isClear {
+                        // An empty board is the best state this app has, and it
+                        // should not look like a broken one.
+                        ClearNote()
+                            .padding(.horizontal, 4)
+                            .transition(.opacity)
+                    }
+                    // Empty reading still stands beside a live For-your-eyes, but
+                    // on a board with nothing else it is one more absence.
+                    if !(reading.isEmpty && ranked.isEmpty) {
+                        ReadingZone(senders: reading, cursor: cursor)
+                    }
+                    BoardFootnote(bannerShowing: bannerShowing)
                 }
-                // Empty reading still stands beside a live For-your-eyes, but
-                // on a board with nothing else it is one more absence.
-                if !(reading.isEmpty && ranked.isEmpty) {
-                    ReadingZone(senders: reading, cursor: cursor)
-                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, holdsRecords ? 24 : 28)
                 if holdsRecords {
-                    records
+                    RecordsTray()
                 }
-                BoardFootnote(bannerShowing: bannerShowing)
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 28)
         }
         .background(Palette.canvas)
         .task {
@@ -177,19 +179,30 @@ struct MobileSitrepView: View {
         // that a glyph is a door and the reason a bare icon still looks tappable.
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                // The picker, exactly what the swipe from the left edge
-                // opens: the glyph and the gesture are one door. The full
-                // Account page is the drawer's Settings button.
-                Button {
-                    Haptics.tick()
-                    AccountDoor.shared.pane = .picker
-                } label: {
-                    Image(systemName: "person.crop.circle")
-                        .foregroundStyle(Palette.accent)
+                HStack(spacing: 18) {
+                    // The picker, exactly what the swipe from the left edge
+                    // opens: the glyph and the gesture are one door. The full
+                    // Account page is the drawer's Settings button.
+                    Button {
+                        Haptics.tick()
+                        AccountDoor.shared.pane = .picker
+                    } label: {
+                        Image(systemName: "person.crop.circle")
+                            .foregroundStyle(Palette.accent)
+                    }
+                    .accessibilityLabel("Account")
+                    // THE LOGIN CODES, while the calendar holds Quick Look's
+                    // tab: a key beside "you", because the codes are your
+                    // accounts' and this is the screen the app opens on. A code
+                    // you are racing arrives by banner and opens the page from
+                    // anywhere; this is the door for looking one up.
+                    if holdsRecords {
+                        CodesKey { showAuth = true }
+                    }
                 }
-                .accessibilityLabel("Account")
             }
             .sharedBackgroundVisibility(.hidden)
+
             ToolbarItem(placement: .topBarTrailing) {
                 // THE COMPOSER, ON THE SCREEN THE APP OPENS ON. Until #166 the
                 // phone could not write an email at all, and the fix is not a
@@ -234,37 +247,6 @@ struct MobileSitrepView: View {
         .background { VisibleWarmKeeper(rows: visible) }
         .onChange(of: visible.count) { _, count in
             if count == 0 { expanded = false }
-        }
-    }
-
-    // MARK: - the records, while the calendar holds their tab
-
-    /// Quick Look's four cards, under everything you owe: reference material
-    /// is what a scroll is for. The key to the login codes rides the section's
-    /// own heading, the same door Quick Look's bar had, because the codes are
-    /// a lookup and this is where the lookups went.
-    private var records: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("quick look")
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.accent)
-                        .textCase(.uppercase)
-                        .tracking(0.6)
-                    Text("Pulled out of your mail, kept here.")
-                        .font(Typo.hero(22))
-                        .foregroundStyle(Palette.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                CodesKey { showAuth = true }
-                    .font(Typo.ui(17))
-                    .frame(minWidth: 44, minHeight: 44)
-            }
-            .padding(.horizontal, 4)
-            .padding(.top, 12)
-            RecordZones()
         }
     }
 
@@ -518,5 +500,30 @@ private struct VisibleWarmKeeper: View {
             .onChange(of: store.lastRefresh) { _, _ in
                 MobileSitrepView.warm(Array(rows.prefix(MobileSitrepView.eyesVisible)))
             }
+    }
+}
+
+/// QUICK LOOK'S RECORDS, under the board while the calendar holds their tab.
+/// No heading: what sets them apart is the surface. The board's cards sit on
+/// the page; these sit on a tray a shade off it, rounded at the top and
+/// running to the bottom of the scroll, so the eye reads a second layer (the
+/// things kept for you) under the first (the things that need you) without a
+/// line of copy to explain it. An even fill, no edge stroke along one side.
+private struct RecordsTray: View {
+    var body: some View {
+        RecordZones()
+            .padding(.horizontal, 16)
+            .padding(.top, 20)
+            .padding(.bottom, 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
+                    topTrailingRadius: 28, style: .continuous)
+                    .fill(Palette.hairline.opacity(0.9))
+                    // Past the end of the scroll too, so a bounce never shows
+                    // the page under the tray's foot.
+                    .padding(.bottom, -600)
+            )
     }
 }

@@ -31,10 +31,9 @@
         /// Turns the hidden `calendar` feature on over a staged week of plans
         /// (FixtureCalendar), so the bar reads Sitrep, Calendar, Mail.
         static let calendar = args.contains("--fixture-calendar")
-        /// Calendar scenes, read by MobileCalendarView itself: `calendar-month`
-        /// opens the strip into the month, `calendar-detail` pushes the
-        /// likely ghost's page.
-        static var calendarMonthOpen: Bool { scene == "calendar-month" }
+        /// The calendar's mode for a screenshot: `--fixture-calendar-mode
+        /// month|week|day`. Scene `calendar-detail` pushes the likely ghost.
+        static var calendarMode: String? { value("--fixture-calendar-mode") }
         static var calendarDetail: String? { scene == "calendar-detail" ? "g:2" : nil }
         /// What to raise once the board has loaded; see `stage`.
         static var scene: String? { value("--fixture-scene") }

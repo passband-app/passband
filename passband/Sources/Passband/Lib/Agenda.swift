@@ -439,6 +439,22 @@ enum Agenda {
         }
     }
 
+    /// `count` days from `first`, EVERY one of them, the empty ones too: the
+    /// phone's week, which lists a quiet Tuesday rather than skipping it.
+    /// Built by `days(from:)`, so a row lands, folds and orders exactly as it
+    /// does in the agenda; past the last day nothing is returned.
+    static func run(
+        _ items: [AgendaItem], now: Date, calendar: Calendar, from first: Date, count: Int
+    ) -> [AgendaDay] {
+        let start = calendar.startOfDay(for: first)
+        var byDay: [Date: AgendaDay] = [:]
+        for day in days(items, now: now, calendar: calendar, from: start) { byDay[day.day] = day }
+        return (0..<max(0, count)).compactMap { offset in
+            guard let day = calendar.date(byAdding: .day, value: offset, to: start) else { return nil }
+            return byDay[day] ?? AgendaDay(day: day, visible: [], unlikely: [], earlier: [])
+        }
+    }
+
     // MARK: next
 
     /// The page's callout: what the user has to be at. Only COMMITMENTS

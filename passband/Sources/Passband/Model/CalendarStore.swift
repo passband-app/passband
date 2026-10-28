@@ -301,6 +301,18 @@ extension AppStore {
         calendarMonthItem = id
     }
 
+    /// A search hit opened (the search panel's Events block): the Calendar
+    /// page, on a grid, turned to the row's day with its detail open. Moving
+    /// the place is what makes the page fetch that month, so an event a year
+    /// back is in the feed by the time the detail looks for it.
+    func openCalendarSearchHit(_ item: AgendaItem, now: Date = Date()) {
+        guard calendarPageAvailable else { return }
+        if activeView != .calendar { setView(.calendar) }
+        guard activeView == .calendar else { return }
+        if !calendarMode.isGrid { setCalendarMode(.month) }
+        selectCalendarItem(item.id, on: CalendarSearch.day(item, calendar: .current), now: now)
+    }
+
     /// Escape on the month or the week: closes the item's detail, then (the
     /// month's) opened day.
     /// False when there is nothing to close, so Escape goes on to its usual

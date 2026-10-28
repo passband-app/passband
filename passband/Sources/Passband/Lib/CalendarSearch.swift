@@ -22,6 +22,9 @@ enum CalendarSearch {
     /// and "N more" opens the rest of what came back.
     static let fetchLimit = 20
 
+    /// Events only (`in:calendar`): the daemon's most.
+    static let listLimit = 50
+
     /// The field, split by scope. `eventsOnly` when it holds `in:calendar`
     /// (any case); `text` is the field without it, words in order, single
     /// spaces.

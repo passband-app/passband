@@ -15,6 +15,7 @@ mod migrate;
 mod notify;
 mod people;
 mod reading_senders;
+mod retention;
 mod rules;
 mod scheduled;
 mod search;

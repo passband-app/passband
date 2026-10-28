@@ -430,6 +430,7 @@ mod notify;
 mod outbound;
 pub mod people;
 pub mod reading_senders;
+mod retention;
 mod rules;
 mod scheduled;
 mod search;
@@ -448,6 +449,7 @@ pub use self::agent_triage::{
     ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
 };
 use self::migrate::migrate;
+pub use self::retention::{HISTORY_RETENTION_DAYS, HistoryPruned};
 pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
 
 use std::path::Path;

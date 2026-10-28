@@ -93,7 +93,7 @@ data:
   # daemon given both SQUELCH_TRACK_URL and SQUELCH_RELAY_URL starts the opens
   # poller against the shared relay, and the push-only bearer becomes the only
   # lock. Bump this and the warden images together, as a release always does.
-  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.13"
+  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.14"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"

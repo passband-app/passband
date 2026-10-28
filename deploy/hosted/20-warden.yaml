@@ -56,7 +56,7 @@ spec:
           # is the renderer, and a roller on an older one renders older tenants.
           # An image is a pod-spec field, so it is the one value the ConfigMap
           # cannot hold for both of them.
-          image: ghcr.io/passband-app/squelch-warden:daemon-0.0.13
+          image: ghcr.io/passband-app/squelch-warden:daemon-0.0.14
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -148,7 +148,7 @@ spec:
   ipAllowList:
     sourceRange:
       # 3. EDIT ME: control's egress (the AWS NAT EIP), as a /32.
-      - 192.0.2.1/32
+      - 184.33.248.151/32
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

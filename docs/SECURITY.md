@@ -939,11 +939,13 @@ the call goes out.
   code that just arrived sits. A page is cut at its first such row rather than
   holed. The rules run on the way in and again on the way back out, so a file
   written any other way still cannot paint auth mail. Billing and receipt mail
-  is otherwise mail like any other: its rows on a mail page are kept. Only what
-  the daemon has answered for this session is written: never a board still
-  repainted from disk or a switch, never a zone or page that has not loaded
-  since, and nothing after the credentials are re-validated in Settings until
-  the next account change. A board the daemon last answered for more than a
+  is otherwise mail like any other: its rows on a mail page are kept. The
+  headline is kept only for the band it was written about, and not when a band
+  row was taken out. Only what the daemon has answered for this session is
+  written: never a board still repainted from disk or a switch, never a zone or
+  page that has not loaded since, and nothing after the credentials are
+  re-validated in Settings until the next account change. A band that is
+  nothing but auth mail is not written at all, and the file goes. A board the daemon last answered for more than a
   week ago is not painted and is deleted, by the read that finds it or by the
   launch sweep, which also deletes the board of every account no longer on the
   install. The file goes when the account is removed, when the same daemon is

@@ -18,6 +18,8 @@ struct BoardFileTests {
         authMailNeverReachesTheFile()
         aDoctoredFileStillPaintsNoAuthMail()
         aBoardRoundTrips()
+        aSaveKeepsOnlyWhatTheDaemonHasAnswered()
+        aSaveWritesOnlyWhatChanged()
         onlyAFreshBoardOfThisVersionIsPainted()
         await theFileIsKeptPrivately()
         await aFileNobodyWillPaintIsDeleted()
@@ -68,7 +70,7 @@ struct BoardFileTests {
     ) -> PersistedBoard {
         let rows = rows ?? [row(1), row(2)]
         return PersistedBoard(
-            standing: rows, new: [], open: [], totalCount: rows.count,
+            standing: rows, totalCount: rows.count,
             fyeHeadline: "Two things today", fyeHeadlineKey: "k", calendar: calendar, shipments: [],
             mailPages: ["inbox": pages ?? rows], mailKeyset: true, authThreads: authThreads,
             lastRefresh: lastRefresh)
@@ -137,14 +139,13 @@ struct BoardFileTests {
                 with: JSONEncoder().encode(row(23, thread: "sealed")))
         else { return fail("the file is a JSON object") }
         object["standing"] = [auth] + ((object["standing"] as? [Any]) ?? [])
-        object["open"] = [auth]
         object["mailPages"] = ["inbox": [zoned, fenced]]
         object["authThreads"] = ["sealed"]
         guard let doctored = try? JSONSerialization.data(withJSONObject: object),
             let back = PersistedBoard.decode(doctored, now: Date())
         else { return fail("the doctored file still reads") }
         check(back.standing.map(\.id) == [1, 2], "an auth row in the file is not painted")
-        check(back.open.isEmpty && back.mailPages["inbox"] == nil, "from any band or page")
+        check(back.mailPages["inbox"] == nil, "from any band or page")
     }
 
     static func aBoardRoundTrips() {
@@ -155,6 +156,61 @@ struct BoardFileTests {
             let back = PersistedBoard.decode(bytes, now: Date(timeIntervalSince1970: 1_800_000_060))
         else { return fail("a fresh board reads back") }
         check(back == kept, "every field comes back as it went")
+    }
+
+    // MARK: - what a save writes
+
+    static func live(
+        rows: [AttentionUpdate]? = nil, headlineKey: String = "k",
+        answered: LiveBoard.Answered = LiveBoard.Answered(bands: true)
+    ) -> LiveBoard {
+        LiveBoard(
+            standing: rows ?? [row(1), row(2)], totalCount: 2, fyeHeadline: "Two things today",
+            fyeHeadlineKey: "k", headlineKey: headlineKey, calendar: [card(31, thread: "t31")],
+            shipments: [], mailPages: ["inbox": [row(1)], "noise": [row(3)]], mailKeyset: true,
+            authThreads: [], lastRefresh: wholeNow, answered: answered)
+    }
+
+    /// Nothing before the bands are answered; then only the parts the daemon
+    /// has answered for this session, the headline only for the band it was
+    /// written about, and the file discarded when the band is all auth mail.
+    static func aSaveKeepsOnlyWhatTheDaemonHasAnswered() {
+        check(PersistedBoard.keeping(live(answered: LiveBoard.Answered())) == .nothing,
+            "nothing is written before a pull has landed")
+        guard case .write(let bands) = PersistedBoard.keeping(live()) else {
+            return fail("the answered bands are written")
+        }
+        check(bands.standing.map(\.id) == [1, 2], "the bands are kept")
+        check(bands.calendar.isEmpty, "a zone not answered yet is kept empty")
+        check(bands.mailPages.isEmpty, "a page not loaded since is not kept")
+        let everything = LiveBoard.Answered(bands: true, shipments: true, calendar: true, pages: ["inbox"])
+        guard case .write(let full) = PersistedBoard.keeping(live(answered: everything)) else {
+            return fail("an answered board is written")
+        }
+        check(full.calendar.map(\.id) == [31], "an answered zone is kept")
+        check(Array(full.mailPages.keys) == ["inbox"], "and a loaded page, but not the one never loaded")
+        check(full.fyeHeadline == "Two things today", "a headline for this band is kept")
+        guard case .write(let older) = PersistedBoard.keeping(live(headlineKey: "k2")) else {
+            return fail("a board with an older headline is written")
+        }
+        check(older.fyeHeadline == nil && older.fyeHeadlineKey == nil,
+            "a headline written for another band is not")
+        check(PersistedBoard.keeping(live(rows: [row(7, auth: true)])) == .discard,
+            "a band of nothing but auth mail discards the file")
+    }
+
+    /// The same rows under a newer date are not written again until the date
+    /// has fallen far enough behind; anything else that differs is.
+    static func aSaveWritesOnlyWhatChanged() {
+        let last = board(lastRefresh: wholeNow)
+        let later = board(lastRefresh: wholeNow.addingTimeInterval(60))
+        let much = board(lastRefresh: wholeNow.addingTimeInterval(700))
+        let other = board(lastRefresh: wholeNow.addingTimeInterval(60), rows: [row(1)])
+        check(!later.needsWrite(over: last, forced: false, restampAfter: 600), "the same rows a minute on are not")
+        check(much.needsWrite(over: last, forced: false, restampAfter: 600), "the same rows ten minutes on are")
+        check(other.needsWrite(over: last, forced: false, restampAfter: 600), "different rows are")
+        check(later.needsWrite(over: nil, forced: false, restampAfter: 600), "a file not known to hold it is")
+        check(later.needsWrite(over: last, forced: true, restampAfter: 600), "and a quit writes regardless")
     }
 
     /// Under a week by the daemon's last answer, a little slack for a clock
@@ -222,8 +278,9 @@ struct BoardFileTests {
     }
 
     /// At launch, the boards of accounts no longer here and boards written
-    /// longer ago than any may be painted go, whoever's they are; the live
-    /// ones, and anything that is not a board, stay.
+    /// longer ago than any may be painted go, whoever's they are, and so does
+    /// anything that is not a board (an interrupted write's leftovers); the
+    /// live boards stay.
     static func theLaunchSweepDeletesWhatNobodyWillPaint() async {
         let dir = scratch()
         defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
@@ -247,7 +304,7 @@ struct BoardFileTests {
         check(exists(live), "a live account's board stays")
         check(!exists(removed), "a removed account's board goes")
         check(!exists(idle), "a board written over a week ago goes, account or not")
-        check(FileManager.default.fileExists(atPath: other.path), "a file that is not a board stays")
+        check(!FileManager.default.fileExists(atPath: other.path), "and so does a file that is not a board")
     }
 
     /// `forget` (the account removed) deletes the board and refuses every

@@ -66,9 +66,8 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     static let clockSlack: TimeInterval = 3_600
 
     var version = PersistedBoard.currentVersion
+    /// For your eyes, the one band the poller fills.
     var standing: [AttentionUpdate]
-    var new: [AttentionUpdate]
-    var open: [AttentionUpdate]
     var totalCount: Int?
     var fyeHeadline: String?
     var fyeHeadlineKey: String?
@@ -88,15 +87,12 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     /// `authThreads` is the store's own fence; the rows' own signals add to
     /// it.
     init(
-        standing: [AttentionUpdate], new: [AttentionUpdate], open: [AttentionUpdate],
-        totalCount: Int?, fyeHeadline: String?, fyeHeadlineKey: String?,
+        standing: [AttentionUpdate], totalCount: Int?, fyeHeadline: String?, fyeHeadlineKey: String?,
         calendar: [CalendarUpdate], shipments: [Shipment],
         mailPages: [String: [AttentionUpdate]], mailKeyset: Bool,
         authThreads: Set<String>, lastRefresh: Date
     ) {
         self.standing = standing
-        self.new = new
-        self.open = open
         self.totalCount = totalCount
         self.fyeHeadline = fyeHeadline
         self.fyeHeadlineKey = fyeHeadlineKey
@@ -143,15 +139,13 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     /// may be about the mail just removed.
     private mutating func withoutAuthMail() {
         var fence = Set(authThreads)
-        var rows = standing + new + open
+        var rows = standing
         for page in mailPages.values { rows += page }
         for row in rows where Self.isAuthMail(row) { fence.insert(row.thread_id) }
         fence.remove("")
         authThreads = fence.sorted()
         let before = standing.count
         standing = standing.filter { Self.keepsBandRow($0, fence: fence) }
-        new = new.filter { Self.keepsBandRow($0, fence: fence) }
-        open = open.filter { Self.keepsBandRow($0, fence: fence) }
         mailPages = mailPages
             .mapValues { rows in Array(rows.prefix(while: { Self.keepsPageRow($0, fence: fence) })) }
             .filter { !$0.value.isEmpty }
@@ -161,6 +155,49 @@ struct PersistedBoard: Codable, Sendable, Equatable {
             fyeHeadline = nil
             fyeHeadlineKey = nil
         }
+    }
+
+    // MARK: - what a save writes
+
+    enum Keeping: Equatable {
+        case write(PersistedBoard)
+        /// Nothing worth keeping yet; the file is left as it is.
+        case nothing
+        /// Nothing honest to paint: the file goes.
+        case discard
+    }
+
+    /// What a save does with `live`. Nothing until the daemon has answered for
+    /// the bands this session; then a board of only the parts it has answered
+    /// for, with the headline only if it was written for the band as it
+    /// stands (one written for an older band may be about an auth row that has
+    /// since left it). DISCARD when every row of a band that has rows is auth
+    /// mail: painted without them it would read as all clear.
+    static func keeping(_ live: LiveBoard) -> Keeping {
+        guard live.answered.bands else { return .nothing }
+        let current = live.fyeHeadlineKey == live.headlineKey
+        let board = PersistedBoard(
+            standing: live.standing, totalCount: live.totalCount,
+            fyeHeadline: current ? live.fyeHeadline : nil,
+            fyeHeadlineKey: current ? live.fyeHeadlineKey : nil,
+            calendar: live.answered.calendar ? live.calendar : [],
+            shipments: live.answered.shipments ? live.shipments : [],
+            mailPages: live.mailPages.filter { live.answered.pages.contains($0.key) },
+            mailKeyset: live.mailKeyset, authThreads: live.authThreads,
+            lastRefresh: live.lastRefresh)
+        if board.standing.isEmpty, !live.standing.isEmpty { return .discard }
+        return .write(board)
+    }
+
+    /// Whether this board must be written over `last`, what the file holds
+    /// from this session (nil: nothing known to be there): when anything but
+    /// the date differs, when the file's date has fallen `restampAfter`
+    /// behind, or when `forced`.
+    func needsWrite(over last: PersistedBoard?, forced: Bool, restampAfter: TimeInterval) -> Bool {
+        guard !forced, let last else { return true }
+        var undated = self
+        undated.lastRefresh = last.lastRefresh
+        return undated != last || lastRefresh.timeIntervalSince(last.lastRefresh) >= restampAfter
     }
 
     // MARK: - bytes
@@ -186,6 +223,35 @@ struct PersistedBoard: Codable, Sendable, Equatable {
     }
 }
 
+/// The live board a save is cut from (`PersistedBoard.keeping`), and what of it
+/// the daemon has answered for this session.
+struct LiveBoard: Sendable {
+    var standing: [AttentionUpdate]
+    var totalCount: Int?
+    var fyeHeadline: String?
+    var fyeHeadlineKey: String?
+    /// The key of the band as it stands now (`AppStore.headlineKey`).
+    var headlineKey: String
+    var calendar: [CalendarUpdate]
+    var shipments: [Shipment]
+    /// The head of each page, by `MailMode` raw value.
+    var mailPages: [String: [AttentionUpdate]]
+    var mailKeyset: Bool
+    /// The store's auth fence (`AppStore.authThreadIds`).
+    var authThreads: Set<String>
+    var lastRefresh: Date
+    var answered: Answered
+
+    /// What the daemon has answered for under the live epoch.
+    struct Answered: Sendable, Equatable {
+        var bands = false
+        var shipments = false
+        var calendar = false
+        /// The pages loaded since, by `MailMode` raw value.
+        var pages: Set<String> = []
+    }
+}
+
 /// Where the boards are kept, and every read and write of them. All on one
 /// serial queue, so a read is ordered after the writes before it and the last
 /// save is the last write.
@@ -197,6 +263,14 @@ enum BoardFile {
     /// Accounts forgotten this session: a write already queued for one is
     /// dropped, so its file cannot come back after the delete.
     private static let forgotten = OSAllocatedUnfairLock(initialState: Set<UUID>())
+
+    /// Accounts whose last write failed (a full disk, the phone locking), so
+    /// the store does not take the file for current and skip the next save.
+    private static let unwritten = OSAllocatedUnfairLock(initialState: Set<UUID>())
+
+    static func lastWriteFailed(account id: UUID) -> Bool {
+        unwritten.withLock { $0.contains(id) }
+    }
 
     static func directory() -> URL {
         let base =
@@ -226,7 +300,9 @@ enum BoardFile {
     ) async -> PersistedBoard? {
         let url = fileURL(for: id, in: directory)
         return await withCheckedContinuation { continuation in
-            queue.async(qos: .userInitiated) { continuation.resume(returning: read(url, now: now)) }
+            queue.async(qos: .userInitiated, flags: .enforceQoS) {
+                continuation.resume(returning: read(url, now: now))
+            }
         }
     }
 
@@ -264,15 +340,21 @@ enum BoardFile {
     /// `accounts`, and those written longer ago than a board may be painted
     /// (a board is written after the answer it is dated by, so one written
     /// that long ago is at least that stale). Run at launch, so the board of
-    /// an account nobody opens does not outlive its week.
+    /// an account nobody opens does not outlive its week. Anything else in the
+    /// directory goes too: it is the boards' alone, and every write runs on
+    /// this queue, so nothing else there is a write in progress (what an
+    /// interrupted atomic write leaves behind is mail content too).
     static func sweep(
         keeping accounts: Set<UUID>, now: Date = Date(), in directory: URL = BoardFile.directory()
     ) {
         queue.async {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
             for name in names {
-                guard let id = account(ofFileNamed: name) else { continue }
                 let url = directory.appendingPathComponent(name)
+                guard let id = account(ofFileNamed: name) else {
+                    remove(url)
+                    continue
+                }
                 let written =
                     (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate]
                     as? Date
@@ -312,7 +394,9 @@ enum BoardFile {
         guard !forgotten.withLock({ $0.contains(id) }) else { return }
         do {
             try PrivateFile.write(PersistedBoard.encode(board), to: url, in: directory)
+            unwritten.withLock { _ = $0.remove(id) }
         } catch {
+            unwritten.withLock { _ = $0.insert(id) }
             log.error("board not written: \(error.localizedDescription, privacy: .public)")
         }
     }

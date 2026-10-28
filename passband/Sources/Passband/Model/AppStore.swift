@@ -638,13 +638,10 @@ final class AppStore {
     /// Model/Badge.swift.
     var sitrep = SitrepData() {
         didSet {
-            // The sealed list is never on disk, so a change to it alone is not
-            // the file's business.
-            if sitrep.standing != oldValue.standing || sitrep.new != oldValue.new
-                || sitrep.open != oldValue.open || sitrep.totalCount != oldValue.totalCount
-            {
-                scheduleBoardSave()
-            }
+            // Any change, the sealed list's included: the file's auth fence is
+            // built from it. The save itself skips a board that would write
+            // the same bytes (`needsWrite`).
+            scheduleBoardSave()
             // The threads `ThreadPrefetch` refuses follow both signals: the
             // sealed list and the feed rows' own decisions. (Verdict writes
             // settle in `AuthDecisions.listed`, which the poller calls.)
@@ -772,9 +769,7 @@ final class AppStore {
     // MARK: sitrep zones — see SitrepZoneCache
     var zones = SitrepZoneCache() {
         didSet {
-            if zones.calendar != oldValue.calendar || zones.shipments != oldValue.shipments {
-                scheduleBoardSave()
-            }
+            scheduleBoardSave()
             // A zone pass writes each zone apart; only Reading's moves this.
             guard zones.reading != oldValue.reading else { return }
             noteReadingThreads()
@@ -2043,23 +2038,30 @@ final class AppStore {
                         connError = nil
                         connStatus = .connected
                     }
+                    // Behind a board the shell was up and `.connected` all
+                    // along, so a pair link was taken as on any connected
+                    // launch, never parked: nothing to raise or drop.
                     #if os(iOS)
                         await PushRegistration.shared.registerAndSync()
                         guard !Task.isCancelled, isCurrent(recoveryEpoch) else { return }
                         // Parked while loading, so nobody raised the sheet for
                         // it, and the phone only takes a link into a sheet the
                         // person opened themselves (`PairLink.admits`).
-                        pairLink = nil
+                        if !behindBoard { pairLink = nil }
                     #else
-                        if pairLink != nil { addAccountSheetOpen = true }
+                        if !behindBoard, pairLink != nil { addAccountSheetOpen = true }
                     #endif
                     return
                 } catch {
                     guard !Task.isCancelled, isCurrent(recoveryEpoch),
                         AccountManager.shared.activeId == accountId else { return }
                     guard CapabilityProbeRetry.isTransient(error) else {
-                        // Refused credentials take the board kept under them,
-                        // painted or not (a locked phone cannot read it).
+                        // A daemon that refuses outright (the credentials, a
+                        // paused tenant, a build it is too old for) takes the
+                        // board kept for it, painted or not (a locked phone
+                        // cannot read it): the gate it ends at is the next
+                        // launch's too, and a board painted over it would only
+                        // flash before the same refusal.
                         discardBoardFile(accountId)
                         if behindBoard { refuseBoardFromDisk() }
                         connStatus = .error
@@ -2078,8 +2080,8 @@ final class AppStore {
         }
     }
 
-    /// The daemon refused the credentials a launch painted its board from
-    /// disk under. The epoch moves, so a pull still in flight lands nowhere
+    /// The daemon refused outright the launch that painted its board from
+    /// disk. The epoch moves, so a pull still in flight lands nowhere
     /// and nothing writes the board again. What is on screen stays in memory
     /// behind the error gate (a reply being typed with it), as the Connect
     /// gate's world does, until a reconnect wipes it.
@@ -2704,7 +2706,7 @@ final class AppStore {
     /// made when its account leaves the screen and taken when it comes back.
     /// The copy a LAUNCH paints is kept on disk by `BoardFile`, under its own
     /// rules (no sealed list, no auth mail, no money cards, no stats; see that
-    /// file and `persistableBoard`), and is painted by the same `paintBoard`.
+    /// file and `boardToKeep`), and is painted by the same `paintBoard`.
     @ObservationIgnored private var boardSnapshots: [UUID: BoardSnapshot] = [:]
 
     /// True from a snapshot's repaint until the daemon has answered for the
@@ -2723,9 +2725,9 @@ final class AppStore {
     }
 
     /// Keep the live board under the live account's id, when there is one
-    /// worth keeping (`liveBoard`).
+    /// worth keeping (`liveSnapshot`).
     private func keepBoardSnapshot() {
-        guard let id = AccountManager.shared.activeId, let board = liveBoard() else { return }
+        guard let id = AccountManager.shared.activeId, let board = liveSnapshot() else { return }
         boardSnapshots[id] = board
     }
 
@@ -2736,8 +2738,8 @@ final class AppStore {
     /// not answering), and a snapshot of that would repaint an empty or
     /// half-loaded board as if it were the mailbox. The one shape both copies
     /// are cut from: the in-memory one a switch back repaints, and the one on
-    /// disk (`persistableBoard`).
-    private func liveBoard() -> BoardSnapshot? {
+    /// disk (`boardToKeep`).
+    private func liveSnapshot() -> BoardSnapshot? {
         guard connStatus == .connected, !RehearsalMode.isEnabled, statsEpoch == epoch,
             lastRefresh != nil
         else { return nil }
@@ -2772,8 +2774,9 @@ final class AppStore {
     private func paintBoard(_ kept: BoardSnapshot) {
         sitrep = kept.sitrep
         stats = kept.stats
-        // These ARE this account's stats, which is all the stamp claims.
-        statsEpoch = epoch
+        // These ARE this account's stats, which is all the stamp claims. A
+        // board from disk has none, and stays unstamped until a pull.
+        if kept.stats != nil { statsEpoch = epoch }
         fyeHeadline = kept.fyeHeadline
         fyeHeadlineKey = kept.fyeHeadlineKey
         zones = kept.zones
@@ -2832,71 +2835,79 @@ final class AppStore {
     @ObservationIgnored private var boardWritesRefusedEpoch: Int?
     /// Something on the board changed since the last write.
     @ObservationIgnored private var boardDirty = true
-    /// The last write: whose, under which epoch, dated when.
-    @ObservationIgnored private var boardWritten: (account: UUID, epoch: Int, lastRefresh: Date)?
+    /// The last write: whose, under which epoch, and what.
+    @ObservationIgnored private var boardWritten: (account: UUID, epoch: Int, board: PersistedBoard)?
 
     /// The parts of the board on disk the daemon has answered for under
     /// `epoch`: the bands (a pull landed) and each zone the file keeps.
-    /// `persistableBoard` writes only these, so the file is never rows nobody
+    /// `boardToKeep` writes only these, so the file is never rows nobody
     /// has vouched for this session: a board repainted from disk or a switch,
     /// or a zone whose fetch keeps failing, is not written back under a
     /// fresh date.
-    private enum BoardPart: Hashable { case bands, shipments, calendar }
-    @ObservationIgnored private var boardAnswered: (epoch: Int, parts: Set<BoardPart>)?
+    private enum BoardPart { case bands, shipments, calendar }
+    @ObservationIgnored private var boardAnswered: (epoch: Int, answered: LiveBoard.Answered)?
 
     private func noteBoardAnswered(_ part: BoardPart, epoch e: Int) {
         guard e == epoch else { return }
-        var parts: Set<BoardPart> = []
-        if let answered = boardAnswered, answered.epoch == e { parts = answered.parts }
-        guard parts.insert(part).inserted else { return }
-        boardAnswered = (e, parts)
+        var answered = LiveBoard.Answered()
+        if let current = boardAnswered, current.epoch == e { answered = current.answered }
+        let before = answered
+        switch part {
+        case .bands: answered.bands = true
+        case .shipments: answered.shipments = true
+        case .calendar: answered.calendar = true
+        }
+        guard answered != before else { return }
+        boardAnswered = (e, answered)
         // An answer can leave the board exactly as it was (the first pull
         // finding the board from disk unchanged), which assigns nothing and so
         // schedules nothing; the file is due all the same.
         scheduleBoardSave()
     }
 
-    private func boardHasAnswered(_ part: BoardPart) -> Bool {
-        guard let answered = boardAnswered, answered.epoch == epoch else { return false }
-        return answered.parts.contains(part)
-    }
-
     /// The poller's word that a pull landed under epoch `e`: the bands are the
     /// daemon's. The fence carried from disk gives way to the live sealed
     /// list, and the launch interval ends if a board from disk did not end it.
+    ///
+    /// A pull that landed is the daemon answering these credentials on its v2
+    /// routes, so a launch from disk still waiting on its probe (which may be
+    /// sleeping out a transient failure) is waiting no longer.
     func notePullLanded(epoch e: Int) {
         guard isCurrent(e) else { return }
         if !restoredAuthThreads.isEmpty {
             restoredAuthThreads = []
             noteAuthThreads()
         }
+        if unverifiedEpoch == e {
+            unverifiedEpoch = nil
+            Notifier.shared.connectionBecameReady()
+        }
         noteBoardAnswered(.bands, epoch: e)
-        LaunchSignpost.end(.network)
+        LaunchSignpost.end(RehearsalMode.isEnabled ? .skipped : .network)
     }
 
-    /// The live board as it may be kept on disk (`PersistedBoard`, which
-    /// leaves out the sealed list, the money zones and all auth mail), or nil
-    /// when there is none worth keeping: `liveBoard`'s rules, and only what
-    /// the daemon has answered for this session (`boardAnswered`). A zone not
-    /// answered yet is kept empty, and a mail page only once it has loaded
-    /// (`mailLoadedAt`), so a page painted from disk and never visited is not
-    /// restamped either.
-    private func persistableBoard() -> PersistedBoard? {
-        guard boardHasAnswered(.bands), boardWritesRefusedEpoch != epoch, let board = liveBoard(),
+    /// What a save would do with the live board (`PersistedBoard.keeping`):
+    /// `liveSnapshot`'s rules, nothing under an epoch whose writes are refused,
+    /// and only what the daemon has answered for this session
+    /// (`boardAnswered`, and a page only once it has loaded, `mailLoadedAt`),
+    /// so a zone or page painted from disk and not asked again is never
+    /// restamped.
+    private func boardToKeep() -> PersistedBoard.Keeping {
+        guard boardWritesRefusedEpoch != epoch, let board = liveSnapshot(),
             let lastRefresh = board.lastRefresh
-        else { return nil }
+        else { return .nothing }
+        var answered = LiveBoard.Answered()
+        if let current = boardAnswered, current.epoch == epoch { answered = current.answered }
+        answered.pages = Set(mailLoadedAt.keys.map(\.rawValue))
         var pages: [String: [AttentionUpdate]] = [:]
-        for (mode, rows) in board.mailPages where mailLoadedAt[mode] != nil {
-            pages[mode.rawValue] = rows
-        }
-        return PersistedBoard(
-            standing: board.sitrep.standing, new: board.sitrep.new, open: board.sitrep.open,
-            totalCount: board.sitrep.totalCount,
-            fyeHeadline: board.fyeHeadline, fyeHeadlineKey: board.fyeHeadlineKey,
-            calendar: boardHasAnswered(.calendar) ? board.zones.calendar : [],
-            shipments: boardHasAnswered(.shipments) ? board.zones.shipments : [],
-            mailPages: pages, mailKeyset: board.mailKeyset, authThreads: authThreadIds,
-            lastRefresh: lastRefresh)
+        for (mode, rows) in board.mailPages { pages[mode.rawValue] = rows }
+        return PersistedBoard.keeping(
+            LiveBoard(
+                standing: board.sitrep.standing, totalCount: board.sitrep.totalCount,
+                fyeHeadline: board.fyeHeadline, fyeHeadlineKey: board.fyeHeadlineKey,
+                headlineKey: headlineKey, calendar: board.zones.calendar,
+                shipments: board.zones.shipments, mailPages: pages, mailKeyset: board.mailKeyset,
+                authThreads: authThreadIds, lastRefresh: lastRefresh, answered: answered))
     }
 
     /// Write the board to disk a little after it changes. One write for a run
@@ -2914,9 +2925,9 @@ final class AppStore {
 
     /// Write the live account's board to disk now: the app leaving the
     /// screen or quitting, a switch away, a scheduled save coming due.
-    /// Nothing when there is no board worth keeping (`persistableBoard`), and
-    /// nothing when the file already holds this board, unless
-    /// `evenIfUnchanged` or its date has fallen `boardRestampAfter` behind.
+    /// Nothing when there is no board worth keeping (`boardToKeep`), and
+    /// nothing when the file already holds this board from this session
+    /// (`needsWrite`), unless `evenIfUnchanged`.
     func saveBoardNow(waitingForDisk: Bool = false, evenIfUnchanged: Bool = false) {
         boardSaveTask?.cancel()
         boardSaveTask = nil
@@ -2925,24 +2936,34 @@ final class AppStore {
         // waiting caller goes on.
         defer { if waitingForDisk { BoardFile.flush() } }
         guard let id = AccountManager.shared.activeId else { return }
-        // Unchanged since the last write, checked before anything is built.
-        if !evenIfUnchanged, !boardDirty, let written = boardWritten, written.account == id,
-            written.epoch == epoch, let lastRefresh,
-            lastRefresh.timeIntervalSince(written.lastRefresh) < Self.boardRestampAfter
+        // What the file holds, as far as this session knows: its last write
+        // for this account and epoch, if that write landed.
+        var last: PersistedBoard?
+        if let written = boardWritten, written.account == id, written.epoch == epoch,
+            !BoardFile.lastWriteFailed(account: id)
+        {
+            last = written.board
+        }
+        // Nothing has changed since, and the file's date is recent: nothing
+        // is built (every focus change on the Mac comes through here).
+        if !evenIfUnchanged, !boardDirty, let last, let lastRefresh,
+            lastRefresh.timeIntervalSince(last.lastRefresh) < Self.boardRestampAfter
         {
             return
         }
-        guard let board = persistableBoard() else { return }
-        boardDirty = false
-        if board.standing.isEmpty, !sitrep.standing.isEmpty {
-            // Every row of the band is auth mail. Painted from the file, the
-            // board would read as all clear; none is kept instead, and the
-            // next launch waits for the daemon.
-            discardBoardFile(id)
+        switch boardToKeep() {
+        case .nothing:
             return
+        case .discard:
+            boardDirty = false
+            discardBoardFile(id)
+        case .write(let board):
+            boardDirty = false
+            guard board.needsWrite(over: last, forced: evenIfUnchanged, restampAfter: Self.boardRestampAfter)
+            else { return }
+            boardWritten = (id, epoch, board)
+            BoardFile.save(board, account: id)
         }
-        boardWritten = (id, epoch, board.lastRefresh)
-        BoardFile.save(board, account: id)
     }
 
     /// Delete `id`'s board on disk, and forget that it was written, so the
@@ -2976,7 +2997,7 @@ final class AppStore {
         paintBoard(
             BoardSnapshot(
                 sitrep: SitrepData(
-                    standing: board.standing, new: board.new, open: board.open,
+                    standing: board.standing, new: [], open: [],
                     sealed: [], totalCount: board.totalCount),
                 stats: nil, fyeHeadline: board.fyeHeadline, fyeHeadlineKey: board.fyeHeadlineKey,
                 zones: diskZones, mailPages: pages, mailKeyset: board.mailKeyset, selectedId: nil,
@@ -4013,9 +4034,7 @@ final class AppStore {
     /// the store they survive navigation, and `Loadable` keeps the last rows through
     /// a reload, so even a stale revisit paints rows first and updates underneath.
     private var mailPages: [MailMode: Loadable<[AttentionUpdate]>] = [:] {
-        // The heads are what the file keeps; a loading flag or a scrolled-in
-        // tail is not.
-        didSet { if Self.pageHeads(mailPages) != Self.pageHeads(oldValue) { scheduleBoardSave() } }
+        didSet { scheduleBoardSave() }
     }
 
     /// The head of each loaded page: what a snapshot keeps of `mailPages`.
@@ -4024,6 +4043,7 @@ final class AppStore {
     ) -> [MailMode: [AttentionUpdate]] {
         pages.compactMapValues { $0.value.map { Array($0.prefix(mailLimit)) } }
     }
+
     /// Which page the emails tab is on. Here for the same reason as the pages
     /// themselves: a trip to the sitrep and back has to land where you left off.
     var mailMode: MailMode = .inbox

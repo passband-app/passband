@@ -1,13 +1,13 @@
 # Mail providers
 
-Gmail is the only mail provider today, but the sync engine and the write door
-reach it through two traits, so adding IMAP (issue #575) or Outlook means
-writing two modules, not editing the engine.
+Two providers today: Gmail and Outlook (Microsoft Graph, [below](#outlook-microsoft-graph)).
+The sync engine and the write door reach either through two traits, so adding
+IMAP (issue #575) means writing two modules, not editing the engine.
 
-| Seam | Trait | Gmail implementation | Picked by |
-|---|---|---|---|
-| Read (sync) | `squelch_core::mail::MailSource` | `squelch_core::mail::gmail::GmailSource` | `SyncEngine::source()` |
-| Write (door) | `squelch_api::write::MailWriter` | `squelch_api::write::gmail::GmailWriteClient` | `handlers::write_client()` |
+| Seam | Trait | Gmail | Outlook | Picked by |
+|---|---|---|---|---|
+| Read (sync) | `squelch_core::mail::MailSource` | `mail::gmail::GmailSource` | `mail::graph::GraphSource` | `SyncEngine::source()` |
+| Write (door) | `squelch_api::write::MailWriter` | `write::gmail::GmailWriteClient` | `write::graph::GraphWriteClient` | `handlers::write_client()` |
 
 Both are picked from the account's `accounts.provider` column
 (`squelch_core::mail::MailProvider`). It is `'gmail'` on every existing row
@@ -100,14 +100,14 @@ These stay Gmail-shaped in the engine or around it, deliberately:
 - **`messages.gmail_msg_id`** keeps its name. Other providers store their own
   id in it (IMAP: a synthetic id, see #575). A rename touches 169 references
   for no behavior.
-- **Token refresh** (`credentials.rs`, `refresh_stored_token_detailed`) still
-  posts to Google's token URL. Parameterizing it belongs with the first
-  provider that refreshes anywhere else.
+- **Token refresh** (`credentials.rs`, `refresh_stored_token_detailed`)
+  posts to the client's issuer's token URL: Google's, or Microsoft's for an
+  Outlook daemon (see [OAuth](#oauth)).
 - **Calendar** (`gcal`) and **auth signals** (`extract_auth_pass` trusts only
   an `Authentication-Results` Google stamped, so any other provider's mail
   fails safe to "no verdict") are untouched.
-- **The startup log line** still reads `gmail REST sync starting`; it is chosen
-  by the source's provider.
+- **The startup log line** reads `gmail REST sync starting` (or `outlook
+  graph`); it is chosen by the source's provider.
 - **In the writer:** `MailWriter::modify` takes Gmail label ids, and
   `FetchedRaw.raw_b64` stays base64url (its callers decode it, and moving the
   decode into the writer would change how a bad body is reported in the
@@ -134,54 +134,131 @@ These stay Gmail-shaped in the engine or around it, deliberately:
    composition in `write/mime.rs` is provider-neutral and shared.
 4. Give the provider an off path for the Gmail-only features above.
 
-## Outlook readiness (checked against Microsoft Graph)
+## Outlook (Microsoft Graph)
 
-The seams were checked by mapping every method onto Graph's mail API. Three
-things that would have blocked Outlook were fixed in phase 1:
-`merge_cursors` takes the start cursor (Graph's per-folder delta links are
-opaque and unordered), the Google profile fetch runs only for Gmail accounts
-(it carries the account's token to Google), and "not spam" is its own
-`MailWriter::not_spam` rather than a Gmail label edit the door spelled out.
+Built on the seams above: `squelch_core::mail::graph::GraphSource` (read),
+`squelch_api::write::graph::GraphWriteClient` (write), and Microsoft OAuth
+in `auth/mod.rs` and `credentials.rs`. Self-host only. A daemon serves one
+account, so the provider is daemon config:
 
-**How each method maps onto Graph:**
+```toml
+account_email = "you@outlook.com"
+provider = "outlook"
+# Only when not using Passband's built-in Entra app:
+# microsoft_client_id = "00000000-0000-0000-0000-000000000000"
+```
+
+`provider` is a config-file key with no environment override. At startup
+every daemon entry point calls `SqliteStore::bind_account_provider`: a fresh
+account (still the `'gmail'` column default, nothing ever synced) takes the
+configured provider once; anything else that disagrees is refused, because a
+mailbox never changes provider.
+
+### Read: `GraphSource`
 
 | Method | Graph |
 |---|---|
-| `list(Folder)` | `GET /me/mailFolders/{inbox,sentitems,junkemail}/messages?$filter=receivedDateTime ge …&$select=id` |
-| `list(Window)` | `GET /me/messages?$filter=receivedDateTime ge … and lt …` (all folders), minus drafts and deleted items; `filed_only` also excludes inbox and sent items |
-| `current_cursor` / `changes` | per-folder `…/messages/delta`; the cursor carries one `@odata.deltaLink` per folder, encoded however the source likes. A `410 Gone` is `ChangesError::Expired` |
-| `merge_cursors(since, a, b)` | take each folder's link from whichever walk changed it relative to `since` |
-| `cursor_is_usable` | every folder has a link |
-| `fetch_raw` | `GET /me/messages/{id}/$value` (raw MIME) plus `parentFolderId` for `Placement` |
-| `fetch_headers` | `$select=toRecipients,ccRecipients,bccRecipients,receivedDateTime`, rendered as header pairs |
-| `inbox_unread` | `GET /me/mailFolders/inbox` → `unreadItemCount`. Graph has no thread count, so a source returns the message count for both |
-| `wait_for_change` | the default (poll). Graph's push is change notifications to a public HTTPS webhook, which a self-host does not have |
+| `list(Folder)` | `GET /me/mailFolders/{inbox,sentitems,junkemail}/messages?$select=id&$orderby=receivedDateTime desc[&$filter=receivedDateTime ge …]` |
+| `list(Window)` | `GET /me/messages?$filter=receivedDateTime ge … and lt …&$select=id,parentFolderId,isDraft`, dropping drafts and anything in Drafts, Deleted Items or Junk; `filed_only` also drops Inbox and Sent Items. Folder ids are looked up once per source |
+| `current_cursor` | **no request.** The cursor is `{"v":1,"inbox":<link>,"sent":<link>}`, and a fresh one holds each folder's INITIAL delta round filtered to `receivedDateTime ge now - 30m` (`CURSOR_OVERLAP`). The first walk runs it, so mail that landed between a window's listing and the cursor comes back instead of falling in the gap |
+| `changes` | follows `@odata.nextLink` to the `@odata.deltaLink`, drops `@removed` entries, replaces that folder's link. `mailbox_unchanged` is always `false` |
+| `merge_cursors` | each folder's link from whichever walk moved it relative to `since` |
+| `cursor_is_usable` | decodes, version 1, both links on the Graph base |
+| `fetch_raw` | metadata (`conversationId`, `receivedDateTime`, `parentFolderId`) then `$value` (raw MIME, not base64), capped at 64 MB |
+| `fetch_headers` | the structured `toRecipients` / `ccRecipients` / `bccRecipients` / `from` / `replyTo`, rendered as header values |
+| `inbox_unread` | `unreadItemCount` for both numbers (Graph has no thread count) |
+| `changes_report_updates` | `true` (below) |
+| `wait_for_change` | the default sleep. Graph's push needs a public HTTPS webhook |
+
+Rules that hold on every request:
+
+- **`Prefer: IdType="ImmutableId"`**, set in the one place a request is
+  built. Without it a move changes the id and orphans the row.
+- **Every followed URL starts with the Graph base.** Delta and next links
+  come back from Graph and sit in the database, and the bearer token goes
+  wherever they point, so a foreign one is refused before a request exists.
+- **`410 Gone` is `ChangesError::Expired`**, so the engine's catch-up mints a
+  fresh cursor. The `Location` Graph sends is ignored: it would start a
+  full-folder enumeration, which the catch-up's window listing already covers.
+- **`429` / `503` with `Retry-After`** is waited out in place for
+  `Urgency::Window` (up to the retry cap), returned for `Live`, and counted in
+  `SourceRefusals` for `Background`. No `GmailBudget`. Errors are recorded
+  under a closed set of `graph_*` reasons and never carry Graph's text.
+
+**Changed mail, not just new mail.** Graph's delta names a message again on
+every read-state flip or flag. `MailSource::changes_report_updates` (default
+`false`, Gmail unchanged) makes the engine's INCREMENTAL walk skip ids it
+already stores (`Store::has_message`), before any body is fetched; never on a
+backfill or catch-up, which re-fetch on purpose (`body_html` is baked at
+ingest). For such a source a walk whose two rounds are both empty reports the
+mailbox idle, so the poll lane's idle ladder still works.
+
+**Self-addressed mail** is two Exchange items (the Inbox copy and the Sent
+Items copy) with different ids, so it is two rows: one visible, one neutral
+sent. That is what the mailbox holds.
+
+### Write: `GraphWriteClient`
+
+| Method | Graph |
+|---|---|
 | `archive` / `trash` / `not_spam` | `POST /me/messages/{id}/move` to `archive` / `deleteditems` / `inbox` |
-| `send` | `POST /me/sendMail` with the MIME body. It answers `202` with no id, so `SentRef` comes back empty and the send echo waits for the next poll |
-| `find_by_rfc822_msgid` | `$filter=internetMessageId eq '<…>'` |
-| `modify` (labels) | categories, or refuse: the label editor is Gmail's feature |
+| `modify` | `UNREAD` is `isRead`, `STARRED` is `flag.flagStatus`, removing `INBOX` is an archive. Any other label refuses the whole request (400) before a call |
+| `send` | **draft, then send**: `POST /me/messages` with the MIME base64 as `text/plain`, then `POST /me/messages/{id}/send`. `sendMail` answers `202` with no id; this way the draft's (immutable) id is the sent item's, so the audit row and the send echo keep it. A refused send (a status) deletes its draft; a dropped connection leaves it, since the mail may have gone. Over Graph's 4 MB request limit is refused before a draft exists (upload sessions are not built) |
+| `parent_headers` | `internetMessageId`, `References` from `internetMessageHeaders`, structured recipients |
+| `fetch_raw` | `$value`, re-encoded base64url for `FetchedRaw` |
+| `find_by_rfc822_msgid` | `$filter=internetMessageId eq '…'` |
+| `find_scheduled_send` | that lookup, then Sent Items filtered by `sentDateTime` in the window, reading each page's `internetMessageHeaders` for the outbox header. Same page cap, shutdown check, and "any doubt is `Err`" as Gmail's |
 
-Use `Prefer: IdType="ImmutableId"` on every call: by default a Graph id changes
-when a message moves, and `messages.gmail_msg_id` has to stay stable.
-`conversationId` is the thread id.
+A `429` is `WriteError::Paced` with Graph's `Retry-After`.
 
-**What has to land before an Outlook account can work, outside the traits:**
+### OAuth
 
-1. **Credentials.** Token refresh (`refresh_stored_token_detailed` in
-   `credentials.rs`) and `squelchd auth` are Google-only: the token URL, the
-   consent URL, the scopes, and the import's account check (which asks Gmail
-   who the mailbox is). They need a per-provider OAuth configuration.
-   `CredentialStore::token` itself is already provider-neutral. This is the
-   largest single piece of Outlook work.
-2. **Setting the provider.** Nothing writes `accounts.provider` yet; the
-   account setup for a new provider has to.
-3. **Auth signals.** `extract_auth_pass` trusts only an
-   `Authentication-Results` Google stamped, so Outlook mail gets no verdict,
-   which is safe but turns off the tracking-pixel bypass, ghost sender scope
-   and timezone learning for that account until Microsoft's authserv ids are
-   added from captured mail.
-4. **Rate limits.** `GmailBudget` is Gmail's. A Graph source handles its own
-   `429` / `Retry-After` and must honor `Urgency` (retry in place only for
-   `Window`). Metrics are still named `squelchd_gmail_*`.
-5. **Calendar** (`gcal`) and **hosted signup** stay Google-only; both need an
-   off path or their own provider work.
+`OAuthClientConfig.issuer` (`Google` or `Microsoft`) follows `provider` and
+decides every endpoint, scope set and identity check:
+
+- **Endpoints**: `login.microsoftonline.com/common/oauth2/v2.0/{authorize,token}`,
+  personal and work or school accounts alike. `refresh_stored_token_detailed`,
+  the one refresh every token goes through, uses the issuer's token URL.
+- **Public client**: an Entra "Mobile and desktop" app has no secret. None is
+  sent on the exchange or the refresh, in the body or a Basic header.
+- **One consent, both mail slots** (as Gmail's `gmail.modify` since #618):
+  `Mail.ReadWrite`, `Mail.Send`, `User.Read`, `offline_access`. Read needs
+  `Mail.ReadWrite` or `Mail.Read`; Write needs `Mail.ReadWrite` and
+  `Mail.Send`. Either spelling (with or without the
+  `https://graph.microsoft.com/` prefix) satisfies a requirement. An exchange
+  with no refresh token stores nothing: without `offline_access` there is
+  none and the credential dies within the hour.
+- **The account check** asks Graph `/me`: `mail`, else an address-shaped
+  `userPrincipalName` (`mail` is null on some personal accounts).
+- **Transfer blobs** (`--export` / `--import`) verify against Microsoft. The
+  exporting machine's config needs `provider = "outlook"` too.
+- **Refused for Outlook**: `--broker` (it relays Google's consent), the
+  calendar consent and its first-run offer, and calendar credentials in the
+  API state, so a Microsoft token is never offered to Google.
+- **The client id** is `PASSBAND_MICROSOFT_CLIENT_ID`, built in (a public
+  client's id is not a secret), overridden by `microsoft_client_id`. It is
+  EMPTY until Passband's Entra app is registered, and until then an Outlook
+  daemon needs `microsoft_client_id`.
+
+### Still open
+
+1. **Live end to end.** Everything above is tested against scripted Graph and
+   token endpoints only. Unverified on a real mailbox: that the message delta
+   honors the `receivedDateTime ge` filter, that `internetMessageHeaders` can
+   be selected on a Sent Items list (the scheduled-send scan depends on it),
+   that a MIME draft keeps our `Message-ID` and outbox header, that the
+   draft's immutable id survives the send, which scope spelling the token
+   endpoint echoes, and that Entra takes the `http://127.0.0.1:<port>`
+   loopback redirect against a registered `http://127.0.0.1`.
+2. **Auth signals.** `extract_auth_pass` trusts only Google's
+   `Authentication-Results`, so Outlook rows get `NULL` (safe: no bypass).
+   Microsoft's authserv ids must be captured from real mail first.
+3. **Large sends** (over about 3 MB of MIME) need Graph upload sessions.
+4. **Downgrades are unsafe.** A build from before `accounts.provider` would
+   sync an Outlook account as Gmail and send its tokens to Google. Do not roll
+   an Outlook daemon back past this build.
+5. **Client copy.** Passband still says "Gmail" in places (Trash, the auth
+   pane); `/client/stats` does not advertise the provider yet.
+6. **Hosted** stays Gmail-only: squelch-control's signup and tenant model are
+   Google-shaped, and need their security argument re-made for a second IdP.
+7. **No profile photo** for Outlook accounts (Graph `/me/photo` is not wired).

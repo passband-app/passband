@@ -254,6 +254,37 @@ is already set up, open **Settings**, go to **Account**, and press
 
 If Test fails, jump to troubleshooting below; the error text names the cause.
 
+## Outlook instead of Gmail
+
+Outlook.com, Hotmail and Microsoft 365 mailboxes sync over Microsoft Graph.
+Skip step 1 (no Google client) and put two lines in the daemon's config file,
+`~/.config/squelch/config.toml` for the user squelchd runs as, on every
+machine that runs `squelchd auth` (the export laptop too):
+
+```toml
+account_email = "you@outlook.com"
+provider = "outlook"
+```
+
+There is no environment variable for `provider`; it is a config-file key.
+Then run step 3 as written, without the two `SQUELCH_CLIENT_*` variables. The
+consent screen is Microsoft's and asks for mail read/write, send, your
+profile, and offline access, once for both reading and writing. `--broker`
+and calendar are Gmail-only.
+
+Until Passband's own Entra app ships in the build, bring one: in the Azure
+portal, App registrations, New registration; supported account types
+"Accounts in any organizational directory and personal Microsoft accounts";
+platform "Mobile and desktop applications" with redirect URI
+`http://127.0.0.1` (Entra ignores the port on a loopback redirect, and
+squelchd's listener picks one); delegated Graph permissions `Mail.ReadWrite`,
+`Mail.Send`, `User.Read` and `offline_access`. No client secret. Put its
+Application (client) ID in the config as `microsoft_client_id = "..."`.
+
+A daemon's database belongs to one provider: the first boot marks the
+account, and a later config that disagrees is refused. Details, and what is
+not built yet, are in [MAIL-PROVIDERS.md](MAIL-PROVIDERS.md#outlook-microsoft-graph).
+
 ## 6. Optional extras
 
 **The console.** The daemon serves a small web console for itself at

@@ -5,8 +5,9 @@
 #              entrypoint's root-time `chown -R relay:relay /data` becomes a
 #              no-op chown to the id it already is, and the relay (dropped to
 #              999 by setpriv) owns the directory it writes.
-#   bifrost -> /bifrost as var.bifrost_uid. Bifrost runs as root; the access
-#              point maps it down, so root in the container is not root on EFS.
+#   bifrost -> /bifrost as var.bifrost_uid (1000, the image's appuser, which
+#              is what deploy/aws/docker/Dockerfile.bifrost runs as). The
+#              access point enforces the same id, so process and files agree.
 
 resource "aws_efs_file_system" "main" {
   creation_token   = "passband"

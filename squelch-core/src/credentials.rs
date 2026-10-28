@@ -204,10 +204,13 @@ pub fn refresh_stored_token_detailed(
     client: &OAuthClientConfig,
     refresh_token: &str,
 ) -> Result<RefreshedToken> {
+    // THE ISSUER'S token endpoint: every refresh in the daemon comes through
+    // here, so a Google URL left in place would send an Outlook refresh token
+    // to Google on the first expiry.
     refresh_stored_token_detailed_at(
         client,
         refresh_token,
-        crate::auth::GOOGLE_TOKEN_URL,
+        client.issuer.token_url(),
         crate::auth::EXCHANGE_HTTP_TIMEOUT,
     )
 }
@@ -229,10 +232,17 @@ pub(crate) fn refresh_stored_token_detailed_at(
     use oauth2::basic::BasicClient;
     use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenResponse, TokenUrl};
 
-    let oauth = BasicClient::new(ClientId::new(client.client_id.clone()))
-        .set_client_secret(ClientSecret::new(client.client_secret.clone()))
+    let oauth = BasicClient::new(ClientId::new(client.client_id.clone()));
+    // A public client (Microsoft) presents no secret; its endpoint refuses one.
+    let oauth = match client.issuer {
+        crate::config::OAuthIssuer::Google => {
+            oauth.set_client_secret(ClientSecret::new(client.client_secret.clone()))
+        }
+        crate::config::OAuthIssuer::Microsoft => oauth,
+    };
+    let oauth = oauth
         .set_auth_uri(
-            AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
+            AuthUrl::new(client.issuer.auth_url().to_string())
                 .map_err(|e| CoreError::Credential(format!("bad auth url: {e}")))?,
         )
         .set_token_uri(
@@ -254,7 +264,9 @@ pub(crate) fn refresh_stored_token_detailed_at(
     let resp = oauth
         .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
         .request(&http)
-        .map_err(|e| CoreError::Credential(refresh_error_message(&e.to_string())))?;
+        .map_err(|e| {
+            CoreError::Credential(refresh_error_message_for(client.issuer, &e.to_string()))
+        })?;
 
     let new_refresh = resp
         .refresh_token()
@@ -293,6 +305,21 @@ fn carry_scopes_forward(stored: &StoredToken, refreshed: RefreshedToken) -> Stor
 /// The credential-error message for a failed refresh exchange. `invalid_grant` means
 /// the REFRESH token itself is dead, not a transient failure — no backoff recovers
 /// it, so the message names the fix instead.
+fn refresh_error_message_for(issuer: crate::config::OAuthIssuer, err: &str) -> String {
+    match issuer {
+        crate::config::OAuthIssuer::Google => refresh_error_message(err),
+        // Not Google's advice: there is no consent-screen publishing status
+        // to fix. Revocation, a password reset, and a personal account's
+        // refresh token lapsing after about 90 days unused are the causes.
+        crate::config::OAuthIssuer::Microsoft if err.contains("invalid_grant") => format!(
+            "refresh failed: {err} — Microsoft has expired or revoked the refresh token \
+             (revoked access, a password change, or about 90 days without use); re-authorize \
+             with `squelchd auth`"
+        ),
+        crate::config::OAuthIssuer::Microsoft => format!("refresh failed: {err}"),
+    }
+}
+
 fn refresh_error_message(err: &str) -> String {
     if err.contains("invalid_grant") {
         format!(
@@ -321,7 +348,7 @@ fn validate_or_refresh_stored<P>(
     validate_or_refresh_stored_at(
         stored,
         client,
-        crate::auth::GOOGLE_TOKEN_URL,
+        client.issuer.token_url(),
         crate::auth::EXCHANGE_HTTP_TIMEOUT,
         persist,
     )
@@ -2010,6 +2037,7 @@ mod tests {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         }
     }
 

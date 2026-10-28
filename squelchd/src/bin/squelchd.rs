@@ -14,7 +14,7 @@ use chrono::{Duration, SecondsFormat};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use squelch_core::auth::{
     AuthFlowOptions, AuthScopes, ConsentBind, CredentialTransfer, DEFAULT_HEADLESS_PORT,
-    TransferCredential, check_token_covers_slot, decode_transfer, encode_transfer, printable,
+    TransferCredential, check_token_covers_slot_for, decode_transfer, encode_transfer, printable,
     run_auth_flow, run_broker_flow, run_export_flow, verify_transfer_credential,
 };
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
@@ -952,7 +952,11 @@ fn cmd_auth(
     // "not stored": the worst case is one optional offer made again.
     let calendar_stored =
         load_token_backend(backend, &creds_path, &email, CredentialKind::Calendar).is_ok();
-    if wants_first_calendar(args, calendar_stored) && confirm_first_calendar() {
+    // Calendar is Google Calendar; an Outlook daemon is never offered it.
+    if client.issuer == squelch_core::config::OAuthIssuer::Google
+        && wants_first_calendar(args, calendar_stored)
+        && confirm_first_calendar()
+    {
         mint_first_calendar(|| {
             mint_credential(
                 &client,
@@ -980,8 +984,9 @@ fn mint_credential(
     broker: Option<&str>,
 ) -> Result<(), squelch_core::CoreError> {
     println!(
-        "Authorizing Google account: {email} [{}] via {:?} backend",
-        scopes.label(),
+        "Authorizing {} account: {email} [{}] via {:?} backend",
+        client.issuer.name(),
+        scopes.label_for(client.issuer),
         backend
     );
 
@@ -1005,7 +1010,7 @@ fn mint_credential(
     // gmail.modify stores nothing rather than a Write slot that cannot write.
     let slots = gmail_slots(scopes);
     for kind in &slots {
-        check_token_covers_slot(*kind, &token)?;
+        check_token_covers_slot_for(client.issuer, *kind, &token)?;
     }
     for kind in slots {
         store_and_announce(backend, creds_path, email, kind, &token)?;
@@ -1140,7 +1145,7 @@ fn cmd_auth_export(config: &Config, args: &AuthArgs) -> Result<(), squelch_core:
         account = Some(mailbox);
         let slots = gmail_slots(scopes);
         for kind in &slots {
-            check_token_covers_slot(*kind, &token)?;
+            check_token_covers_slot_for(client.issuer, *kind, &token)?;
         }
         for kind in slots {
             credentials.push(TransferCredential {
@@ -1515,6 +1520,9 @@ fn open_account_store(
     let email = config.require_account_email()?;
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
+    // Before anything syncs or writes: the account is the provider the config
+    // says, or this refuses (a mailbox never changes provider).
+    store.bind_account_provider(account_id, config.provider)?;
     Ok((store, account_id))
 }
 
@@ -1815,6 +1823,9 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
 
     let mut store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
+    // Before anything syncs or writes: the account is the provider the config
+    // says, or this refuses (a mailbox never changes provider).
+    store.bind_account_provider(account_id, config.provider)?;
 
     // Attach the embedder to both the store (query-side) and the engine
     // (write-side); `None` keeps everything working without vector recall.
@@ -2329,6 +2340,9 @@ fn cmd_serve(
 
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
+    // Before anything syncs or writes: the account is the provider the config
+    // says, or this refuses (a mailbox never changes provider).
+    store.bind_account_provider(account_id, config.provider)?;
     let store = Arc::new(store);
 
     let backend = config.credential_backend;
@@ -4049,6 +4063,7 @@ mod tests {
             OAuthClientConfig {
                 client_id: "test".into(),
                 client_secret: "test".into(),
+                issuer: Default::default(),
             },
         ));
         let budget = Arc::new(squelch_core::gmail_budget::GmailBudget::new(

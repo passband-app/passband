@@ -612,6 +612,7 @@ async fn world_with(
             OAuthClientConfig {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
+                issuer: Default::default(),
             },
         )
         .unwrap(),
@@ -1818,6 +1819,7 @@ async fn events_are_scoped_to_their_account() {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         },
     )
     .unwrap();
@@ -3495,6 +3497,7 @@ async fn writes_are_scoped_to_their_account() {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         },
     )
     .unwrap();
@@ -4514,6 +4517,7 @@ async fn guests_are_scoped_to_their_account() {
         OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         },
     )
     .unwrap();

@@ -9387,6 +9387,7 @@ fn calendar_resolver(
         squelch_core::config::OAuthClientConfig {
             client_id: "id".into(),
             client_secret: "secret".into(),
+            issuer: Default::default(),
         },
     )
     .unwrap();

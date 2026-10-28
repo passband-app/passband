@@ -1501,20 +1501,26 @@ impl ApiState {
         Ok(match cfg.oauth_client() {
             Ok(client) => {
                 let account_id = state.account_id;
-                state
-                    .with_calendar_credentials(squelch_core::credentials::CalendarCredentials::new(
-                        account_id,
-                        account_email.to_string(),
-                        cfg.credential_backend,
-                        cfg.resolve_credentials_path(),
-                        client.clone(),
-                    )?)
-                    .with_write_credentials(
-                        cfg.credential_backend,
-                        account_email.to_string(),
-                        cfg.resolve_credentials_path(),
-                        client,
-                    )?
+                // Calendar is Google Calendar: an Outlook daemon has none, and
+                // its Microsoft token must never be offered to Google's API.
+                let state = match client.issuer {
+                    squelch_core::config::OAuthIssuer::Google => state.with_calendar_credentials(
+                        squelch_core::credentials::CalendarCredentials::new(
+                            account_id,
+                            account_email.to_string(),
+                            cfg.credential_backend,
+                            cfg.resolve_credentials_path(),
+                            client.clone(),
+                        )?,
+                    ),
+                    squelch_core::config::OAuthIssuer::Microsoft => state,
+                };
+                state.with_write_credentials(
+                    cfg.credential_backend,
+                    account_email.to_string(),
+                    cfg.resolve_credentials_path(),
+                    client,
+                )?
             }
             Err(_) => {
                 eprintln!(

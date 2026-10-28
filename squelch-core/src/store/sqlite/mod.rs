@@ -185,6 +185,31 @@ macro_rules! thread_key_sql {
     };
 }
 
+/// An answered revisit: an `applied` run (`$r`, of `agent_triage_runs`) of a
+/// `revisit:` job (`$j`, of `agent_triage_jobs`). The ghost-event revisit pass
+/// reads the newest one per message as "already answered", and asks the
+/// model again (a billed run) when it finds none; history retention keeps
+/// that newest one for it (`retention.rs`). One definition, so the reader and
+/// what is kept for it cannot drift apart.
+macro_rules! revisit_answer_sql {
+    ($r:literal, $j:literal) => {
+        concat!(
+            $r,
+            ".outcome='applied' AND ",
+            $j,
+            ".id=",
+            $r,
+            ".job_id AND ",
+            $j,
+            ".account_id=",
+            $r,
+            ".account_id AND ",
+            $j,
+            ".trigger LIKE 'revisit:%'"
+        )
+    };
+}
+
 /// THE AUTH ARM OF FYE MEMBERSHIP, thread-level, as two CTEs to put after a
 /// query's `WITH`: `auth_fye_threads(account_id, thread_key, id)` holds, per
 /// thread, the newest not-done auth message that [`auth_fye_sql!`] holds for.
@@ -430,6 +455,7 @@ mod notify;
 mod outbound;
 pub mod people;
 pub mod reading_senders;
+mod retention;
 mod rules;
 mod scheduled;
 mod search;
@@ -448,6 +474,7 @@ pub use self::agent_triage::{
     ARCHIVE_SURFACE_CAP, AccessProgress, ArchiveAccessCaps, BACKGROUND_BUDGET_KEY,
 };
 use self::migrate::migrate;
+pub use self::retention::{HISTORY_RETENTION_DAYS, HistoryPruned};
 pub use self::search::{EXTERNAL_RECALL_MAX, ExternalSearchMode};
 
 use std::path::Path;

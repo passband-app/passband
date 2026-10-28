@@ -3407,8 +3407,8 @@ pub(super) const DUE_REMINDERS_SQL: &str =
      ORDER BY t.reminded_at DESC,m.id DESC";
 
 /// The newest runs for one message, for `agent_diagnostics`. A `const` so the
-/// plan test pins it to `idx_agent_triage_runs_message`: the table is never
-/// pruned, and without the index this was a scan of all of it.
+/// plan test pins it to `idx_agent_triage_runs_message`: without the index
+/// this is a scan of every run in the retention window (`retention.rs`).
 pub(super) const MESSAGE_RUNS_SQL: &str =
     "SELECT id,job_id,outcome,completed_at,metadata_json FROM agent_triage_runs
      WHERE account_id=?1 AND message_id=?2 ORDER BY id DESC LIMIT 25";

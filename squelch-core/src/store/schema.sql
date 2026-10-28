@@ -1756,11 +1756,13 @@ CREATE TABLE IF NOT EXISTS agent_triage_runs (
     metadata_json TEXT NOT NULL DEFAULT '{}',
     completed_at TEXT NOT NULL
 );
--- One row per run, never deleted, so without this the diagnostics read
--- (`agent_diagnostics`: the newest 25 runs for one message) is a scan of a
--- table that only grows. The first open after this ships builds it over the
--- whole table, synchronously, before the daemon serves: a one-time cost in
--- proportion to the run history, paid once.
+-- One row per run, kept for HISTORY_RETENTION_DAYS (`retention.rs`; a
+-- message's newest answered revisit is kept past it, slimmed, because the
+-- revisit pass reads it),
+-- so without this the diagnostics read (`agent_diagnostics`: the newest 25
+-- runs for one message) is a scan of the whole window. The first open after
+-- this shipped built it over the whole table, synchronously, before the
+-- daemon served: a one-time cost in proportion to the run history, paid once.
 CREATE INDEX IF NOT EXISTS idx_agent_triage_runs_message ON agent_triage_runs(account_id, message_id);
 CREATE TABLE IF NOT EXISTS agent_triage_cutover (
     account_id INTEGER PRIMARY KEY,
@@ -2137,7 +2139,9 @@ CREATE TABLE IF NOT EXISTS sender_zones (
 );
 
 -- Independent model assessments for human notification diagnostics. Multiple
--- attempts remain inspectable; the notification ledger still records delivery.
+-- attempts remain inspectable for HISTORY_RETENTION_DAYS (`retention.rs`);
+-- the notification ledger still records delivery, and it, not
+-- this table, is what stops a second model call.
 CREATE TABLE IF NOT EXISTS notification_assessments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

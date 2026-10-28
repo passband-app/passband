@@ -133,3 +133,55 @@ These stay Gmail-shaped in the engine or around it, deliberately:
 3. Implement `MailWriter` in `squelch-api/src/write/<provider>.rs`. The RFC 822
    composition in `write/mime.rs` is provider-neutral and shared.
 4. Give the provider an off path for the Gmail-only features above.
+
+## Outlook readiness (checked against Microsoft Graph)
+
+The seams were checked by mapping every method onto Graph's mail API. Three
+things that would have blocked Outlook were fixed in phase 1:
+`merge_cursors` takes the start cursor (Graph's per-folder delta links are
+opaque and unordered), the Google profile fetch runs only for Gmail accounts
+(it carries the account's token to Google), and "not spam" is its own
+`MailWriter::not_spam` rather than a Gmail label edit the door spelled out.
+
+**How each method maps onto Graph:**
+
+| Method | Graph |
+|---|---|
+| `list(Folder)` | `GET /me/mailFolders/{inbox,sentitems,junkemail}/messages?$filter=receivedDateTime ge …&$select=id` |
+| `list(Window)` | `GET /me/messages?$filter=receivedDateTime ge … and lt …` (all folders), minus drafts and deleted items; `filed_only` also excludes inbox and sent items |
+| `current_cursor` / `changes` | per-folder `…/messages/delta`; the cursor carries one `@odata.deltaLink` per folder, encoded however the source likes. A `410 Gone` is `ChangesError::Expired` |
+| `merge_cursors(since, a, b)` | take each folder's link from whichever walk changed it relative to `since` |
+| `cursor_is_usable` | every folder has a link |
+| `fetch_raw` | `GET /me/messages/{id}/$value` (raw MIME) plus `parentFolderId` for `Placement` |
+| `fetch_headers` | `$select=toRecipients,ccRecipients,bccRecipients,receivedDateTime`, rendered as header pairs |
+| `inbox_unread` | `GET /me/mailFolders/inbox` → `unreadItemCount`. Graph has no thread count, so a source returns the message count for both |
+| `wait_for_change` | the default (poll). Graph's push is change notifications to a public HTTPS webhook, which a self-host does not have |
+| `archive` / `trash` / `not_spam` | `POST /me/messages/{id}/move` to `archive` / `deleteditems` / `inbox` |
+| `send` | `POST /me/sendMail` with the MIME body. It answers `202` with no id, so `SentRef` comes back empty and the send echo waits for the next poll |
+| `find_by_rfc822_msgid` | `$filter=internetMessageId eq '<…>'` |
+| `modify` (labels) | categories, or refuse: the label editor is Gmail's feature |
+
+Use `Prefer: IdType="ImmutableId"` on every call: by default a Graph id changes
+when a message moves, and `messages.gmail_msg_id` has to stay stable.
+`conversationId` is the thread id.
+
+**What has to land before an Outlook account can work, outside the traits:**
+
+1. **Credentials.** Token refresh (`refresh_stored_token_detailed` in
+   `credentials.rs`) and `squelchd auth` are Google-only: the token URL, the
+   consent URL, the scopes, and the import's account check (which asks Gmail
+   who the mailbox is). They need a per-provider OAuth configuration.
+   `CredentialStore::token` itself is already provider-neutral. This is the
+   largest single piece of Outlook work.
+2. **Setting the provider.** Nothing writes `accounts.provider` yet; the
+   account setup for a new provider has to.
+3. **Auth signals.** `extract_auth_pass` trusts only an
+   `Authentication-Results` Google stamped, so Outlook mail gets no verdict,
+   which is safe but turns off the tracking-pixel bypass, ghost sender scope
+   and timezone learning for that account until Microsoft's authserv ids are
+   added from captured mail.
+4. **Rate limits.** `GmailBudget` is Gmail's. A Graph source handles its own
+   `429` / `Retry-After` and must honor `Urgency` (retry in place only for
+   `Window`). Metrics are still named `squelchd_gmail_*`.
+5. **Calendar** (`gcal`) and **hosted signup** stay Google-only; both need an
+   off path or their own provider work.

@@ -63,6 +63,9 @@ enum EventBanner {
     enum TapRoute: Equatable, Sendable {
         case update
         case test
+        /// A smart re-notify banner (RenotifyBanner.swift): open its first
+        /// message and report the tap against its batch.
+        case renotify(RenotifyTap)
         /// An agent's draft to review. `accountId` nil only when an enriched
         /// banner lost its account key, which the tap queue reads as "the
         /// active account".
@@ -95,6 +98,7 @@ enum EventBanner {
         }
         // A draft banner that lost its binding opens nothing at all.
         if route == agentDraftRoute { return .thread(nil) }
+        if let renotify = renotifyTap(userInfo) { return .renotify(renotify) }
         let messageId =
             (userInfo[messageKey] as? Int) ?? (userInfo[messageKey] as? String).flatMap(Int.init)
         let flagged = (userInfo[authKey] as? Bool) ?? false
@@ -109,6 +113,52 @@ enum EventBanner {
             return .event(unresolved)
         }
         return .thread(userInfo[threadKey] as? String)
+    }
+
+    // MARK: - smart re-notify taps (the banner itself: RenotifyBanner.swift)
+
+    /// The daemon's closed re-notify trigger set, mirrored for analytics.
+    enum RenotifyTrigger: String, Sendable {
+        case client_online
+        case meeting_end
+    }
+
+    /// The tap route a re-notify banner carries in `routeKey`.
+    static let renotifyRoute = "renotify"
+    /// The batch id: what a tap reports to `/client/renotify/{id}/opened`.
+    static let renotifyBatchKey = "passband.renotify.batch"
+    /// The frame's trigger, for the tap's analytics.
+    static let renotifyTriggerKey = "passband.renotify.trigger"
+    /// How many messages the banner named.
+    static let renotifyCountKey = "passband.renotify.items"
+    /// The coalescing group every re-notify shares, before the poster
+    /// prefixes it with the account.
+    static let renotifyGroup = "passband.renotify"
+
+    /// A tap on a re-notify banner: open `messageId` (the first item) and
+    /// report it against `batch`.
+    struct RenotifyTap: Equatable, Sendable {
+        var batch: Int
+        var messageId: Int
+        var threadId: String
+        var trigger: RenotifyTrigger?
+        var items: Int
+    }
+
+    /// The re-notify half of `tapRoute`, nil for any other banner.
+    static func renotifyTap(_ userInfo: [AnyHashable: Any]) -> RenotifyTap? {
+        guard userInfo[routeKey] as? String == renotifyRoute,
+            let batch = intValue(userInfo[renotifyBatchKey]), batch > 0,
+            let messageId = intValue(userInfo[messageKey]), messageId > 0
+        else { return nil }
+        return RenotifyTap(
+            batch: batch, messageId: messageId, threadId: userInfo[threadKey] as? String ?? "",
+            trigger: (userInfo[renotifyTriggerKey] as? String).flatMap(RenotifyTrigger.init),
+            items: intValue(userInfo[renotifyCountKey]) ?? 1)
+    }
+
+    private static func intValue(_ any: Any?) -> Int? {
+        (any as? Int) ?? (any as? NSNumber)?.intValue ?? (any as? String).flatMap(Int.init)
     }
 
     /// The relay's original push survives when device enrichment times out.

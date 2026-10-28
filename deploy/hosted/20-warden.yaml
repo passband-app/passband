@@ -1,10 +1,11 @@
 # The warden itself: one Deployment, one Service, one Ingress.
 #
-# EDIT BEFORE APPLYING. Two values in this file are placeholders and both will
-# break the deploy if they are left alone:
+# EDIT BEFORE APPLYING. Three values in this file are placeholders and all
+# will break the deploy if they are left alone:
 #
 #   1. `image:` on the Deployment          -> your squelch-warden image
-#   2. `host:` on the Ingress, twice       -> warden.<your domain>
+#   2. `host:` on both Ingresses           -> warden.<your domain>
+#   3. `sourceRange:` on the Middleware    -> the addresses that may call the API
 #
 # Everything this process is CONFIGURED with is in `15-warden-config.yaml`,
 # which is where your domain, the squelchd image tenants run and the control
@@ -120,18 +121,51 @@ spec:
       port: 8852
       targetPort: http
 ---
+# Who may reach the API at all. The bearer token is the real credential, but
+# it is one static token that can read every tenant's Secret (10-warden-rbac),
+# so it should not also be usable from anywhere on the internet. This list is
+# the second factor: a leaked token is worth nothing from an address not on it.
+#
+# REQUIRES real client IPs at Traefik: apply 05-traefik-metrics.yaml (it sets
+# externalTrafficPolicy: Local) FIRST, or every caller looks like a cluster
+# address and this list refuses control too.
+#
+# Apply only once control calls from a fixed address: after the AWS cutover
+# (deploy/aws/CUTOVER.md Phase 6) control egresses through the NAT EIP,
+# `tofu -chdir=deploy/aws/tofu/main output -raw nat_egress_ip`. On Railway
+# its egress address is not fixed.
+#
+# Operators: call the API from the box itself through a port-forward,
+#   kubectl -n warden port-forward svc/squelch-warden 8852:8852
+# rather than adding a laptop address here. /healthz stays public (the
+# second Ingress below) so blackbox can keep probing it from wherever it runs.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: warden-allowlist
+  namespace: warden
+spec:
+  ipAllowList:
+    sourceRange:
+      # 3. EDIT ME: control's egress (the AWS NAT EIP), as a /32.
+      - 192.0.2.1/32
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: squelch-warden
   namespace: warden
+  annotations:
+    # <namespace>-<middleware name>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: warden-warden-allowlist@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:
     # The warden lives on the PRODUCT domain, not the tenant one: `*.passband.email`
     # is reserved to mean "a tenant" and nothing else, so internal surfaces go
     # through passband.app. 40-wildcard-certificate.yaml issues warden-tls for
-    # this single host over HTTP-01.
+    # this single host over HTTP-01 (cert-manager's solver Ingress is its own
+    # object, without this middleware, so renewals are not blocked).
     - hosts:
         # 2. EDIT ME
         - warden.passband.app
@@ -141,10 +175,38 @@ spec:
     - host: warden.passband.app
       http:
         paths:
-          # Unlike a tenant vhost, every path here goes to the service: the
-          # whole API is behind the bearer, and /healthz says only `ok`.
+          # Every path goes to the service, from allowlisted addresses only.
+          # The whole API is also behind the bearer.
           - path: /
             pathType: Prefix
+            backend:
+              service:
+                name: squelch-warden
+                port:
+                  name: http
+---
+# /healthz, from anywhere: it says only `ok`, and the blackbox probe
+# (deploy/monitoring/prometheus/prometheus.yml) is not on the allowlist. An
+# Exact path outranks the Prefix route above, so only this one path is open.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: squelch-warden-healthz
+  namespace: warden
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        # 2. EDIT ME
+        - warden.passband.app
+      secretName: warden-tls
+  rules:
+    # 2. EDIT ME
+    - host: warden.passband.app
+      http:
+        paths:
+          - path: /healthz
+            pathType: Exact
             backend:
               service:
                 name: squelch-warden

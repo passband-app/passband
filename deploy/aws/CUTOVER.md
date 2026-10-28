@@ -1172,6 +1172,23 @@ aws rds wait db-snapshot-available --db-snapshot-identifier passband-post-cutove
 5. Delete `$WORK` (`rm -rf "$WORK"`; it holds the control dump).
 6. Old Kubernetes Secret: `kubectl -n tenants delete secret apns-relay` once
    every tenant shows `apns-relay-2` (Phase 7 VERIFY loop).
+7. **Close the warden API to everyone but control.** Control now calls the
+   warden only from the NAT EIP, so the allowlist in
+   `deploy/hosted/20-warden.yaml` can go on. On carrier, in this order:
+
+   ```sh
+   tofu -chdir=$TF output -raw nat_egress_ip        # -> the /32 for 20-warden.yaml's sourceRange
+   kubectl apply -f deploy/hosted/05-traefik-metrics.yaml   # externalTrafficPolicy: Local; Traefik restarts once
+   kubectl -n kube-system get svc traefik -o jsonpath='{.spec.externalTrafficPolicy}'   # Local
+   kubectl apply -f deploy/hosted/20-warden.yaml            # with the EIP filled in
+   ```
+
+   **VERIFY.** From your laptop, `curl -s -o /dev/null -w '%{http_code}\n'
+   https://warden.passband.app/v1/tenants` says `403` (Traefik's allowlist,
+   before the bearer is even read), and `/healthz` says `200`. Then a real
+   signup end to end, which is control calling the warden: if it fails at
+   provisioning, the EIP in `sourceRange` is wrong or Traefik is still
+   seeing cluster addresses (check the policy line above).
 
 **VERIFY.** `railway list` shows no project; `dig` for every product host
 resolves to AWS (ALB or CloudFront); no `railway` header on any of them. `grep -E '^(operator_cidrs|operator_db_access)' $TF/terraform.tfvars` shows

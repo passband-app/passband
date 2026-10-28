@@ -30,3 +30,16 @@ spec:
         # slow read vs. a stream that legitimately lasts a minute) is not one
         # bucket.
         buckets: "0.005,0.01,0.025,0.05,0.1,0.25,0.5,1,2.5,5,10,30,60"
+    # Real client IPs. With the chart's default externalTrafficPolicy
+    # (Cluster), k3s's service load balancer SNATs every connection, so
+    # Traefik sees a cluster address instead of the caller and an IP
+    # allowlist (the warden's, in 20-warden.yaml) would match nobody, or
+    # everybody. Local keeps the source address. It costs nothing on a single
+    # node: there is no other node for traffic to be balanced to.
+    #
+    # VERIFY after applying: Traefik's access log, or
+    #   kubectl -n kube-system get svc traefik -o jsonpath='{.spec.externalTrafficPolicy}'
+    # says Local, and the warden allowlist admits control (see 20-warden.yaml).
+    service:
+      spec:
+        externalTrafficPolicy: Local

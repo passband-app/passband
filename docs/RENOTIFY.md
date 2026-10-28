@@ -118,10 +118,11 @@ copy) and the re-notify half of `EventBanner.swift` (the tap), posted by
   daemon has already recorded it as fired, so a dropped frame counts as an
   ignored banner.
 - **Copy.** One message keeps its first banner's title (the sender) with a
-  reminder framing: "Still waiting: ..." or, for `reason: deadline`, "Due
-  tomorrow: ...", "Due Friday: ...", "Past due: ...", read in the Mac's own
-  calendar. Several are one banner, "N emails still need you", naming up to
-  two senders, with a deadline leading the body. Only a deadline chimes.
+  reminder framing: "Still waiting: ..." or, for `why: due_soon`, "Due
+  tomorrow: ...", "Due Friday: ...", "Past due: ...", worded from `due_at`
+  (else `deadline`) in the Mac's own calendar. Several are one banner, "N
+  emails still need you", naming up to two senders, with a due-soon item
+  leading the body. Only due-soon mail chimes.
 - **Identity.** The request id is `passband.renotify.<account>.<batch>`, and
   the userInfo has no event id. So it never replaces the first banner, and
   `ToldEvents` never swallows it. The backlog rule reads an `Event`, which

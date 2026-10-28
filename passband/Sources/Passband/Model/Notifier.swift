@@ -258,7 +258,7 @@ final class Notifier {
         #endif
         var props: [String: Any] = [
             "items": signal.items.count,
-            "deadline": signal.items.contains(where: \.isDeadline),
+            "due_soon": signal.items.contains(where: \.isDueSoon),
             "foreground": foreground,
         ]
         if let trigger = signal.knownTrigger { props["trigger"] = trigger.rawValue }

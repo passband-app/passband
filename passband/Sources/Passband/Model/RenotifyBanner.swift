@@ -28,21 +28,27 @@ struct RenotifySignal: Decodable, Equatable, Sendable {
         var importance: Int
         var sender: String
         var one_line: String
-        /// The message's current deadline (RFC 3339), or nil.
+        /// The deadline snapshot (RFC 3339), display copy only.
         var deadline: String?
-        /// Absent from the daemon's first cut of the frame, which only ever
-        /// re-notified unanswered mail.
-        var reason: Reason?
+        /// Why it is back. Absent from the daemon's first cut of the frame,
+        /// which only ever re-notified unanswered mail.
+        var why: Why?
+        /// For `due_soon`: the due time the daemon judged (RFC 3339). It is
+        /// what "Due tomorrow" is worded from.
+        var due_at: String?
 
-        var isDeadline: Bool { reason == .deadline }
+        var isDueSoon: Bool { why == .due_soon }
+        /// The date a due-soon banner names: the judged due time, else the
+        /// snapshot.
+        var dueDate: String? { due_at ?? deadline }
     }
 
     /// Why one message is back. Lenient: a newer daemon's reason reads as the
     /// plain "still waiting" framing rather than failing the frame.
-    enum Reason: String, LenientRawEnum {
-        case waiting
-        case deadline
-        static var unknownFallback: Self { .waiting }
+    enum Why: String, LenientRawEnum {
+        case unhandled
+        case due_soon
+        static var unknownFallback: Self { .unhandled }
     }
 
     let renotify: Int
@@ -103,9 +109,10 @@ extension EventBanner {
     ///
     /// ONE MESSAGE reads like its first banner (`copy(for:)`: the sender as
     /// the title, the summary as the body) framed as a reminder: "Still
-    /// waiting: …", or for a deadline, "Due tomorrow: …". The date is the
-    /// daemon's CURRENT deadline, not the first banner's snapshot, which is
-    /// why this banner may say it when the first one deliberately did not.
+    /// waiting: …", or for due-soon mail, "Due tomorrow: …". The date is the
+    /// due time the daemon judged (`due_at`), not the first banner's
+    /// snapshot, which is why this banner may say it when the first one
+    /// deliberately did not.
     ///
     /// SEVERAL are one banner, "3 emails still need you", naming a couple of
     /// senders. A deadline among them leads the body.
@@ -116,13 +123,13 @@ extension EventBanner {
         for signal: RenotifySignal, now: Date = Date(), calendar: Calendar = .current
     ) -> Copy {
         let items = signal.items
-        let anyDeadline = items.contains(where: \.isDeadline)
+        let anyDeadline = items.contains(where: \.isDueSoon)
         if items.count == 1 {
             let item = items[0]
             let original = copy(for: event(from: item))
             let lead =
-                item.isDeadline
-                ? dueLabel(item.deadline, now: now, calendar: calendar) ?? "Due soon"
+                item.isDueSoon
+                ? dueLabel(item.dueDate, now: now, calendar: calendar) ?? "Due soon"
                 : "Still waiting"
             let summary = flatten(item.one_line, max: 220)
             return Copy(
@@ -145,8 +152,8 @@ extension EventBanner {
         case (2, 0): who = "From \(shown[0]) and \(shown[1])"
         case (_, let n): who = "From \(shown.joined(separator: ", ")) and \(n) more"
         }
-        if let due = items.first(where: \.isDeadline),
-            let label = dueLabel(due.deadline, now: now, calendar: calendar)
+        if let due = items.first(where: \.isDueSoon),
+            let label = dueLabel(due.dueDate, now: now, calendar: calendar)
         {
             let dueWho = flatten(SenderID.readableName(due.sender), max: 40)
             let head = dueWho.isEmpty ? label : "\(label): \(dueWho)"

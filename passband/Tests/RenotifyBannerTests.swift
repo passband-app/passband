@@ -38,11 +38,11 @@ struct RenotifyBannerTests {
     }
 
     static let bill =
-        #"{"event_id":9,"message_id":4,"thread_id":"t4","kind":"deadline","importance":80,"sender":"Comcast <billing@comcast.com>","one_line":"Invoice due","deadline":"2026-10-29T17:00:00Z","reason":"deadline"}"#
+        #"{"event_id":9,"message_id":4,"thread_id":"t4","kind":"deadline","importance":80,"sender":"Comcast <billing@comcast.com>","one_line":"Invoice due","deadline":null,"why":"due_soon","due_at":"2026-10-29T17:00:00Z"}"#
     static let note =
-        #"{"event_id":10,"message_id":5,"thread_id":"t5","kind":"surfaced","importance":60,"sender":"Sarah Chen <sarah@acme.com>","one_line":"Can you review the draft?","deadline":null,"reason":"waiting"}"#
+        #"{"event_id":10,"message_id":5,"thread_id":"t5","kind":"surfaced","importance":60,"sender":"Sarah Chen <sarah@acme.com>","one_line":"Can you review the draft?","deadline":null,"why":"unhandled"}"#
     static let never =
-        #"{"event_id":null,"message_id":6,"thread_id":"t6","kind":"deadline","importance":55,"sender":"rent@landlord.example","one_line":"Rent","deadline":"2026-10-28T23:00:00Z","reason":"deadline"}"#
+        #"{"event_id":null,"message_id":6,"thread_id":"t6","kind":"deadline","importance":55,"sender":"rent@landlord.example","one_line":"Rent","deadline":"2026-10-28T23:00:00Z","why":"due_soon"}"#
     static let old =
         #"{"event_id":11,"message_id":7,"thread_id":"t7","kind":"surfaced","importance":50,"sender":"Sarah Chen <sarah@acme.com>","one_line":"Ping"}"#
 
@@ -64,12 +64,12 @@ struct RenotifyBannerTests {
         expect(s?.renotify == 12 && s?.items.count == 2, "the batch and its items decode")
         expect(s?.knownTrigger == .client_online, "the trigger is known")
         expect(s?.items[1].event_id == nil, "deadline mail that never notified has no event")
-        expect(s?.items[0].isDeadline == true, "the reason decodes")
-        expect(RenotifySignal.parse(frame(old))?.items[0].reason == nil, "a frame from before `reason` still decodes")
+        expect(s?.items[0].isDueSoon == true, "why decodes")
+        expect(RenotifySignal.parse(frame(old))?.items[0].why == nil, "a frame from before `why` still decodes")
         expect(
-            RenotifySignal.parse(frame(note.replacingOccurrences(of: "\"waiting\"", with: "\"later\"")))?
-                .items[0].reason == .waiting,
-            "an unknown reason reads as waiting")
+            RenotifySignal.parse(frame(note.replacingOccurrences(of: "\"unhandled\"", with: "\"later\"")))?
+                .items[0].why == .unhandled,
+            "an unknown why reads as unhandled")
         expect(RenotifySignal.parse(frame(bill, trigger: "lunch"))?.knownTrigger == nil, "an unknown trigger still shows, unnamed")
         expect(
             (try? JSONDecoder().decode(Event.self, from: Data(raw.utf8))) == nil,
@@ -98,7 +98,10 @@ struct RenotifyBannerTests {
         expect(!waiting.sound, "a nudge, not an alarm")
 
         let due = EventBanner.renotifyCopy(for: RenotifySignal.parse(frame(bill))!, now: now, calendar: utc)
-        expect(due.body == "Due tomorrow: Invoice due", "a deadline leads: \(due.body)")
+        expect(due.body == "Due tomorrow: Invoice due", "due_at words it: \(due.body)")
+        expect(
+            RenotifySignal.parse(frame(never))?.items[0].dueDate == "2026-10-28T23:00:00Z",
+            "without due_at the snapshot is the date")
         expect(due.sound, "a deadline chimes")
         expect(due.threadIdentifier == EventBanner.renotifyGroup, "its own group, not the thread's")
     }

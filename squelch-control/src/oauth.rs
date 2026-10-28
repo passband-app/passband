@@ -5,7 +5,7 @@
 //! FOUR FLOWS RUN THROUGH HERE and they ask Google for different things, which
 //! is why every entry point takes a [`Flow`]:
 //!
-//! - [`Flow::Signup`] is a GRANT. It asks for all three Gmail scopes and
+//! - [`Flow::Signup`] is a GRANT. It asks for the Gmail scope (`gmail.modify`) and
 //!   `access_type=offline`, because what it is for is a refresh token a daemon
 //!   will use for years. It also asks, optionally, for Google Calendar, so a
 //!   new mailbox has it the day the `calendar` feature turns on.
@@ -48,8 +48,7 @@ use oauth2::{
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use squelch_core::config::{
-    CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_READONLY_SCOPE, GOOGLE_PROFILE_SCOPE,
-    WRITE_SCOPES,
+    CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_SCOPES, GOOGLE_PROFILE_SCOPE,
 };
 use squelch_core::credentials::StoredToken;
 
@@ -102,7 +101,7 @@ pub struct GoogleEndpoints<'a> {
     /// Gmail's profile endpoint, which names the mailbox behind a Gmail grant.
     /// The GRANT flows only ([`Flow::Signup`], [`Flow::Reconnect`] and
     /// [`Flow::Calendar`], whose request includes the Gmail scopes): it needs
-    /// `gmail.readonly`, which is precisely what a console login does not have.
+    /// a Gmail scope, which is precisely what a console login does not have.
     pub profile_url: &'a str,
     /// OpenID Connect's userinfo endpoint. [`Flow::Console`] only: it is what an
     /// `openid email` token can read, and reading it is the whole errand.
@@ -136,14 +135,14 @@ pub enum Flow {
     Reconnect,
     /// CALENDAR: [`Flow::Reconnect`] with Google Calendar ADDED to the request.
     ///
-    /// The same three Gmail scopes plus [`CALENDAR_SCOPES`], the same
+    /// The same Gmail scope plus [`CALENDAR_SCOPES`], the same
     /// parameters, and the same install, because on hosted the calendar grant
     /// is the SAME TOKEN with more scopes: an install replaces a tenant's whole
     /// credentials file, so a separate calendar credential would be wiped by
     /// the next Gmail reconnect.
     ///
-    /// Calendar is REQUESTED AND NEVER REQUIRED: the floor is the three Gmail
-    /// scopes, exactly as a reconnect's. A person who unticks calendar at Google
+    /// Calendar is REQUESTED AND NEVER REQUIRED: the floor is the Gmail
+    /// scope, exactly as a reconnect's. A person who unticks calendar at Google
     /// passes the floor, and the callback then installs nothing at all (see
     /// `handlers::reconnect_install`), so their working credential is untouched.
     Calendar,
@@ -244,7 +243,8 @@ const EMAIL_SCOPE_URL: &str = "https://www.googleapis.com/auth/userinfo.email";
 
 /// What a flow asks Google for.
 ///
-/// SIGNUP asks for all three Gmail scopes in ONE consent, deliberately. Hosted
+/// SIGNUP asks for `gmail.modify`, the ONE Gmail scope (since 2026-10-27; it
+/// reads, changes and sends), deliberately in ONE consent. Hosted
 /// Passband ships the actions in the app, and the daemon's write path loads the
 /// [`squelch_core::credentials::CredentialKind::Write`] slot, which cannot be
 /// filled by a grant that was never asked for. A second consent later would mean
@@ -296,12 +296,11 @@ fn requested_scopes(flow: Flow) -> Vec<&'static str> {
     }
 }
 
-/// The three Gmail scopes a hosted mailbox cannot work without.
+/// The Gmail scope a hosted mailbox cannot work without: `gmail.modify`
+/// alone, which reads, changes and sends. The old `gmail.readonly` and
+/// `gmail.send` are no longer asked for or declared on the consent screen.
 fn gmail_scopes() -> Vec<&'static str> {
-    let mut scopes = Vec::with_capacity(2 + WRITE_SCOPES.len());
-    scopes.push(GMAIL_READONLY_SCOPE);
-    scopes.extend_from_slice(WRITE_SCOPES);
-    scopes
+    GMAIL_SCOPES.to_vec()
 }
 
 /// What a grant must COVER for a flow to be usable. One entry per requirement;
@@ -312,9 +311,8 @@ fn gmail_scopes() -> Vec<&'static str> {
 /// single spelling, and the Gmail set is unchanged.
 fn required_scopes(flow: Flow) -> Vec<Vec<&'static str>> {
     match flow {
-        // Every Gmail scope, spelled one way, exactly as before. NOT the
-        // profile scope: it is requested and optional. CALENDAR'S FLOOR IS THE
-        // SAME THREE: its calendar scopes are requested and never required, so
+        // `gmail.modify`, spelled one way. NOT the profile scope: it is
+        // requested and optional. CALENDAR'S FLOOR IS THE SAME: its calendar scopes are requested and never required, so
         // unticking them is a choice and not a refusal.
         Flow::Signup | Flow::Reconnect | Flow::Calendar => {
             gmail_scopes().into_iter().map(|s| vec![s]).collect()
@@ -399,7 +397,7 @@ pub fn consent_url_with_hint(
 /// anything the browser sent.
 ///
 /// `flow` is the grant flow the session was started as, and the scope floor is
-/// that flow's: for every grant flow it is the three Gmail scopes, so calendar
+/// that flow's: for every grant flow it is `gmail.modify`, so calendar
 /// can be unticked and still pass. A console login has its own exchange
 /// ([`verify_identity`]) and is refused here.
 pub async fn exchange_code(
@@ -505,7 +503,7 @@ pub async fn verify_identity(
 /// another client of the same project gets a token that reports more than we
 /// asked for. What must never happen is LESS, which is the case this catches:
 /// Google's screen lets a user uncheck individual boxes, and a token missing
-/// `gmail.send` provisions a tenant whose Compose button fails forever with no
+/// `gmail.modify` provisions a tenant that can neither read nor send, with no
 /// way back to the consent screen.
 ///
 /// An absent `scope` field means "same as the request" per RFC 6749 section 5.1,
@@ -665,10 +663,10 @@ mod tests {
     }
 
     /// The consent URL is the one thing a user sees before Google does, so
-    /// every parameter on it is asserted: all three scopes, the PKCE method, the
-    /// state we chose, and the refresh-token parameters.
+    /// every parameter on it is asserted: the one Gmail scope, the PKCE method,
+    /// the state we chose, and the refresh-token parameters.
     #[test]
-    fn builds_a_consent_url_asking_for_all_three_scopes_with_pkce() {
+    fn builds_a_consent_url_asking_for_the_gmail_scope_with_pkce() {
         let c = consent_url(&endpoints(), "the-state".into(), Flow::Signup).unwrap();
         let url = url::Url::parse(&c.url).unwrap();
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -678,9 +676,10 @@ mod tests {
         let scope = q.get("scope").map(String::as_str).unwrap_or_default();
         let asked: Vec<&str> = scope.split(' ').collect();
         assert_eq!(asked, requested_scopes(Flow::Signup), "{scope}");
-        assert!(scope.contains("gmail.readonly"), "{scope}");
         assert!(scope.contains("gmail.modify"), "{scope}");
-        assert!(scope.contains("gmail.send"), "{scope}");
+        // The two scopes taken off the consent screen are never asked for.
+        assert!(!scope.contains("gmail.readonly"), "{scope}");
+        assert!(!scope.contains("gmail.send"), "{scope}");
         assert_eq!(q.get("state").map(String::as_str), Some("the-state"));
         assert_eq!(c.state, "the-state");
         assert_eq!(
@@ -754,7 +753,7 @@ mod tests {
             .collect()
     }
 
-    /// THE CALENDAR CONSENT, every parameter: the three Gmail scopes, the
+    /// THE CALENDAR CONSENT, every parameter: the Gmail scope, the
     /// optional profile scope and both calendar scopes in one ask, offline, forced consent, incremental, PKCE,
     /// and the hint as `login_hint`.
     #[test]
@@ -771,9 +770,7 @@ mod tests {
         assert_eq!(
             scope.split(' ').collect::<Vec<_>>(),
             vec![
-                GMAIL_READONLY_SCOPE,
                 squelch_core::config::GMAIL_MODIFY_SCOPE,
-                squelch_core::config::GMAIL_SEND_SCOPE,
                 GOOGLE_PROFILE_SCOPE,
                 CALENDAR_EVENTS_SCOPE,
                 squelch_core::config::CALENDAR_LIST_SCOPE,
@@ -835,8 +832,8 @@ mod tests {
         assert_eq!(q.get("prompt").map(String::as_str), Some("consent"));
     }
 
-    /// CALENDAR IS REQUESTED, NEVER REQUIRED. The floor is the three Gmail
-    /// scopes: a grant without calendar passes (the callback then installs
+    /// CALENDAR IS REQUESTED, NEVER REQUIRED. The floor is the Gmail
+    /// scope: a grant without calendar passes (the callback then installs
     /// nothing), and a grant missing any Gmail scope is refused as before,
     /// calendar or not.
     /// A token response with no `scope` field never counts as a calendar
@@ -848,11 +845,10 @@ mod tests {
             !silent.iter().any(|s| s == CALENDAR_EVENTS_SCOPE),
             "{silent:?}"
         );
-        assert!(
-            silent.iter().any(|s| s == GMAIL_READONLY_SCOPE),
-            "{silent:?}"
+        assert_eq!(
+            silent,
+            vec![squelch_core::config::GMAIL_MODIFY_SCOPE.to_string()]
         );
-        assert_eq!(silent.len(), 3, "{silent:?}");
         // A named scope set is recorded exactly as given.
         let named = recorded_grant(
             Some(vec![CALENDAR_EVENTS_SCOPE.to_string()]),
@@ -860,15 +856,15 @@ mod tests {
         );
         assert_eq!(named, vec![CALENDAR_EVENTS_SCOPE.to_string()]);
         // Flows with nothing optional are unchanged by the rule.
-        assert_eq!(recorded_grant(None, Flow::Reconnect).len(), 3);
+        assert_eq!(recorded_grant(None, Flow::Reconnect).len(), 1);
     }
 
     #[test]
     fn the_calendar_floor_is_the_gmail_floor() {
         let gmail = gmail_scopes();
         assert!(check_scope_grant(Some(&granted(&gmail)), Flow::Calendar).is_ok());
-        // Neither optional scope is part of the floor: the Gmail three alone
-        // pass, profile or not, calendar or not.
+        // Neither optional scope is part of the floor: the Gmail scope alone
+        // passes, profile or not, calendar or not.
         assert!(requested_scopes(Flow::Calendar).contains(&GOOGLE_PROFILE_SCOPE));
         let everything = requested_scopes(Flow::Calendar);
         assert!(check_scope_grant(Some(&granted(&everything)), Flow::Calendar).is_ok());
@@ -914,11 +910,16 @@ mod tests {
         unioned.push(EMAIL_SCOPE_URL.to_string());
         assert!(check_scope_grant(Some(&unioned), Flow::Signup).is_ok());
 
-        // Every way to grant LESS, including each single box a user can uncheck
-        // on Google's screen. Read alone used to pass and now must not: it
-        // provisions a tenant that cannot archive, label, or send.
+        // Every way to grant LESS, including the box a user can uncheck on
+        // Google's screen. A LEGACY read+send grant without modify is refused
+        // too: it provisions a tenant that cannot archive or label.
         assert!(check_scope_grant(Some(&[]), Flow::Signup).is_err());
         assert!(check_scope_grant(Some(&granted(&["openid"])), Flow::Signup).is_err());
+        let legacy = granted(&[
+            squelch_core::config::GMAIL_READONLY_SCOPE,
+            squelch_core::config::GMAIL_SEND_SCOPE,
+        ]);
+        assert!(check_scope_grant(Some(&legacy), Flow::Signup).is_err());
         for dropped in &signup_scopes {
             let partial: Vec<String> = signup_scopes
                 .iter()

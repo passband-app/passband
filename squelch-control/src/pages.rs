@@ -678,11 +678,11 @@ pub fn signup_form(
 <details>
 <summary>Google will ask to read, change, and send your Gmail, and optionally for your calendar.</summary>
 <ul>
-<li><strong>Read</strong> (<code>gmail.readonly</code>): mail triage.</li>
-<li><strong>Change</strong> (<code>gmail.modify</code>): archiving and labeling, never deletion.</li>
-<li><strong>Send</strong> (<code>gmail.send</code>): replying from the app.</li>
+<li><strong>Read</strong>: mail triage.</li>
+<li><strong>Change</strong>: archiving, labeling and moving to trash, never permanent deletion.</li>
+<li><strong>Send</strong>: replying from the app.</li>
 </ul>
-<p>Passband needs all three, so keep those boxes checked. It also asks for your name and profile photo, to show them in the app, and for Google Calendar (<code>calendar.events</code>), which can view and edit your events; both are optional. Calendar is asked for now so it never needs a second consent, and nothing touches your calendar until calendar is available on your account. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
+<p>All three come from one Google permission, <code>gmail.modify</code>, so keep that box checked. It also asks for your name and profile photo, to show them in the app, and for Google Calendar (<code>calendar.events</code>), which can view and edit your events; both are optional. Calendar is asked for now so it never needs a second consent, and nothing touches your calendar until calendar is available on your account. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
 </details>
 {links_html}"#,
             error_html = error_html,
@@ -2023,9 +2023,10 @@ mod tests {
     #[tokio::test]
     async fn the_form_states_all_three_grants_and_the_base_domain() {
         let html = body_of(signup_form("passband.email", None, "", "", None)).await;
-        assert!(html.contains("gmail.readonly"));
+        // One Google permission covers all three, and it is named.
         assert!(html.contains("gmail.modify"));
-        assert!(html.contains("gmail.send"));
+        assert!(!html.contains("gmail.readonly"), "never asked for any more");
+        assert!(!html.contains("gmail.send"), "never asked for any more");
         // The fourth ask is named too, and named as the optional one.
         assert!(html.contains("name and profile photo"), "{html}");
         // ...and the reason for each, not just the scope name.
@@ -2053,7 +2054,7 @@ mod tests {
             summary.contains("read, change, and send your Gmail"),
             "{summary}"
         );
-        assert!(folded.contains("needs all three"), "{html}");
+        assert!(folded.contains("keep that box checked"), "{html}");
         // Shut by default: `open` is what would render it expanded.
         assert!(!html.contains("<details open"), "{html}");
         // A disclosure is markup, not script. This page still has none.

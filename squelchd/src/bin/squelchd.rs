@@ -14,8 +14,8 @@ use chrono::{Duration, SecondsFormat};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use squelch_core::auth::{
     AuthFlowOptions, AuthScopes, ConsentBind, CredentialTransfer, DEFAULT_HEADLESS_PORT,
-    TransferCredential, decode_transfer, encode_transfer, printable, run_auth_flow,
-    run_broker_flow, run_export_flow, verify_transfer_credential,
+    TransferCredential, check_token_covers_slot, decode_transfer, encode_transfer, printable,
+    run_auth_flow, run_broker_flow, run_export_flow, verify_transfer_credential,
 };
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
 use squelch_core::credentials::{
@@ -57,10 +57,10 @@ enum Command {
     /// Authorize a Gmail account and store tokens in the configured backend
     /// (OS keyring, or a mode-0600 JSON file on headless hosts).
     ///
-    /// Plain `auth` mints only the READ credential (gmail.readonly) used by
-    /// sync. `--write` mints WRITE (gmail.modify + gmail.send) and re-mints
-    /// READ, as two consent flows into two distinct slots so the pair cannot
-    /// drift; sync/triage never touch the write one.
+    /// One Gmail consent (`gmail.modify`, the only Gmail scope Passband asks
+    /// for), stored in BOTH the Read slot used by sync and the Write slot used
+    /// by human-door actions; sync/triage never load the write one. Then an
+    /// optional Google Calendar consent.
     ///
     /// HEADLESS: `--headless [--port N]` prints the consent URL and binds a
     /// FIXED loopback port (default 8847) to forward with
@@ -193,9 +193,9 @@ struct ServeArgs {
 
 #[derive(Args)]
 struct AuthArgs {
-    /// Mint the WRITE credential (gmail.modify + gmail.send) AND re-mint the
-    /// read-only one, as two consent flows into two separate slots.
-    #[arg(long)]
+    /// Kept so existing scripts still run. Plain `auth` now fills the Write
+    /// slot too (one `gmail.modify` consent), so this changes nothing.
+    #[arg(long, hide = true)]
     write: bool,
 
     /// Mint the CALENDAR credential (calendar.events +
@@ -844,20 +844,30 @@ fn scope_word(scopes: AuthScopes) -> &'static str {
     }
 }
 
-/// Which credentials one `auth` invocation mints, in order. `--write` re-mints
-/// READ too so the pair cannot drift, but it stays two scope sets, two flows,
-/// two slots — the two-door split is never collapsed into one merged token.
+/// Which consents one `auth` invocation runs, in order. ONE Gmail consent
+/// (`gmail.modify`), with or without `--write`: the only Gmail scope covers
+/// reading and writing, so a second Gmail screen would ask for the same thing
+/// again. Its token fills both Gmail slots ([`gmail_slots`]).
 ///
-/// `--calendar` mints the Calendar credential ALONE. Calendar is an optional
+/// `--calendar` runs the Calendar consent ALONE. Calendar is an optional
 /// grant on top of a working mailbox, so asking for it must never re-run (and
-/// so never risk) the Gmail consents.
+/// so never risk) the Gmail consent.
 fn auth_plan(args: &AuthArgs) -> Vec<AuthScopes> {
     if args.calendar {
         vec![AuthScopes::Calendar]
-    } else if args.write {
-        vec![AuthScopes::Write, AuthScopes::Read]
     } else {
         vec![AuthScopes::Read]
+    }
+}
+
+/// The slots one consent's token is stored in. The Gmail consent fills Read
+/// AND Write with the one token: the slots stay separate so sync can only
+/// ever load Read, which is what keeps the two doors apart (token scope never
+/// did, since Google unions grants per project).
+fn gmail_slots(scopes: AuthScopes) -> Vec<CredentialKind> {
+    match scopes {
+        AuthScopes::Read | AuthScopes::Write => vec![CredentialKind::Read, CredentialKind::Write],
+        AuthScopes::Calendar => vec![CredentialKind::Calendar],
     }
 }
 
@@ -971,24 +981,6 @@ fn cmd_auth(
 
     let plan = auth_plan(args);
     let total = plan.len();
-    if total > 1 {
-        eprintln!(
-            "squelchd: --write renews BOTH credentials so they cannot drift apart; \
-             {total} separate Google consent screens are coming, one per credential."
-        );
-        if broker.is_some() {
-            eprintln!(
-                "squelchd: each flow prints its OWN consent link; open them one at a time, \
-                 as they appear."
-            );
-        } else if args.headless {
-            eprintln!(
-                "squelchd: both flows reuse loopback port {}, so a single SSH tunnel covers both.",
-                args.port
-            );
-        }
-    }
-
     for (i, scopes) in plan.iter().copied().enumerate() {
         let step = i + 1;
         eprintln!(
@@ -1041,7 +1033,6 @@ fn mint_credential(
     args: &AuthArgs,
     broker: Option<&str>,
 ) -> Result<(), squelch_core::CoreError> {
-    let kind = scopes.kind();
     println!(
         "Authorizing Google account: {email} [{}] via {:?} backend",
         scopes.label(),
@@ -1064,7 +1055,15 @@ fn mint_credential(
             run_auth_flow(client, email, &opts)?
         }
     };
-    store_and_announce(backend, creds_path, email, kind, &token)?;
+    // Every slot checked before any is written, so a grant without
+    // gmail.modify stores nothing rather than a Write slot that cannot write.
+    let slots = gmail_slots(scopes);
+    for kind in &slots {
+        check_token_covers_slot(*kind, &token)?;
+    }
+    for kind in slots {
+        store_and_announce(backend, creds_path, email, kind, &token)?;
+    }
     if token.refresh_token.is_some() {
         println!("A refresh token was captured; squelch can renew access automatically.");
     } else {
@@ -1168,13 +1167,6 @@ fn cmd_auth_export(config: &Config, args: &AuthArgs) -> Result<(), squelch_core:
 
     let plan = auth_plan(args);
     let total = plan.len();
-    if total > 1 {
-        eprintln!(
-            "squelchd: --write exports BOTH credentials in one blob; {total} separate Google \
-             consent screens are coming, one per credential. Approve them as the SAME account."
-        );
-    }
-
     let mut account: Option<String> = None;
     let mut credentials: Vec<TransferCredential> = Vec::new();
     for (i, scopes) in plan.iter().copied().enumerate() {
@@ -1200,12 +1192,20 @@ fn cmd_auth_export(config: &Config, args: &AuthArgs) -> Result<(), squelch_core:
             )));
         }
         account = Some(mailbox);
-        credentials.push(TransferCredential {
-            kind: scopes.kind(),
-            token,
-        });
+        let slots = gmail_slots(scopes);
+        for kind in &slots {
+            check_token_covers_slot(*kind, &token)?;
+        }
+        for kind in slots {
+            credentials.push(TransferCredential {
+                kind,
+                token: token.clone(),
+            });
+        }
     }
 
+    // Slots, not consents: the one Gmail consent exports as Read and Write.
+    let total = credentials.len();
     let account = account.ok_or_else(|| other_err("no credential was authorized".to_string()))?;
     let blob = encode_transfer(&CredentialTransfer::new(account.clone(), credentials))?;
 
@@ -3187,38 +3187,41 @@ mod tests {
         }
     }
 
-    /// Plain `auth` mints READ only; `--write` mints WRITE then READ. The
-    /// two-door split must survive as separate kinds, separate slots, and
-    /// non-overlapping scopes.
+    /// ONE Gmail consent (`gmail.modify`), with or without `--write`, on every
+    /// transport, and its token fills BOTH Gmail slots. The slots stay
+    /// separate: that is what keeps sync off the write path.
     #[test]
-    fn auth_plan_write_mints_both_credentials() {
-        let read_only = auth_plan(&AuthArgs {
-            write: false,
-            ..bare_auth_args()
-        });
-        assert_eq!(read_only, vec![AuthScopes::Read]);
-
-        // The plan is the scope sets, not the transport: a broker run mints the
-        // same two credentials into the same two slots, and an export packs the
-        // same two into one blob.
-        let both = auth_plan(&AuthArgs {
-            write: true,
-            broker: Some("https://auth.passband.email".to_string()),
-            ..bare_auth_args()
-        });
-        assert_eq!(both, vec![AuthScopes::Write, AuthScopes::Read]);
-        assert_eq!(both[0].kind(), CredentialKind::Write);
-        assert_eq!(both[1].kind(), CredentialKind::Read);
+    fn one_gmail_consent_fills_both_slots() {
+        for args in [
+            bare_auth_args(),
+            AuthArgs {
+                write: true,
+                ..bare_auth_args()
+            },
+            AuthArgs {
+                write: true,
+                broker: Some("https://auth.passband.email".to_string()),
+                ..bare_auth_args()
+            },
+        ] {
+            assert_eq!(auth_plan(&args), vec![AuthScopes::Read]);
+        }
+        assert_eq!(
+            gmail_slots(AuthScopes::Read),
+            vec![CredentialKind::Read, CredentialKind::Write]
+        );
+        assert_eq!(
+            gmail_slots(AuthScopes::Calendar),
+            vec![CredentialKind::Calendar]
+        );
         assert_ne!(
             CredentialKind::Write.slot_key("you@x.com"),
             CredentialKind::Read.slot_key("you@x.com"),
             "the two credentials must land in separate storage slots"
         );
-
-        let (write_scopes, read_scopes) = (both[0].scopes(), both[1].scopes());
-        assert!(
-            write_scopes.iter().all(|s| !read_scopes.contains(s)),
-            "write and read scope sets must not be merged into one consent"
+        assert_eq!(
+            AuthScopes::Read.scopes(),
+            vec![squelch_core::config::GMAIL_MODIFY_SCOPE.to_string()]
         );
     }
 
@@ -3253,7 +3256,7 @@ mod tests {
         }
         // The Gmail plan is unchanged: calendar is never folded into it.
         assert_eq!(auth_plan(&plain), vec![AuthScopes::Read]);
-        assert_eq!(auth_plan(&write), vec![AuthScopes::Write, AuthScopes::Read]);
+        assert_eq!(auth_plan(&write), vec![AuthScopes::Read]);
     }
 
     /// Enter or a y is a yes; anything else is a no.

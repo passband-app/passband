@@ -1529,8 +1529,9 @@ permission is requested. Google's Places API is not used.
 `squelchd auth --calendar` stores its token in its own credential slot
 (`CredentialKind::Calendar`). Google unions grants per Cloud project and the consent
 asks with `include_granted_scopes`, so that token carries EVERYTHING this OAuth
-client was granted for the account, Gmail scopes included (`gmail.modify` and
-`gmail.send` if `squelchd auth --write` was ever run). Asking for less cannot
+client was granted for the account, Gmail scopes included (`gmail.modify`, the
+one Gmail scope since 2026-10-27; legacy grants may also carry `gmail.readonly`
+and `gmail.send`). Asking for less cannot
 narrow it; only a separate Cloud project could. What keeps calendar code away from
 mail is the slot and the code paths: the calendar loop loads only the Calendar slot
 (or, without one, the Read slot when it records `calendar.events`) and only calls

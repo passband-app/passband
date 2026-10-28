@@ -4742,7 +4742,7 @@ pub(crate) fn write_client(state: &ApiState) -> Result<GmailWriteClient, ApiErro
         .with_budget(state.gmail_budget().cloned())),
         None => Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            "write credential not configured; run `squelchd auth --write`",
+            "write credential not configured; run `squelchd auth`",
         )),
     }
 }
@@ -4752,7 +4752,7 @@ fn write_error(e: &WriteError) -> ApiError {
     match e {
         WriteError::MissingCredential(_) => ApiError::new(
             StatusCode::FORBIDDEN,
-            "write credential not configured; run `squelchd auth --write`",
+            "write credential not configured; run `squelchd auth`",
         ),
         WriteError::Invalid(m) => ApiError::bad_request(m.clone()),
         // Nothing reached Gmail: the mailbox is in a quota hold. 503 so the
@@ -6279,7 +6279,7 @@ pub(crate) async fn read_forward_original(
         // A DEAD WRITE CREDENTIAL IS NOT A GMAIL OUTAGE. The fetch runs on the
         // write token too, so an expired or revoked one fails HERE, before any
         // send — and collapsing it into the 502 tells the composer to blame
-        // Gmail when the fix is `squelchd auth --write`. Answer it with the same
+        // Gmail when the fix is `squelchd auth`. Answer it with the same
         // 403 every other write path answers it with, so the client's existing
         // "no write credential" handling fires.
         Err(e @ WriteError::MissingCredential(_)) => {

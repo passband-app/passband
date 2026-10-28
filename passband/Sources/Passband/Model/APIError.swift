@@ -5,7 +5,7 @@ import Foundation
 
 enum APIErrorKind: String, Sendable {
     case unauthorized   // 401: bad/absent bearer token
-    case forbidden      // 403: no write credential (run `squelchd auth --write`)
+    case forbidden      // 403: no write credential (run `squelchd auth`)
     case notFound       // 404: missing OR sealed-hidden (indistinguishable by design)
     case badRequest     // 400: validation
     case guardBlocked   // 422: outbound send guard matched; see `guardKinds`

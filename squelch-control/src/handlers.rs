@@ -1419,7 +1419,7 @@ pub async fn oauth_callback(
             return done(pages::problem(
                 StatusCode::BAD_GATEWAY,
                 "Google did not complete the sign in",
-                "Nothing was set up. Start again and approve all three Gmail permissions.",
+                "Nothing was set up. Start again and approve the Gmail permission.",
             ));
         }
     };
@@ -1955,16 +1955,16 @@ async fn reconnect_install(
     };
     // A FULL GMAIL GRANT, not an identity hop: this is the credential the daemon
     // will hold, so it is exchanged and scope-checked exactly as signup's is.
-    // The floor is the three Gmail scopes for both purposes.
+    // The floor is the Gmail scope (`gmail.modify`) for both purposes.
     let grant = match oauth::exchange_code(&endpoints(state), code, pkce_verifier, flow).await {
         Ok(g) => g,
         Err(oauth::OAuthError::Scope) if purpose == Purpose::Calendar => {
             tracing::info!("calendar consent granted only part of the Gmail scope set");
             return pages::console_problem(
                 StatusCode::OK,
-                "Passband needs all three Gmail permissions",
-                "Nothing changed. Connecting your calendar also asks again for the three Gmail \
-                 permissions Passband already uses, so leave those boxes checked on Google's \
+                "Passband needs its Gmail permission",
+                "Nothing changed. Connecting your calendar also asks again for the Gmail \
+                 permission Passband already uses, so leave that box checked on Google's \
                  screen and start again from Passband.",
             );
         }
@@ -1975,8 +1975,10 @@ async fn reconnect_install(
             tracing::info!("reconnect consent granted only part of the scope set");
             return pages::console_problem(
                 StatusCode::OK,
-                "Passband needs all three Gmail permissions",
-                "Nothing changed and your mailbox is still disconnected. Passband needs all                  three: reading your mail to triage it, changing it to archive and label, and                  sending so you can reply from the app. Start again and leave every box checked                  on Google's screen.",
+                "Passband needs its Gmail permission",
+                "Nothing changed and your mailbox is still disconnected. Passband needs \
+                 Gmail access to read your mail and triage it, archive and label it, and send \
+                 your replies. Start again and leave the Gmail box checked on Google's screen.",
             );
         }
         Err(e) => {
@@ -3077,22 +3079,20 @@ fn internal_problem() -> Response {
     )
 }
 
-/// What a consent that left something out gets: all three, or none.
+/// What a consent that left the Gmail permission out gets.
 ///
 /// Honest about why rather than vague about what happened. Passband cannot run
-/// on two of the three: the daemon reads with one grant, archives and labels
-/// with the second, and sends with the third, and a tenant provisioned on a
-/// partial grant would look fine until the first button that needed the missing
-/// one, with no way back to Google's screen from inside the app.
+/// without `gmail.modify`: the daemon reads, archives, labels and sends with
+/// it, and there is no way back to Google's screen from inside the app.
 ///
 /// `200`, like the "changed my mind" page above and for the same reason: this is
 /// a choice the person made at Google, not a failure of this service.
 fn partial_consent_problem() -> Response {
     pages::problem(
         StatusCode::OK,
-        "Passband needs all three Gmail permissions",
-        "Nothing was set up and your invite code has not been used. Start again and leave every \
-         box checked on Google's screen.",
+        "Passband needs its Gmail permission",
+        "Nothing was set up and your invite code has not been used. Start again and leave the \
+         Gmail box checked on Google's screen.",
     )
 }
 

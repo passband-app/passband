@@ -34,12 +34,14 @@ const GOOGLE_HOST: &str = "accounts.google.com";
 /// The only path.
 const GOOGLE_AUTH_PATH: &str = "/o/oauth2/v2/auth";
 
-/// The scopes `squelchd` requests: `squelchd auth` asks for the first (and,
-/// alongside it, the optional [`GOOGLE_PROFILE_SCOPE`]), `squelchd auth
-/// --write` for the next two, `squelchd auth --calendar` for the two calendar
-/// scopes, and nothing asks for anything else.
+/// The scopes `squelchd` requests. A current `squelchd auth` asks for
+/// `gmail.modify` alone (with the optional [`GOOGLE_PROFILE_SCOPE`]) and
+/// `--calendar` for the two calendar scopes. `gmail.readonly` and
+/// `gmail.send` are what daemons before 2026-10-27 asked for; they stay
+/// allowed so an older self-host can still finish a consent through the
+/// broker. Nothing asks for anything else.
 ///
-/// SOURCE OF TRUTH is squelch-core (`GMAIL_READONLY_SCOPE`, `WRITE_SCOPES`,
+/// SOURCE OF TRUTH is squelch-core (`GMAIL_SCOPES`, the legacy scopes,
 /// `CALENDAR_SCOPES` and `GOOGLE_PROFILE_SCOPE` in
 /// `squelch-core/src/config.rs`); they are restated here rather than imported
 /// because the broker ships as its own image and must not pull the daemon's

@@ -48,17 +48,50 @@ struct AuthView: View {
     private var visible: [SealedMeta] {
         store.sitrep.sealed.filter { !archived.contains($0.id) }
     }
+    /// For the key bindings, which run on a keypress, not per frame. Drawing
+    /// reads the `Derived` snapshot instead.
     private var shown: [SealedMeta] { visible.filter { matches($0, filter) } }
     private var focus: SealedMeta? { shown[safe: index] }
-    private var live: [SealedMeta] { shown.filter { age($0.received_at) <= Self.liveWindow } }
-    private var archive: [SealedMeta] { shown.filter { age($0.received_at) > Self.liveWindow } }
-    private var openDecisions: [SealedMeta] {
-        visible.filter { decisions.isOpen($0) }
+
+    /// Everything the page derives from the sealed list, built ONCE per body.
+    /// These used to be computed properties read from every row: each row's
+    /// `shown.firstIndex(of:)` re-filtered the whole list, so a redraw was
+    /// quadratic in auth mail, and scrolling a long list stuttered.
+    private struct Derived {
+        var visible: [SealedMeta]
+        var shown: [SealedMeta]
+        var live: [SealedMeta]
+        var archive: [SealedMeta]
+        var openDecisions: [SealedMeta]
+        /// Counted COLLAPSED, the rule the rail's badge uses too: a burst is
+        /// one decision ("All me") whether or not it is laid out for review.
+        var decisionCards: [AuthPolicy.Card]
+        /// A row's position in `shown`, for selection and j/k.
+        var indexById: [Int: Int]
+        /// Every listed message by id, for the "explained by" lookup.
+        var byId: [Int: SealedMeta]
+        var focus: SealedMeta?
     }
-    /// Counted COLLAPSED, the rule the rail's badge uses too: a burst is one
-    /// decision ("All me") whether or not it is laid out for review.
-    private var decisionCards: [AuthPolicy.Card] {
-        AuthPolicy.cards(openDecisions)
+
+    private func derive() -> Derived {
+        let all = store.sitrep.sealed
+        let visible = all.filter { !archived.contains($0.id) }
+        let shown = visible.filter { matches($0, filter) }
+        var live: [SealedMeta] = []
+        var archive: [SealedMeta] = []
+        for m in shown {
+            if age(m.received_at) <= Self.liveWindow { live.append(m) } else { archive.append(m) }
+        }
+        let now = Date()
+        let open = visible.filter { decisions.isOpen($0, now: now) }
+        var indexById: [Int: Int] = [:]
+        for (i, m) in shown.enumerated() { indexById[m.id] = i }
+        return Derived(
+            visible: visible, shown: shown, live: live, archive: archive,
+            openDecisions: open, decisionCards: AuthPolicy.cards(open),
+            indexById: indexById,
+            byId: Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }),
+            focus: shown[safe: index])
     }
 
     /// Seconds since an ISO stamp; huge when missing/invalid (=> treated old).
@@ -78,12 +111,13 @@ struct AuthView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let d = derive()
+        return VStack(spacing: 0) {
             RoutedHeader(title: "Auth", subtitle: "codes, alerts & resets") {
                 HStack(spacing: Space.s12) {
                     StatusDot(
                         color: Palette.lock,
-                        label: "\(live.count) live · \(decisionCards.count) awaiting you",
+                        label: "\(d.live.count) live · \(d.decisionCards.count) awaiting you",
                         tone: Palette.inkFaint, size: 5)
                     HStack(spacing: Space.scaled(3)) {
                         Kbd("j")
@@ -98,8 +132,8 @@ struct AuthView: View {
             }
 
             HStack(alignment: .top, spacing: Space.s16) {
-                mainColumn
-                rail
+                mainColumn(d)
+                rail(d)
             }
             .padding(.horizontal, Space.scaled(22))
             .padding(.vertical, Space.s16)
@@ -112,10 +146,10 @@ struct AuthView: View {
         }
         .onChange(of: store.authQueue.count) { _, _ in seedFromArrivals() }
         .onAppear { seedFromArrivals() }
-        .onChange(of: shown.count) { _, count in
+        .onChange(of: d.shown.count) { _, count in
             index = max(0, min(index, max(0, count - 1)))
         }
-        .onChange(of: focus?.id) { _, _ in copied = false }
+        .onChange(of: d.focus?.id) { _, _ in copied = false }
         // A page kept across an account switch must not carry the old
         // mailbox's state: a reveal open over the switch would reveal the same
         // int on the NEW daemon.
@@ -129,10 +163,13 @@ struct AuthView: View {
 
     // MARK: - main column
 
-    private var mainColumn: some View {
+    private func mainColumn(_ d: Derived) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Space.s14) {
-                if let focus {
+            // Lazy, and the rows' stack lazy inside it: only the rows on screen
+            // are built, so a page holding hundreds of auth messages scrolls
+            // like one holding ten.
+            LazyVStack(alignment: .leading, spacing: Space.s14) {
+                if let focus = d.focus {
                     FocusPanel(
                         meta: focus,
                         code: codes[focus.id] ?? nil,
@@ -167,7 +204,7 @@ struct AuthView: View {
                         .foregroundStyle(filter == f ? Palette.accent : Palette.inkFaint)
                     }
                     Spacer(minLength: Space.s6)
-                    Text("\(shown.count) of \(visible.count) shown")
+                    Text("\(d.shown.count) of \(d.visible.count) shown")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
                 }
@@ -177,12 +214,12 @@ struct AuthView: View {
                     // a material, so there is nothing here to morph — and a
                     // container re-coordinates its descendants every time a
                     // hovered row redraws, which is a cost with no matching gain.
-                    VStack(spacing: 1) {
-                        section("Live · last hour", rows: live)
-                        section("Archive", rows: archive)
+                    LazyVStack(spacing: 1) {
+                        section("Live · last hour", rows: d.live, d)
+                        section("Archive", rows: d.archive, d)
                     }
                     .onChange(of: index) { _, i in
-                        guard let m = shown[safe: i] else { return }
+                        guard let m = d.shown[safe: i] else { return }
                         withAnimation(Motion.scrollFollow) {
                             proxy.scrollTo(m.id, anchor: .center)
                         }
@@ -194,7 +231,7 @@ struct AuthView: View {
     }
 
     @ViewBuilder
-    private func section(_ label: String, rows: [SealedMeta]) -> some View {
+    private func section(_ label: String, rows: [SealedMeta], _ d: Derived) -> some View {
         if !rows.isEmpty {
             Text(label)
                 .font(Typo.sectionLabel)
@@ -204,10 +241,10 @@ struct AuthView: View {
                 .padding(.top, Space.s10)
                 .padding(.bottom, Space.s4)
             ForEach(rows) { m in
-                let i = shown.firstIndex(of: m) ?? 0
+                let i = d.indexById[m.id] ?? 0
                 AuthRow(
                     meta: m, selected: i == index, code: codes[m.id] ?? nil,
-                    explained: explainedNote(m),
+                    explained: explainedNote(m, d),
                     answered: answeredLine(m),
                     onUndo: { decisions.set(m, nil) },
                     onSelect: {
@@ -227,9 +264,9 @@ struct AuthView: View {
     }
 
     /// The quiet line on a row an earlier code, link or receipt explains.
-    private func explainedNote(_ m: SealedMeta) -> String? {
+    private func explainedNote(_ m: SealedMeta, _ d: Derived) -> String? {
         guard AuthPolicy.isExplained(m), let by = m.explained_by else { return nil }
-        let explainer = store.sitrep.sealed.first { $0.id == by }
+        let explainer = d.byId[by]
         return AuthPolicy.explainedNote(
             explainer: explainer,
             service: explainer.map { SenderCache.resolved($0.sender).displayName })
@@ -237,24 +274,18 @@ struct AuthView: View {
 
     // MARK: - rail
 
-    private var rail: some View {
+    private func rail(_ d: Derived) -> some View {
         VStack(spacing: Space.s12) {
             VStack(alignment: .leading, spacing: Space.scaled(9)) {
-                HStack {
-                    Text("Needs a decision")
-                        .font(Typo.zoneTitle)
-                        .foregroundStyle(Palette.ink)
-                    Spacer()
-                    Text("\(decisionCards.count) open")
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                }
-                if openDecisions.isEmpty {
+                AuthDecisionHeader(
+                    open: d.openDecisions, cardCount: d.decisionCards.count,
+                    showsClearAll: AuthPolicy.showsClearAll(d.decisionCards))
+                if d.openDecisions.isEmpty {
                     EmptyNote(
                         "nothing to rule on. sign-in alerts, account changes and reset requests show up here.")
                 } else {
                     AuthDecisionStack(
-                        open: openDecisions, limit: Self.maxDecisionCards,
+                        open: d.openDecisions, limit: Self.maxDecisionCards,
                         expanded: $expandedBursts,
                         onNotMine: { m in revealing = m })
                 }

@@ -44,6 +44,7 @@ struct AuthPolicyTests {
         eventsBecomeRevealableMeta()
         sendersWithNoServiceNeverMakeABurst()
         theRevealAsksAndOffersUndo()
+        clearAllSparesCriticalChanges()
 
         print("\(checks - failures)/\(checks) checks passed")
         if failures > 0 { exit(1) }
@@ -499,6 +500,29 @@ struct AuthPolicyTests {
         expect(AuthPolicy.answeredLine(meta(1, .loginAlert), .notMine) == "You said: Not me", "answered sign-in")
         let tap = AuthPolicy.revealMeta(messageId: 7, threadId: "t7", sender: "a@b.com")
         expect(tap.id == 7 && !tap.speaksVerdicts, "a tap's meta never claims the daemon keeps verdicts")
+    }
+
+    static func clearAllSparesCriticalChanges() {
+        // Account changes never burst, so each is its own card: a provider's
+        // pile of them is the case this exists for.
+        let six = (1...6).map { meta($0, .accountChange, from: "no-reply@aws.amazon.com") }
+        expect(!AuthPolicy.showsClearAll(AuthPolicy.cards(six)), "six cards fit the rail: no clear all")
+        let pile = six + [meta(7, .accountChange, from: "no-reply@aws.amazon.com")]
+        expect(AuthPolicy.showsClearAll(AuthPolicy.cards(pile)), "a seventh card brings clear all")
+        let burst = (1...9).map { i in
+            meta(i, .loginAlert, from: "x@svc\(i).com", age: Double(i) * 3600)
+        }
+        expect(!AuthPolicy.showsClearAll(AuthPolicy.cards(burst)), "counted collapsed: one burst is one card")
+
+        let mixed = pile + [meta(8, .accountChange, critical: true)]
+        let cleared = AuthPolicy.clearable(mixed)
+        expect(cleared.count == 7, "everything but the critical change is cleared")
+        expect(!cleared.contains { $0.isCritical }, "a critical change is never cleared in bulk")
+        expect(
+            AuthPolicy.clearAllLine(cleared: 7, kept: 1).hasSuffix("1 critical change stays open for you to answer one by one."),
+            "the confirmation names what stays")
+        expect(!AuthPolicy.clearAllLine(cleared: 2, kept: 0).contains("critical"), "and says nothing when nothing stays")
+        expect(!AuthPolicy.clearAllLine(cleared: 7, kept: 2).contains("\u{2014}"), "no em dashes in copy")
     }
 
     // MARK: -

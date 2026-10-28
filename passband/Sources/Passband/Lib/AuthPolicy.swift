@@ -261,6 +261,33 @@ enum AuthPolicy {
         }
     }
 
+    // MARK: - clear all
+
+    /// "Clear all" shows once more cards are open than the Mac's rail draws
+    /// (six). Below that, answering card by card is quicker than reading a
+    /// confirmation; above it, the cards nobody can see pile up (a provider
+    /// mailing a hundred account changes in one afternoon).
+    static let clearAllAbove = 6
+
+    static func showsClearAll(_ cards: [Card]) -> Bool { cards.count > clearAllAbove }
+
+    /// What "Clear all" answers "That was me" on: every open question except
+    /// a critical change. A takeover-class change is exactly what must not be
+    /// waved through in bulk, so each of those still takes its own answer.
+    static func clearable(_ open: [SealedMeta]) -> [SealedMeta] {
+        open.filter { !$0.isCritical }
+    }
+
+    /// The confirmation's sentence. Names what stays, so a critical card left
+    /// behind after the clear reads as intended rather than as a bug.
+    static func clearAllLine(cleared: Int, kept: Int) -> String {
+        let noun = cleared == 1 ? "question" : "questions"
+        let base = "Answers \(cleared) \(noun) \"That was me\". Each one can still be undone from its row."
+        guard kept > 0 else { return base }
+        let keptNoun = kept == 1 ? "critical change stays" : "critical changes stay"
+        return base + " \(kept) \(keptNoun) open for you to answer one by one."
+    }
+
     // MARK: - copy
 
     /// The two buttons on a question card: (yes, no).

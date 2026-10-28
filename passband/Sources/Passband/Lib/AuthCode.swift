@@ -153,7 +153,13 @@ final class AuthDecisions {
     /// list that carries it (`AuthPolicy.settle`).
     private var pending: [Int: AuthPolicy.PendingWrite] = [:]
     /// The last sealed list, for the "still listed?" test a failed PUT needs.
-    @ObservationIgnored private var lastRows: [SealedMeta] = []
+    @ObservationIgnored private var lastRows: [SealedMeta] = [] {
+        didSet { lastRowsById = Dictionary(lastRows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) }
+    }
+    /// `lastRows` by id. `decision` runs once per message on every redraw of
+    /// every surface that counts open questions, so a linear search here made
+    /// those redraws quadratic in auth mail.
+    @ObservationIgnored private var lastRowsById: [Int: SealedMeta] = [:]
     /// Numbers every sealed-list fetch as it STARTS (`beginListFetch`).
     @ObservationIgnored private var fetchSeq = 0
     /// The newest fetch number whose list was applied.
@@ -195,7 +201,7 @@ final class AuthDecisions {
         if let p = pending[m.id] { return p.verdict }
         if daemonKeepsVerdicts {
             // The listed row is the truth; a meta built elsewhere may lag it.
-            let row = lastRows.first { $0.id == m.id } ?? m
+            let row = lastRowsById[m.id] ?? m
             if let v = row.serverVerdict { return v }
         }
         // On a new daemon this is a verdict still waiting to be uploaded; on an
@@ -256,7 +262,7 @@ final class AuthDecisions {
         } catch let error as APIError
             where AuthPolicy.fallsBackToLedger(
                 status: error.status,
-                stillListed: !daemonKeepsVerdicts || lastRows.contains { $0.id == m.id })
+                stillListed: !daemonKeepsVerdicts || lastRowsById[m.id] != nil)
         {
             // No verdict route (an older daemon, or one rolled back under
             // us): this device keeps it, quietly.

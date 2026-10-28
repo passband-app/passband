@@ -97,14 +97,41 @@ struct MobileRecordsView: View {
 /// calendar is hidden; under the sitrep's board once the calendar takes this
 /// slot in the tab bar (MobileSitrepView), because a calendar is a place you
 /// live in and records are a place you look one fact up.
+///
+/// TWO COLUMNS WHEN THERE IS ROOM (a phone on its side): one card at 700
+/// points wide is a row of words with a desert after them. The columns are
+/// balanced by hand, the tall one (shipments, each a little card of its own)
+/// beside the two short lists, so neither column ends far above the other.
 struct RecordZones: View {
+    @State private var width: CGFloat = 0
+
+    /// Two cards side by side keep each about as wide as a phone held upright.
+    static let twoColumnWidth: CGFloat = 640
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            CalendarZone()
-            ShipmentsZone()
-            BankingZone()
-            ReceiptsZone()
+        Group {
+            if width >= Self.twoColumnWidth {
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        CalendarZone()
+                        BankingZone()
+                    }
+                    VStack(alignment: .leading, spacing: 16) {
+                        ShipmentsZone()
+                        ReceiptsZone()
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 16) {
+                    CalendarZone()
+                    ShipmentsZone()
+                    BankingZone()
+                    ReceiptsZone()
+                }
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 
     /// Both halves, because a record can arrive either way: the zones come

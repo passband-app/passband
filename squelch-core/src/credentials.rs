@@ -318,16 +318,29 @@ pub fn token_issuer(token: &StoredToken) -> Option<crate::config::OAuthIssuer> {
 /// same address moving from Google Workspace to Microsoft 365 (or back) with
 /// the old credential still in its slot, or a blob exported under the other
 /// provider.
+///
+/// ASYMMETRIC ON PURPOSE. A token with no recorded scopes predates scope
+/// recording, and every such token is Google's: a Gmail daemon keeps
+/// accepting them, an Outlook daemon refuses them. Every Microsoft token is
+/// born with scopes (the exchange records the requested set when the
+/// response names none, an import refuses a refresh that names none, and a
+/// refresh carries them forward), so requiring proof costs Outlook nothing.
 pub fn check_token_issuer(token: &StoredToken, issuer: crate::config::OAuthIssuer) -> Result<()> {
-    match token_issuer(token) {
-        Some(minted) if minted != issuer => Err(CoreError::Credential(format!(
-            "the stored credential was minted by {}, but this daemon is configured for {} \
-             (provider in the config); it was not used. Re-run `squelchd auth`.",
-            minted.name(),
-            issuer.name()
-        ))),
-        _ => Ok(()),
+    use crate::config::OAuthIssuer;
+    let minted = token_issuer(token);
+    let ok = match issuer {
+        OAuthIssuer::Google => minted != Some(OAuthIssuer::Microsoft),
+        OAuthIssuer::Microsoft => minted == Some(OAuthIssuer::Microsoft),
+    };
+    if ok {
+        return Ok(());
     }
+    Err(CoreError::Credential(format!(
+        "the stored credential was minted by {}, but this daemon is configured for {} \
+         (provider in the config); it was not used. Re-run `squelchd auth`.",
+        minted.unwrap_or(OAuthIssuer::Google).name(),
+        issuer.name()
+    )))
 }
 
 /// The token to persist after a refresh of `stored`.

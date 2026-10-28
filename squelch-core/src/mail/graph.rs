@@ -280,11 +280,21 @@ fn render_address(r: &Recipient) -> Option<String> {
     }
     match r.email_address.name.as_deref().map(str::trim) {
         Some(name) if !name.is_empty() && !name.eq_ignore_ascii_case(addr) => {
-            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-            Some(format!("\"{escaped}\" <{addr}>"))
+            Some(format!("\"{}\" <{addr}>", clean_name(name)))
         }
         _ => Some(addr.to_string()),
     }
+}
+
+/// A display name made safe to quote: quotes, backslashes and line breaks
+/// DROPPED rather than escaped. The header parsers downstream (the reply
+/// path's injected-header truncation) treat every `"` as a quote boundary,
+/// so an escaped one would cut a recipient list short; and nothing reads
+/// the name except a person.
+fn clean_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n'))
+        .collect()
 }
 
 fn render_list(list: &[Recipient]) -> Option<String> {

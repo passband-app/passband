@@ -563,7 +563,7 @@ async fn headers_are_rendered_from_the_structured_fields() {
         vec![
             (
                 "To".to_string(),
-                r#""Ann \"A\" Lee" <ann@example.com>, bob@example.com"#.to_string()
+                r#""Ann A Lee" <ann@example.com>, bob@example.com"#.to_string()
             ),
             ("Bcc".to_string(), "c@example.com".to_string()),
         ]

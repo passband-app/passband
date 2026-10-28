@@ -3578,11 +3578,12 @@ mod microsoft_tests {
                 r#"{"mail":null,"userPrincipalName":"Me@Outlook.com"}"#.to_string(),
             )
         };
+        // An Outlook export always records its scopes.
         let pasted = StoredToken {
             access_token: "stale".into(),
             refresh_token: Some("pasted-refresh".into()),
             expires_at: None,
-            scopes: None,
+            scopes: Some(vec!["Mail.ReadWrite".into(), "Mail.Send".into()]),
         };
         let verify = |base: &str, who: &str| {
             verify_transfer_credential_at(
@@ -3619,6 +3620,22 @@ mod microsoft_tests {
         assert_eq!(token_issuer(&google), Some(OAuthIssuer::Google));
         assert_eq!(token_issuer(&ms), Some(OAuthIssuer::Microsoft));
         assert_eq!(token_issuer(&t(None)), None);
+        // A legacy token (no scopes recorded) is Google's: Gmail keeps it,
+        // Outlook refuses it.
+        assert!(check_token_issuer(&t(None), OAuthIssuer::Google).is_ok());
+        assert!(check_token_issuer(&t(None), OAuthIssuer::Microsoft).is_err());
+        let legacy_blob = verify_transfer_credential_at(
+            &ms_client(),
+            "me@outlook.com",
+            CredentialKind::Read,
+            &t(None),
+            "http://127.0.0.1:1/token",
+            "http://127.0.0.1:1/me",
+            Duration::from_secs(1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(legacy_blob.contains("minted by Google"), "{legacy_blob}");
         assert!(check_token_issuer(&google, OAuthIssuer::Microsoft).is_err());
         assert!(check_token_issuer(&ms, OAuthIssuer::Google).is_err());
         assert!(check_token_issuer(&ms, OAuthIssuer::Microsoft).is_ok());

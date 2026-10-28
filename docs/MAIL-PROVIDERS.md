@@ -232,7 +232,9 @@ decides every endpoint, scope set and identity check:
   refreshed (`credentials::check_token_issuer`, read off its recorded
   scopes): the same address moved between Workspace and Microsoft 365 with
   the old credential in its slot, or a blob exported under the other
-  provider. Tokens with no recorded scopes (old Google ones) pass.
+  provider. A token with no recorded scopes predates scope recording and is
+  Google's: a Gmail daemon accepts it, an Outlook daemon refuses it (every
+  Microsoft token is minted with scopes).
 - **The refresh** sends the consent's scopes, which Microsoft's v2 refresh
   documents as required.
 - **The account check** asks Graph `/me`: `mail`, else an address-shaped
@@ -259,6 +261,16 @@ decides every endpoint, scope set and identity check:
    draft's immutable id survives the send, which scope spelling the token
    endpoint echoes, and that Entra takes the `http://127.0.0.1:<port>`
    loopback redirect against a registered `http://127.0.0.1`.
+   The send path leans hardest on two of these, and both can double-send if
+   wrong: (a) **the draft's immutable id surviving the send** (if the Sent
+   Items copy gets a new id, the echo fetches a dead id, the next sync adds a
+   second sent row, and the tracker and later actions point at nothing); and
+   (b) **Exchange keeping the minted `Message-ID`**, since
+   `internetMessageHeaders` may be empty on Sent Items, which would leave
+   scheduled-send recovery with no way to find a fired send. Also check that
+   Graph accepts `internetMessageId eq … and isDraft eq false` (a 400 there
+   leaves every `maybe_sent` row stuck), and that the well-known `archive`
+   folder exists on the test mailbox.
 2. **Auth signals.** `extract_auth_pass` trusts only Google's
    `Authentication-Results`, so Outlook rows get `NULL` (safe: no bypass).
    Microsoft's authserv ids must be captured from real mail first.
@@ -281,3 +293,7 @@ decides every endpoint, scope set and identity check:
     Items and Junk only: mail in their subfolders, Outbox or Sync Issues is
     listed.
 11. **The account check** trusts `/me` `mail`, which a tenant admin sets.
+12. **A label edit can half-apply**: the read/flag PATCH lands, then the
+    archive move fails. Retrying is safe.
+13. **Copy says Gmail** in the door's errors ("Gmail is pacing this
+    mailbox") and audit details (`failed:gmail`).

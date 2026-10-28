@@ -298,6 +298,7 @@ async fn parent_headers_come_from_the_message_id_references_and_recipients() {
     assert_eq!(p.message_id.as_deref(), Some("<p@x>"));
     assert_eq!(p.references.as_deref(), Some("<a@x> <b@x>"));
     assert_eq!(p.from.as_deref(), Some(r#""Ann" <ann@x.com>"#));
+    assert_eq!(p.references.as_deref(), Some("<a@x> <b@x>"));
     assert_eq!(p.to.as_deref(), Some("me@outlook.com"));
     assert_eq!(p.cc.as_deref(), Some(r#""B" <b@x.com>"#));
     assert_eq!(p.reply_to, None);
@@ -400,7 +401,13 @@ async fn a_scan_that_cannot_rule_the_mail_out_is_an_error_never_a_none() {
 async fn a_send_whose_outcome_is_unknown_keeps_its_draft() {
     for status in [500u16, 503, 504, 408] {
         let (m, c) = mock(vec![(201, r#"{"id":"d1"}"#), (status, "{}")]).await;
-        assert!(c.send(b"x", None).await.is_err());
+        let err = c.send(b"x", None).await.unwrap_err();
+        // The caller's "maybe sent" is a Transport error or a 5xx.
+        assert!(
+            matches!(err, WriteError::Transport(_))
+                || matches!(err, WriteError::Api { status, .. } if status >= 500),
+            "{status}: {err}"
+        );
         let s = seen(&m);
         assert_eq!(
             s.len(),
@@ -408,4 +415,34 @@ async fn a_send_whose_outcome_is_unknown_keeps_its_draft() {
             "{status}: the draft (maybe the sent mail) was deleted"
         );
     }
+}
+
+#[tokio::test]
+async fn folded_references_are_unfolded_and_names_lose_their_quotes() {
+    let (_m, c) = mock(vec![(
+        200,
+        r#"{"internetMessageId":"<p@x>",
+            "internetMessageHeaders":[{"name":"References","value":"<a@x>\r\n <b@x>"}],
+            "ccRecipients":[
+              {"emailAddress":{"name":"He said \"Re: hi","address":"one@x.com"}},
+              {"emailAddress":{"address":"two@x.com"}}]}"#,
+    )])
+    .await;
+    let p = c.parent_headers("m").await.unwrap();
+    assert_eq!(p.references.as_deref(), Some("<a@x> <b@x>"));
+    assert_eq!(
+        p.cc.as_deref(),
+        Some(r#""He said Re: hi" <one@x.com>, two@x.com"#)
+    );
+}
+
+#[tokio::test]
+async fn a_label_both_added_and_removed_is_refused() {
+    let (m, c) = mock(vec![]).await;
+    let err = c
+        .modify("m", &["UNREAD".into()], &["UNREAD".into()])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WriteError::Invalid(_)));
+    assert!(seen(&m).is_empty());
 }

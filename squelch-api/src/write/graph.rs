@@ -127,12 +127,22 @@ fn render(r: &Recipient) -> Option<String> {
         return None;
     }
     match r.email_address.name.as_deref().map(str::trim) {
-        Some(name) if !name.is_empty() && !name.eq_ignore_ascii_case(addr) => Some(format!(
-            "\"{}\" <{addr}>",
-            name.replace('\\', "\\\\").replace('"', "\\\"")
-        )),
+        Some(name) if !name.is_empty() && !name.eq_ignore_ascii_case(addr) => {
+            Some(format!("\"{}\" <{addr}>", clean_name(name)))
+        }
         _ => Some(addr.to_string()),
     }
+}
+
+/// A display name made safe to quote: quotes, backslashes and line breaks
+/// DROPPED rather than escaped. The header parsers downstream (the reply
+/// path's injected-header truncation) treat every `"` as a quote boundary,
+/// so an escaped one would cut a recipient list short; and nothing reads
+/// the name except a person.
+fn clean_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n'))
+        .collect()
 }
 
 fn render_list(list: &[Recipient]) -> Option<String> {
@@ -283,6 +293,11 @@ impl MailWriter for GraphWriteClient {
         add: &[String],
         remove: &[String],
     ) -> Result<(), WriteError> {
+        if add.iter().any(|l| remove.contains(l)) {
+            return Err(WriteError::Invalid(
+                "a label cannot be added and removed in one request".into(),
+            ));
+        }
         let mut patch = serde_json::Map::new();
         let mut archive = false;
         for (label, adding) in add
@@ -335,11 +350,14 @@ impl MailWriter for GraphWriteClient {
             self.msg_url(msg_id)
         );
         let m: MessageMeta = self.get_json(&url).await?;
+        // Unfolded and single-spaced: a folded value carries CRLF, which the
+        // reply builder refuses outright, and every reply in a long thread
+        // would fail.
         let references = m
             .internet_message_headers
             .iter()
             .filter(|h| h.name.eq_ignore_ascii_case("references"))
-            .map(|h| h.value.clone())
+            .flat_map(|h| h.value.split_whitespace().map(str::to_string))
             .reduce(|a, b| format!("{a} {b}"));
         Ok(ParentHeaders {
             message_id: m.internet_message_id.clone(),
@@ -383,7 +401,17 @@ impl MailWriter for GraphWriteClient {
         }
         let sent = self
             .post_json(&format!("{}/send", self.msg_url(&draft.id)), &json!({}))
-            .await;
+            .await
+            // A 408 says the server gave up waiting, not that it sent
+            // nothing: it is a "maybe sent" to every caller (the door and the
+            // scheduled send decide that from a Transport error), never a
+            // plain refusal that invites a second send.
+            .map_err(|e| match e {
+                WriteError::Api { status: 408, .. } => {
+                    WriteError::Transport("graph send timed out (408); it may have gone".into())
+                }
+                other => other,
+            });
         match sent {
             Ok(_) => Ok(SentRef {
                 id: Some(draft.id),
@@ -417,12 +445,26 @@ impl MailWriter for GraphWriteClient {
                 self.msg_url(msg_id)
             ))
             .await?;
-        let bytes = self
+        let mut resp = self
             .call(self.http.get(format!("{}/$value", self.msg_url(msg_id))))
-            .await?
-            .bytes()
+            .await?;
+        // The read side's bound, for the same reason: peak memory is ours.
+        const MAX_RAW: usize = 64 * 1024 * 1024;
+        let too_big = || WriteError::Invalid("message exceeds the 64MB bound".into());
+        if resp.content_length().is_some_and(|n| n > MAX_RAW as u64) {
+            return Err(too_big());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|_| WriteError::Transport("graph body read failed".into()))?;
+            .map_err(|_| WriteError::Transport("graph body read failed".into()))?
+        {
+            if bytes.len() + chunk.len() > MAX_RAW {
+                return Err(too_big());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         let internal_date = meta
             .received_date_time
             .as_deref()

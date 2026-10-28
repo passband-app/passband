@@ -225,6 +225,19 @@ macro_rules! revisit_answer_sql {
 /// me" verdicts. Never a per-row subquery: the
 /// sitrep inventory and the stats run it over the whole window.
 ///
+/// DRIVEN FROM THOSE FEW ROWS, PINNED: `auth_hold CROSS JOIN messages`, so
+/// each held message is one rowid probe. Left to choose, a store with
+/// statistics (every store, from the first pass a minute after the daemon
+/// starts) ran it the other way round for as long as `auth_verdicts` is
+/// empty, which on most stores is always: ANALYZE writes no row for an empty
+/// table, the planner took the union for a large one, and it scanned every
+/// message in the store, each probed into an automatic index built over the
+/// union. That was 300 ms on a 50k store, in every read that carries this
+/// CTE, where pinned it is a fraction of a millisecond. The window function
+/// keeps the CTE from being flattened into an outer query, so the pin holds
+/// in every reader. `auth_fye_threads_drive_from_the_held_messages` pins the
+/// plan, with and without statistics.
+///
 /// NO REVISION CHECK: it reads the message's standing decision, so a
 /// critical change or a "Not me" stays in FYE through a body heal or a
 /// re-fetch (which bump the state revision) until the re-triage lands, the
@@ -252,7 +265,7 @@ macro_rules! auth_fye_threads_cte {
             thread_key_sql!("fm"),
             " ORDER BY fm.received_at DESC, fm.id DESC) AS pick
                  FROM auth_hold h
-                 JOIN messages fm ON fm.account_id=h.account_id AND fm.id=h.message_id
+                 CROSS JOIN messages fm ON fm.account_id=h.account_id AND fm.id=h.message_id
                  JOIN agent_message_decisions d ON d.account_id=fm.account_id AND d.message_id=fm.id
                  LEFT JOIN auth_verdicts v ON v.account_id=fm.account_id AND v.message_id=fm.id
                  LEFT JOIN triage ft ON ft.account_id=fm.account_id AND ft.message_id=fm.id

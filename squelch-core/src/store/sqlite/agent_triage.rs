@@ -5767,6 +5767,25 @@ mod tests {
         assert!(listed(&store).is_empty());
     }
 
+    /// `EXPLAIN QUERY PLAN` steps for `sql`, every placeholder bound to NULL.
+    fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let nulls = vec![rusqlite::types::Value::Null; stmt.parameter_count()];
+        stmt.query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    /// The stats tier count, the widest reader of the auth thread CTE: it runs
+    /// over the whole mailbox.
+    fn stats_tier_sql() -> String {
+        format!(
+            "{} SELECT display_tier, COUNT(*) FROM classified GROUP BY display_tier",
+            super::super::attention::CANONICAL_MAIL_CTE
+        )
+    }
+
     /// FYE MEMBERSHIP FOR AUTH MAIL NEVER PARSES THE MAILBOX: the thread CTE
     /// is driven from the partial index of critical decisions (and the small
     /// verdict table), never a scan of every decision. Pinned on the stats
@@ -5775,17 +5794,7 @@ mod tests {
     fn auth_fye_threads_read_the_critical_index() {
         let store = fixture();
         let conn = store.lock().unwrap();
-        let plan = conn
-            .prepare(&format!(
-                "EXPLAIN QUERY PLAN {} SELECT display_tier, COUNT(*) FROM classified GROUP BY display_tier",
-                super::super::attention::CANONICAL_MAIL_CTE
-            ))
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(3))
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap()
-            .join("\n");
+        let plan = query_plan(&conn, &stats_tier_sql()).join("\n");
         assert!(plan.contains("idx_decisions_critical"), "{plan}");
         assert!(
             !plan
@@ -5793,6 +5802,81 @@ mod tests {
                 .any(|line| line.trim_end().ends_with("SCAN agent_message_decisions")),
             "{plan}"
         );
+    }
+
+    /// The thread CTE is driven FROM the held messages, one rowid probe each,
+    /// with and without statistics, on its own and inside the stats tier
+    /// count. Its window function keeps it from being flattened into any outer
+    /// query, so the order pinned here is the order in every reader (the FYE
+    /// listing and the human inventory too).
+    ///
+    /// The canary is the same CTE unpinned under the statistics a real store
+    /// has from its first pass, a minute after the daemon starts: a large
+    /// `messages`, a few critical decisions, and no row at all for the empty
+    /// `auth_verdicts` (ANALYZE writes none for an empty table, and the
+    /// planner takes a table it has no row for as a large one). Unpinned, that
+    /// store scans every message (300 ms at 50k, in every FYE, inventory and
+    /// stats read).
+    #[test]
+    fn auth_fye_threads_drive_from_the_held_messages() {
+        let store = fixture();
+        let alone = format!(
+            "WITH {} SELECT COUNT(*) FROM auth_fye_threads",
+            auth_fye_threads_cte!()
+        );
+        let readers = [alone, stats_tier_sql()];
+        let unpin = |sql: &str| {
+            let unpinned = sql.replace("CROSS JOIN messages fm", "JOIN messages fm");
+            assert_ne!(unpinned, sql, "the pin is in the CTE");
+            unpinned
+        };
+        let driven = |steps: &[String]| {
+            steps.iter().any(|s| s == "SCAN h")
+                && steps
+                    .iter()
+                    .any(|s| s == "SEARCH fm USING INTEGER PRIMARY KEY (rowid=?)")
+                && !steps.iter().any(|s| s.starts_with("SCAN fm"))
+        };
+        {
+            let conn = store.lock().unwrap();
+            for sql in &readers {
+                let steps = query_plan(&conn, sql);
+                assert!(driven(&steps), "no statistics: {steps:?}");
+            }
+        }
+
+        // The production pass, which writes the fixture's own statistics
+        // (stat1 only, under its analysis limit), then the 50k bench store's
+        // in their place.
+        store.refresh_statistics().unwrap();
+        let conn = store.lock().unwrap();
+        conn.execute_batch(
+            "DELETE FROM sqlite_stat1;
+             INSERT INTO sqlite_stat1(tbl,idx,stat) VALUES
+               ('accounts','sqlite_autoindex_accounts_1','1 1'),
+               ('agent_message_decisions','sqlite_autoindex_agent_message_decisions_1','50000 50000 1'),
+               ('agent_message_decisions','idx_decisions_critical','50 1'),
+               ('agent_message_state','sqlite_autoindex_agent_message_state_1','50000 50000 1'),
+               ('agent_thread_attention','sqlite_autoindex_agent_thread_attention_1','15862 15862 1'),
+               ('messages','idx_messages_from_nocase','50000 50000 10'),
+               ('messages','idx_messages_from','50000 50000 10'),
+               ('messages','idx_messages_received','50000 50000 1'),
+               ('messages','idx_messages_thread_received','50000 50000 4 1'),
+               ('messages','idx_messages_thread','50000 50000 4'),
+               ('messages','sqlite_autoindex_messages_1','50000 50000 1'),
+               ('triage','idx_triage_status','50000 50000 16667');
+             ANALYZE sqlite_schema;",
+        )
+        .unwrap();
+        for sql in &readers {
+            let unpinned = query_plan(&conn, &unpin(sql));
+            assert!(
+                unpinned.iter().any(|s| s.starts_with("SCAN fm")),
+                "canary: unpinned, a store with statistics scans every message: {unpinned:?}"
+            );
+            let steps = query_plan(&conn, sql);
+            assert!(driven(&steps), "with statistics: {steps:?}");
+        }
     }
 
     /// The shredder keeps evidence: never a message ruled "Not me", never a

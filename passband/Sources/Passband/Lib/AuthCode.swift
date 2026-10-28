@@ -152,13 +152,10 @@ final class AuthDecisions {
     /// own verdict so a card does not flicker back between the PUT and the
     /// list that carries it (`AuthPolicy.settle`).
     private var pending: [Int: AuthPolicy.PendingWrite] = [:]
-    /// The last sealed list, for the "still listed?" test a failed PUT needs.
-    @ObservationIgnored private var lastRows: [SealedMeta] = [] {
-        didSet { lastRowsById = Dictionary(lastRows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) }
-    }
-    /// `lastRows` by id. `decision` runs once per message on every redraw of
-    /// every surface that counts open questions, so a linear search here made
-    /// those redraws quadratic in auth mail.
+    /// The last sealed list by id, for `decision` and the "still listed?"
+    /// test a failed PUT needs. A dictionary because `decision` runs once per
+    /// message on every redraw of every surface that counts open questions,
+    /// and a linear search here made those redraws quadratic in auth mail.
     @ObservationIgnored private var lastRowsById: [Int: SealedMeta] = [:]
     /// Numbers every sealed-list fetch as it STARTS (`beginListFetch`).
     @ObservationIgnored private var fetchSeq = 0
@@ -185,7 +182,7 @@ final class AuthDecisions {
         }
         local = next
         pending = [:]
-        lastRows = []
+        lastRowsById = [:]
         daemonKeepsVerdicts = false
         migrationTried = []
         migrating = false
@@ -236,29 +233,53 @@ final class AuthDecisions {
         writeChain = Task { @MainActor in
             await previous?.value
             var accepted = false
+            var failed = 0
+            var firstError: Error?
             for m in ms {
                 // BEFORE each send as well as after it: an account switch
                 // between the tap and this task would hand the old daemon's
                 // message id to the new one, a verdict on an unrelated message.
                 guard AppStore.shared.isCurrent(epoch) else { return }
-                if await write(m, verdict, epoch: epoch) { accepted = true }
+                switch await write(m, verdict, epoch: epoch) {
+                case .accepted: accepted = true
+                case .kept: break
+                case .failed(let error):
+                    failed += 1
+                    if firstError == nil { firstError = error }
+                }
             }
-            guard accepted, AppStore.shared.isCurrent(epoch) else { return }
+            guard AppStore.shared.isCurrent(epoch) else { return }
+            // ONE toast for the batch: a "Clear all" over a hundred questions
+            // with the daemon down must not stack a hundred of them.
+            if let firstError {
+                let what = failed == 1 ? "could not save that answer" : "could not save \(failed) answers"
+                AppStore.shared.pushToast(errText(firstError, what), .error)
+            }
+            guard accepted else { return }
             await SitrepPoller.shared.refreshSealed()
         }
     }
 
-    /// One PUT and its outcome. True when the server accepted it.
-    private func write(_ m: SealedMeta, _ verdict: AuthVerdict?, epoch: Int) async -> Bool {
+    private enum WriteOutcome {
+        /// The server took it.
+        case accepted
+        /// No verdict route: this device keeps it, or the account moved on.
+        case kept
+        /// Rolled back; the caller says so once for the whole batch.
+        case failed(Error)
+    }
+
+    /// One PUT and its outcome.
+    private func write(_ m: SealedMeta, _ verdict: AuthVerdict?, epoch: Int) async -> WriteOutcome {
         do {
             try await APIClient.shared.putSealedVerdict(m.id, verdict: verdict?.rawValue)
-            guard AppStore.shared.isCurrent(epoch) else { return false }
+            guard AppStore.shared.isCurrent(epoch) else { return .kept }
             // Only a list fetched from here on can confirm it.
             // (Keeping `resent`, so a disagreeing list resends only once.)
             if pending[m.id]?.verdict == verdict { pending[m.id]?.acceptedAfterFetch = fetchSeq }
             // Any local copy is superseded by the server's.
             writeLocal { $0.removeValue(forKey: m.id) }
-            return true
+            return .accepted
         } catch let error as APIError
             where AuthPolicy.fallsBackToLedger(
                 status: error.status,
@@ -266,19 +287,18 @@ final class AuthDecisions {
         {
             // No verdict route (an older daemon, or one rolled back under
             // us): this device keeps it, quietly.
-            guard AppStore.shared.isCurrent(epoch) else { return false }
+            guard AppStore.shared.isCurrent(epoch) else { return .kept }
             writeLocal { map in
                 if let verdict { map[m.id] = verdict } else { map.removeValue(forKey: m.id) }
             }
             pending.removeValue(forKey: m.id)
-            return false
+            return .kept
         } catch {
-            guard AppStore.shared.isCurrent(epoch) else { return false }
+            guard AppStore.shared.isCurrent(epoch) else { return .kept }
             // Only roll back the intent this write carried: a later tap
             // (an Undo queued behind it) owns `pending` now.
             if pending[m.id]?.verdict == verdict { pending.removeValue(forKey: m.id) }
-            AppStore.shared.pushToast(errText(error, "could not save that answer"), .error)
-            return false
+            return .failed(error)
         }
     }
 
@@ -298,7 +318,7 @@ final class AuthDecisions {
     /// local ledger up to it.
     func listed(_ rows: [SealedMeta], fetch: Int) {
         appliedFetch = max(appliedFetch, fetch)
-        lastRows = rows
+        lastRowsById = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         // An empty list says nothing either way; keep what the last one said.
         if !rows.isEmpty {
             let keeps = rows.contains(where: \.speaksVerdicts)

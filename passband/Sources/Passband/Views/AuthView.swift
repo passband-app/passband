@@ -13,8 +13,9 @@ struct AuthView: View {
 
     /// Newer than this counts as live and heads the list.
     private static let liveWindow: TimeInterval = 60 * 60
-    /// Cards in the decision rail before it stops growing.
-    private static let maxDecisionCards = 6
+    /// Cards in the decision rail before it stops growing; past it, the
+    /// header offers "Clear all".
+    private static let maxDecisionCards = AuthPolicy.clearAllAbove
 
     enum Filter: String, CaseIterable, Identifiable {
         case all, live, codes, risk
@@ -165,10 +166,10 @@ struct AuthView: View {
 
     private func mainColumn(_ d: Derived) -> some View {
         ScrollView {
-            // Lazy, and the rows' stack lazy inside it: only the rows on screen
-            // are built, so a page holding hundreds of auth messages scrolls
-            // like one holding ten.
-            LazyVStack(alignment: .leading, spacing: Space.s14) {
+            // A plain stack of three children; the rows' stack below is the
+            // lazy one, so only the rows on screen are built and a page holding
+            // hundreds of auth messages scrolls like one holding ten.
+            VStack(alignment: .leading, spacing: Space.s14) {
                 if let focus = d.focus {
                     FocusPanel(
                         meta: focus,

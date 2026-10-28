@@ -35,7 +35,9 @@ struct AuthDecisionHeader: View {
             }
         }
         .confirmationDialog(
-            "Clear \(clearable.count) from Needs a decision?",
+            clearable.count == 1
+                ? "Clear 1 question from Needs a decision?"
+                : "Clear \(clearable.count) questions from Needs a decision?",
             isPresented: $confirming, titleVisibility: .visible
         ) {
             Button("Clear \(clearable.count)") {

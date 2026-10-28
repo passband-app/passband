@@ -32,7 +32,7 @@ enum SenderAvatar {
     /// round trip, and a logo is a nicety. Its own session so the ceiling is
     /// unambiguous, as the badge count's is in NotificationService.
     private nonisolated(unsafe) static let session = Sessions.ephemeral(
-        timeout: 2, resource: 3, emptyHeaders: true)
+        timeout: 1, resource: 1.5, emptyHeaders: true)
 
     /// `content` re-derived as a communication notification from `sender`, or
     /// `content` unchanged when iOS refuses. `name` is the readable title the
@@ -60,12 +60,8 @@ enum SenderAvatar {
             sender: person,
             attachments: nil)
         intent.setImage(image, forParameterNamed: \.sender)
-
-        let interaction = INInteraction(intent: intent, response: nil)
-        interaction.direction = .incoming
-        // A failed donation only costs Siri a suggestion; the banner does not
-        // depend on it.
-        try? await interaction.donate()
+        // NOT donated: the banner needs only `updating(from:)`, and a donation
+        // would hand every sender, people included, to Siri suggestions.
         return (try? content.updating(from: intent)) ?? content
     }
 

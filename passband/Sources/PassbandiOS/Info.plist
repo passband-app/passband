@@ -78,14 +78,14 @@
 	     the LAN rather than on loopback. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Passband connects to the squelchd daemon you run, which may live on another machine on your network.</string>
-	<!-- HTTPS-only (standard exempt encryption), so App Store Connect skips the
-	     export-compliance questionnaire on every upload instead of asking. -->
 	<!-- Pairs with the communication-notifications entitlement: the intent the
 	     notification extension hands iOS for each mail banner. -->
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>INSendMessageIntent</string>
 	</array>
+	<!-- HTTPS-only (standard exempt encryption), so App Store Connect skips the
+	     export-compliance questionnaire on every upload instead of asking. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

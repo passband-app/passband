@@ -131,9 +131,10 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             guard let event else {
                 return self.deliver(Self.badged(fallback, count: count))
             }
-            let content = await Self.withSender(
-                Self.content(for: event, accountId: route.accountId), event: event)
-            self.deliver(Self.badged(content, count: count))
+            // Badged BEFORE the sender is attached, so the communication
+            // content `updating(from:)` returns is the one delivered as is.
+            let base = Self.badged(Self.content(for: event, accountId: route.accountId), count: count)
+            self.deliver(await Self.withSender(base, event: event))
         }
         // Published after launch, so an expiry in between could not cancel
         // it: if the handler is already spent, cancel the fetch here instead.

@@ -651,7 +651,7 @@ private struct ShredderCard: View {
                     if !stats.write_ready {
                         Label {
                             Text(
-                                "Needs the write credential — run `squelchd auth --write`. Nothing can be shredded until then."
+                                "Needs the write credential — run `squelchd auth`. Nothing can be shredded until then."
                             )
                         } icon: {
                             Image(systemName: "exclamationmark.shield")

@@ -4,7 +4,7 @@
 
 **Local-first email intelligence for your AI agent.**
 
-squelch reads your Gmail (read-only), decides what actually deserves attention, catches bills and deadlines, and serves that intelligence over MCP to an agent you already run. Your agent never holds your Gmail credential and never gets raw access to your mailbox.
+squelch reads your Gmail, decides what actually deserves attention, catches bills and deadlines, and serves that intelligence over MCP to an agent you already run. Your agent never holds your Gmail credential and never gets raw access to your mailbox.
 
 [![release](https://github.com/passband-app/passband/actions/workflows/release-daemon.yml/badge.svg)](https://github.com/passband-app/passband/actions/workflows/release-daemon.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -42,7 +42,7 @@ The name comes from the radio control that mutes everything below a signal thres
 
 ```mermaid
 flowchart LR
-    G["Gmail REST API<br/>(gmail.readonly)"] -->|history.list poll| D[squelchd]
+    G["Gmail REST API<br/>(gmail.modify)"] -->|history.list poll| D[squelchd]
     D --> S[(SQLite)]
     S --> T["triage<br/>seal ➜ rules ➜ 2-stage LLM"]
     T --> M["/mcp<br/>agent door"]
@@ -51,7 +51,7 @@ flowchart LR
     C --> P["Passband (macOS · iOS)<br/>/console · TUI"]
 ```
 
-- **Sync**: polls Gmail every 5s with a read-only token. Sent mail seeds a "people I know" contact list, the strongest cheap triage signal.
+- **Sync**: polls Gmail every 5s, loading only the Read credential slot. Sent mail seeds a "people I know" contact list, the strongest cheap triage signal.
 - **Triage**: seal detection runs before anything else, so auth mail never reaches any LLM. Everything else gets a real model verdict: heuristics (bills, known contacts, alerts, newsletters, cold sales) write provisional seed values at ingest, then Stage-1 (default `claude-opus-5-5` at low effort) scores importance, tier, deadline, category, and a one-liner with a per-property "why". Those heuristics never stand as the answer unless the API is unreachable, and they never fire a notification on their own; what they do instead is act as a witness, because a model verdict that contradicts them is one of the strongest signals that a row needs a second look.
 - **Escalation**: a router, not the model's own confidence, decides what gets that second look. It reads the settled verdict plus facts the model cannot see: what the deterministic detectors found, whether you have corrected this sender before, and where the score fell against the surface line. Stage-2 runs the *same* model at the same `low` effort (an eval found `low` matching `xhigh` on every placement metric; a new account's first five days run the mail its user is waiting on at `xhigh`, see `Stage2Config::onboarding_effort`) with more context (why it was flagged, the sender's track record, the rest of the thread) — escalation buys information, not a bigger brain. Your squelch/surface rules still settle visibility outright, applied over the verdict rather than instead of it.
 - **Re-triage**: relevance expires. Alongside each verdict the model lists dates to look again ("this reservation is dead the morning after"), anything with a deadline schedules itself regardless, and anything sitting unactioned in the standing band gets swept. Verdicts you have corrected by hand are never re-evaluated. Every model pass also has an age horizon (7 days for Stage-1, 14 for Stage-2) so a fresh install cannot spend a day's cap on a decade of backlog, and a re-triage you ask for by hand outranks that horizon for 24 hours and jumps the queue ahead of the backlog: asking is the one thing the cutoff exists to wait for.
@@ -161,7 +161,7 @@ cargo run --bin squelchd -- auth     # one-time browser consent; token -> macOS 
 cargo run --bin squelchd -- serve    # sync + both doors on one port
 ```
 
-Write scopes are a separate, later opt-in: `squelchd auth --write` (only needed for archive/send actions). It runs two consent flows, minting the write credential and re-minting the read one, so the two slots stay in sync.
+`squelchd auth` asks Google for one Gmail scope, `gmail.modify`, and stores the token in both the Read slot (sync) and the Write slot (archive/send actions). `--write` is still accepted and changes nothing.
 
 <details>
 <summary><b>Headless box</b> (SSH port-forward)</summary>
@@ -177,7 +177,7 @@ Consent runs on a machine that *does* have a browser, and the resulting token mo
 
 ```sh
 # on your laptop, where the browser is:
-squelchd auth --export --out cred.txt          # add --write for both credentials
+squelchd auth --export --out cred.txt          # one consent, both credentials
 
 # on the daemon's host:
 docker exec -i squelchd squelchd auth --import < cred.txt
@@ -304,7 +304,7 @@ The prerequisites, the five repo secrets, and what to do about a bad release tha
 
 ## Security posture
 
-- The sync credential is requested as `gmail.readonly`, and what holds the line is structural: sync and triage can only load the Read slot, ever. The write credential (`gmail.modify` + `gmail.send`) lives in a separate slot that is only reachable from the human door's action handlers, which require an explicit confirm flag, run an outbound secret scan on sends, and audit every attempt. (Google unions granted scopes across one project's consents, so the token in the Read slot may *carry* more than readonly after `auth --write` — which door can load which slot is the enforcement, not the token's scope list.)
+- Passband asks Google for one Gmail scope, `gmail.modify`, stored in separate Read and Write slots. What holds the line is structural: sync and triage can only load the Read slot, ever. The Write slot (the same `gmail.modify` token) is only reachable from the human door's action handlers, which require an explicit confirm flag, run an outbound secret scan on sends, and audit every attempt. The token in the Read slot can write too, so which door can load which slot is the enforcement, not the token's scope list.
 - Auth emails (2FA codes, password resets, login alerts) are sealed at ingest and never appear in any MCP response, any LLM call, or any list endpoint. Revealing one takes an explicit authenticated request and writes an audit row.
 - Email content is treated as untrusted input everywhere. Tokens never appear in logs.
 - The console introduces no new credential type: its session cookie *is* an ordinary device token, HttpOnly and verified by the same check the bearer path runs, so a browser is one more paired device and `squelchd token revoke <id>` ends its session like any other. The pages ship no JavaScript and no external asset, and say so to the browser with a `default-src 'none'` CSP.

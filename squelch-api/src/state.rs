@@ -1501,7 +1501,7 @@ impl ApiState {
             Err(_) => {
                 eprintln!(
                     "squelch-api: no OAuth client configured; action endpoints will return 403 \
-                     (set client_id/client_secret and run `squelchd auth --write`)"
+                     (set client_id/client_secret and run `squelchd auth`)"
                 );
                 state
             }

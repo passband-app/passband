@@ -845,9 +845,9 @@ async fn the_signup_surface_is_unchanged() {
     let h = Harness::new().await;
     let (status, _, body) = h.get("/", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("gmail.readonly"), "{body}");
     assert!(body.contains("gmail.modify"), "{body}");
-    assert!(body.contains("gmail.send"), "{body}");
+    assert!(!body.contains("gmail.readonly"), "{body}");
+    assert!(!body.contains("gmail.send"), "{body}");
     assert!(body.contains(r#"action="/signup""#), "{body}");
 
     // ...and the consent a real post builds, parameter for parameter.
@@ -864,9 +864,8 @@ async fn the_signup_surface_is_unchanged() {
     assert_eq!(
         scope.split(' ').collect::<Vec<_>>(),
         vec![
-            "https://www.googleapis.com/auth/gmail.readonly",
+            // The one Gmail scope (gmail.readonly and gmail.send are gone).
             "https://www.googleapis.com/auth/gmail.modify",
-            "https://www.googleapis.com/auth/gmail.send",
             // Asked for on the same screen and optional: name and photo.
             "https://www.googleapis.com/auth/userinfo.profile",
             // Also optional: calendar, asked for at signup even while the

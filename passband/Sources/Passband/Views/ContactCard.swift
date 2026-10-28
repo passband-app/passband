@@ -61,13 +61,62 @@ private struct ContactCardTrigger: ViewModifier {
                 Divider()
                 Button("Show Contact Card") { open = true }
             }
-            // Downward, like the read receipt beside it: the space below a
-            // message's header is its body, the one direction with room.
-            .popover(isPresented: $open, arrowEdge: .bottom) {
-                ContactCard(who: who, dismiss: { open = false })
-                    .presentationCompactAdaptation(.popover)
-            }
+            #if DEBUG && os(iOS)
+                .onAppear { if FixtureStage.takeContactCard() { open = true } }
+            #endif
+            #if os(macOS)
+                // Downward, like the read receipt beside it: the space below a
+                // message's header is its body, the one direction with room.
+                .popover(isPresented: $open, arrowEdge: .bottom) {
+                    ContactCard(who: who, dismiss: { open = false })
+                }
+            #else
+                // A SHEET ON THE PHONE, opaque. As a popover it was a glass
+                // bubble pinned over the thread's header, with the subject and
+                // the recipient lines showing through it.
+                .sheet(isPresented: $open) {
+                    ScrollView {
+                        ContactCard(who: who, dismiss: { open = false })
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                    .presentationBackground(Palette.canvas)
+                }
+            #endif
     }
+}
+
+/// The card's sizes. The Mac's are a popover's; the phone's are a sheet's,
+/// read at arm's length, with rows a thumb can hit.
+@MainActor
+private enum CardMetrics {
+    #if os(macOS)
+        static let avatar: CGFloat = 40
+        static var name: Font { Typo.ui(15, weight: .semibold) }
+        static var body: Font { Typo.rowSub }
+        static var detail: Font { Typo.micro }
+        static var detailInk: Color { Palette.inkFaintest }
+        static var labelColumn: CGFloat { Typo.measure(66) }
+        static var padding: EdgeInsets { EdgeInsets(Space.s14) }
+        static let rowHeight: CGFloat? = nil
+    #else
+        static let avatar: CGFloat = 52
+        static var name: Font { Typo.ui(19, weight: .semibold) }
+        static var body: Font { Typo.ui(15) }
+        static var detail: Font { Typo.ui(13) }
+        static var detailInk: Color { Palette.inkFaint }
+        static var labelColumn: CGFloat { 92 }
+        static var padding: EdgeInsets {
+            EdgeInsets(top: Space.s24 + Space.s8, leading: Space.page,
+                bottom: Space.s24, trailing: Space.page)
+        }
+        static let rowHeight: CGFloat? = 44
+    #endif
+}
+
+private extension EdgeInsets {
+    init(_ all: CGFloat) { self.init(top: all, leading: all, bottom: all, trailing: all) }
 }
 
 private struct ContactCard: View {
@@ -95,8 +144,12 @@ private struct ContactCard: View {
             Hairline()
             actions
         }
-        .padding(Space.s14)
-        .frame(width: Typo.measure(320), alignment: .leading)
+        .padding(CardMetrics.padding)
+        #if os(macOS)
+            .frame(width: Typo.measure(320), alignment: .leading)
+        #else
+            .frame(maxWidth: .infinity, alignment: .leading)
+        #endif
         .task(id: who.address) { await load() }
     }
 
@@ -117,16 +170,16 @@ private struct ContactCard: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: Space.scaled(11)) {
-            Avatar(sender: who.sender, size: 40)
+            Avatar(sender: who.sender, size: CardMetrics.avatar)
             VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 Text(name)
-                    .font(Typo.ui(15, weight: .semibold))
+                    .font(CardMetrics.name)
                     .foregroundStyle(Palette.ink)
                     .lineLimit(2)
                     .textSelection(.enabled)
                 HStack(spacing: Space.scaled(5)) {
                     Text(who.address)
-                        .font(Typo.rowSub)
+                        .font(CardMetrics.body)
                         .foregroundStyle(Palette.inkDim)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -170,13 +223,13 @@ private struct ContactCard: View {
             HStack(spacing: Space.s8) {
                 ProgressView().controlSize(.small)
                 Text("Reading your history with them")
-                    .font(Typo.rowSub)
+                    .font(CardMetrics.body)
                     .foregroundStyle(Palette.inkFaint)
             }
             .frame(maxWidth: .infinity, minHeight: Space.scaled(36), alignment: .leading)
         case .unavailable:
             Text("No history available for this address.")
-                .font(Typo.rowSub)
+                .font(CardMetrics.body)
                 .foregroundStyle(Palette.inkFaint)
         case .loaded(let p):
             loaded(p)
@@ -188,7 +241,7 @@ private struct ContactCard: View {
         VStack(alignment: .leading, spacing: Space.s8) {
             if p.received == nil && p.sent == nil {
                 Text("No mail with them yet.")
-                    .font(Typo.rowSub)
+                    .font(CardMetrics.body)
                     .foregroundStyle(Palette.inkFaint)
             }
             if let r = p.received {
@@ -219,17 +272,17 @@ private struct ContactCard: View {
     private func fact(_ label: String, _ value: String, detail: String? = nil) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
             Text(label)
-                .font(Typo.rowSub)
+                .font(CardMetrics.body)
                 .foregroundStyle(Palette.inkFaint)
-                .frame(width: Typo.measure(66), alignment: .leading)
+                .frame(width: CardMetrics.labelColumn, alignment: .leading)
             VStack(alignment: .leading, spacing: 1) {
                 Text(value)
-                    .font(Typo.rowSub)
+                    .font(CardMetrics.body)
                     .foregroundStyle(Palette.ink)
                 if let detail {
                     Text(detail)
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
+                        .font(CardMetrics.detail)
+                        .foregroundStyle(CardMetrics.detailInk)
                 }
             }
             Spacer(minLength: 0)
@@ -242,9 +295,9 @@ private struct ContactCard: View {
     private func ruleFact(_ rule: PersonCard.Rule) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
             Text("Rule")
-                .font(Typo.rowSub)
+                .font(CardMetrics.body)
                 .foregroundStyle(Palette.inkFaint)
-                .frame(width: Typo.measure(66), alignment: .leading)
+                .frame(width: CardMetrics.labelColumn, alignment: .leading)
             VStack(alignment: .leading, spacing: Space.s2) {
                 HStack(spacing: Space.scaled(5)) {
                     Chip(text: rule.disposition.label, tone: tone(rule.disposition))
@@ -258,7 +311,7 @@ private struct ContactCard: View {
                 }
                 if !rule.want_text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(rule.want_text)
-                        .font(Typo.rowSub)
+                        .font(CardMetrics.body)
                         .foregroundStyle(Palette.inkDim)
                         .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
@@ -283,14 +336,16 @@ private struct ContactCard: View {
                 } label: {
                     HStack(spacing: Space.s8) {
                         Text(t.subject.isEmpty ? "(no subject)" : t.subject)
-                            .font(Typo.rowSub)
+                            .font(CardMetrics.body)
                             .lineLimit(1)
                             .truncationMode(.tail)
                         Spacer(minLength: Space.s8)
                         Text(here ? "open" : shortAge(t.last_at))
-                            .font(Typo.num(10))
-                            .foregroundStyle(Palette.inkFaintest)
+                            .font(CardMetrics.detail.monospacedDigit())
+                            .foregroundStyle(CardMetrics.detailInk)
                     }
+                    .frame(minHeight: CardMetrics.rowHeight)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.textAction)
                 // The conversation already on screen is not somewhere to go.
@@ -301,7 +356,50 @@ private struct ContactCard: View {
 
     // MARK: - acting on them
 
+    @ViewBuilder
     private var actions: some View {
+        #if os(macOS)
+            textActions
+        #else
+            HStack(spacing: Space.s10) {
+                door("email", symbol: "square.and.pencil") {
+                    dismiss()
+                    store.openCompose(ComposeState(to: who.address))
+                }
+                .disabled(store.compose != nil)
+                door("their mail", symbol: "magnifyingglass") {
+                    dismiss()
+                    store.openSearch(seed: "from:\(who.address)")
+                }
+            }
+            .padding(.top, Space.s4)
+        #endif
+    }
+
+    #if !os(macOS)
+        /// The reader's own reply doors (ChainFoot), so the two read as one set.
+        private func door(_ title: String, symbol: String, action: @escaping () -> Void)
+            -> some View
+        {
+            Button(action: action) {
+                HStack(spacing: Space.s8) {
+                    Image(systemName: symbol)
+                        .font(Typo.ui(13, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                    Text(title)
+                        .font(Typo.ui(15, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .glassCapsule(tint: Palette.glassTint)
+        }
+    #endif
+
+    private var textActions: some View {
         HStack(spacing: Space.s14) {
             Button {
                 dismiss()
@@ -324,7 +422,7 @@ private struct ContactCard: View {
 
             Spacer(minLength: 0)
         }
-        .font(Typo.rowSub)
+        .font(CardMetrics.body)
         .buttonStyle(.textAction)
     }
 

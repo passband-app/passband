@@ -121,27 +121,19 @@
 
       <section class="section">
         <p class="num">02 &middot; YOUR GOOGLE ACCOUNT</p>
-        <h2>Three permissions. <em>No others required.</em></h2>
+        <h2>One Gmail permission. <em>No others required.</em></h2>
         <p class="intro">
           Passband connects to Gmail through the Gmail API with your consent,
-          over OAuth. Your profile and Google Calendar are asked for too, and
-          both are optional.
+          over OAuth, using one permission. Your profile and Google Calendar are
+          asked for too, and both are optional.
         </p>
         <div class="table-wrap scopes">
           <table>
             <thead><tr><th>Permission</th><th>Why Passband needs it</th></tr></thead>
             <tbody>
               <tr>
-                <td><code>gmail.readonly</code></td>
-                <td>Read your messages so they can be triaged, threaded, searched, and displayed, and so deadlines and tracking numbers can be extracted.</td>
-              </tr>
-              <tr>
                 <td><code>gmail.modify</code></td>
-                <td>Apply what triage or you decided: archive a message, add or remove a label, mark it read or unread, bring a parked thread back.</td>
-              </tr>
-              <tr>
-                <td><code>gmail.send</code></td>
-                <td>Send the mail you write in Passband: replies, forwards, new messages, and invitations you choose to share.</td>
+                <td>Read your messages so they can be triaged, threaded, searched, and displayed; apply what triage or you decided (archive, label, mark read or unread, bring a parked thread back); and send the mail you write in Passband. It cannot permanently delete mail.</td>
               </tr>
               <tr>
                 <td><code>userinfo.profile</code></td>
@@ -155,8 +147,9 @@
           </table>
         </div>
         <p class="note">
-          Read access and write access are held as separate credentials, and the
-          sync path is structurally unable to load the one that can write. What
+          The one permission can read and write, so Passband keeps them apart
+          in its own code: the sync path loads its own credential slot and has
+          no code that archives, labels or sends. What
           is stored, where it lives, and who can reach it is set out in full in
           the <a href="/privacy">Privacy Policy</a> and on the
           <a href="/trust">trust page</a>.

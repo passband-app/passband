@@ -156,6 +156,9 @@
          dimmed, so the difference between the tiers is the picture. */
       #tier-self:checked ~ .chain .ch[data-hosted] { opacity: 0.32; filter: saturate(0); }
       #tier-self:checked ~ .chain .ch[data-hosted] .off { display: inline-block; margin-left: 0.5rem; }
+      /* And the reverse: a channel only a self-hosted daemon uses. */
+      #tier-hosted:checked ~ .chain .ch[data-self] { opacity: 0.32; filter: saturate(0); }
+      #tier-hosted:checked ~ .chain .ch[data-self] .off { display: inline-block; margin-left: 0.5rem; }
       #tier-self:checked ~ .chain .tenant-hosted,
       #tier-hosted:checked ~ .chain .tenant-self { display: none; }
 
@@ -323,10 +326,10 @@
               <div class="what"><b>Push notifications</b>A fixed alert, an event id, and the Gmail thread id so repeat alerts collapse. The phone fetches the mail itself, from the daemon.</div>
               <div class="who"><b>Apple Push Notification service</b>via our relay on Railway, which stores nothing<br /><span class="pill">no mail content</span></div>
             </div>
-            <div class="ch meta">
+            <div class="ch meta" data-self>
               <span class="wire"></span>
-              <div class="what"><b>Read receipts <small class="opt">opt-in</small></b>If you turn on open tracking for mail you send, the relay holds an opaque token, a time and a user agent until your daemon collects them.</div>
-              <div class="who"><b>Our relay on Railway</b>only your daemon can tie a token to a message<br /><span class="pill">no mail content</span></div>
+              <div class="what"><b>Read receipts <small class="opt">opt-in</small></b>If you turn on open tracking for mail you send, a self-hosted daemon that uses our relay has it hold an opaque token, a time and a user agent until the daemon collects them. A hosted account serves the pixel from its own daemon, so its opens never reach the relay.</div>
+              <div class="who"><b>Our relay on Railway</b>self-hosted only; only your daemon can tie a token to a message<br /><span class="pill">no mail content</span><span class="off">off</span></div>
             </div>
             <div class="ch meta" data-hosted>
               <span class="wire"></span>
@@ -505,8 +508,8 @@
         </p>
         <div class="facts">
           <div>
-            <h3>Reading can't send</h3>
-            <p>Sync holds a read-only Google credential. The one that can write lives apart, and the sync path cannot load it.</p>
+            <h3>Sync never writes</h3>
+            <p>Google grants Passband one Gmail permission, and it can read and write. Passband keeps the two apart in its own code: the sync and triage path loads its own credential slot and has no code that archives, labels or sends.</p>
           </div>
           <div>
             <h3>One instance per account</h3>
@@ -521,8 +524,8 @@
             <p>Verification codes, sign-in links and password resets are sealed as they are recognized, by rules first and triage second. Sealed mail is never shown to the assistant or to AI agents, and opens only when you reveal it.</p>
           </div>
           <div>
-            <h3>Agents read, never write</h3>
-            <p>The interface Passband offers to AI agents is read-only and serves text only, never HTML and never sealed mail.</p>
+            <h3>Agents draft, you send</h3>
+            <p>The interface Passband offers to AI agents serves mail as text only, never HTML and never sealed mail. Agents can leave drafts for you to review. Sending is off unless you turn it on, and then each message needs your approval.</p>
           </div>
           <div>
             <h3>Mail renders sandboxed</h3>

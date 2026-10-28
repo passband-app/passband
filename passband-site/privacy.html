@@ -117,26 +117,16 @@
     <table>
       <tr><th>Scope</th><th>What it is used for</th></tr>
       <tr>
-        <td><code>gmail.readonly</code></td>
-        <td>
-          Sync message headers and bodies so the daemon can triage them, render
-          threads, search them, and extract deadlines, shipment tracking, and
-          calendar details.
-        </td>
-      </tr>
-      <tr>
         <td><code>gmail.modify</code></td>
         <td>
-          Apply the outcome of a triage or an explicit user action: archive,
-          label, mark read or unread, park a thread for later. Never used by the
-          sync path.
-        </td>
-      </tr>
-      <tr>
-        <td><code>gmail.send</code></td>
-        <td>
-          Send mail you compose in Passband: replies, forwards, new messages,
-          and invitations you choose to share from your own address.
+          The one Gmail permission. Read: sync message headers and bodies so
+          the daemon can triage them, render threads, search them, and extract
+          deadlines, shipment tracking, and calendar details. Change: apply the
+          outcome of a triage or an explicit user action (archive, label, mark
+          read or unread, park a thread for later). Send: mail you compose in
+          Passband, such as replies, forwards, new messages, and invitations you
+          choose to share from your own address. It cannot permanently delete
+          mail.
         </td>
       </tr>
       <tr>
@@ -177,12 +167,10 @@
       </tr>
     </table>
     <p>
-      Read access and write access are held in separate credential slots, and
-      the sync pipeline is structurally unable to load the write slot. On
-      self-host, write access is a second, separate consent you can decline and
-      never grant. On hosted, all three scopes are granted in a single consent
-      at signup, because a hosted account has no second path back to Google;
-      a partial consent provisions nothing at all.
+      Passband asks Google for one Gmail permission, granted in a single
+      consent at signup (or at <code>squelchd auth</code> on self-host); a
+      consent without it sets nothing up. That permission can read and write;
+      see Security below for how Passband keeps sync away from writing.
     </p>
     <p>
       Every write action is user-initiated or the direct result of a rule you
@@ -327,9 +315,14 @@
       <tr>
         <td><strong>Read receipts</strong> (opt-in)</td>
         <td>
-          If you enable open tracking on mail you send, the relay briefly
-          buffers an opaque token, a timestamp, and a user agent string until
-          your daemon collects them. Only your daemon can map a token back to a
+          If you enable open tracking on mail you send, the pixel records an
+          opaque token, a timestamp, and a user agent string. On a hosted
+          account the pixel is served by your own daemon at your account's
+          address, so these never pass through the relay; the recipient's mail
+          client fetches it from that address, which therefore appears in the
+          tracked email. On a self-hosted
+          daemon that uses our relay, the relay briefly buffers them until your
+          daemon collects them. Only your daemon can map a token back to a
           message. Collected entries are deleted from the relay, and uncollected
           ones after 90 days.
         </td>
@@ -451,10 +444,12 @@
 
     <h2>Security</h2>
     <p>
-      The read credential and the write credential are held in separate slots,
-      and the sync pipeline is structurally unable to load the write slot.
-      Agent-facing interfaces are read-only and never expose security-sensitive
-      mail. Self-hosted daemons bind to loopback by default. Hosted accounts are
+      Passband's one Gmail permission can read and write, so the separation is
+      kept in Passband's own code: the sync pipeline loads its own credential
+      slot and has no code that archives, labels, or sends. Agent-facing
+      interfaces never expose security-sensitive mail; agents can leave drafts
+      for you to review, and can send only if you turn sending on, with your
+      approval for each message. Self-hosted daemons bind to loopback by default. Hosted accounts are
       isolated from one another at the container, network, and storage layers,
       and each has its own encryption identity. Secrets are encrypted at rest.
       A summary of these controls, our subprocessors, and retention is at

@@ -85,6 +85,14 @@ data:
   # silently upgrade every tenant's daemon on any pod restart. The warden
   # refuses to start without one. Changing this value and applying is what a
   # daemon rollout IS; the roller does the rest.
+  #
+  # FLOOR: every warden from the release that renders SQUELCH_TRACK_URL (read
+  # tracking on every tenant) pairs only with a daemon tag that has the
+  # same-origin opens-poller gate (`pixel_lands_on_relay`), the SAME tag as the
+  # warden image. Never roll this below it while that warden runs: an older
+  # daemon given both SQUELCH_TRACK_URL and SQUELCH_RELAY_URL starts the opens
+  # poller against the shared relay, and the push-only bearer becomes the only
+  # lock. Bump this and the warden images together, as a release always does.
   SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.13"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.

@@ -1269,7 +1269,7 @@ struct RuleEditor: View {
             if let key = request.draftKey { store.ruleDrafts[key] = nil }
             onClose()
         } catch let apiError as APIError where apiError.kind == .forbidden {
-            error = "no write credential · run squelchd auth --write"
+            error = "no write credential · run squelchd auth"
             saving = false
         } catch {
             self.error = errText(error, "save failed")

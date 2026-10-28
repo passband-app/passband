@@ -40,6 +40,27 @@ pub fn is_mintable_base_url(base_url: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+/// Whether a pixel minted against `base_url` is fetched from the relay at
+/// `relay_url`: same scheme, host (case-insensitively) and port. Only then do
+/// opens buffer on the relay for this daemon to collect. Any path on either
+/// side is ignored; the pixel route and the drain both hang off the origin.
+///
+/// A self-hoster who fronts the relay's pixel with a second hostname (a CNAME
+/// for deliverability) should name the same hostname in both settings.
+pub fn pixel_lands_on_relay(base_url: &str, relay_url: &str) -> bool {
+    let parse = |u: &str| url::Url::parse(u.trim()).ok();
+    let (Some(a), Some(b)) = (parse(base_url), parse(relay_url)) else {
+        return false;
+    };
+    // `Url` already lowercases the scheme and a domain host; a fully
+    // qualified trailing dot names the same host.
+    let host = |u: &url::Url| u.host_str().map(|h| h.trim_end_matches('.').to_string());
+    a.scheme() == b.scheme()
+        && host(&a).is_some_and(|h| !h.is_empty())
+        && host(&a) == host(&b)
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
 /// The opens poller's cursor row in `sync_state`: `uidvalidity` unused,
 /// `last_uid` holds the highest relay row id durably written here. Its own key,
 /// distinct from the pusher's and the sync engine's.
@@ -133,6 +154,45 @@ fn relay_failure() -> CoreError {
     CoreError::Other(anyhow::anyhow!("relay opens poll failed"))
 }
 
+/// Append the `opened` event that wakes the existing SSE + APNs pipeline, for
+/// an open just recorded by EITHER path: the relay poller, or the daemon's own
+/// `/t/` route (every hosted tenant). Call it only when `record_open` said the
+/// row was new.
+/// BEST-EFFORT: the open is already durable, and `events` is UNIQUE on
+/// `message_id`, so the second open of a message is silently collapsed into
+/// the first — one nudge per message, not per pixel fetch.
+pub fn notify_open<S: Store + ?Sized>(store: &S, account_id: AccountId, token: &str) {
+    let tracked = match store.tracked_message(account_id, token) {
+        // The tracker exists but its echo never backfilled a local message
+        // id: the open is recorded, there is just nothing to point a
+        // notification at.
+        Ok(None) => return,
+        Ok(Some(t)) => t,
+        Err(e) => {
+            eprintln!("squelch: could not resolve a tracked message: {e}");
+            return;
+        }
+    };
+    let ev = NewEvent {
+        account_id,
+        message_id: tracked.message_id,
+        thread_id: tracked.thread_id,
+        kind: EventKind::Opened,
+        tier: Tier::Signal,
+        importance: OPENED_IMPORTANCE,
+        sender: tracked.from_addr,
+        one_line: tracked.subject,
+        deadline: None,
+        // An open receipt is about the user's OWN sent mail; nothing here is
+        // sealed and nothing routes to the reveal flow.
+        is_auth: false,
+        sealed_kind: None,
+    };
+    if let Err(e) = store.append_event(&ev) {
+        eprintln!("squelch: could not append an opened event: {e}");
+    }
+}
+
 /// The opens poller task. Construct with [`OpensPoller::from_config`], which
 /// returns `Ok(None)` unless both a relay and a tracking base URL are configured.
 pub struct OpensPoller {
@@ -157,6 +217,13 @@ impl OpensPoller {
     /// collect, so all a poller there could do is drain and ack away ANOTHER
     /// daemon's opens. Having a relay (for push) is not a reason to collect.
     /// The daemon's own `/t/:token` route needs neither.
+    ///
+    /// And the pixel must POINT AT THAT RELAY ([`pixel_lands_on_relay`]). A
+    /// daemon whose pixel is its own public `/t/` route (every hosted tenant)
+    /// records opens directly and has nothing buffered on the relay, even when
+    /// it holds a relay for iOS push. Polling there would at best 401 forever
+    /// on the push-only bearer and at worst drain the self-hosted daemons'
+    /// opens.
     pub fn from_config(
         store: Arc<dyn Store>,
         account_id: AccountId,
@@ -179,6 +246,14 @@ impl OpensPoller {
             .as_deref()
             .is_some_and(is_mintable_base_url);
         if !mints_pixels {
+            return Ok(None);
+        }
+        if !config
+            .tracking
+            .base_url
+            .as_deref()
+            .is_some_and(|base| pixel_lands_on_relay(base, &relay_url))
+        {
             return Ok(None);
         }
         // The error carries no url and no bearer; neither reached the builder.
@@ -300,44 +375,8 @@ impl OpensPoller {
                 }
             }
             for token in &newly_opened {
-                self.notify_open(token);
+                notify_open(self.store.as_ref(), self.account_id, token);
             }
-        }
-    }
-
-    /// Append the `opened` event that wakes the existing SSE + APNs pipeline.
-    /// BEST-EFFORT: the open is already durable, and `events` is UNIQUE on
-    /// `message_id`, so the second open of a message is silently collapsed into
-    /// the first — one nudge per message, not per pixel fetch.
-    fn notify_open(&self, token: &str) {
-        let tracked = match self.store.tracked_message(self.account_id, token) {
-            // The tracker exists but its echo never backfilled a local message
-            // id: the open is recorded, there is just nothing to point a
-            // notification at.
-            Ok(None) => return,
-            Ok(Some(t)) => t,
-            Err(e) => {
-                eprintln!("squelch: opens poller could not resolve a tracked message: {e}");
-                return;
-            }
-        };
-        let ev = NewEvent {
-            account_id: self.account_id,
-            message_id: tracked.message_id,
-            thread_id: tracked.thread_id,
-            kind: EventKind::Opened,
-            tier: Tier::Signal,
-            importance: OPENED_IMPORTANCE,
-            sender: tracked.from_addr,
-            one_line: tracked.subject,
-            deadline: None,
-            // An open receipt is about the user's OWN sent mail; nothing here is
-            // sealed and nothing routes to the reveal flow.
-            is_auth: false,
-            sealed_kind: None,
-        };
-        if let Err(e) = self.store.append_event(&ev) {
-            eprintln!("squelch: opens poller could not append an opened event: {e}");
         }
     }
 
@@ -466,21 +505,53 @@ mod tests {
                 .expect("a scheme-less tracking url is not an error")
                 .is_none()
         );
+        // A pixel on a DIFFERENT host than the relay: opens land wherever the
+        // pixel points (a hosted tenant's own `/t/`), so nothing is buffered
+        // on the relay for this daemon and it must not collect.
+        config.tracking.base_url = Some("https://track.example.com".to_string());
+        assert!(
+            OpensPoller::from_config(store.clone(), 1, &config)
+                .expect("a pixel off the relay is not an error")
+                .is_none()
+        );
+
         // Case and surrounding whitespace do not matter, as in minting.
-        config.tracking.base_url = Some("  HTTPS://track.example.com ".to_string());
+        config.tracking.base_url = Some("  HTTPS://Relay.example.com ".to_string());
         assert!(
             OpensPoller::from_config(store.clone(), 1, &config)
                 .expect("building the client")
                 .is_some()
         );
 
-        // Both named: the poller exists.
-        config.tracking.base_url = Some("https://track.example.com".to_string());
+        // Both naming the relay: the poller exists.
+        config.tracking.base_url = Some("https://relay.example.com".to_string());
         let p = OpensPoller::from_config(store, 1, &config)
             .expect("building the client")
-            .expect("a relay plus a tracking url builds a poller");
+            .expect("a relay plus a pixel on it builds a poller");
         // The trailing slash does not become a double slash on the path.
         assert_eq!(p.opens_url, "https://relay.example.com/v1/opens");
+    }
+
+    #[test]
+    fn a_pixel_lands_on_the_relay_only_at_the_same_origin() {
+        let relay = "https://relay.squelch.sh";
+        assert!(pixel_lands_on_relay("https://relay.squelch.sh", relay));
+        assert!(pixel_lands_on_relay("https://relay.squelch.sh/", relay));
+        assert!(pixel_lands_on_relay(" HTTPS://RELAY.squelch.sh ", relay));
+        assert!(pixel_lands_on_relay("https://relay.squelch.sh:443", relay));
+        assert!(pixel_lands_on_relay("https://relay.squelch.sh./", relay));
+        // A hosted tenant: its own vhost, with the relay held for push alone.
+        assert!(!pixel_lands_on_relay(
+            "https://ethan-2.passband.email",
+            relay
+        ));
+        assert!(!pixel_lands_on_relay("http://relay.squelch.sh", relay));
+        assert!(!pixel_lands_on_relay(
+            "https://relay.squelch.sh:8443",
+            relay
+        ));
+        assert!(!pixel_lands_on_relay("relay.squelch.sh", relay));
+        assert!(!pixel_lands_on_relay("", relay));
     }
 
     /// A first-ever start collects from zero, not from HEAD: the relay is

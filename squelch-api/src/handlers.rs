@@ -4732,8 +4732,8 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
 /// Resolve the account's WRITE-bound mail writer, or 403 with a hint if no
 /// write credential is configured.
 ///
-/// THE WRITER IS THE ACCOUNT'S PROVIDER'S (`accounts.provider`, read per call
-/// like everything else the door knows about the account). The credential is
+/// THE WRITER IS THE ACCOUNT'S PROVIDER'S (`accounts.provider`, read on the
+/// first call and kept in [`ApiState::mail_provider`]). The credential is
 /// checked first, so a door with none configured answers exactly as it
 /// always has without touching the store. A provider this build does not know
 /// is refused, never written to as Gmail: see [`writer_unavailable`].
@@ -4741,7 +4741,7 @@ pub(crate) async fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>
     let Some(creds) = state.write_creds().cloned() else {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            "write credential not configured; run `squelchd auth --write`",
+            "write credential not configured; run `squelchd auth`",
         ));
     };
     let provider = match state.mail_provider.get() {
@@ -4816,7 +4816,7 @@ fn write_error(e: &WriteError) -> ApiError {
     match e {
         WriteError::MissingCredential(_) => ApiError::new(
             StatusCode::FORBIDDEN,
-            "write credential not configured; run `squelchd auth --write`",
+            "write credential not configured; run `squelchd auth`",
         ),
         WriteError::Invalid(m) => ApiError::bad_request(m.clone()),
         // Nothing reached Gmail: the mailbox is in a quota hold. 503 so the
@@ -6339,7 +6339,7 @@ pub(crate) async fn read_forward_original(
         // A DEAD WRITE CREDENTIAL IS NOT A GMAIL OUTAGE. The fetch runs on the
         // write token too, so an expired or revoked one fails HERE, before any
         // send — and collapsing it into the 502 tells the composer to blame
-        // Gmail when the fix is `squelchd auth --write`. Answer it with the same
+        // Gmail when the fix is `squelchd auth`. Answer it with the same
         // 403 every other write path answers it with, so the client's existing
         // "no write credential" handling fires.
         Err(e @ WriteError::MissingCredential(_)) => {
@@ -7630,6 +7630,6 @@ mod write_client_tests {
             Err(e) => e,
         };
         assert_eq!(err.status, StatusCode::FORBIDDEN);
-        assert!(err.message.contains("squelchd auth --write"));
+        assert!(err.message.contains("squelchd auth`"));
     }
 }

@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn a_gmail_event_one_ghost_matches_is_adopted_with_the_clean_place() {
         let g = ghost(7, "Dinner at Dingles", START);
-        let steps = plan_of(&[g.clone()], &[dingles()], &[]);
+        let steps = plan_of(std::slice::from_ref(&g), &[dingles()], &[]);
         let [
             Step::Adopt {
                 ghost_id,
@@ -641,7 +641,7 @@ mod tests {
         );
         for e in [invite, shared, elsewhere, past, mine] {
             assert!(
-                plan_of(&[g.clone(), g_past.clone()], &[e.clone()], &[]).is_empty(),
+                plan_of(&[g.clone(), g_past.clone()], std::slice::from_ref(&e), &[]).is_empty(),
                 "{e:?}"
             );
         }
@@ -690,12 +690,23 @@ mod tests {
         // Nothing new in the mail: nothing to do, even if the user moved it.
         let mut moved_by_user = mine.clone();
         moved_by_user.row.start = at("2026-10-30T21:00:00-04:00");
-        assert!(plan_of(&[g.clone()], &[moved_by_user], &[o.clone()]).is_empty());
+        assert!(
+            plan_of(
+                std::slice::from_ref(&g),
+                &[moved_by_user],
+                std::slice::from_ref(&o)
+            )
+            .is_empty()
+        );
 
         // The mail moves it an hour later: the start moves, the length kept.
         let mut later = g.clone();
         later.start = at("2026-10-30T21:15:00-04:00");
-        let steps = plan_of(&[later.clone()], &[mine.clone()], &[o.clone()]);
+        let steps = plan_of(
+            std::slice::from_ref(&later),
+            std::slice::from_ref(&mine),
+            std::slice::from_ref(&o),
+        );
         let [
             Step::Update {
                 patch: Some(patch),
@@ -720,7 +731,11 @@ mod tests {
         // Cancelled by mail: marked, shown free; restored: unmarked.
         let mut off = g.clone();
         off.mail_state = GhostMailState::Cancelled;
-        let steps = plan_of(&[off.clone()], &[mine.clone()], &[o.clone()]);
+        let steps = plan_of(
+            std::slice::from_ref(&off),
+            std::slice::from_ref(&mine),
+            std::slice::from_ref(&o),
+        );
         let [
             Step::Update {
                 patch: Some(patch), ..
@@ -736,7 +751,11 @@ mod tests {
         assert_eq!(patch["transparency"], "transparent");
         let mut marked = mine.clone();
         marked.row.summary = Some("Canceled: Reservation at Dingles Public House".into());
-        let steps = plan_of(&[g.clone()], &[marked], &[bound(&off, OwnState::Owned)]);
+        let steps = plan_of(
+            std::slice::from_ref(&g),
+            &[marked],
+            &[bound(&off, OwnState::Owned)],
+        );
         let [
             Step::Update {
                 patch: Some(patch), ..
@@ -754,7 +773,11 @@ mod tests {
         let g = ghost(7, "Dinner at Dingles", START);
         let o = bound(&g, OwnState::Owned);
         let mine = passbands(&g, START, END);
-        let steps = plan_of(&[g.clone()], &[mine.clone(), dingles()], &[o.clone()]);
+        let steps = plan_of(
+            std::slice::from_ref(&g),
+            &[mine.clone(), dingles()],
+            std::slice::from_ref(&o),
+        );
         assert_eq!(
             steps,
             vec![Step::DropDuplicate {
@@ -764,14 +787,20 @@ mod tests {
             }]
         );
         // The user deleted Passband's event: let go, and Gmail's copy stays.
-        let steps = plan_of(&[g.clone()], &[dingles()], &[o.clone()]);
+        let steps = plan_of(
+            std::slice::from_ref(&g),
+            &[dingles()],
+            std::slice::from_ref(&o),
+        );
         assert_eq!(steps, vec![Step::Release { ghost_id: 7 }]);
         for state in [OwnState::Released, OwnState::Refused] {
-            assert!(plan_of(&[g.clone()], &[dingles()], &[bound(&g, state)]).is_empty());
+            assert!(
+                plan_of(std::slice::from_ref(&g), &[dingles()], &[bound(&g, state)]).is_empty()
+            );
         }
         // The ghost is gone: forget the binding, leave the event.
         assert_eq!(
-            plan_of(&[], &[mine], &[o.clone()]),
+            plan_of(&[], &[mine], std::slice::from_ref(&o)),
             vec![Step::Forget { ghost_id: 7 }]
         );
     }
@@ -780,7 +809,7 @@ mod tests {
     fn mail_that_failed_authentication_neither_adopts_nor_moves_anything() {
         let mut g = ghost(7, "Dinner at Dingles", START);
         g.owner_scope = None;
-        assert!(plan_of(&[g.clone()], &[dingles()], &[]).is_empty());
+        assert!(plan_of(std::slice::from_ref(&g), &[dingles()], &[]).is_empty());
         let o = bound(&g, OwnState::Owned);
         let mut later = g.clone();
         later.start = at("2026-10-30T21:15:00-04:00");

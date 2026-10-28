@@ -635,6 +635,32 @@ pub struct SqliteStore {
     /// lagged or missed broadcast costs only latency, which is why send errors
     /// are ignored.
     event_tx: RwLock<Option<tokio::sync::broadcast::Sender<i64>>>,
+    /// The inventory half of the last `stats()`, and the [`WriteToken`] it was
+    /// read at, so a poll that finds nothing written since reuses it
+    /// (`attention::InventoryMemo`).
+    inventory_memo: Mutex<Option<attention::InventoryMemo>>,
+}
+
+/// Whether anything has been written to the file since a read: this
+/// connection's count of rows inserted, updated or deleted
+/// (`sqlite3_total_changes`, every statement including triggers and those
+/// rolled back) and `PRAGMA data_version`, which moves when ANOTHER
+/// connection commits (`squelchd token`, `pair`, a standalone `squelch-mcp`).
+/// Equal tokens mean the same data. Unequal ones may not (a rolled-back
+/// write, an update to the same value), which only costs a recompute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WriteToken {
+    changes: u64,
+    data_version: i64,
+}
+
+impl WriteToken {
+    pub(super) fn of(conn: &Connection) -> Result<Self> {
+        Ok(Self {
+            changes: conn.total_changes(),
+            data_version: conn.query_row("PRAGMA data_version", [], |r| r.get(0))?,
+        })
+    }
 }
 
 impl SqliteStore {
@@ -743,6 +769,7 @@ impl SqliteStore {
             conn: Mutex::new(conn),
             embedder: RwLock::new(None),
             event_tx: RwLock::new(None),
+            inventory_memo: Mutex::new(None),
         })
     }
 

@@ -124,7 +124,7 @@ struct MobileAuthView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            LazyVStack(alignment: .leading, spacing: 16) {
                 masthead
                 decisionsPane
                 codes
@@ -182,16 +182,11 @@ struct MobileAuthView: View {
     private var decisionsPane: some View {
         let open = openDecisions
         if !open.isEmpty {
+            let cards = AuthPolicy.cards(open)
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Needs a decision")
-                        .font(Typo.zoneTitle)
-                        .foregroundStyle(Palette.ink)
-                    Spacer()
-                    Text("\(AuthPolicy.cards(open).count) open")
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                }
+                AuthDecisionHeader(
+                    open: open, cardCount: cards.count,
+                    showsClearAll: AuthPolicy.showsClearAll(cards))
                 AuthDecisionStack(
                     open: open, limit: 12, expanded: $expandedBursts,
                     onNotMine: { m in revealing = m })
@@ -207,7 +202,9 @@ struct MobileAuthView: View {
     /// other cards sit beside it, and this screen has no beside. The nav title
     /// and the masthead say it once.
     private var codes: some View {
-        VStack(spacing: 2) {
+        // Lazy: this is EVERY sealed message, and only the rows on screen
+        // need building.
+        LazyVStack(spacing: 2) {
             if rows.isEmpty {
                 // Stated, not omitted — the same reason the zone gave: a surface
                 // that renders nothing reads as broken rather than as "nothing

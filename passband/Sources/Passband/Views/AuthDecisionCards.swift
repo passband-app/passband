@@ -5,6 +5,51 @@
 
 import SwiftUI
 
+/// "Needs a decision", its count, and past `AuthPolicy.clearAllAbove` cards a
+/// "Clear all" that answers every non-critical question "That was me" after
+/// one confirmation. `cardCount` is the COLLAPSED count, the one the rail badge
+/// shows, handed in so the caller computes the cards once.
+struct AuthDecisionHeader: View {
+    let open: [SealedMeta]
+    let cardCount: Int
+    let showsClearAll: Bool
+
+    @State private var confirming = false
+
+    var body: some View {
+        let clearable = AuthPolicy.clearable(open)
+        HStack(spacing: Space.s8) {
+            Text("Needs a decision")
+                .font(Typo.zoneTitle)
+                .foregroundStyle(Palette.ink)
+            Spacer()
+            Text("\(cardCount) open")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaintest)
+            if showsClearAll && !clearable.isEmpty {
+                Button("Clear all") { confirming = true }
+                    .buttonStyle(.glass)
+                    .foregroundStyle(Palette.inkDim)
+                    .font(Typo.micro)
+                    .decisionControlSize()
+            }
+        }
+        .confirmationDialog(
+            clearable.count == 1
+                ? "Clear 1 question from Needs a decision?"
+                : "Clear \(clearable.count) questions from Needs a decision?",
+            isPresented: $confirming, titleVisibility: .visible
+        ) {
+            Button("Clear \(clearable.count)") {
+                AuthDecisions.shared.setAll(clearable, .mine)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(AuthPolicy.clearAllLine(cleared: clearable.count, kept: open.count - clearable.count))
+        }
+    }
+}
+
 /// Open questions as cards: critical first, bursts collapsed unless the owner
 /// asked to review them one by one. Writes verdicts through `AuthDecisions`;
 /// "Not me" also hands the message to `onNotMine`, which opens the reveal.

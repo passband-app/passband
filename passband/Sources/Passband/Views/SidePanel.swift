@@ -144,7 +144,7 @@ struct SearchView: View {
         let expanded = store.search.expanded
 
         VStack(alignment: .leading, spacing: 0) {
-            Field(label: "") {
+            Field(label: "", capsule: true) {
                 HStack(spacing: Space.s8) {
                     TextField("search mail…", text: $store.search.query)
                         .textFieldStyle(.plain)
@@ -920,6 +920,19 @@ private struct HitRow: View {
             HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
                 Avatar(sender: hit.from_name.map { "\($0) <\(hit.from_addr)>" } ?? hit.from_addr,
                        size: 26)
+                    // THE NOT-DONE BAR rides on the avatar, so it is the
+                    // avatar's height on the avatar's centre wherever the
+                    // avatar sits (the name line). Drawn from the row it was
+                    // centred on the two-line row and hung a few points low.
+                    // It reaches back out to s4 from the row's leading edge.
+                    .overlay(alignment: .leading) {
+                        if hit.is_done == false {
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(Palette.accentInk)
+                                .frame(width: 2)
+                                .offset(x: Space.s4 - PanelRow.hitPadding)
+                        }
+                    }
                     .alignmentGuide(.firstTextBaseline) { d in
                         d[VerticalAlignment.center] + nameLine
                     }
@@ -929,15 +942,6 @@ private struct HitRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .overlay(alignment: .bottom) { if ruled { HitRule() } }
-        .overlay(alignment: .leading) {
-            if hit.is_done == false {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Palette.accentInk)
-                    .frame(width: 2)
-                    .padding(.vertical, Space.s14)
-                    .padding(.leading, Space.s4)
-            }
-        }
         .accessibilityElement(children: .combine)
         .accessibilityValue(hit.is_done.map { $0 ? "Done" : "Not done" } ?? "")
         .accessibilityAddTraits(selected ? .isSelected : [])

@@ -1624,12 +1624,14 @@ private struct RigSlot<Field: View>: View {
 /// unreadable.
 struct Field<Content: View>: View {
     let label: String
+    /// A search field: capsule, not well (see `fieldWell`).
+    var capsule = false
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.scaled(5)) {
             FieldLabel(label)
-            content.fieldWell()
+            content.fieldWell(capsule: capsule)
         }
     }
 }
@@ -1649,20 +1651,26 @@ struct FieldLabel: View {
 }
 
 extension View {
-    func fieldWell() -> some View {
+    /// `capsule` is for SEARCH fields, which take the capsule the segmented
+    /// controls and filter pills beside them wear (see `Radius`). A field that
+    /// holds a value (a name, an address, a key) keeps the well's corner.
+    @ViewBuilder
+    func fieldWell(capsule: Bool = false) -> some View {
+        if capsule {
+            wellChrome(Capsule(style: .continuous), inset: Space.s12)
+        } else {
+            wellChrome(RoundedRectangle(cornerRadius: Radius.well, style: .continuous), inset: Space.s10)
+        }
+    }
+
+    private func wellChrome<S: InsettableShape>(_ shape: S, inset: CGFloat) -> some View {
         self
             .font(Typo.ui(13))
             .foregroundStyle(Palette.ink)
-            .padding(.horizontal, Space.s10)
+            .padding(.horizontal, inset)
             .padding(.vertical, Space.s8)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
-                    .fill(Palette.canvas.opacity(0.9))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
-                    .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75)
-            )
+            .background(shape.fill(Palette.canvas.opacity(0.9)))
+            .overlay(shape.strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
     }
 }
 

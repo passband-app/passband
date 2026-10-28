@@ -79,6 +79,9 @@ enum Space {
 /// job round the same way on every page.
 ///
 /// Constants on purpose: radii describe the ink, and do not follow density.
+/// Not a number: SEARCH FIELDS, segmented controls, filter pills and chips
+/// that hold one word are CAPSULES, the platform's control shape. A field that
+/// holds a value (a name, an address) is a `well`.
 enum Radius {
     /// A glass pane: zone cards, section cards, the reader's chrome cards.
     static let pane: CGFloat = 18

@@ -364,12 +364,13 @@ struct SettingsView: View {
         }
         .padding(.horizontal, DeskRow.hPadding)
         .padding(.vertical, Space.s6)
+        // A search field, so a capsule like the mail search (`fieldWell`).
         .background(
-            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+            Capsule(style: .continuous)
                 .fill(Palette.canvas.opacity(0.65))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+            Capsule(style: .continuous)
                 .strokeBorder(
                     searchFocused ? Palette.accent.opacity(0.55) : Palette.hairlineStrong,
                     lineWidth: 0.75)

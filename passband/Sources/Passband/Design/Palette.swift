@@ -122,18 +122,9 @@ enum Palette {
     // MARK: - avatar palette
 
     /// Ten theme-aware pairs, picked deterministically by sender address.
-    static let avatarPalette: [(bg: Color, fg: Color)] = [
-        (Color(light: 0xD8E6F8, dark: 0x24384F), Color(light: 0x1C4E82, dark: 0xA9CBF0)),
-        (Color(light: 0xDCE9E1, dark: 0x22392E), Color(light: 0x246148, dark: 0x9AD3B6)),
-        (Color(light: 0xF3E2DC, dark: 0x442C26), Color(light: 0x8E4231, dark: 0xEBA894)),
-        (Color(light: 0xE6E1F5, dark: 0x2F2A4A), Color(light: 0x4C3E9C, dark: 0xB8ACF2)),
-        (Color(light: 0xF5EBD5, dark: 0x3E2E1B), Color(light: 0x7E5A16, dark: 0xE2C078)),
-        (Color(light: 0xDCE7EE, dark: 0x25333D), Color(light: 0x2C5568, dark: 0x9EC4D8)),
-        (Color(light: 0xEFDEE9, dark: 0x3E2839), Color(light: 0x83366A, dark: 0xE0A6CD)),
-        (Color(light: 0xE0EAD8, dark: 0x2A3726), Color(light: 0x466A2E, dark: 0xB4D69A)),
-        (Color(light: 0xE9E3DA, dark: 0x37312A), Color(light: 0x6A5540, dark: 0xD3C0A6)),
-        (Color(light: 0xDDE0F0, dark: 0x282C45), Color(light: 0x3B4490, dark: 0xAAB2EE)),
-    ]
+    static let avatarPalette: [(bg: Color, fg: Color)] = avatarHex.map {
+        (bg: Color(light: $0.bg.light, dark: $0.bg.dark), fg: Color(light: $0.fg.light, dark: $0.fg.dark))
+    }
 
     /// THROUGH THE CACHE, not `SenderID.slot` directly: the slot is a parse of
     /// the address plus a hash of it, and this is asked once per message on

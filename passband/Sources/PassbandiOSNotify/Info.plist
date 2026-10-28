@@ -29,6 +29,15 @@
 		<string>com.apple.usernotifications.service</string>
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).NotificationService</string>
+		<!-- Banners carry the sender as an INSendMessageIntent so iOS draws
+		     their avatar with our icon as the badge (SenderAvatar.swift). -->
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>IntentsSupported</key>
+			<array>
+				<string>INSendMessageIntent</string>
+			</array>
+		</dict>
 	</dict>
 	<!-- The same exemption the app carries, and for the same reason: a daemon
 	     on http://127.0.0.1:8848 is what development talks to. A phone reaching

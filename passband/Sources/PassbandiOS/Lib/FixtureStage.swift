@@ -162,6 +162,14 @@
                 }
             case "search-lane":
                 store.search.query = "thursday?"
+            // The Events block: wants `--fixture-calendar --fixture-tab
+            // search`. `calendar-search` is "dinner" (two plans, one of them
+            // a ghost, beside the mail); `calendar-search-only` is the
+            // events-only listing.
+            case "calendar-search":
+                store.search.query = "dinner"
+            case "calendar-search-only":
+                store.search.query = "in:calendar sam"
             case "accounts":
                 AccountDoor.shared.pane = .picker
             // THE SENT PAGE, which the practice mailbox leaves empty: nothing

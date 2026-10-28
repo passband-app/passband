@@ -93,9 +93,9 @@ struct MobileRecordsView: View {
     }
 }
 
-/// The four record cards, in the Mac rail's order. Their own tab while the
-/// calendar is hidden; under the sitrep's board once the calendar takes this
-/// slot in the tab bar (MobileSitrepView), because a calendar is a place you
+/// The four record cards, in the Mac rail's order. Their own tab only on a
+/// daemon too old to serve the calendar's timeline; under the sitrep's board
+/// wherever the calendar takes this slot in the tab bar (MobileSitrepView), because a calendar is a place you
 /// live in and records are a place you look one fact up.
 ///
 /// TWO COLUMNS WHEN THERE IS ROOM (a phone on its side): one card at 700

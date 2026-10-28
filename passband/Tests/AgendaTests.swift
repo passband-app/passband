@@ -538,19 +538,19 @@ struct AgendaTests {
     // MARK: gate
 
     static func theGate() {
-        // The truth table: the daemon's timeline against the `calendar` flag.
-        expect(CalendarGate.pageAvailable(timeline: true, feature: true), "both: shown")
-        expect(!CalendarGate.pageAvailable(timeline: true, feature: false), "no flag: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: false, feature: true), "said no: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: false, feature: false), "neither: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: nil, feature: true), "older daemon: hidden")
-        expect(!CalendarGate.pageAvailable(timeline: nil, feature: false), "older daemon, no flag: hidden")
+        // The truth table: the daemon's timeline, and nothing else. The
+        // `calendar` flag is retired; every mailbox on a daemon that serves
+        // the timeline has the page.
+        expect(CalendarGate.pageAvailable(timeline: true), "a timeline: shown")
+        expect(!CalendarGate.pageAvailable(timeline: false),
+               "said no (a daemon from before the launch, flag off): hidden")
+        expect(!CalendarGate.pageAvailable(timeline: nil), "older daemon: hidden")
 
         // The gate closing takes the user off the calendar, and only off it.
         expect(CalendarGate.leavesPage(available: false, active: "calendar", calendar: "calendar"),
-               "the flag goes off on the page: leave it")
+               "the gate closes on the page: leave it")
         expect(!CalendarGate.leavesPage(available: false, active: "emails", calendar: "calendar"),
-               "the flag goes off elsewhere: stay")
+               "the gate closes elsewhere: stay")
         expect(!CalendarGate.leavesPage(available: true, active: "calendar", calendar: "calendar"),
                "still on: stay")
 
@@ -620,13 +620,13 @@ struct AgendaTests {
         expect(!hidden.contains("calendar"), "and no digit opens a page that is not there")
         expect(CalendarGate.numbered([String](), calendar: "calendar", offered: true).isEmpty,
                "an empty rail stays empty")
-        // The flag drives the count through the one gate.
-        let flagOff = CalendarGate.pageAvailable(timeline: true, feature: false)
-        expect(CalendarGate.numbered(pages, calendar: "calendar", offered: flagOff) == pages,
-               "the flag off: the old numbers")
-        let flagOn = CalendarGate.pageAvailable(timeline: true, feature: true)
-        expect(CalendarGate.numbered(pages, calendar: "calendar", offered: flagOn) == offered,
-               "the flag on: calendar is 2")
+        // The timeline drives the count through the one gate.
+        let older = CalendarGate.pageAvailable(timeline: nil)
+        expect(CalendarGate.numbered(pages, calendar: "calendar", offered: older) == pages,
+               "an older daemon: the old numbers")
+        let served = CalendarGate.pageAvailable(timeline: true)
+        expect(CalendarGate.numbered(pages, calendar: "calendar", offered: served) == offered,
+               "a timeline: calendar is 2")
     }
 
     static func theGateIsTheActiveAccounts() {

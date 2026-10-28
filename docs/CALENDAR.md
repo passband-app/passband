@@ -512,8 +512,8 @@ is still needed (a refund pending, a later leg's tickets, a question to
 answer) is a judgment, and hand-written rules for it were never as accurate
 as asking. Code does two things around the model: it schedules the question
 from the model's own dates, and it enforces a few rails on the answer. It is
-NOT behind the `calendar` flag: it runs for every mailbox, like ghost
-projection does.
+NOT behind the (now retired) `calendar` flag: it runs for every mailbox,
+like ghost projection does.
 
 - **The question.** A triage job whose trigger starts with `revisit:` is a
   scheduled re-check. On one, and only on one, the agent may answer `done`
@@ -632,7 +632,7 @@ founder says otherwise:
 - Accounts are two muted fills. Blue is reserved for state: now, next, holds
   and suggested slots.
 
-**Built so far** (Mac client, behind the `calendar` hidden feature, §11): a Calendar destination
+**Built so far** (Mac client; for every mailbox since the `calendar` flag was retired, §11): a Calendar destination
 second in the rail. The page opens on a conventional month (Month | Agenda in
 the header, `m` and `a`): each cell lists its day top-down as chips in the
 calendar's colour, trips and stays as named bars across the cells they cover,
@@ -1010,8 +1010,7 @@ Rules:
   confidence. It is served on the person record behind the contact card
   (`GET /client/person`), where the user can see it and correct it
   (`PUT /client/person/timezone`; clearing the correction hands it back to
-  inference), both only while the `calendar` flag is on (§11); inference
-  runs either way. The Date offset is written by the message upsert itself,
+  inference), for every mailbox (§11). The Date offset is written by the message upsert itself,
   in the same INSERT as the row, so ingest writes each message once. It
   learns forward from the day it ships: the raw mail is not
   kept, so filling in existing correspondents would take a Gmail request per
@@ -1101,13 +1100,10 @@ from the plan below:
   control plane passes it to Google as `login_hint` and, at the callback,
   installs nothing when a different account consented. The hint is a guard,
   never an authority: the tenant is still found from the account Google names.
-- **New signups** are asked for calendar at signup (decided 2026-10-27), even
-  while the `calendar` hidden feature is off for them. It is optional, like
-  the profile scope: a person who unticks it still gets a mailbox. A daemon
-  without the feature holds the scope and calls nothing; when the feature
-  turns on, calendar works with no second consent. The callback's feature
-  gate applies to the calendar reconnect only, never to signup. Tenants from
-  before this still grant through the calendar page.
+- **New signups** are asked for calendar at signup (decided 2026-10-27). It
+  is optional, like the profile scope: a person who unticks it still gets a
+  mailbox, and the calendar page offers the grant on its first visit. Tenants
+  from before this grant through the calendar page.
 - **Self-host** connects from the app (`POST /client/calendar/connect`, the
   daemon running the consent on loopback) or from a terminal with
   `squelchd auth --calendar`. Both BUILT, and both build the same consent.
@@ -1741,67 +1737,67 @@ nothing:
   from before the tool existed, and a call to its name is answered as any
   invented tool is.
 
-## 11. Feature flag
+## 11. Feature flag (RETIRED: calendar is for everyone)
 
-The calendar is the hidden feature `calendar` (`squelch_core::features::CALENDAR`,
-in `KNOWN`, so it is a column on `/admin/features`). How hidden features travel
-is `docs/FEATURES.md`. For this one:
+The calendar was the hidden feature `calendar` from its first merge (#360)
+until October 2026, when it launched for every tenant and every app ("everyone
+should get it", the founder, 2026-10-28). The key is RETIRED and listed in
+`squelch_core::features::RETIRED`; it is never to be reused (docs/FEATURES.md,
+"Launching"). With no users yet there was no staged rollout: the flag and
+every check on it were deleted in one change.
 
-- **Turning it on.** Hosted: tick the box for a tenant, or "Everyone", on
-  `/admin/features`; the daemon hears within five minutes and the app on its
-  next stats poll, with no restart and no release. Development and self-host:
-  start squelchd with `SQUELCH_FEATURES=calendar`.
-- **Off is as if the feature did not exist, on the daemon.** Every route
-  behind the page (`GET /client/timeline`, `PATCH /client/timeline/ghosts/{id}`,
-  `POST /client/timeline/refresh`, `POST /client/calendar/connect`,
-  `POST /client/calendar/events`, `PATCH` and `DELETE
+What that means now:
+
+- **The daemon.** Every route behind the page (`GET /client/timeline`, `PATCH
+  /client/timeline/ghosts/{id}`, `POST /client/timeline/refresh`, `POST
+  /client/calendar/connect`, `GET /client/calendar/people`, `POST
+  /client/calendar/events`, `PATCH` and `DELETE
   /client/calendar/events/{calendar_id}/{id}`, `PUT /client/person/timezone`)
-  answers the opaque 404
-  (`{"error": "not found"}`) from a route layer (`calendar_routes` in
-  `squelch-api/src/lib.rs`), after bearer auth and before the handler reads a
-  body or calls Google. A refused write writes no audit row: a path that is
-  not served is not an attempt at an action. `/client/stats` says `timeline:
-  false` and carries no `calendar` object. The sync loop asks the flag at the
-  top of every pass and, off, reads no credential and calls Google for
-  nothing; the first pass after it turns on syncs. It asks again before each
-  calendar of a pass, so a flag turned off mid-pass stops at the next
-  calendar (a page already in flight finishes). Each answer is asked at the
-  moment of the decision, so a flip takes effect on the next request, pass
-  or calendar.
-- **Off deletes nothing.** Calendars, events and guest lists already synced
-  stay in the store (other people's addresses among them), served by no
-  route while the flag is off, and brought up to date by the first pass once
-  it is on again. Purging them on off was considered and not done: a flag
-  flipped by mistake would cost a full resync of every calendar.
-- **What keeps running when it is off,** on purpose: ghost projection in the
-  triage commit, and correspondent timezone inference at ingest. Both are
-  cheap and never leave the daemon, and keeping them means a mailbox switched
-  on sees its recent history at once instead of starting empty. What they
-  produce is NOT served while it is off: `GET /client/person` carries no
-  `timezone` key (as on main), and `PUT /client/person/timezone` is one of
-  the gated routes (404).
-- **The hosted calendar consent** (`/reconnect?calendar=1`) is refused for a
-  tenant without the feature (its own row or the Everyone default), with
-  "Calendar isn't available for this mailbox yet." It is refused at the
-  CALLBACK, after Google, not at the start: the start names no tenant by
-  design (the `hint` is a guard that is never used to look anything up), so
-  refusing there would make the link an oracle for which mailboxes have
-  calendar. Nothing is installed or queued. The plain reconnect is untouched.
+  is served to every mailbox, after bearer auth like every human-door route
+  (`calendar_routes` in `squelch-api/src/lib.rs`). `/client/stats` always says
+  `timeline: true` and always carries the `calendar` object (granted or not,
+  and how to connect). `GET /client/person` serves the inferred `timezone`.
+  The sync loop needs no flag: it idles until calendar is GRANTED and then
+  syncs. Ghost projection and timezone inference ran regardless of the flag
+  all along, so every mailbox has its history from the day those shipped.
+- **The hosted calendar consent** (`/reconnect?calendar=1`) installs for any
+  tenant. It used to be refused at the callback for a tenant without the
+  feature ("Calendar isn't available for this mailbox yet"); that refusal is
+  gone, and the callback no longer reads `tenant_features` at all. The
+  unticked-calendar, Gmail-floor and hint guards are unchanged. Signup has
+  asked for calendar since 2026-10-27.
 - **The apps.** `CalendarGate.pageAvailable` (in
-  `passband/Sources/Passband/Lib/Agenda.swift`) is the daemon's `timeline` AND
-  `store.hasFeature(.calendar)`. Developer mode no longer has anything to do
-  with it. The rail tile, `⇧C`, number key 2 and the shift of the later pages,
-  the Go menu and the shortcuts sheet all follow it. The rail and the Go menu
-  read a stored "page available" value that the stats poller writes only
-  when it changes, so they do not rebuild on every poll. The product guide
-  behind ⌘K help (`Lib/ProductGuide.swift`), its topic index and the
-  assistant's `product_help` schema mention the calendar (its topic, its
-  getting-around line, its shortcut group) only while the page is available;
-  with it off their text equals main's. If the flag turns off while the page
-  is open, the app goes to the Sitrep, closes the event pane (an unsaved
-  draft is discarded, as on an account switch; leaving the page by
-  navigation instead parks it, §5) and drops the calendar state. A write
-  whose answer lands after the gate closed is dropped, with no analytics.
+  `passband/Sources/Passband/Lib/Agenda.swift`) is the daemon's `timeline` and
+  nothing else. It still matters for an OLDER DAEMON: one from before the
+  timeline, or one from before the launch whose mailbox never had the flag,
+  says no timeline, and that app gets no Calendar page (the Mac's rail tile,
+  `⇧C`, number key 2, the Go menu, the shortcuts sheet and the product guide
+  all follow it) and the iPhone keeps Quick Look in the bar's second slot. If
+  the gate closes while the page is open (an account switch onto such a
+  daemon), the app goes to the Sitrep, closes the event pane and drops the
+  calendar state, as before.
+- **Asking for Google Calendar.** Both apps raise the connect card on the
+  calendar's FIRST VISIT for an account that has not granted it, once per
+  account (`raiseCalendarCardIfOwed`, `calendarOffer == .card`), and offer it
+  after that from a banner (Mac) or an inline card at the top of the list
+  (iPhone). The card is `Views/CalendarConnectCard.swift`, the same view on
+  both: the Mac's action layer mounts it, and the iPhone's `MobileShell`
+  mounts it over the Calendar tab only. Practice mode and a granted calendar
+  are never offered it.
+- **Leftover rows.** `tenant_features` rows (and an "Everyone" default) for
+  `calendar` may still exist. They are harmless: nothing asks for the key. They
+  are still served on `GET /tenant/features` and listed in `/client/stats`
+  `features`, which the apps ignore. Saving `/admin/features` does not touch
+  them, since `calendar` is no longer a column there.
+- **Rollout: both halves, or the flag.** The control-plane half deploys
+  itself from `main`. The daemon half needs a daemon release and a fleet roll;
+  until then a hosted tenant's daemon still gates on the flag and says
+  `timeline: false` without it. The app half needs a Mac and an iOS release;
+  an app from before it still asks for `calendar` in `/client/stats`
+  `features` as well as the timeline. So a mailbox sees the page once its
+  daemon AND its app are both new, or, in the meantime, wherever a
+  `calendar` row is still served (the leftover rows above keep an old app or
+  an old daemon working, which is the one thing they are good for).
 
 ## 12. Build order
 

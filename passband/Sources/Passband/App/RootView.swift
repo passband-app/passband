@@ -281,8 +281,7 @@ private struct ShellWatchers: View {
             .onChange(of: store.calendarGranted) { _, granted in
                 if granted { store.calendarGrantArrived() }
             }
-            // The gate closing (the `calendar` hidden feature turned off, an
-            // older daemon) takes an open calendar page with it, rather than
+            // The gate closing (an older daemon that serves no timeline) takes an open calendar page with it, rather than
             // leaving a page up that the rail no longer has a door to, and
             // drops the event pane and everything the page held.
             .onChange(of: store.calendarPageAvailable) { _, available in

@@ -21,20 +21,21 @@ import Foundation
 
 /// Whether the Calendar destination exists, and how to connect a calendar.
 enum CalendarGate {
-    /// THE ONE PLACE THE CALENDAR PAGE IS SWITCHED ON. The daemon must serve
-    /// the timeline (`timeline == true` on /client/stats), and the `calendar`
-    /// hidden feature must be on for this mailbox (`feature`, which is
-    /// `store.hasFeature(.calendar)`; docs/FEATURES.md, docs/CALENDAR.md
-    /// section 11). A daemon with the flag off already says `timeline: false`;
-    /// the app asks both anyway, so a daemon older than the flag cannot show
-    /// the page to somebody who was not let in. The rail, the Go menu, the
-    /// number keys, ⇧C, the shortcuts sheet and the route all read it through
+    /// THE ONE PLACE THE CALENDAR PAGE IS SWITCHED ON: the daemon serves the
+    /// timeline (`timeline == true` on /client/stats). Every mailbox has the
+    /// calendar now; the `calendar` hidden feature that once gated it is
+    /// retired (docs/FEATURES.md, docs/CALENDAR.md section 11). What this
+    /// still guards is an OLDER DAEMON: one from before the timeline, or one
+    /// from before the launch whose mailbox never had the flag, says no
+    /// timeline, and gets no page. The rail, the Go menu, the number keys,
+    /// ⇧C, the shortcuts sheet and the route all read it through
     /// `AppStore.calendarPageAvailable`, so it hides everywhere at once.
-    static func pageAvailable(timeline: Bool?, feature: Bool) -> Bool {
-        timeline == true && feature
+    static func pageAvailable(timeline: Bool?) -> Bool {
+        timeline == true
     }
 
-    /// Whether the gate closing (the flag turned off, an older daemon) must
+    /// Whether the gate closing (an older daemon, after a switch of account
+    /// or a downgrade) must
     /// take the user off the page they are on: only when that page is the
     /// calendar. Generic for the reason `numbered` is.
     static func leavesPage<Page: Equatable>(available: Bool, active: Page, calendar: Page) -> Bool {

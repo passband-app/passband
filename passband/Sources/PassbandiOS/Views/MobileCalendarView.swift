@@ -1,7 +1,14 @@
-// THE CALENDAR TAB. Behind the hidden `calendar` feature, it takes the bar's
-// second slot (Quick Look's records move under the sitrep's board, see
-// MobileSitrepView) because a calendar is somewhere you live and records are
-// somewhere you look one fact up.
+// THE CALENDAR TAB. On for every mailbox whose daemon serves a timeline, it
+// takes the bar's second slot (Quick Look's records move under the sitrep's
+// board, see MobileSitrepView) because a calendar is somewhere you live and
+// records are somewhere you look one fact up.
+//
+// NOT CONNECTED, IT ASKS. The first visit for an account that has not granted
+// Google Calendar raises the Mac's own connect card over the tab (mounted by
+// MobileShell, raised there on `calendarOffer == .card`), once per account;
+// after that the inline card at the top of the list offers it, and its
+// Connect raises the same card. Until then the tab shows the plans found in
+// mail.
 //
 // THE SHAPE IS A PHONE'S, NOT A SMALLER MAC. The Mac opens on a month of
 // top-down cells, which needs about 78 points a column; a phone has about 50,
@@ -192,6 +199,14 @@ struct MobileCalendarView: View {
                     }
                     try? await Task.sleep(for: .seconds(1.5))
                     fixtureDetail = FixtureStage.calendarDetail
+                    // The connect card, staged straight onto the store: the
+                    // practice inbox never offers it (`calendarOffer` is
+                    // `.none` in practice), and a screenshot needs the ask.
+                    if FixtureStage.scene == "calendar-connect" {
+                        store.calendarConnectAsk = CalendarConnectAsk(
+                            route: .link("https://example.invalid/reconnect?calendar=1"),
+                            email: "you@example.com", epoch: store.epoch)
+                    }
                     // The sheet, staged straight onto the store: the
                     // practice inbox never offers "+" (nothing can be saved).
                     if FixtureStage.scene == "calendar-new" {
@@ -800,9 +815,10 @@ private struct MobileCalendarStatus: View {
                     card(
                         "Waiting for Google to finish connecting your calendar.",
                         button: "Show again", renewing: wait.renewing, dots: true)
-                } else if store.calendarOffer != .none {
-                    // The Mac's first-visit card is a modal of its own; a
-                    // phone says the same thing in the list, once per visit.
+                } else if store.calendarOffer != .none, !store.calendarCardUp {
+                    // The first-visit card (MobileShell's overlay) says all
+                    // of this itself while it is up; after it, the list says
+                    // it here on every visit, and Connect raises the card.
                     card(
                         "Showing plans found in your mail. Connect Google Calendar to add your events.",
                         button: "Connect", renewing: false, dots: false)

@@ -8,8 +8,9 @@
 // one: a rail is a directory you read, and a tab bar is three or four places you
 // LIVE in. So the rail's seven destinations land here as three tabs — sitrep,
 // quick look, mail — plus the search role parked at the trailing end.
-// Behind the hidden `calendar` feature the middle tab is the calendar instead,
-// and Quick Look's records move under the sitrep (see `MobileTab`).
+// When the daemon serves a timeline (every current one does) the middle tab is
+// the calendar instead, and Quick Look's records move under the sitrep (see
+// `MobileTab`).
 //
 // WHAT CAME OFF THE BAR, and where it went. Settings and the login codes are not
 // places anyone lives; they are reference surfaces you visit and leave, so they
@@ -58,8 +59,8 @@ import SwiftUI
 /// material records and renaming the symbol would churn all of it to relabel one
 /// tab.
 ///
-/// AND THE CALENDAR TAKES ITS SLOT. Behind the hidden `calendar` feature the bar
-/// reads Sitrep, Calendar, Mail: a calendar is a surface the day alternates
+/// AND THE CALENDAR TAKES ITS SLOT. Wherever the daemon serves a timeline the
+/// bar reads Sitrep, Calendar, Mail: a calendar is a surface the day alternates
 /// with, records are not, and four tabs would be the claim made once too often.
 /// So the records go back under the sitrep's board, below everything you owe,
 /// where the argument above said they would be behind a scroll, and that is
@@ -196,8 +197,9 @@ private struct MobileShell: View {
         return .sitrep
     }
 
-    /// The calendar holds the bar's second slot: the hidden feature is on for
-    /// this mailbox and the daemon serves a timeline (`CalendarGate`).
+    /// The calendar holds the bar's second slot: the daemon serves a timeline
+    /// (`CalendarGate`). Every mailbox has the calendar; only a daemon too old
+    /// to serve one keeps Quick Look here.
     ///
     /// UNTIL THE STATS LAND, THE LAST ANSWER. The gate reads false until the
     /// first poll, so a cold launch drew Quick Look and swapped it for
@@ -331,17 +333,38 @@ private struct MobileShell: View {
             default: break
             }
         }
-        // The feature turned on or off under a tab that just left the bar:
-        // the slot's new occupant, rather than a selection nothing draws.
+        // The calendar arrived or left (a daemon upgraded, or an account
+        // switch onto an older one) under a tab that just left the bar: the
+        // slot's new occupant, rather than a selection nothing draws.
         .onChange(of: calendarTab) { _, on in
             if store.hasStats, lastCalendarTab != on { lastCalendarTab = on }
             // The login codes go where the records go: up on the sitrep with
-            // the flag on, on Quick Look with it off. Whoever was looking at
-            // them follows them rather than losing the page.
+            // the calendar on the bar, on Quick Look without it. Whoever was
+            // looking at them follows them rather than losing the page.
             if on, tab == .records { tab = showAuth ? .sitrep : .calendar }
             if !on, tab == .calendar || showAuth { tab = .records }
         }
         .onChange(of: tab, initial: true) { _, _ in syncReaders() }
+        // THE CALENDAR'S FIRST VISIT ASKS FOR GOOGLE CALENDAR, as the Mac's
+        // page does: once per account that has not connected, the card. Asked
+        // only while the Calendar tab is the one on screen, so it never lands
+        // over a tab it says nothing about; `calendarOffer` is `.none` in
+        // practice, once granted, and until this account's own stats land.
+        .onChange(of: tab == .calendar && store.calendarOffer == .card, initial: true) { _, owed in
+            if owed { store.raiseCalendarCardIfOwed() }
+        }
+        // And it is the tab's: leaving the tab takes it down (seen, not
+        // refused), and a wait already started carries on in the tab's own
+        // waiting line.
+        .onChange(of: tab) { _, tab in
+            if tab != .calendar { store.closeCalendarConnectForNavigation() }
+        }
+        // THE GRANT, heard wherever the user is, as the Mac's RootView hears
+        // it: the card and the "waiting for Google" line go away and the real
+        // events load.
+        .onChange(of: store.calendarGranted) { _, granted in
+            if granted { store.calendarGrantArrived() }
+        }
         .onChange(of: door.pane) { _, _ in syncReaders() }
         // Mail opened from somewhere else (a banner) while the drawer is out:
         // the drawer is in front of the stack that mail is about to push on.
@@ -437,6 +460,14 @@ private struct MobileShell: View {
         // sitrep's disconnected banner raises it.
         .overlay {
             if let ask = store.reconnectAsk { ReconnectAccountPrompt(ask: ask) }
+        }
+        // CONNECT GOOGLE CALENDAR: the Mac's own card, over the Calendar tab
+        // only. An overlay for the reason the reconnect prompt is one: it is
+        // its own scrim, and taps off it are "Not now".
+        .overlay {
+            if tab == .calendar, store.calendarCardUp, let ask = store.calendarConnectAsk {
+                CalendarConnectCard(ask: ask)
+            }
         }
         // `v`. A SHEET here and a top-anchored command bar there, for one reason:
         // the palette autofocuses a text field, and a phone answers that by

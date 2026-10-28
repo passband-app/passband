@@ -70,18 +70,14 @@ struct CalendarDeleteAsk: Hashable {
     let epoch: Int
 }
 
-/// The Calendar page and everything behind it, gated per mailbox from the
-/// admin site (docs/FEATURES.md).
-extension HiddenFeature { static let calendar = HiddenFeature(key: "calendar") }
-
 extension AppStore {
     // MARK: - the gate
 
     // `calendarPageAvailable`, the gate itself, is stored in AppStore and
     // written from `stats` only when it flips.
 
-    /// The gate closed under the user (the flag turned off, or an older
-    /// daemon): leave the page for the Sitrep if it is up, close the event
+    /// The gate closed under the user (an older daemon, one that serves no
+    /// timeline): leave the page for the Sitrep if it is up, close the event
     /// pane and the delete question, and drop everything the page held. An
     /// unsaved draft in the pane is DISCARDED: the page it belongs to no
     /// longer exists for this mailbox, and the daemon would refuse its save.

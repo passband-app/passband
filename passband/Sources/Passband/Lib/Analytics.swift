@@ -119,7 +119,7 @@ enum Analytics {
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
-        // The calendar page (behind the `calendar` hidden feature): opened, the
+        // The calendar page: opened, the
         // connect card's two answers, the user's word on a ghost, and the
         // three writes to a real calendar. Bools and a closed state word;
         // never a title, a place, a time, a calendar or an address. A write

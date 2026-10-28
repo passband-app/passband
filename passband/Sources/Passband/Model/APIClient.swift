@@ -460,7 +460,7 @@ actor APIClient {
 
     /// Who a first name most likely is, for the event pane's guest
     /// suggestion: at most three people the user has written to, the most
-    /// recent exchange first. Behind the calendar feature; a daemon older
+    /// recent exchange first. A daemon older
     /// than the route answers 404, and the pane then suggests nobody.
     func calendarPeople(named name: String) async throws -> [NamedPerson] {
         let answer: NamedPeople = try await get("/client/calendar/people", query: ["name": name])

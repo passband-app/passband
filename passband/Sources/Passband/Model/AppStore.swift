@@ -661,7 +661,7 @@ final class AppStore {
     /// Each is compared first: an assignment of the same value still tells
     /// every reader to look again.
     private func noteStats() {
-        let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
+        let open = CalendarGate.pageAvailable(timeline: stats?.timeline)
         if open != calendarPageAvailable { calendarPageAvailable = open }
         let email = stats?.account_email
         if email != accountEmail { accountEmail = email }
@@ -703,8 +703,8 @@ final class AppStore {
     private(set) var hasStats = false
     /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
     /// number keys, the shortcuts sheet, the assistant's guide and the route
-    /// all read this one property; the rule itself, the daemon's timeline AND
-    /// the `calendar` hidden feature, is `CalendarGate.pageAvailable`.
+    /// all read this one property; the rule itself, whether the daemon
+    /// serves the timeline, is `CalendarGate.pageAvailable`.
     ///
     /// STORED, and written by `noteStats` only when it changes (the
     /// `statsEpoch` pattern): computed off `stats` it made the rail and the

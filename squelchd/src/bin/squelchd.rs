@@ -292,6 +292,25 @@ struct AuthArgs {
     // `requires = "export"` alone, `--import --expose-consent-listener` parses.
     #[arg(long, requires = "export", conflicts_with = "import")]
     expose_consent_listener: bool,
+
+    /// Set this account up on a plain IMAP server with an app password
+    /// instead of Google (issue #575; read only for now, so the write door
+    /// answers 501).
+    ///
+    /// Prompts for the host, port, TLS mode (implicit TLS, STARTTLS, or none
+    /// for a server on this machine only), username and app password (not
+    /// echoed), logs in and lists the folders, and only then stores
+    /// anything: the password in the credential backend like a token, the
+    /// rest with the account in the database. With no terminal, the answers
+    /// are read one per line from stdin in that order.
+    #[arg(long, conflicts_with_all = ["write", "calendar", "export", "import", "headless"])]
+    imap: bool,
+
+    /// With --imap: a PEM CA to trust on top of the public roots, for a
+    /// server whose certificate a private CA signed. Stored with the account.
+    /// Verification is never turned off.
+    #[arg(long, value_name = "PATH", requires = "imap")]
+    ca_file: Option<PathBuf>,
 }
 
 /// Ceiling on a pasted credential blob. A real one is about a kilobyte; this is
@@ -893,6 +912,11 @@ fn cmd_auth(
     args: &AuthArgs,
     sources: AuthFlagSources,
 ) -> Result<(), squelch_core::CoreError> {
+    // Before any OAuth transport is resolved: an IMAP setup has none, and an
+    // exported SQUELCH_BROKER_URL must not stand in its way.
+    if args.imap {
+        return cmd_auth_imap(config, args);
+    }
     let transport = resolve_transport(args, sources)?;
     if broker_url(args, sources).is_some() && !matches!(transport, Transport::Broker(_)) {
         eprintln!(
@@ -965,6 +989,201 @@ fn cmd_auth(
             )
         });
     }
+    Ok(())
+}
+
+/// The OAuth client a run is built with. A Gmail account needs the real one.
+/// An IMAP account never talks to Google (the engine reads its password and
+/// server instead, and the profile fetch and calendar sync are skipped for
+/// it), so without a configured client it gets an EMPTY placeholder, which
+/// could not mint or refresh a token even if something asked.
+fn oauth_client_for(
+    config: &Config,
+    provider: squelch_core::mail::MailProvider,
+) -> Result<OAuthClientConfig, squelch_core::CoreError> {
+    match (provider, config.oauth_client()) {
+        (_, Ok(client)) => Ok(client),
+        (squelch_core::mail::MailProvider::Imap, Err(_)) => Ok(OAuthClientConfig {
+            client_id: String::new(),
+            client_secret: String::new(),
+        }),
+        (_, Err(e)) => Err(e),
+    }
+}
+
+/// The test login's location table: it lists folders and records nothing.
+struct NoLocations;
+
+impl squelch_core::mail::imap::MessageLocations for NoLocations {
+    fn message_locations(
+        &self,
+        _: AccountId,
+        _: &str,
+    ) -> squelch_core::Result<Vec<squelch_core::mail::imap::MessageLocation>> {
+        Ok(Vec::new())
+    }
+    fn record_message_locations(
+        &self,
+        _: AccountId,
+        _: &[(String, squelch_core::mail::imap::MessageLocation)],
+    ) -> squelch_core::Result<()> {
+        Ok(())
+    }
+    fn forget_message_location(&self, _: AccountId, _: &str, _: &str) -> squelch_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// One answer for `squelchd auth --imap`: the prompt on stderr, a line from
+/// stdin, the default on an empty line. A closed stdin is an error, never a
+/// silent default for every remaining question.
+fn ask(label: &str, default: Option<&str>) -> Result<String, squelch_core::CoreError> {
+    use std::io::Write;
+    match default {
+        Some(d) => eprint!("{label} [{d}]: "),
+        None => eprint!("{label}: "),
+    }
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| other_err(format!("reading stdin: {e}")))?
+        == 0
+    {
+        return Err(other_err(format!(
+            "stdin closed before \"{label}\" was answered; nothing was stored"
+        )));
+    }
+    let answer = line.trim();
+    match (answer.is_empty(), default) {
+        (true, Some(d)) => Ok(d.to_string()),
+        (true, None) => Err(other_err(format!("\"{label}\" needs an answer"))),
+        (false, _) => Ok(answer.to_string()),
+    }
+}
+
+/// The TLS mode an answer names.
+fn parse_imap_tls(answer: &str) -> Option<squelch_core::mail::imap::ImapTls> {
+    use squelch_core::mail::imap::ImapTls;
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "implicit" | "tls" | "ssl" => Some(ImapTls::Implicit),
+        "starttls" => Some(ImapTls::StartTls),
+        "plain" | "none" => Some(ImapTls::Plain),
+        _ => None,
+    }
+}
+
+/// `squelchd auth --imap`: prompt, test-login, then store. Nothing is written
+/// until the login and the folder listing have worked, and the provider row
+/// flips to imap LAST, so an account never reads as IMAP without its server
+/// and password in place. The password is never printed or logged.
+fn cmd_auth_imap(config: &Config, args: &AuthArgs) -> Result<(), squelch_core::CoreError> {
+    use squelch_core::mail::MailProvider;
+    use squelch_core::mail::imap::{
+        IMAP_ACCOUNT_SETTING, ImapAccountConfig, ImapPassword, ImapServer, ImapSource, ImapTls,
+        plaintext_allowed,
+    };
+    let email = config.require_account_email()?;
+    let backend = config.credential_backend;
+    ensure_backend(backend)?;
+    let creds_path = config.resolve_credentials_path();
+
+    eprintln!("squelchd: setting up {email} on an IMAP server (read only for now)");
+    let host = ask("IMAP host", None)?;
+    let tls = loop {
+        let answer = ask("TLS mode (implicit, starttls, plain)", Some("implicit"))?;
+        match parse_imap_tls(&answer) {
+            Some(t) => break t,
+            None => eprintln!("squelchd: answer implicit, starttls or plain"),
+        }
+    };
+    if tls == ImapTls::Plain && !plaintext_allowed(&host) {
+        return Err(squelch_core::CoreError::InvalidInput(
+            "plain (no TLS) is only allowed for a server on this machine; use implicit or \
+             starttls"
+                .into(),
+        ));
+    }
+    let default_port = if tls == ImapTls::Implicit {
+        "993"
+    } else {
+        "143"
+    };
+    let port: u16 = ask("Port", Some(default_port))?
+        .parse()
+        .map_err(|_| squelch_core::CoreError::InvalidInput("the port is a number".into()))?;
+    let username = ask("Username", Some(&email))?;
+    let password = {
+        use std::io::IsTerminal;
+        let _echo = std::io::stdin()
+            .is_terminal()
+            .then(TerminalEcho::suppressed);
+        let pw = ask("App password (not shown)", None);
+        eprintln!();
+        pw?
+    };
+    let ca_file = match &args.ca_file {
+        Some(p) => Some(std::fs::canonicalize(p).map_err(|e| {
+            squelch_core::CoreError::InvalidInput(format!("--ca-file {}: {e}", p.display()))
+        })?),
+        None => None,
+    };
+    let account = ImapAccountConfig {
+        server: ImapServer {
+            host,
+            port,
+            tls,
+            username,
+        },
+        ca_file,
+    };
+
+    // THE TEST LOGIN, before anything is stored.
+    let source = ImapSource::from_config(
+        0,
+        &account,
+        ImapPassword::new(password.clone()),
+        Arc::new(NoLocations),
+        Arc::new(squelch_core::mail::SourceRefusals::default()),
+    )?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| other_err(format!("tokio runtime: {e}")))?;
+    let roles = runtime.block_on(source.check_login())?;
+    eprintln!(
+        "squelchd: logged in to {}:{} as {}; folders:",
+        account.server.host, account.server.port, account.server.username
+    );
+    for (role, folder) in &roles {
+        eprintln!("  {role:<9} {}", folder.as_deref().unwrap_or("(none)"));
+    }
+
+    let store = SqliteStore::open(&config.db_path)?;
+    let account_id = store.ensure_account(&email)?;
+    // An account that already syncs Gmail keeps Gmail ids and a Gmail
+    // cursor; turning it into an IMAP one under the same rows would mix two
+    // id spaces. A fresh database is the way to switch.
+    if store.account_provider(account_id)? == MailProvider::Gmail
+        && store.sync_cursor(account_id)?.is_some()
+    {
+        return Err(squelch_core::CoreError::InvalidInput(format!(
+            "{email} already syncs from Gmail in {}; set up IMAP in a fresh database",
+            config.db_path.display()
+        )));
+    }
+    squelch_core::credentials::store_imap_password_backend(
+        backend,
+        &creds_path,
+        &email,
+        &password,
+    )?;
+    store.set_app_setting(account_id, IMAP_ACCOUNT_SETTING, &account.to_json()?)?;
+    store.set_account_provider(account_id, MailProvider::Imap)?;
+    println!(
+        "Stored: the IMAP password in the {backend:?} backend, the server with account {email}. \
+         `squelchd serve` now syncs it over IMAP."
+    );
     Ok(())
 }
 
@@ -1810,11 +2029,11 @@ fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
     // constructor refuses a backend this build cannot use too; asking here
     // keeps the refusal ahead of opening the store and building the embedder.
     let email = config.require_account_email()?;
-    let client = config.oauth_client()?;
     ensure_backend(config.credential_backend)?;
 
     let mut store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
+    let client = oauth_client_for(&config, store.account_provider(account_id)?)?;
 
     // Attach the embedder to both the store (query-side) and the engine
     // (write-side); `None` keeps everything working without vector recall.
@@ -2321,7 +2540,6 @@ fn cmd_serve(
     let bind = resolve_bind(args)?;
     let metrics_bind = resolve_metrics_bind(&config)?;
     let email = config.require_account_email()?;
-    let client = config.oauth_client()?;
     // The store constructor below refuses a backend this build cannot use
     // too; asking here keeps the refusal ahead of opening the store, its
     // migrations, the embedder and the runtime.
@@ -2329,6 +2547,9 @@ fn cmd_serve(
 
     let store = SqliteStore::open(&config.db_path)?;
     let account_id = store.ensure_account(&email)?;
+    let provider = store.account_provider(account_id)?;
+    let client = oauth_client_for(&config, provider)?;
+    let is_gmail = provider == squelch_core::mail::MailProvider::Gmail;
     let store = Arc::new(store);
 
     let backend = config.credential_backend;
@@ -2496,7 +2717,10 @@ fn cmd_serve(
     // arrive under a running daemon (`squelchd auth --calendar`). Its own task
     // with its own backoff, never inside the Gmail sync loop: a calendar
     // failure of any kind must not fail or delay Gmail sync, triage or ingest.
-    let calendar_sync = api_state.calendar().cloned().and_then(|creds| {
+    //
+    // Never for an IMAP account: there is no Google grant to find, and the
+    // loop must not go looking for one under that account's address.
+    let calendar_sync = api_state.calendar().cloned().filter(|_| is_gmail).and_then(|creds| {
         // The same live feature set the human door gates on: the loop asks it
         // at every pass, so a flag flipped on the admin page reaches it with
         // no restart.
@@ -2628,7 +2852,10 @@ fn cmd_serve(
                 Some(tokio::spawn(async move { sync.run(shutdown_rx).await }))
             }
             None => {
-                eprintln!("squelchd: calendar sync disabled (no OAuth client configured)");
+                eprintln!(
+                    "squelchd: calendar sync disabled (no OAuth client configured, or not a \
+                     Gmail account)"
+                );
                 None
             }
         };
@@ -2772,8 +2999,10 @@ fn cmd_serve(
 
         // Auth-mail retention runs here because this process owns the write
         // credential (sync is bound to gmail.readonly by hard invariant). No-op
-        // unless the shredder is enabled AND a write credential exists.
-        {
+        // unless the shredder is enabled AND a write credential exists. Not
+        // for an IMAP account, whose write door is 501 until SMTP lands: the
+        // pass would fail every hour.
+        if is_gmail {
             let shred_state = api_state.clone();
             tokio::spawn(async move {
                 // Stagger past the startup sync burst; retention is in days.
@@ -3089,6 +3318,8 @@ mod tests {
             out: None,
             import: false,
             expose_consent_listener: false,
+            imap: false,
+            ca_file: None,
         }
     }
 

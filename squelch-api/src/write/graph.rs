@@ -260,31 +260,76 @@ impl GraphWriteClient {
         }
     }
 
-    /// The address Exchange sends this account's mail as: `/me`'s `mail`,
-    /// else an address-shaped `userPrincipalName`. `None` on any failure, and
-    /// the message then goes as composed.
+    /// The address Exchange sends this account's mail as. FIRST the From on
+    /// the newest Sent Items message, because that is what Exchange actually
+    /// used, and it enforces the current primary whatever a draft says.
+    /// `/me` comes second: seen live 2026-10-29, it went on naming the old
+    /// primary for a day after the owner changed it, while Exchange was
+    /// already sending as the new one. `None` on any failure, and the message
+    /// then goes as composed.
     async fn send_as(&self) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct Addr {
+            address: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Recipient {
+            #[serde(rename = "emailAddress")]
+            email_address: Addr,
+        }
+        #[derive(serde::Deserialize)]
+        struct Sent {
+            from: Option<Recipient>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Page {
+            #[serde(default)]
+            value: Vec<Sent>,
+        }
         #[derive(serde::Deserialize)]
         struct Me {
             mail: Option<String>,
             #[serde(rename = "userPrincipalName")]
             upn: Option<String>,
         }
+        let shaped =
+            |a: Option<String>| a.map(|a| a.trim().to_string()).filter(|a| a.contains('@'));
+        let timeout = std::time::Duration::from_secs(15);
+        let last_sent = self
+            .call(
+                self.http
+                    .get(format!(
+                        "{}/me/mailFolders/sentitems/messages?$top=1&$select=from&$orderby=sentDateTime desc",
+                        self.base
+                    ))
+                    .timeout(timeout),
+            )
+            .await
+            .ok();
+        if let Some(resp) = last_sent
+            && let Ok(page) = resp.json::<Page>().await
+            && let Some(addr) = shaped(
+                page.value
+                    .into_iter()
+                    .next()
+                    .and_then(|m| m.from)
+                    .and_then(|f| f.email_address.address),
+            )
+        {
+            return Some(addr);
+        }
         let me: Me = self
             .call(
                 self.http
                     .get(format!("{}/me?$select=mail,userPrincipalName", self.base))
-                    .timeout(std::time::Duration::from_secs(15)),
+                    .timeout(timeout),
             )
             .await
             .ok()?
             .json()
             .await
             .ok()?;
-        me.mail
-            .filter(|m| m.contains('@'))
-            .or(me.upn.filter(|u| u.contains('@')))
-            .map(|a| a.trim().to_string())
+        shaped(me.mail).or(shaped(me.upn))
     }
 
     fn msg_url(&self, id: &str) -> String {

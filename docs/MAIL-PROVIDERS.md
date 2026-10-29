@@ -275,10 +275,14 @@ decides every endpoint, scope set and identity check:
      takes the address Microsoft names and saves it to the config.
    - A re-consent is the same mailbox when its Microsoft account id matches
      the stored credential's, whatever address Microsoft uses today.
-   - Every send asks `/me` and writes that address into the From before the
-     draft is made, so the From the recipient sees is never the hidden one.
-   - Mail from the configured address, `/me`'s `mail`, or the sign-in name
-     counts as the owner's own.
+   - Exchange picks the From itself: it enforces the CURRENT primary
+     whatever the draft says (seen live 2026-10-29: a draft From the old
+     primary went out as the new one). `/me` lags that change by a day, so
+     every send writes the From of the newest Sent Items message (else
+     `/me`'s `mail`) into the draft. The From the daemon stores for the echo
+     is read back from the sent copy, so it is always what really went out.
+   - Mail from the configured address, `/me`'s `mail`, the sign-in name, or
+     the newest sent From counts as the owner's own.
    The gap: a configured alias that is NOT primary is still the address the
    daemon is filed under, while mail goes out as the primary. The client does
    not yet show "Sends as ...".

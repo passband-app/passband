@@ -393,10 +393,41 @@ impl<C: CredentialStore + ?Sized> GraphSource<C> {
         let looked_up = self
             .own
             .get_or_try_init(|| async {
+                #[derive(Deserialize)]
+                struct Addr {
+                    address: Option<String>,
+                }
+                #[derive(Deserialize)]
+                struct From {
+                    #[serde(rename = "emailAddress")]
+                    email_address: Addr,
+                }
+                #[derive(Deserialize)]
+                struct Sent {
+                    from: Option<From>,
+                }
+                #[derive(Deserialize)]
+                struct Page {
+                    #[serde(default)]
+                    value: Vec<Sent>,
+                }
                 let url = format!("{}/me?$select=mail,userPrincipalName", self.api_base);
                 let me = self.get_json::<Me>(&url, Urgency::Window).await?;
+                // What Exchange actually sends as, which `/me` can lag by a
+                // day after the owner changes their primary alias.
+                let sent_url = format!(
+                    "{}/me/mailFolders/sentitems/messages?$top=1&$select=from&$orderby=sentDateTime desc",
+                    self.api_base
+                );
+                let last_sent = self
+                    .get_json::<Page>(&sent_url, Urgency::Window)
+                    .await
+                    .ok()
+                    .and_then(|p| p.value.into_iter().next())
+                    .and_then(|m| m.from)
+                    .and_then(|f| f.email_address.address);
                 let mut all = vec![configured.clone()];
-                for a in [me.mail, me.upn].into_iter().flatten() {
+                for a in [me.mail, me.upn, last_sent].into_iter().flatten() {
                     let a = a.trim().to_ascii_lowercase();
                     if a.contains('@') && !all.contains(&a) {
                         all.push(a);

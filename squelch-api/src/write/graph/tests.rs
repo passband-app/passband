@@ -478,39 +478,61 @@ fn rewrite_from_swaps_only_the_address() {
 
 #[tokio::test]
 async fn a_send_goes_out_as_the_address_exchange_will_use() {
+    let draft_of = |r: &Seen| {
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(&r.body)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let raw = b"From: Me <braelyn@passband.app>\r\nTo: a@example.com\r\nSubject: x\r\n\r\nhi";
+
+    // The newest sent message's From wins over a stale /me.
     let (m, c) = mock(vec![
         (
             200,
-            r#"{"mail":"braelyn@passband.app","userPrincipalName":"braelyn@passband.app"}"#,
+            r#"{"value":[{"from":{"emailAddress":{"address":"passband-qa@outlook.com"}}}]}"#,
         ),
         (201, r#"{"id":"IMM-9","conversationId":"conv-9"}"#),
         (202, ""),
     ])
     .await;
-    let c = c.resolving_send_as();
-    let raw = b"From: Me <passband-qa@outlook.com>\r\nTo: a@example.com\r\nSubject: x\r\n\r\nhi";
-    c.send(raw, None).await.unwrap();
+    c.resolving_send_as().send(raw, None).await.unwrap();
     let s = seen(&m);
-    assert_eq!(s[0].method, "GET");
-    assert!(s[0].target.starts_with("/me?"), "{}", s[0].target);
-    let draft = base64::engine::general_purpose::STANDARD
-        .decode(&s[1].body)
-        .unwrap();
     assert!(
-        String::from_utf8(draft)
-            .unwrap()
-            .starts_with("From: Me <braelyn@passband.app>\r\n"),
+        s[0].target
+            .starts_with("/me/mailFolders/sentitems/messages?"),
+        "{}",
+        s[0].target
     );
+    assert!(draft_of(&s[1]).starts_with("From: Me <passband-qa@outlook.com>\r\n"));
 
-    // A failed lookup sends as composed.
-    let (m, c) = mock(vec![(500, "{}"), (201, r#"{"id":"d"}"#), (202, "")]).await;
-    let c = c.resolving_send_as();
-    c.send(raw, None).await.unwrap();
+    // Nothing sent yet: /me names it.
+    let (m, c) = mock(vec![
+        (200, r#"{"value":[]}"#),
+        (
+            200,
+            r#"{"mail":"primary@outlook.com","userPrincipalName":"x@y.com"}"#,
+        ),
+        (201, r#"{"id":"d"}"#),
+        (202, ""),
+    ])
+    .await;
+    c.resolving_send_as().send(raw, None).await.unwrap();
     let s = seen(&m);
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(&s[1].body)
-            .unwrap(),
-        raw
-    );
+    assert!(s[1].target.starts_with("/me?"), "{}", s[1].target);
+    assert!(draft_of(&s[2]).starts_with("From: Me <primary@outlook.com>\r\n"));
+
+    // Both lookups failing: sent as composed.
+    let (m, c) = mock(vec![
+        (500, "{}"),
+        (500, "{}"),
+        (201, r#"{"id":"d"}"#),
+        (202, ""),
+    ])
+    .await;
+    c.resolving_send_as().send(raw, None).await.unwrap();
+    let s = seen(&m);
+    assert_eq!(draft_of(&s[2]).as_bytes(), raw);
 }

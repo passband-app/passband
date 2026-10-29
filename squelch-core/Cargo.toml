@@ -50,8 +50,12 @@ webpki-roots = "1"
 # trace call out at build time, and Cargo unifies features, so it holds for
 # every crate in any binary that links this one. Nothing in the workspace
 # reads trace-level `log` output (the hosted services' tracing-subscriber
-# filters default to info). Pinned by `mail::imap::tests::log_trace_is_compiled_out`.
-log = { version = "0.4", features = ["max_level_debug"] }
+# filters default to info). `release_max_level_debug` holds the same line in
+# release builds, where log reads the release_* features INSTEAD: without it a
+# dependency enabling `release_max_level_trace` would turn the LOGIN trace back
+# on in the shipped binary, and with it a conflicting one is a compile error.
+# Pinned at compile time by the const assert in `mail/imap.rs`, in every profile.
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 sha2 = "0.10"
 # OS entropy for read-tracking tokens. Deliberately the raw syscall wrapper
 # rather than a PRNG crate: a tracking token is minted once and must be

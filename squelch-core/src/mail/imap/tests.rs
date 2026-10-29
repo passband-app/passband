@@ -474,6 +474,8 @@ fn the_canonical_id_still_tells_different_messages_apart() {
 /// build; this fails if a dependency change ever lifts the ceiling.
 #[test]
 fn log_trace_is_compiled_out() {
+    // The const assert in imap.rs is the real pin (it holds in release, where
+    // tests do not run); this is its runtime twin.
     assert!(log::STATIC_MAX_LEVEL <= log::LevelFilter::Debug);
     assert!(!log::log_enabled!(log::Level::Trace));
 }

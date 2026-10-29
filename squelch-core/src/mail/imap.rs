@@ -12,9 +12,10 @@
 //!   are left exactly as the user's other clients see them;
 //! - log or echo the password: it lives in [`ImapPassword`], whose `Debug`
 //!   is redacted, and a failed `LOGIN` is reported without the server's text
-//!   (some servers echo the username back). async-imap `log::trace!`s the
-//!   LOGIN line; this crate builds `log` with `max_level_debug`, which compiles
-//!   every trace call out of the whole binary (see the test that pins it);
+//!   (some servers echo the username back, a `BAD` may echo the command).
+//!   async-imap `log::trace!`s the LOGIN line; this crate builds `log` with
+//!   `max_level_debug` and `release_max_level_debug`, which compile every
+//!   trace call out of the whole binary (a const assert below pins it);
 //! - send the password in the clear to anything but this machine.
 //!
 //! THE STABLE ID is `imap:` + hex sha256 of the normalized `Message-ID`
@@ -81,6 +82,15 @@ use super::{
 };
 use crate::error::{CoreError, Result};
 use crate::types::AccountId;
+
+// THE PASSWORD NEVER REACHES A LOG LINE (security review 7): async-imap
+// `log::trace!`s the LOGIN command. This fails the BUILD, in debug and release
+// alike, if `log` is ever compiled with trace enabled (see squelch-core's
+// Cargo.toml).
+const _: () = assert!(
+    log::STATIC_MAX_LEVEL as usize <= log::LevelFilter::Debug as usize,
+    "log must be built with max_level_debug and release_max_level_debug"
+);
 
 /// The prefix of every IMAP stable id, so one can never be mistaken for a
 /// Gmail id in the same column.

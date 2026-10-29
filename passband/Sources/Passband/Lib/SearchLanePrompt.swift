@@ -61,20 +61,16 @@ enum SearchLanePrompt {
     /// a line.
     static let subjectCap = 120
 
-    /// The whole system prompt as one string: the two blocks below, in order.
+    /// Everything the lane is told for one search, as one string: the system
+    /// prompt, then the context its question is sent with (the time and the
+    /// local hits, see `AssistantSession.questionContext`).
     static func system(today: String, hits: [Hit]) -> String {
-        let prompt = blocks(today: today, hits: hits)
-        return prompt.stable + "\n\n" + prompt.volatile
+        stable + "\n\nToday is \(today).\(hitsBlock(hits))"
     }
 
-    /// The system prompt in the two blocks a request sends: what holds for the
-    /// whole lane (and carries the cache breakpoint), then what changes per
-    /// request or per search, the time and the local hits.
-    static func blocks(today: String, hits: [Hit]) -> (stable: String, volatile: String) {
-        (stable: stable, volatile: "Today is \(today).\n\(hitsBlock(hits))")
-    }
-
-    /// Everything in the lane's prompt that is the same on every request.
+    /// The lane's system prompt. It does not change from request to request,
+    /// so the prompt cache holds it; the time and the hits ride on the
+    /// question instead.
     static let stable = """
         You are the search lane inside Passband, a macOS email app. \
         The person is SEARCHING THEIR MAILBOX, not chatting: they typed words into a \

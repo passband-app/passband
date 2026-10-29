@@ -1,10 +1,11 @@
 // The assistant's request body (Wire.Request in Transcript.swift) and the
-// history budget beside it. What has to hold: the body carries exactly two
-// prompt-cache breakpoints, on the system prompt's stable block and on the
-// last block of the last message, and nowhere else; the same request is the
-// same bytes every time it is built; and pruning the history for a request
-// keeps every tool_use with its tool_result, never touches the turn being
-// answered, and stays put until the budget is passed again.
+// history budget beside it. What has to hold: the body carries its prompt-cache
+// breakpoints on the system prompt and the newest two user turns and nowhere
+// else; the same request is the same bytes every time it is built, and a
+// question's context is the same bytes in every later request; and pruning the
+// history for a request keeps every tool_use with its tool_result, never
+// touches the current run's own results, and stays put until the budget is
+// passed again.
 
 import Foundation
 
@@ -23,11 +24,13 @@ struct AssistantRequestTests {
     static var checks = 0
 
     static func main() {
-        twoBreakpointsAndNoMore()
+        breakpointsWhereTheyBelong()
         earlierMessagesAreSentAsTheyAreKept()
         theSameRequestIsTheSameBytes()
+        aQuestionsContextIsTheSameBytesLater()
         pruningKeepsTheShapeOfTheConversation()
         pruningIsStickyAndStaysUnderBudget()
+        theCurrentRunIsNeverPruned()
         aThreadBodyIsCapped()
 
         if failures > 0 {
@@ -66,7 +69,7 @@ struct AssistantRequestTests {
     static func request(_ messages: [Wire.MessageParam]) -> Wire.Request {
         Wire.Request(
             model: "claude-haiku-4-5", max_tokens: 4096,
-            system: [.stable("You are the assistant."), .volatile("Today is Thursday.")],
+            system: [.stable("You are the assistant.")],
             tools: tools(), messages: messages)
     }
 
@@ -111,11 +114,11 @@ struct AssistantRequestTests {
 
     // MARK: - checks
 
-    static func twoBreakpointsAndNoMore() {
+    static func breakpointsWhereTheyBelong() {
         let one = json(request([.init(role: "user", content: .text("hi"))]))
         check(
             breakpoints(one) == [".messages[0].content[0]", ".system[0]"],
-            "a first question: the stable system block and the question carry the only two breakpoints")
+            "a first question: the system prompt and the question carry the only breakpoints")
         let body = one as! [String: Any]
         let content = ((body["messages"] as! [Any])[0] as! [String: Any])["content"] as! [Any]
         let block = content[0] as! [String: Any]
@@ -124,8 +127,8 @@ struct AssistantRequestTests {
 
         let loop = json(request(conversation(turns: 3)))
         check(
-            breakpoints(loop) == [".messages[6].content[0]", ".system[0]"],
-            "a tool loop: the breakpoint is on the newest tool result, and only there")
+            breakpoints(loop) == [".messages[4].content[0]", ".messages[6].content[0]", ".system[0]"],
+            "a tool loop: the newest tool result, and the previous request's newest, and nowhere else")
         let last = (((loop as! [String: Any])["messages"] as! [Any])[6] as! [String: Any])["content"] as! [Any]
         let result = last[0] as! [String: Any]
         check(result["type"] as? String == "tool_result" && result["tool_use_id"] as? String == "toolu_2",
@@ -135,11 +138,11 @@ struct AssistantRequestTests {
     static func earlierMessagesAreSentAsTheyAreKept() {
         let history = conversation(turns: 2)
         let sent = (json(request(history)) as! [String: Any])["messages"] as! [Any]
-        for index in history.indices.dropLast() {
+        for index in history.indices.dropLast() where index != history.count - 3 {
             let kept = try! JSONSerialization.jsonObject(with: Wire.Request.encoder().encode(history[index]))
             check(
                 NSDictionary(dictionary: kept as! [String: Any]).isEqual(sent[index] as! [String: Any]),
-                "message \(index) is sent exactly as the history keeps it")
+                "message \(index), carrying no breakpoint, is sent exactly as the history keeps it")
         }
         let stored = try! Wire.Request.encoder().encode(history)
         check(!String(decoding: stored, as: UTF8.self).contains("cache_control"),
@@ -203,10 +206,55 @@ struct AssistantRequestTests {
         let next = Wire.elisions(for: grown, already: first, budget: budget, target: target)
         check(next == first, "one more turn under the budget prunes nothing more, so the cached prefix holds")
 
-        let rolledBack = Array(big.prefix(3))
-        check(Wire.elisions(for: rolledBack, already: first, budget: budget, target: target)
-            <= Wire.prunableResults(rolledBack),
-            "a count from a longer history is clamped to what this one has")
+    }
+
+    static func theCurrentRunIsNeverPruned() {
+        // Three earlier runs' worth of results, then a run of its own reading
+        // ten long threads: the budget is passed on the run's own results.
+        let earlier = conversation(turns: 3)
+        let runStart = earlier.count
+        var history = earlier + [.init(role: "user", content: .text("compare the statements"))]
+        for n in 10..<20 { history += turn(n, body: 8000) }
+        let count = Wire.elisions(
+            for: history, already: 0, protectedFrom: runStart, budget: 10_000, target: 6_000)
+        check(count == Wire.prunableResults(history, protectedFrom: runStart),
+            "over budget, everything before the run may go")
+        check(count == 3, "and that is only the three earlier results")
+        let sent = Wire.pruned(history, eliding: count, protectedFrom: runStart)
+        var kept = 0
+        for message in sent.suffix(from: runStart) {
+            guard case .blocks(let blocks) = message.content else { continue }
+            for block in blocks {
+                if case .toolResult(_, let content, _) = block, content != Wire.elidedResult { kept += 1 }
+            }
+        }
+        check(kept == 10, "every result the current run fetched is sent whole")
+    }
+
+    static func aQuestionsContextIsTheSameBytesLater() {
+        let context = [0: "Context from Passband, not typed by the user:\nToday is Thursday."]
+        let first = Wire.withContext([.init(role: "user", content: .text("what is due"))], context)
+        guard case .blocks(let blocks) = first[0].content, blocks.count == 2,
+            case .text(let lead) = blocks[0], case .text(let question) = blocks[1]
+        else { return check(false, "the context is a text block ahead of the question") }
+        check(lead == context[0] && question == "what is due", "the context leads, the question follows")
+
+        let later = Wire.withContext(
+            conversation(turns: 2).enumerated().map { index, message in
+                index == 0 ? .init(role: "user", content: .text("what is due")) : message
+            } + [.init(role: "user", content: .text("and next week?"))], context)
+        let encoder = Wire.Request.encoder()
+        check(
+            try! encoder.encode(first[0]) == encoder.encode(later[0]),
+            "the first question goes out as the same bytes once the conversation has grown")
+        check(Wire.withContext(later, [:]).count == later.count, "no context changes nothing")
+        let stored: [Wire.MessageParam] = [.init(role: "user", content: .text("what is due"))]
+        _ = Wire.withContext(stored, context)
+        if case .text = stored[0].content {
+            check(true, "the kept history is not touched")
+        } else {
+            check(false, "the kept history is not touched")
+        }
     }
 
     static func aThreadBodyIsCapped() {

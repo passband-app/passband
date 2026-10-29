@@ -143,10 +143,12 @@ enum Wire {
         var type = "ephemeral"
     }
 
-    /// One block of the system prompt. The prompt is sent as TWO: what holds
-    /// for the whole conversation, carrying the cache breakpoint (the tools
-    /// render ahead of it, so it caches them too), then the part that changes
-    /// (the time, the open email, the local hits), after the breakpoint.
+    /// The system prompt, as one block carrying a cache breakpoint (the tools
+    /// render ahead of it, so it caches them too). NOTHING IN IT MAY CHANGE
+    /// within a conversation: the provider renders tools, then system, then
+    /// messages, so a byte changed here re-writes the whole history behind
+    /// it. What does change (the time, the open email, the local hits) rides
+    /// on the question it was asked with instead (`withContext`).
     struct SystemBlock: Encodable, Equatable {
         var type = "text"
         var text: String
@@ -155,17 +157,16 @@ enum Wire {
         static func stable(_ text: String) -> SystemBlock {
             SystemBlock(text: text, cache_control: CacheControl())
         }
-
-        static func volatile(_ text: String) -> SystemBlock {
-            SystemBlock(text: text, cache_control: nil)
-        }
     }
 
-    /// THE REQUEST BODY. Two cache breakpoints: the system prompt's stable
-    /// block, and the last block of the last message. That one is added HERE,
-    /// on the way out, so the history that is kept (and saved with a question,
-    /// see ConversationSnapshot) never carries one. It moves forward each
-    /// turn; the entries earlier turns wrote stay readable.
+    /// THE REQUEST BODY. Up to three cache breakpoints: the system prompt,
+    /// the last block of the last message, and the last block of the message
+    /// two before it, which is where the previous request's breakpoint sat.
+    /// The second is a read point for when one turn adds more blocks than the
+    /// provider's lookback from the newest breakpoint (about 20). The message
+    /// breakpoints are added HERE, on the way out, so the history that is
+    /// kept (and saved with a question, see ConversationSnapshot) never
+    /// carries one.
     struct Request: Encodable {
         var model: String
         var max_tokens: Int
@@ -189,7 +190,7 @@ enum Wire {
             try c.encode(tools, forKey: .tools)
             var list = c.nestedUnkeyedContainer(forKey: .messages)
             for (index, message) in messages.enumerated() {
-                if index == messages.count - 1 {
+                if index == messages.count - 1 || index == messages.count - 3 {
                     try list.encode(CacheMarked(message: message))
                 } else {
                     try list.encode(message)
@@ -257,80 +258,121 @@ enum Wire {
     static let elidedResult =
         #"{"elided":"This result was removed from the conversation to save space. Call the tool again if you need it."}"#
 
-    /// A rough token count for a history: characters over four, the usual
-    /// estimate for English and JSON. Only the budget below reads it, and the
-    /// budget is a ceiling with room under it, not an exact limit.
+    /// A rough token count for a history: UTF-8 bytes over four, about right
+    /// for English and JSON and an undercount for CJK (three bytes a
+    /// character). Only the budget below reads it, and the budget is a
+    /// ceiling with room under it, not an exact limit.
     static func estimatedTokens(_ messages: [MessageParam]) -> Int {
-        var chars = 0
-        for message in messages {
-            switch message.content {
-            case .text(let text): chars += text.count
-            case .blocks(let blocks):
-                for block in blocks {
-                    switch block {
-                    case .text(let text): chars += text.count
-                    case .toolUse(_, let name, let input):
-                        chars += name.count + ((try? JSONEncoder().encode(input).count) ?? 0)
-                    case .toolResult(_, let content, _): chars += content.count
-                    }
+        var bytes = 0
+        for message in messages { bytes += size(message) }
+        return bytes / 4
+    }
+
+    private static func size(_ message: MessageParam) -> Int {
+        switch message.content {
+        case .text(let text): return text.utf8.count
+        case .blocks(let blocks): return blocks.reduce(0) { $0 + size($1) }
+        }
+    }
+
+    private static func size(_ block: RequestBlock) -> Int {
+        switch block {
+        case .text(let text): return text.utf8.count
+        case .toolUse(let id, let name, let input):
+            return id.utf8.count + name.utf8.count + ((try? JSONEncoder().encode(input).count) ?? 0)
+        case .toolResult(let id, let content, _): return id.utf8.count + content.utf8.count
+        }
+    }
+
+    /// Where every tool result that may be pruned sits, oldest first: before
+    /// `protectedFrom`, and never in the last message.
+    private static func prunable(
+        _ messages: [MessageParam], protectedFrom: Int
+    ) -> [(message: Int, block: Int, bytes: Int)] {
+        let end = min(protectedFrom, messages.count - 1)
+        guard end > 0 else { return [] }
+        var found: [(message: Int, block: Int, bytes: Int)] = []
+        for m in 0..<end {
+            guard case .blocks(let blocks) = messages[m].content else { continue }
+            for (b, block) in blocks.enumerated() {
+                if case .toolResult(let id, let content, _) = block {
+                    found.append((m, b, id.utf8.count + content.utf8.count))
                 }
             }
         }
-        return chars / 4
+        return found
     }
 
-    /// The history as it is SENT, with the `count` oldest tool results
-    /// replaced by `elidedResult`. Nothing else changes: every tool_use keeps
-    /// its tool_result, every turn stays where it was, and the history that
-    /// is kept is not touched. The last message is never pruned: it holds
-    /// what the model is answering.
-    static func pruned(_ messages: [MessageParam], eliding count: Int) -> [MessageParam] {
+    /// The history as it is SENT, with the `count` oldest prunable tool
+    /// results (see `elisions`) replaced by `elidedResult`. Nothing else
+    /// changes: every tool_use keeps its tool_result, every turn stays where
+    /// it was, and the history that is kept is not touched.
+    static func pruned(
+        _ messages: [MessageParam], eliding count: Int, protectedFrom: Int = .max
+    ) -> [MessageParam] {
         guard count > 0 else { return messages }
-        var left = count
         var out = messages
-        for m in out.indices.dropLast() {
-            guard left > 0 else { break }
-            guard case .blocks(let blocks) = out[m].content else { continue }
-            var changed = blocks
-            for b in changed.indices {
-                guard left > 0, case .toolResult(let id, _, let isError) = changed[b] else { continue }
-                changed[b] = .toolResult(toolUseId: id, content: elidedResult, isError: isError)
-                left -= 1
-            }
-            out[m].content = .blocks(changed)
+        for spot in prunable(messages, protectedFrom: protectedFrom).prefix(count) {
+            guard case .blocks(var blocks) = out[spot.message].content,
+                case .toolResult(let id, _, let isError) = blocks[spot.block]
+            else { continue }
+            blocks[spot.block] = .toolResult(toolUseId: id, content: elidedResult, isError: isError)
+            out[spot.message].content = .blocks(blocks)
         }
         return out
     }
 
-    /// How many tool results the last message is behind: every one before it.
-    static func prunableResults(_ messages: [MessageParam]) -> Int {
-        var total = 0
-        for message in messages.dropLast() {
-            guard case .blocks(let blocks) = message.content else { continue }
-            for block in blocks {
-                if case .toolResult = block { total += 1 }
-            }
-        }
-        return total
+    /// How many tool results may be pruned: those before `protectedFrom`
+    /// (the current run's first message: a run never loses what it fetched
+    /// itself) and before the last message.
+    static func prunableResults(_ messages: [MessageParam], protectedFrom: Int = .max) -> Int {
+        prunable(messages, protectedFrom: protectedFrom).count
     }
 
-    /// How many of the oldest tool results to prune before the next request,
-    /// given how many already are. STICKY, so the prefix the cache holds stays
-    /// put: nothing more is pruned until the history passes `budget` again,
-    /// and then enough goes to bring it down to `target`, well under the
-    /// budget, so the next prune is many turns away. Each prune costs one
-    /// cache miss on everything after the first result it changes.
+    /// How many of the oldest prunable tool results to prune before the next
+    /// request, given how many already are. STICKY, so the prefix the cache
+    /// holds stays put: nothing more is pruned until the history passes
+    /// `budget` again, and then enough goes to bring it down to `target`, well
+    /// under the budget, so the next prune is many turns away. Each prune
+    /// costs one cache miss on everything after the first result it changes.
+    /// A history over budget on the current run's own results alone stays
+    /// over: those are what the model is working from.
     static func elisions(
-        for messages: [MessageParam], already: Int, budget: Int = historyBudget,
-        target: Int = historyTarget
+        for messages: [MessageParam], already: Int, protectedFrom: Int = .max,
+        budget: Int = historyBudget, target: Int = historyTarget
     ) -> Int {
-        let prunable = prunableResults(messages)
-        var count = min(already, prunable)
-        guard estimatedTokens(pruned(messages, eliding: count)) > budget else { return count }
-        while count < prunable, estimatedTokens(pruned(messages, eliding: count)) > target {
+        let spots = prunable(messages, protectedFrom: protectedFrom)
+        let note = elidedResult.utf8.count
+        var count = min(already, spots.count)
+        var bytes = 0
+        for message in messages { bytes += size(message) }
+        for spot in spots.prefix(count) { bytes -= max(0, spot.bytes - note) }
+        guard bytes / 4 > budget else { return count }
+        while count < spots.count, bytes / 4 > target {
+            bytes -= max(0, spots[count].bytes - note)
             count += 1
         }
         return count
+    }
+
+    /// The history as it is SENT with each question's context in front of
+    /// it: `context[i]` is a text block put ahead of message i's own. What a
+    /// question was asked under (the time, the email open, the local hits)
+    /// changes from question to question, so it cannot sit in the system
+    /// prompt without re-writing the whole cached history behind it; on the
+    /// question it belongs to, it is the same bytes in every later request.
+    /// Held beside the history rather than in it, so a saved question keeps
+    /// what it always kept.
+    static func withContext(_ messages: [MessageParam], _ context: [Int: String]) -> [MessageParam] {
+        guard !context.isEmpty else { return messages }
+        var out = messages
+        for (index, text) in context where out.indices.contains(index) && !text.isEmpty {
+            switch out[index].content {
+            case .text(let question): out[index].content = .blocks([.text(text), .text(question)])
+            case .blocks(let blocks): out[index].content = .blocks([.text(text)] + blocks)
+            }
+        }
+        return out
     }
 
     /// The history's ceiling, in estimated tokens, on top of the system prompt

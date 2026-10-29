@@ -487,6 +487,7 @@ final class AssistantSession {
         transcript.removeAll()
         history.removeAll()
         elidedResults = 0
+        turnContext.removeAll()
         // A new conversation has no earlier email to have switched away from.
         askedThreadIds.removeAll()
         rollbackMark = 0
@@ -517,6 +518,7 @@ final class AssistantSession {
         transcript = other.transcript
         history = other.history
         elidedResults = 0
+        turnContext.removeAll()
         askedThreadIds = other.askedThreadIds
         rollbackMark = history.count
         nextItemId = other.nextItemId
@@ -548,6 +550,7 @@ final class AssistantSession {
         transcript = snapshot.transcript
         history = snapshot.history
         elidedResults = 0
+        turnContext.removeAll()
         askedThreadIds = snapshot.askedThreadIds
         rollbackMark = history.count
         nextItemId = max(nextItemId, snapshot.nextItemId, snapshot.transcript.map(\.id).max() ?? 0)
@@ -654,6 +657,8 @@ final class AssistantSession {
         }
 
         rollbackMark = history.count
+        elidedAtRunStart = elidedResults
+        turnContext[history.count] = questionContext(pin)
         append(.user, text: question)
         history.append(.init(role: "user", content: .text(question)))
         // A fresh answer cites its own sources.
@@ -704,7 +709,7 @@ final class AssistantSession {
 
             let body: Data
             do {
-                body = try requestBody(model: model, pin: pin)
+                body = try requestBody(model: model)
             } catch {
                 fail(errorText(error))
                 return
@@ -1141,6 +1146,9 @@ final class AssistantSession {
     ) {
         guard alive(gen) else { return }
         if history.count > rollbackMark { history.removeSubrange(rollbackMark...) }
+        // What the requests prune and the context they carry go back with it.
+        elidedResults = elidedAtRunStart
+        turnContext = turnContext.filter { $0.key < rollbackMark }
         // AND THE REFINEMENT GOES BACK IN THE SLOT. The rollback above is why:
         // a narrowing taken at a tool-result boundary rode on a message that
         // has just been deleted, so the reader's newest words are now nowhere
@@ -1224,46 +1232,63 @@ final class AssistantSession {
 
     /// How many of the history's oldest tool results the requests prune (see
     /// `Wire.elisions`). Kept so the pruned prefix stays the same from one
-    /// request to the next; back to zero whenever the history is replaced.
-    /// The history itself is never pruned: it is what a saved question keeps.
+    /// request to the next; back to zero whenever the history is replaced,
+    /// and back to `elidedAtRunStart` when a failed run is rolled back. The
+    /// history itself is never pruned: it is what a saved question keeps.
     private var elidedResults = 0
+    private var elidedAtRunStart = 0
+
+    /// Each question's context (`questionContext`), by its index in
+    /// `history`. Sent in front of that question in every request
+    /// (`Wire.withContext`) and never stored in the history: a saved question
+    /// keeps what it always kept, and one brought back is simply asked on
+    /// without the context its earlier questions had.
+    private var turnContext: [Int: String] = [:]
 
     /// The body of the next request, exactly as it is sent: the history
-    /// pruned to its budget, the system prompt in its stable and changing
-    /// blocks, and the keys sorted so the same request is the same bytes.
-    private func requestBody(model: AssistantModel, pin: PinnedContext) throws -> Data {
-        elidedResults = Wire.elisions(for: history, already: elidedResults)
+    /// pruned to its budget (never the current run's own results), each
+    /// question with its context, a system prompt that does not change, and
+    /// the keys sorted so the same request is the same bytes.
+    private func requestBody(model: AssistantModel) throws -> Data {
+        elidedResults = Wire.elisions(
+            for: history, already: elidedResults, protectedFrom: rollbackMark)
+        let sent = Wire.pruned(history, eliding: elidedResults, protectedFrom: rollbackMark)
         return try Wire.Request.encoder().encode(
             Wire.Request(
-                model: model.rawValue, max_tokens: Self.maxTokens, system: system(pin),
+                model: model.rawValue, max_tokens: Self.maxTokens, system: system(),
                 tools: lane.definitions(calendar: AppStore.shared.calendarPageAvailable),
-                messages: Wire.pruned(history, eliding: elidedResults)))
+                messages: Wire.withContext(sent, turnContext)))
     }
 
     // MARK: - system prompt
 
-    /// Built per request, because the date is part of it: an agent that thinks
-    /// it is still last month reads "due Friday" wrong. The email on screen is
-    /// part of it too, but it arrives as the RUN's copy rather than off the
-    /// live property — the pin may move between requests, the question may not.
-    /// TWO BLOCKS, for the prompt cache: everything that holds for the whole
-    /// conversation, then what does not (the time, the open email, the local
-    /// hits), so a new minute or a new pin re-sends only the second.
-    private func system(_ pin: PinnedContext) -> [Wire.SystemBlock] {
+    /// What a question is asked under, sent in front of it (see
+    /// `turnContext`): the time, and the email open in the reader or the
+    /// local search's hits. The time because an agent that thinks it is still
+    /// last month reads "due Friday" wrong; the email as the RUN's copy, since
+    /// the pin may move while the question may not. Built ONCE per question,
+    /// so every request of the run, and of every later run, sends the same
+    /// bytes for it.
+    private func questionContext(_ pin: PinnedContext) -> String {
         // The weekday, the time and the zone too, not just the date: "tonight",
         // "this Friday" and "in 3 hours" need all three, and they match what
         // the daemon's agents are told (#526).
         let today = Date().formatted(.dateTime.weekday(.wide).month(.wide).day().year().hour().minute())
             + " (\(TimeZone.current.identifier))"
+        let rest = lane == .search ? SearchLanePrompt.hitsBlock(pin.hits) : openEmailBlock(pin)
+        return "Context from Passband, not typed by the user:\nToday is \(today).\(rest)"
+    }
+
+    /// THE SYSTEM PROMPT, ONE BLOCK THAT DOES NOT CHANGE within a
+    /// conversation, so the cache holds it and everything after it. What
+    /// changes per question is in `questionContext`.
+    private func system() -> [Wire.SystemBlock] {
         let year = Calendar.current.component(.year, from: Date())
         // The search lane's prompt lives in a pure file so its two properties
         // that cannot be seen on screen — no dash the house style forbids, and
         // every mail-derived line inside data markers — are asserted in
         // test.sh rather than reasoned about here.
-        if lane == .search {
-            let prompt = SearchLanePrompt.blocks(today: today, hits: pin.hits)
-            return [.stable(prompt.stable), .volatile(prompt.volatile)]
-        }
+        if lane == .search { return [.stable(SearchLanePrompt.stable)] }
         let stable = """
             You are the user's personal inbox assistant, embedded in a macOS app called \
             Passband. You answer questions about their email, and you \
@@ -1338,7 +1363,7 @@ final class AssistantSession {
               mailbox. It changes what gets surfaced from here on; it moves no mail.
             - When the user asks you to write but not send, use save_draft.\(Self.calendarTools)
             """
-        return [.stable(stable), .volatile("Today is \(today).\n\(openEmailBlock(pin))")]
+        return [.stable(stable)]
     }
 
     /// THE POINTER, NOT THE GUIDE. How Passband works is a few thousand tokens

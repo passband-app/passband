@@ -603,6 +603,27 @@ fn the_archive_window_skips_junk_trash_and_drafts_and_filed_only_the_live_folder
     assert_eq!(roles.window_folders(true), vec!["Archive", "Projects/2026"]);
 }
 
+/// CORRECTNESS M4: an all-mail view holds INBOX and Sent mail too, so it is
+/// never walked: `filed_only` would leak live mail, and every window would
+/// list each message twice. By SPECIAL-USE or by its name.
+#[test]
+fn the_archive_window_never_walks_the_all_mail_view() {
+    for all in [("All Mail", &["\\All"][..]), ("All Mail", &[][..])] {
+        let roles = resolve_roles(&names(&[
+            ("INBOX", &[]),
+            ("Sent", &["\\Sent"]),
+            all,
+            ("Archive", &["\\Archive"]),
+        ]));
+        assert_eq!(roles.all.as_deref(), Some("All Mail"));
+        assert_eq!(
+            roles.window_folders(false),
+            vec!["INBOX", "Sent", "Archive"]
+        );
+        assert_eq!(roles.window_folders(true), vec!["Archive"]);
+    }
+}
+
 #[test]
 fn placement_comes_from_every_live_row() {
     let roles = resolve_roles(&names(&[("INBOX", &[]), ("Sent", &["\\Sent"])]));
@@ -1482,7 +1503,7 @@ async fn live_a_long_wait_under_keepalives_ends_on_time_and_still_wakes() {
 #[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
 async fn live_mail_after_a_kick_wakes_the_same_wait() {
     let user = fresh_user("kickmail");
-    let mut other = other_client(&user).await;
+    let other = other_client(&user).await;
     let (src, _) = live(&user);
     let cursor = src.current_cursor().await.unwrap();
     let src = Arc::new(src);
@@ -1509,6 +1530,56 @@ async fn live_mail_after_a_kick_wakes_the_same_wait() {
     assert_eq!(src.idle_connects(), 2, "one fresh login after the kick");
     drop(other);
     let _ = other2.logout().await;
+}
+
+/// CORRECTNESS M1: the poll lane never walks Junk, so junk mail must not
+/// make an otherwise idle mailbox read as changed (that ran the Sent walk
+/// and rewrote the cursor on every tick, and the idle ladder never grew).
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_junk_mail_does_not_make_an_idle_mailbox_read_as_changed() {
+    let user = fresh_user("junkidle");
+    let mut other = other_client(&user).await;
+    let (src, _) = live(&user);
+    let cursor = src.current_cursor().await.unwrap();
+    append(&mut other, "Junk", &mail(Some("spam@x.org"), "spam"), None).await;
+    for folder in [Folder::Inbox, Folder::Sent] {
+        let walk = src.changes(&cursor, folder).await.unwrap();
+        assert!(walk.ids.is_empty());
+        assert!(walk.mailbox_unchanged, "{folder:?}");
+    }
+    // Sent mail still counts.
+    append(&mut other, "Sent", &mail(Some("s@x.org"), "s"), None).await;
+    let walk = src.changes(&cursor, Folder::Inbox).await.unwrap();
+    assert!(!walk.mailbox_unchanged);
+    let _ = other.logout().await;
+}
+
+/// CORRECTNESS M5: the unread count is not read from the session's stale
+/// view of an INBOX it has open.
+#[tokio::test]
+#[ignore = "needs the Dovecot test bed: scripts/imap-dev.sh start"]
+async fn live_the_unread_count_is_fresh_when_inbox_is_open() {
+    let user = fresh_user("unread");
+    let mut other = other_client(&user).await;
+    append(&mut other, INBOX, &mail(Some("u1@x.org"), "u1"), None).await;
+    let (src, _) = live(&user);
+    assert_eq!(src.inbox_unread().await.unwrap(), (1, 1));
+    for n in 2..=3 {
+        // The listing leaves INBOX open on the command session.
+        src.list(inbox_listing(), None, Urgency::Window)
+            .await
+            .unwrap();
+        append(
+            &mut other,
+            INBOX,
+            &mail(Some(&format!("u{n}@x.org")), "u"),
+            None,
+        )
+        .await;
+        assert_eq!(src.inbox_unread().await.unwrap(), (n, n));
+    }
+    let _ = other.logout().await;
 }
 
 fn doveadm(args: &[&str]) {

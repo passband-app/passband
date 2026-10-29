@@ -569,8 +569,10 @@ impl FolderRoles {
     /// The folders the archive window walks: every selectable folder but
     /// junk, trash and drafts (Gmail's `-in:draft` plus its default exclusion
     /// of spam and trash), and with `filed_only` the inbox and sent folder too.
+    /// Never the all-mail view (correctness M4): it holds INBOX and Sent mail
+    /// as well, so it would break `filed_only` and list every message twice.
     pub fn window_folders(&self, filed_only: bool) -> Vec<&str> {
-        let mut skip: Vec<&str> = [&self.junk, &self.trash, &self.drafts]
+        let mut skip: Vec<&str> = [&self.junk, &self.trash, &self.drafts, &self.all]
             .into_iter()
             .filter_map(|f| f.as_deref())
             .collect();
@@ -1100,12 +1102,10 @@ impl Conn {
         Ok(Some(validity))
     }
 
-    /// One folder's position as `STATUS` reports it now, or `None` if the
-    /// server refuses it (the folder is gone).
-    async fn status(&mut self, folder: &str) -> Result<Option<FolderPos>> {
-        // `STATUS` on the open folder can answer from the session's stale
-        // view of it (RFC 3501 says not to ask), so close it first. `CLOSE`
-        // on a folder opened with `EXAMINE` expunges nothing.
+    /// `STATUS` on the open folder can answer from the session's stale view
+    /// of it (RFC 3501 says not to ask), so every `STATUS` closes it first.
+    /// `CLOSE` on a folder opened with `EXAMINE` expunges nothing.
+    async fn close_if_open(&mut self, folder: &str) -> Result<()> {
         if self
             .selected
             .as_ref()
@@ -1114,6 +1114,13 @@ impl Conn {
             self.selected = None;
             self.session.close().await.map_err(imap_err("close"))?;
         }
+        Ok(())
+    }
+
+    /// One folder's position as `STATUS` reports it now, or `None` if the
+    /// server refuses it (the folder is gone).
+    async fn status(&mut self, folder: &str) -> Result<Option<FolderPos>> {
+        self.close_if_open(folder).await?;
         let items = if self.condstore {
             "(UIDVALIDITY UIDNEXT HIGHESTMODSEQ)"
         } else {
@@ -2150,10 +2157,15 @@ enum Walk {
     },
 }
 
-/// Does every watched folder other than `skip` stand exactly where `start`
-/// left it? A role that gained, lost or changed its folder is a change.
+/// Does every folder the poll lane walks, other than `skip`, stand exactly
+/// where `start` left it? A role that gained, lost or changed its folder is a
+/// change.
+///
+/// Not Junk (correctness M1): the poll lane never walks it, so its entry in
+/// the cursor stays where the last catch-up left it, and the first junk mail
+/// after that would read as a change on every tick for good.
 async fn others_unchanged(c: &mut Conn, start: &ImapCursor, skip: Folder) -> Result<bool> {
-    for folder in WATCHED {
+    for folder in [Folder::Inbox, Folder::Sent] {
         if folder == skip {
             continue;
         }
@@ -2545,6 +2557,8 @@ impl MailSource for ImapSource {
     async fn inbox_unread(&self) -> Result<(i64, i64)> {
         self.with_conn(|c| {
             Box::pin(async move {
+                // Not from a stale view of an open INBOX (correctness M5).
+                c.close_if_open(INBOX).await?;
                 let st = c
                     .session
                     .status(INBOX, "(MESSAGES UNSEEN)")

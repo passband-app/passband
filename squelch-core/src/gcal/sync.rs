@@ -402,11 +402,18 @@ impl CalendarSync {
                 return;
             }
         };
-        for raw in pending {
-            if !self.reserve_place_call(&day, spent) {
-                break;
-            }
+        // The calls run side by side, so one slow answer does not hold up
+        // the rest of the pass by its whole timeout times the batch.
+        let asked: Vec<String> = pending
+            .into_iter()
+            .take_while(|_| self.reserve_place_call(&day, spent))
+            .collect();
+        let answers = futures::future::join_all(asked.into_iter().map(|raw| async move {
             let result = place::clean_place(client, &raw).await;
+            (raw, result)
+        }))
+        .await;
+        for (raw, result) in answers {
             let place = match result.cleaned {
                 Cleaned::Place(place) => Some(Some(place)),
                 Cleaned::Nothing => Some(None),

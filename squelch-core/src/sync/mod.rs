@@ -12754,7 +12754,7 @@ mod tests {
         });
         let remote = tokio::task::spawn_blocking(move || {
             let settings = crate::config::EmbedConfig::default().settings();
-            crate::embed::RemoteEmbedder::new(&url, None, &settings, 1000).unwrap()
+            crate::embed::RemoteEmbedder::new(&url, None, &settings).unwrap()
         })
         .await
         .unwrap();

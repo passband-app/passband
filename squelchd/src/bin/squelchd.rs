@@ -670,12 +670,7 @@ fn build_embedder_with(
 /// only for a configuration that can never work (a bad URL, or a daemon in a
 /// different vector space from the service), with the reason on stderr.
 fn build_remote_embedder(config: &Config, url: &str) -> Option<Arc<RemoteEmbedder>> {
-    let built = RemoteEmbedder::new(
-        url,
-        config.embed.token.as_deref(),
-        &config.embed.settings(),
-        config.embed.max_chars,
-    );
+    let built = RemoteEmbedder::new(url, config.embed.token.as_deref(), &config.embed.settings());
     let embedder = match built {
         Ok(e) => e,
         Err(e) => {

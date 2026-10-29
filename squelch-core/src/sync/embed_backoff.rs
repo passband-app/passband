@@ -18,9 +18,13 @@
 //! s); a refused connection, the shape of a service that is simply gone, costs
 //! nothing measurable.
 //!
-//! Local embedder errors and permanent remote ones (400, 401, a response in the
-//! wrong vector space) never open a window: retrying them is not a load
-//! problem, and the existing stop-the-pass behaviour is unchanged for them.
+//! A PERMANENT remote failure (400, 401, a response in the wrong vector space)
+//! opens a window too, at once at [`EMBED_BACKOFF_CAP`]: nothing about the
+//! next request differs from the one refused, so a wrong token or a service
+//! rebuilt on another model would otherwise be asked twelve times a minute,
+//! for ever, by every tenant. A success closes it like any other window.
+//! Local embedder errors never open a window: they are not a load problem,
+//! and the existing stop-the-pass behaviour is unchanged for them.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -83,14 +87,19 @@ impl EmbedBackoff {
         *self.lock() = State::default();
     }
 
-    /// A call failed with `err`. If that is a transient remote failure, open
-    /// the next window and return its length, for the caller's one log line;
-    /// anything else returns `None` and changes nothing.
+    /// A call failed with `err`. If that is a remote failure, open a window
+    /// and return its length, for the caller's one log line: the next rung of
+    /// the ladder for a transient one, [`EMBED_BACKOFF_CAP`] for a permanent
+    /// one. Anything else returns `None` and changes nothing.
     pub(crate) fn failed(&self, err: &CoreError, now: Instant) -> Option<Duration> {
-        let remote = remote_failure(err).filter(|r| r.transient)?;
+        let remote = remote_failure(err)?;
         let mut state = self.lock();
-        state.failures = state.failures.saturating_add(1);
-        let delay = embed_backoff_delay(state.failures, remote.retry_after);
+        let delay = if remote.transient {
+            state.failures = state.failures.saturating_add(1);
+            embed_backoff_delay(state.failures, remote.retry_after)
+        } else {
+            EMBED_BACKOFF_CAP
+        };
         state.until = Some(now + delay);
         Some(delay)
     }
@@ -121,8 +130,25 @@ mod tests {
         assert_eq!(d(1, 86_400), 300, "and a floor is still capped");
     }
 
+    /// A wrong token or a service in another vector space is not asked
+    /// again on the next tick: the window opens at the cap straight away.
     #[test]
-    fn only_a_transient_remote_failure_opens_a_window() {
+    fn a_permanent_remote_failure_opens_the_longest_window_at_once() {
+        let b = EmbedBackoff::default();
+        let t0 = Instant::now();
+        let refused = CoreError::from(crate::embed::RemoteEmbedError::permanent("HTTP 401"));
+        assert_eq!(b.failed(&refused, t0), Some(EMBED_BACKOFF_CAP));
+        assert!(!b.may_call(t0 + Duration::from_secs(299)));
+        assert!(b.may_call(t0 + EMBED_BACKOFF_CAP));
+
+        // Still the cap the second time, and a success closes it.
+        assert_eq!(b.failed(&refused, t0), Some(EMBED_BACKOFF_CAP));
+        b.succeeded();
+        assert!(b.may_call(t0));
+    }
+
+    #[test]
+    fn only_a_remote_failure_opens_a_window() {
         let b = EmbedBackoff::default();
         let t0 = Instant::now();
         assert!(b.may_call(t0));
@@ -145,15 +171,10 @@ mod tests {
         let err = tokio::task::spawn_blocking(move || {
             use crate::embed::Embedder;
             let settings = crate::config::EmbedConfig::default().settings();
-            crate::embed::RemoteEmbedder::new(
-                &format!("http://127.0.0.1:{port}"),
-                None,
-                &settings,
-                1000,
-            )
-            .unwrap()
-            .embed("hi")
-            .unwrap_err()
+            crate::embed::RemoteEmbedder::new(&format!("http://127.0.0.1:{port}"), None, &settings)
+                .unwrap()
+                .embed("hi")
+                .unwrap_err()
         })
         .await
         .unwrap();

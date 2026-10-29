@@ -22,10 +22,15 @@
 //!   that used to be local CPU work. Unbounded, a half-open connection parks
 //!   that thread forever, one per poll tick, until the pool is gone. So the
 //!   connect and request timeouts are not optional and not configurable.
-//! - **Bounded text.** Each text is cut to `embed.max_chars` HERE, before it is
-//!   sent. Ingest and backfill already cut through `message_embed_text`, but a
-//!   search query reaches the embedder as typed, and a pasted page is not
-//!   something to put on the wire.
+//! - **Bounded text, the same text the local embedder reads.** Each text is
+//!   cut to [`protocol::MAX_CHARS_PER_TEXT`] here, the bound the service would
+//!   cut to anyway, and NOT to `embed.max_chars`. Ingest and backfill already
+//!   cut to `embed.max_chars` through `message_embed_text`; a search query
+//!   reaches the embedder as typed, and the in-process embedder reads it
+//!   uncut but for `max_tokens`. Cutting a query to `max_chars` here would
+//!   make the same search mean something different on hosted than on
+//!   self-host. A call whose body would pass [`protocol::MAX_BODY_BYTES`] is
+//!   split, never sent to be refused.
 //! - **No text in any log or error.** Errors carry an HTTP status, the
 //!   service's closed error word, or a transport class (timeout, connect), and
 //!   nothing derived from a request or a response body.
@@ -64,8 +69,9 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// service that can switch a fleet's embedding off for a day with one header.
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
 
-/// How long a call may take. Fixed in production ([`Timeouts::PRODUCTION`]);
-/// a field only so the tests can wait milliseconds rather than seconds.
+/// How long a call may take. Fixed in production ([`Timeouts::PRODUCTION`],
+/// from the protocol, which also sets the server's lane deadlines just under
+/// them); a field only so the tests can wait milliseconds rather than seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Timeouts {
     /// TCP connect. In-cluster this is sub-millisecond when anything is
@@ -80,11 +86,12 @@ pub(crate) struct Timeouts {
 }
 
 impl Timeouts {
-    /// docs/EMBED-SERVICE.md §2.
+    /// docs/EMBED-SERVICE.md §2. `single` and `batch` are the protocol's,
+    /// because the service drops a request unrun just before them.
     pub(crate) const PRODUCTION: Self = Self {
         connect: Duration::from_secs(2),
-        single: Duration::from_secs(5),
-        batch: Duration::from_secs(30),
+        single: protocol::INTERACTIVE_TIMEOUT,
+        batch: protocol::BACKFILL_TIMEOUT,
     };
 }
 
@@ -99,8 +106,10 @@ impl Timeouts {
 pub struct RemoteEmbedError {
     /// Worth retrying later without changing anything: 408, 429, 503 and other 5xx,
     /// a timeout, a refused or failed connection. The sync engine backs off on
-    /// these. Anything else (400, 401, a response in the wrong vector space) is
-    /// PERMANENT: retrying it sends the same request to the same refusal.
+    /// these, on its doubling ladder. Anything else (400, 401, a response in
+    /// the wrong vector space) is PERMANENT: retrying it sends the same request
+    /// to the same refusal, so the engine pauses for its longest window at
+    /// once rather than ask again every tick.
     pub transient: bool,
     /// The service's `Retry-After`, in seconds, capped at [`MAX_RETRY_AFTER`].
     pub retry_after: Option<Duration>,
@@ -108,7 +117,7 @@ pub struct RemoteEmbedError {
 }
 
 impl RemoteEmbedError {
-    fn transient(what: impl Into<String>, retry_after: Option<Duration>) -> Self {
+    pub(crate) fn transient(what: impl Into<String>, retry_after: Option<Duration>) -> Self {
         Self {
             transient: true,
             retry_after,
@@ -116,7 +125,7 @@ impl RemoteEmbedError {
         }
     }
 
-    fn permanent(what: impl Into<String>) -> Self {
+    pub(crate) fn permanent(what: impl Into<String>) -> Self {
         Self {
             transient: false,
             retry_after: None,
@@ -149,7 +158,6 @@ pub struct RemoteEmbedder {
     /// `Bearer <token>`, marked sensitive so reqwest keeps it out of its own
     /// debug output.
     auth: Option<HeaderValue>,
-    max_chars: usize,
     timeouts: Timeouts,
 }
 
@@ -159,7 +167,6 @@ impl std::fmt::Debug for RemoteEmbedder {
         f.debug_struct("RemoteEmbedder")
             .field("embed_url", &self.embed_url.as_str())
             .field("auth", &self.auth.as_ref().map(|_| "<redacted>"))
-            .field("max_chars", &self.max_chars)
             .finish()
     }
 }
@@ -174,20 +181,14 @@ impl RemoteEmbedder {
     /// `message_vecs` is in; a disagreement does not fail loudly on the wire,
     /// it produces 384 floats that stop being comparable with the ones already
     /// stored. Also refuses a URL that is not plain `http(s)://host[:port][/path]`.
-    pub fn new(
-        url: &str,
-        token: Option<&str>,
-        settings: &EmbedSettings,
-        max_chars: usize,
-    ) -> Result<Self> {
-        Self::with_timeouts(url, token, settings, max_chars, Timeouts::PRODUCTION)
+    pub fn new(url: &str, token: Option<&str>, settings: &EmbedSettings) -> Result<Self> {
+        Self::with_timeouts(url, token, settings, Timeouts::PRODUCTION)
     }
 
     pub(crate) fn with_timeouts(
         url: &str,
         token: Option<&str>,
         settings: &EmbedSettings,
-        max_chars: usize,
         timeouts: Timeouts,
     ) -> Result<Self> {
         check_vector_space(settings)?;
@@ -226,7 +227,6 @@ impl RemoteEmbedder {
             embed_url,
             health_url,
             auth,
-            max_chars,
             timeouts,
         })
     }
@@ -283,27 +283,56 @@ impl RemoteEmbedder {
         check_response(&parsed, n)?;
         Ok(parsed.vectors)
     }
+}
 
-    fn cut(&self, text: &str) -> String {
-        truncate_chars(text, self.max_chars)
+/// `text` cut to the service's per-text bound, which is where the service
+/// would cut it: the vector is the one it would have computed uncut.
+fn cut(text: &str) -> String {
+    truncate_chars(text, protocol::MAX_CHARS_PER_TEXT)
+}
+
+/// `texts` (already cut) in order, as calls of at most
+/// [`protocol::MAX_TEXTS_PER_CALL`] texts whose bodies fit in
+/// [`protocol::MAX_BODY_BYTES`]. Only a configured `embed.max_chars` far over
+/// the default makes a body that large; one text always fits by itself
+/// (`protocol::MAX_TEXT_WIRE_BYTES`).
+fn calls(texts: Vec<String>) -> Vec<Vec<String>> {
+    // `{"texts":[` and `]}`.
+    const FRAME: usize = 12;
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut size = FRAME;
+    for text in texts {
+        // The string as serde_json writes it, plus its comma.
+        let wire =
+            serde_json::to_string(&text).map_or(protocol::MAX_TEXT_WIRE_BYTES, |s| s.len()) + 1;
+        let fits = out.last().is_some_and(|call| {
+            call.len() < protocol::MAX_TEXTS_PER_CALL && size + wire <= protocol::MAX_BODY_BYTES
+        });
+        if !fits {
+            out.push(Vec::new());
+            size = FRAME;
+        }
+        size += wire;
+        out.last_mut().expect("pushed above").push(text);
     }
+    out
 }
 
 impl Embedder for RemoteEmbedder {
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let mut out = self.post(vec![self.cut(text)])?;
+        let mut out = self.post(vec![cut(text)])?;
         // `post` has already checked there is exactly one.
         Ok(out.pop().unwrap_or_default())
     }
 
-    /// Chunked to [`protocol::MAX_TEXTS_PER_CALL`] per request, in order. A
-    /// failed chunk fails the whole batch, which is what the backfill expects:
-    /// it stops the pass and the rows stay owed.
+    /// Chunked to [`protocol::MAX_TEXTS_PER_CALL`] per request, and smaller
+    /// where a body would not fit, in order. A failed chunk fails the whole
+    /// batch, which is what the backfill expects: it stops the pass and the
+    /// rows stay owed.
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let mut out = Vec::with_capacity(texts.len());
-        for chunk in texts.chunks(protocol::MAX_TEXTS_PER_CALL) {
-            let cut: Vec<String> = chunk.iter().map(|t| self.cut(t)).collect();
-            out.extend(self.post(cut)?);
+        for call in calls(texts.iter().map(|t| cut(t)).collect()) {
+            out.extend(self.post(call)?);
         }
         Ok(out)
     }
@@ -473,6 +502,9 @@ mod tests {
         );
         let d = crate::config::EmbedConfig::default();
         assert_eq!(d.dims, protocol::DIMS);
+        // The client's timeouts are the ones the server's deadlines sit under.
+        assert_eq!(Timeouts::PRODUCTION.single, protocol::INTERACTIVE_TIMEOUT);
+        assert_eq!(Timeouts::PRODUCTION.batch, protocol::BACKFILL_TIMEOUT);
     }
 
     /// One request as the fake service saw it.
@@ -596,7 +628,7 @@ mod tests {
     }
 
     fn remote(base: &str, token: Option<&str>) -> RemoteEmbedder {
-        RemoteEmbedder::new(base, token, &settings(), 1000).unwrap()
+        RemoteEmbedder::new(base, token, &settings()).unwrap()
     }
 
     fn err_of(r: Result<impl std::fmt::Debug>) -> RemoteEmbedError {
@@ -634,17 +666,45 @@ mod tests {
         assert!(e.embed_batch(&[]).unwrap().is_empty());
     }
 
+    /// Cut where the service cuts, not at `embed.max_chars`: a query is
+    /// embedded as typed on self-host, so it must be here too, or one search
+    /// would mean two things.
     #[test]
-    fn text_is_truncated_before_it_is_sent() {
+    fn text_is_cut_to_the_protocol_bound_not_max_chars() {
         let (base, seen) = serve(echo);
-        let e = RemoteEmbedder::new(&base, None, &settings(), 10).unwrap();
+        let e = remote(&base, None);
+        let max = protocol::MAX_CHARS_PER_TEXT;
+        // Longer than the default `embed.max_chars` (1000): sent whole.
+        let query = "q".repeat(3000);
+        assert_eq!(e.embed(&query).unwrap()[0], 3000.0);
         // Multibyte, so a byte cut would split a char.
-        let long = "é".repeat(50);
-        assert_eq!(e.embed(&long).unwrap()[0], 10.0);
+        let long = "é".repeat(max + 50);
+        assert_eq!(e.embed(&long).unwrap()[0], max as f32);
         e.embed_batch(&[long.clone(), "short".into()]).unwrap();
         let seen = seen.lock().unwrap();
-        assert_eq!(seen[0].texts(), vec!["é".repeat(10)]);
-        assert_eq!(seen[1].texts(), vec!["é".repeat(10), "short".into()]);
+        assert_eq!(seen[0].texts(), vec![query]);
+        assert_eq!(seen[1].texts(), vec!["é".repeat(max)]);
+        assert_eq!(seen[2].texts(), vec!["é".repeat(max), "short".into()]);
+    }
+
+    /// A call whose body would pass the server's limit is split, so a
+    /// daemon with a large `embed.max_chars` never sends a request the
+    /// service refuses as a permanent 400.
+    #[test]
+    fn a_call_too_large_for_one_body_is_split() {
+        let (base, seen) = serve(echo);
+        let e = remote(&base, None);
+        // Control characters escape to six bytes each: eight of these are
+        // about 390 KB, over the 256 KiB body limit.
+        let heavy = "\u{1}".repeat(protocol::MAX_CHARS_PER_TEXT);
+        let texts = vec![heavy; 8];
+        assert_eq!(e.embed_batch(&texts).unwrap().len(), 8);
+        let seen = seen.lock().unwrap();
+        assert!(seen.len() > 1, "split into {} calls", seen.len());
+        assert_eq!(seen.iter().map(|s| s.texts().len()).sum::<usize>(), 8);
+        for s in seen.iter() {
+            assert!(s.body.len() <= protocol::MAX_BODY_BYTES, "{}", s.body.len());
+        }
     }
 
     #[test]
@@ -725,7 +785,7 @@ mod tests {
             single: Duration::from_millis(200),
             batch: Duration::from_millis(400),
         };
-        let e = RemoteEmbedder::with_timeouts(&base, None, &settings(), 1000, quick).unwrap();
+        let e = RemoteEmbedder::with_timeouts(&base, None, &settings(), quick).unwrap();
         let started = std::time::Instant::now();
         let err = err_of(e.embed("hi"));
         assert!(err.transient);
@@ -777,24 +837,24 @@ mod tests {
         let base = "http://squelch-embed:8850";
         let mut s = settings();
         s.dims = 768;
-        let e = RemoteEmbedder::new(base, None, &s, 1000).unwrap_err();
+        let e = RemoteEmbedder::new(base, None, &s).unwrap_err();
         assert!(e.to_string().contains("embed.dims is 768"), "{e}");
 
         let mut s = settings();
         s.max_tokens = 512;
-        let e = RemoteEmbedder::new(base, None, &s, 1000).unwrap_err();
+        let e = RemoteEmbedder::new(base, None, &s).unwrap_err();
         assert!(e.to_string().contains("embed.max_tokens is 512"), "{e}");
 
         // The int8 build of the same family is a different space.
         let mut s = settings();
         s.model_name = "BGESmallENV15Q".into();
-        let e = RemoteEmbedder::new(base, None, &s, 1000).unwrap_err();
+        let e = RemoteEmbedder::new(base, None, &s).unwrap_err();
         assert!(e.to_string().contains("embed.model"), "{e}");
 
         // An alias that MEANS the service's model is the service's model.
         let mut s = settings();
         s.model_name = "BGESmallENV15".into();
-        RemoteEmbedder::new(base, None, &s, 1000).unwrap();
+        RemoteEmbedder::new(base, None, &s).unwrap();
     }
 
     #[test]
@@ -806,7 +866,7 @@ mod tests {
             " http://10.0.0.1:8850/ ",
             "http://squelch-embed:8850/base",
         ] {
-            RemoteEmbedder::new(ok, None, &s, 1000).unwrap_or_else(|e| panic!("{ok}: {e}"));
+            RemoteEmbedder::new(ok, None, &s).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
         for bad in [
             "",
@@ -816,7 +876,7 @@ mod tests {
             "http://squelch-embed:8850/?x=1",
             "http://squelch-embed:8850/#f",
         ] {
-            let e = RemoteEmbedder::new(bad, None, &s, 1000).unwrap_err();
+            let e = RemoteEmbedder::new(bad, None, &s).unwrap_err();
             assert!(e.to_string().contains("SQUELCH_EMBED_URL"), "{bad}: {e}");
         }
         let (embed, health) = service_urls("http://h:1/base/").unwrap();

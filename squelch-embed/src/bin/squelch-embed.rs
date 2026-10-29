@@ -10,7 +10,8 @@
 //!
 //! Both listeners bind before the session loads, so the kubelet's probe gets a
 //! 503 rather than a refused connection while the weights come off disk. A
-//! session that cannot be built exits the process non-zero, with the reason.
+//! session that cannot be built exits the process non-zero, with the reason,
+//! and so does an inference thread that dies after it was built.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -130,12 +131,7 @@ async fn run(model_dir: PathBuf, token: Option<Arc<str>>, log: Log) -> ExitCode 
         metrics.clone(),
         log.clone(),
     );
-    let state = AppState {
-        coalescer,
-        metrics,
-        token,
-        log: log.clone(),
-    };
+    let state = AppState::new(coalescer.clone(), metrics, token, log.clone());
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
@@ -157,10 +153,19 @@ async fn run(model_dir: PathBuf, token: Option<Arc<str>>, log: Log) -> ExitCode 
     let code = tokio::select! {
         result = loaded => match result {
             Ok(Ok(())) => {
-                // Ready. Serve until told to stop.
-                terminated().await;
-                log.line("shutting down");
-                ExitCode::SUCCESS
+                // Ready. Serve until told to stop, or until the inference
+                // thread dies: then exit non-zero for the kubelet to restart
+                // the pod, rather than answer 503 for ever.
+                tokio::select! {
+                    () = terminated() => {
+                        log.line("shutting down");
+                        ExitCode::SUCCESS
+                    }
+                    () = coalescer.died() => {
+                        log.line("the inference thread stopped; exiting");
+                        ExitCode::FAILURE
+                    }
+                }
             }
             Ok(Err(e)) => {
                 log.line(&format!("cannot build the embedding session: {e}"));

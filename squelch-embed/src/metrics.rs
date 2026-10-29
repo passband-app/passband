@@ -114,7 +114,7 @@ impl From<Option<Lane>> for LaneLabel {
 }
 
 /// Seconds a request waits between being queued and its batch starting. The
-/// interesting range runs from "inside the coalescing window" (10 ms) to "a
+/// interesting range runs from "straight in" (a few ms) to "a
 /// signup backfill is in front of you" (tens of seconds, §2's arithmetic for a
 /// full backfill lane on a shared core).
 pub const QUEUE_WAIT_BUCKETS: [f64; 12] = [
@@ -128,7 +128,8 @@ pub const INFERENCE_BUCKETS: [f64; 10] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0
 
 /// Texts per forward pass, 1 to [`crate::protocol::MAX_TEXTS_PER_CALL`]. One
 /// bucket per possible size, so the histogram is the exact distribution: how
-/// often coalescing actually merged anything is the question it answers.
+/// big the requests are is the question it answers: a pass is one request,
+/// never a merge of several.
 pub const BATCH_SIZE_BUCKETS: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
 /// One unlabelled histogram over fixed bounds. Buckets are stored
@@ -247,6 +248,12 @@ impl Metrics {
         self.session_ready.store(true, Ordering::Release);
     }
 
+    /// The inference thread is gone: `/healthz` answers 503 again and the
+    /// readiness probe takes the pod out of the Service.
+    pub fn set_not_ready(&self) {
+        self.session_ready.store(false, Ordering::Release);
+    }
+
     pub fn is_ready(&self) -> bool {
         self.session_ready.load(Ordering::Acquire)
     }
@@ -347,7 +354,7 @@ impl Metrics {
         e.family(
             "squelch_embed_batch_size",
             "histogram",
-            "Texts per forward pass. Anything above a request's own size is coalescing at work.",
+            "Texts per forward pass. One pass is one request; requests are never merged.",
         );
         self.batch_size
             .render(&mut e, "squelch_embed_batch_size", &[]);

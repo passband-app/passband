@@ -29,7 +29,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 
-use crate::coalescer::{Coalescer, Lane, QueueFull};
+use crate::coalescer::{Coalescer, Failure, Lane, Refused};
 use crate::log::Log;
 use crate::metrics::{LaneLabel, Metrics, Outcome};
 use crate::protocol::{self, EmbedRequest, EmbedResponse, ErrorResponse};
@@ -52,6 +52,22 @@ pub struct AppState {
     /// `None` means no authentication (the startup log says so).
     pub token: Option<Arc<str>>,
     pub log: Log,
+}
+
+impl AppState {
+    pub fn new(
+        coalescer: Coalescer,
+        metrics: Arc<Metrics>,
+        token: Option<Arc<str>>,
+        log: Log,
+    ) -> Self {
+        Self {
+            coalescer,
+            metrics,
+            token,
+            log,
+        }
+    }
 }
 
 /// `POST /embed` and `GET /healthz`, for [`protocol::PORT`].
@@ -78,6 +94,13 @@ fn error(status: StatusCode, word: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+fn too_many(retry_after_secs: u64) -> Response {
+    let mut r = error(StatusCode::TOO_MANY_REQUESTS, protocol::ERR_QUEUE_FULL);
+    r.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(retry_after_secs));
+    r
 }
 
 fn authorized(token: &str, headers: &HeaderMap) -> bool {
@@ -141,14 +164,14 @@ async fn embed(State(s): State<AppState>, headers: HeaderMap, body: Body) -> Res
 
     let reply = match s.coalescer.submit(texts) {
         Ok(rx) => rx,
-        Err(QueueFull(lane)) => {
+        Err(Refused::QueueFull(lane)) => {
             s.metrics.record(lane, Outcome::QueueFull);
-            let mut r = error(StatusCode::TOO_MANY_REQUESTS, protocol::ERR_QUEUE_FULL);
-            r.headers_mut().insert(
-                header::RETRY_AFTER,
-                HeaderValue::from(lane.retry_after_secs()),
-            );
-            return r;
+            return too_many(lane.retry_after_secs());
+        }
+        // The worker died between the readiness check and here.
+        Err(Refused::Stopped) => {
+            s.metrics.record(lane, Outcome::NotReady);
+            return error(StatusCode::SERVICE_UNAVAILABLE, protocol::ERR_NOT_READY);
         }
     };
 
@@ -160,7 +183,12 @@ async fn embed(State(s): State<AppState>, headers: HeaderMap, body: Body) -> Res
             vectors,
         })
         .into_response(),
-        Ok(Err(_)) | Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, protocol::ERR_INTERNAL),
+        // Waited past the lane's deadline: the service was too busy, which
+        // is a 429, not a fault.
+        Ok(Err(Failure::Expired)) => too_many(lane.retry_after_secs()),
+        Ok(Err(Failure::Inference | Failure::Stopped)) | Err(_) => {
+            error(StatusCode::INTERNAL_SERVER_ERROR, protocol::ERR_INTERNAL)
+        }
     }
 }
 
@@ -269,12 +297,7 @@ mod tests {
         let (coalescer, loaded) = Coalescer::start(fake.loader(), metrics.clone(), log.clone());
         loaded.await.unwrap().unwrap();
         Harness {
-            state: AppState {
-                coalescer,
-                metrics,
-                token: token.map(Arc::from),
-                log,
-            },
+            state: AppState::new(coalescer, metrics, token.map(Arc::from), log),
             fake,
             lines,
         }
@@ -381,6 +404,92 @@ mod tests {
         assert!(h.fake.seen().is_empty());
     }
 
+    /// A dead inference thread is a 500 for whoever was queued and a 503 for
+    /// everyone after, never a hang.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dead_worker_is_500_for_the_queue_and_503_after() {
+        let gate = Gate::closed();
+        let h = harness_with(
+            Fake {
+                gate: Some(gate.clone()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+        let router = work_router(h.state.clone());
+        let hold = tokio::spawn(call(router.clone(), post(body_for(&["hold"]), None)));
+        let g = gate.clone();
+        tokio::task::spawn_blocking(move || g.wait_for_arrivals(1))
+            .await
+            .unwrap();
+        let first = tokio::spawn(call(router.clone(), post(body_for(&["a", "b"]), None)));
+        let second = tokio::spawn(call(router.clone(), post(body_for(&["c", "d"]), None)));
+        until_depth(&h.state, [0, 4]).await;
+        h.state.coalescer.kill_worker();
+        gate.open();
+        assert_eq!(hold.await.unwrap().0, StatusCode::OK);
+        for p in [first, second] {
+            let (status, _, body) = tokio::time::timeout(Duration::from_secs(5), p)
+                .await
+                .expect("answered, not left hanging")
+                .unwrap();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(error_word(&body), protocol::ERR_INTERNAL);
+        }
+        tokio::time::timeout(Duration::from_secs(5), h.state.coalescer.died())
+            .await
+            .unwrap();
+        let (status, _, body) = call(router.clone(), post(body_for(&["e"]), None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_word(&body), protocol::ERR_NOT_READY);
+        assert_eq!(
+            get_path(metrics_router(h.state.clone()), "/healthz")
+                .await
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// A request that waited past its lane's deadline is a 429 with that
+    /// lane's Retry-After: busy, not broken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_past_its_deadline_is_429() {
+        let gate = Gate::closed();
+        let fake = Fake {
+            gate: Some(gate.clone()),
+            ..Default::default()
+        };
+        let metrics = Arc::new(Metrics::new());
+        let (coalescer, loaded) = Coalescer::start_with(
+            fake.loader(),
+            metrics.clone(),
+            Log::new(|_| {}),
+            [Duration::from_millis(100), Duration::from_millis(100)],
+        );
+        loaded.await.unwrap().unwrap();
+        let state = AppState::new(coalescer, metrics, None, Log::new(|_| {}));
+        let router = work_router(state.clone());
+        let hold = tokio::spawn(call(router.clone(), post(body_for(&["hold"]), None)));
+        let g = gate.clone();
+        tokio::task::spawn_blocking(move || g.wait_for_arrivals(1))
+            .await
+            .unwrap();
+        let late = tokio::spawn(call(router.clone(), post(body_for(&["x", "y"]), None)));
+        until_depth(&state, [0, 2]).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        gate.open();
+        assert_eq!(hold.await.unwrap().0, StatusCode::OK);
+        let (status, headers, body) = late.await.unwrap();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error_word(&body), protocol::ERR_QUEUE_FULL);
+        assert_eq!(
+            headers[header::RETRY_AFTER],
+            Lane::Backfill.retry_after_secs().to_string()
+        );
+        assert_eq!(fake.seen().len(), 1, "only the held pass ran");
+    }
+
     #[tokio::test]
     async fn the_token_is_required_when_set_and_compared_exactly() {
         let h = harness(Some(TOKEN)).await;
@@ -442,12 +551,7 @@ mod tests {
             metrics.clone(),
             Log::new(|_| {}),
         );
-        let state = AppState {
-            coalescer,
-            metrics,
-            token: None,
-            log: Log::new(|_| {}),
-        };
+        let state = AppState::new(coalescer, metrics, None, Log::new(|_| {}));
 
         for router in [work_router(state.clone()), metrics_router(state.clone())] {
             let (status, body) = get_path(router, "/healthz").await;

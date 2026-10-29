@@ -3,66 +3,75 @@
 //! A request's LANE is its shape: exactly one text is interactive (a search
 //! query, or one message being ingested), two or more is backfill. The service
 //! cannot name a tenant and must not need to, so shape is the only thing it
-//! has. The interactive lane always drains first, which is what keeps a
-//! search from queuing behind somebody's signup backfill.
+//! has. PRIORITY IS STRICT: the worker takes the next interactive request
+//! whenever one is waiting, and a backfill request only when none is, which
+//! is what keeps a search from queuing behind somebody's signup backfill.
 //!
-//! BATCHING ONLY MERGES. A request is at most [`INFERENCE_BATCH`] texts, which
-//! is also the most one forward pass takes, so a request never splits across
-//! two runs and nothing here has to reassemble one. The worker waits up to
-//! [`COALESCE_WINDOW`] after the oldest waiting request arrived, or until
-//! [`INFERENCE_BATCH`] texts are waiting, then takes whole requests, lane by
-//! lane and in arrival order within a lane, while they fit. A full 8-text
-//! backfill request fills a batch by itself; merging buys a forward pass only
-//! when short requests actually overlap.
+//! ONE FORWARD PASS PER REQUEST. Requests are never merged, so no pass ever
+//! holds two callers' texts. A merged pass is a side channel between tenants:
+//! a batch pads to its longest member, so how long my pass took would say how
+//! long somebody else's text was, and whether it ran at all would say they
+//! were embedding just then. A request is at most [`INFERENCE_BATCH`] texts,
+//! which is also the most one pass takes, so a request never splits either.
+//! The cost is throughput on short overlapping requests, which at this
+//! fleet's load is nothing; there is no coalescing window to wait out.
 //!
-//! Two tenants' texts can sit in one batch. The batch is a positional array
-//! that lives for one forward pass: results go back by index to the request
-//! that supplied them, and the texts are dropped when the pass returns. No
-//! cache, and no dedup inside a batch either (a byte-identical text from two
-//! requests is run twice): a content-keyed shortcut is a cross-tenant oracle
-//! on latency (§4).
+//! No cache, and no dedup inside a request (a byte-identical text sent twice
+//! is run twice): a content-keyed shortcut is a cross-tenant oracle on
+//! latency (§4). The texts are dropped when the pass returns.
 //!
 //! A request whose caller has gone (the HTTP handler was dropped because the
 //! connection closed or the client timed out) is SKIPPED when it reaches the
-//! front of its lane, never run.
+//! front of its lane, never run. So is one that waited past its lane's
+//! DEADLINE ([`protocol::INTERACTIVE_DEADLINE`],
+//! [`protocol::BACKFILL_DEADLINE`]), which sits just under the daemon's own
+//! timeout: a pass started after the caller gave up is a pass for nobody.
+//! Both count as `abandoned`; an expired request whose caller is somehow
+//! still there is answered 429.
 //!
-//! Lane shares bound memory and fairness at once: 192 texts of backfill and 64
-//! of interactive may wait, and past a lane's share a request is refused
-//! (429) rather than queued, so a backfill flood cannot 429 a search and a
-//! search flood cannot crowd backfill out of the queue. Priority is strict:
-//! interactive load sustained above the service's whole throughput would
-//! starve backfill, which at one short text per search is a load nobody
-//! generates; if it ever happens, backfill's 429s and queue-wait say so.
+//! Lane shares bound memory and fairness at once: [`BACKFILL_SHARE`] texts of
+//! backfill and [`INTERACTIVE_SHARE`] of interactive may wait, and past a
+//! lane's share a request is refused (429) rather than queued, after the lane
+//! has been swept of callers that are gone or expired. A backfill flood
+//! cannot 429 a search and a search flood cannot crowd backfill out of the
+//! queue. Interactive load sustained above the service's whole throughput
+//! would starve backfill, which at one short text per search is a load nobody
+//! generates; if it ever happens, backfill's `abandoned` and `queue_full`
+//! counts say so.
+//!
+//! IF THE INFERENCE THREAD DIES (a panic outside the guarded forward pass),
+//! the service stops being ready, every queued caller is answered 500 at
+//! once rather than left to time out, nothing new is queued, and
+//! [`Coalescer::died`] resolves so the binary exits non-zero for the kubelet
+//! to restart it. A process answering 503 forever is worse than a restart.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use crate::log::Log;
 use crate::metrics::{Metrics, Outcome};
 use crate::protocol;
 use crate::session::{Loader, Session};
 
-/// How long a waiting request may sit for company before its batch fires.
-/// Invisible at query time, where a search already spends tens of ms in
-/// SQLite.
-pub const COALESCE_WINDOW: Duration = Duration::from_millis(10);
-
-/// Texts per forward pass. THIS IS THE MEMORY BOUND: batch 8 at 256 tokens is
-/// about +123 MB of ORT scratch, and the pod limit is sized from it (§2).
-/// Equal to the wire bound, which is why a request never splits; if one of
-/// the two moves, the other moves with it or this module grows a splitter.
+/// Texts per forward pass, which is one request. THIS IS THE MEMORY BOUND:
+/// batch 8 at 256 tokens is about +123 MB of ORT scratch, and the pod limit
+/// is sized from it (§2). Equal to the wire bound, which is why a request
+/// never splits; if one of the two moves, the other moves with it or this
+/// module grows a splitter.
 pub const INFERENCE_BATCH: usize = protocol::MAX_TEXTS_PER_CALL;
 
+/// Backfill's share of the queue, in texts: 12 full requests, about as many
+/// as can start inside [`protocol::BACKFILL_DEADLINE`] on a shared core.
+pub const BACKFILL_SHARE: usize = 96;
+/// Interactive's share: 16 searches or single-message ingests, a fraction of
+/// a second of work at the front of the queue.
+pub const INTERACTIVE_SHARE: usize = 16;
 /// Texts that may wait across both lanes.
-pub const MAX_QUEUED_TEXTS: usize = 256;
-/// Backfill's share of [`MAX_QUEUED_TEXTS`]: 24 full requests.
-pub const BACKFILL_SHARE: usize = 192;
-/// Interactive's share: 64 searches or single-message ingests.
-pub const INTERACTIVE_SHARE: usize = MAX_QUEUED_TEXTS - BACKFILL_SHARE;
+pub const MAX_QUEUED_TEXTS: usize = BACKFILL_SHARE + INTERACTIVE_SHARE;
 
 /// Which queue a request waits in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,12 +100,20 @@ impl Lane {
         }
     }
 
+    /// How long a request in this lane may wait for its pass to start.
+    pub fn deadline(self) -> Duration {
+        match self {
+            Self::Interactive => protocol::INTERACTIVE_DEADLINE,
+            Self::Backfill => protocol::BACKFILL_DEADLINE,
+        }
+    }
+
     /// The `Retry-After` on a 429 from this lane, in seconds. Interactive is
-    /// short because its lane drains first and holds at most 64 single texts,
-    /// a few seconds of work; in practice the daemon does not retry a search
-    /// at all, it degrades to keyword results. Backfill is the time a full
-    /// lane takes to move meaningfully at §7's throughput, and the daemon's
-    /// backoff treats it as a floor.
+    /// short because its lane drains first and holds at most 16 single texts;
+    /// in practice the daemon does not retry a search at all, it degrades to
+    /// keyword results. Backfill is the time a full lane takes to move
+    /// meaningfully at §7's throughput, and the daemon's backoff treats it as
+    /// a floor.
     pub fn retry_after_secs(self) -> u64 {
         match self {
             Self::Interactive => 2,
@@ -116,16 +133,28 @@ impl Lane {
     }
 }
 
-/// The lane was over its share.
+/// Why a request was not queued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueueFull(pub Lane);
+pub enum Refused {
+    /// The lane was over its share, even after sweeping it.
+    QueueFull(Lane),
+    /// The inference thread is gone.
+    Stopped,
+}
 
-/// The forward pass failed, or returned the wrong shape.
+/// Why a queued request got no vectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InferenceFailed;
+pub enum Failure {
+    /// The forward pass failed, or returned the wrong shape.
+    Inference,
+    /// It waited past its lane's deadline and was dropped unrun.
+    Expired,
+    /// The inference thread died with it still queued.
+    Stopped,
+}
 
 /// What a request is answered with: its own vectors, in its own order.
-pub type Reply = Result<Vec<Vec<f32>>, InferenceFailed>;
+pub type Reply = Result<Vec<Vec<f32>>, Failure>;
 
 struct Job {
     texts: Vec<String>,
@@ -140,11 +169,20 @@ struct Queues {
     /// Texts waiting per lane, which is what the shares bound.
     waiting: [usize; 2],
     shutdown: bool,
+    /// The inference thread has exited; nothing is queued any more.
+    dead: bool,
 }
 
 struct Shared {
     queues: Mutex<Queues>,
     wake: Condvar,
+    /// Per lane, by [`Lane::index`]: [`Lane::deadline`] in production.
+    deadlines: [Duration; 2],
+    /// Raised once, when the inference thread exits for any reason.
+    died: watch::Sender<bool>,
+    /// Lets a test kill the worker outside the guarded forward pass.
+    #[cfg(test)]
+    kill: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -152,6 +190,10 @@ impl Shared {
         // Nothing holding this lock can panic midway through an update that
         // matters, so a poisoned lock is still a consistent one.
         self.queues.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn expired(&self, job: &Job, now: Instant) -> bool {
+        now.saturating_duration_since(job.enqueued) >= self.deadlines[job.lane.index()]
     }
 }
 
@@ -162,6 +204,31 @@ impl Drop for StopOnDrop {
     fn drop(&mut self) {
         self.0.lock().shutdown = true;
         self.0.wake.notify_all();
+    }
+}
+
+/// Runs when the inference thread exits, by return or by panic: the service
+/// stops being ready, every queued caller is answered, and nothing new is
+/// accepted.
+struct WorkerExit<'a> {
+    shared: &'a Shared,
+    metrics: &'a Metrics,
+}
+
+impl Drop for WorkerExit<'_> {
+    fn drop(&mut self) {
+        self.metrics.set_not_ready();
+        let jobs: Vec<Job> = {
+            let mut q = self.shared.lock();
+            q.dead = true;
+            q.waiting = [0, 0];
+            q.lanes.iter_mut().flat_map(|l| l.drain(..)).collect()
+        };
+        for job in jobs {
+            let _ = job.reply.send(Err(Failure::Stopped));
+            self.metrics.record(job.lane, Outcome::Error);
+        }
+        self.shared.died.send_replace(true);
     }
 }
 
@@ -184,9 +251,29 @@ impl Coalescer {
         metrics: Arc<Metrics>,
         log: Log,
     ) -> (Self, oneshot::Receiver<Result<(), String>>) {
+        Self::start_with(
+            loader,
+            metrics,
+            log,
+            [Lane::Interactive.deadline(), Lane::Backfill.deadline()],
+        )
+    }
+
+    /// [`Self::start`] with other lane deadlines, so a test can wait
+    /// milliseconds rather than seconds.
+    pub(crate) fn start_with(
+        loader: Loader,
+        metrics: Arc<Metrics>,
+        log: Log,
+        deadlines: [Duration; 2],
+    ) -> (Self, oneshot::Receiver<Result<(), String>>) {
         let shared = Arc::new(Shared {
             queues: Mutex::new(Queues::default()),
             wake: Condvar::new(),
+            deadlines,
+            died: watch::Sender::new(false),
+            #[cfg(test)]
+            kill: std::sync::atomic::AtomicBool::new(false),
         });
         let (loaded_tx, loaded_rx) = oneshot::channel();
         let worker_shared = shared.clone();
@@ -205,6 +292,10 @@ impl Coalescer {
                         let _ = loaded_tx.send(Err("session loader panicked".to_string()));
                         return;
                     }
+                };
+                let _exit = WorkerExit {
+                    shared: &worker_shared,
+                    metrics: &worker_metrics,
                 };
                 worker_metrics.set_ready();
                 log.line(&format!(
@@ -233,19 +324,33 @@ impl Coalescer {
         self.metrics.is_ready()
     }
 
+    /// Resolves once the inference thread has exited, for any reason. The
+    /// binary exits non-zero on it.
+    pub async fn died(&self) {
+        let mut rx = self.shared.died.subscribe();
+        let _ = rx.wait_for(|dead| *dead).await;
+    }
+
     /// Queue `texts` (1..=[`INFERENCE_BATCH`], already validated and
     /// truncated) and return where the answer will arrive. Refused, not
-    /// queued, if its lane is over its share.
-    pub fn submit(&self, texts: Vec<String>) -> Result<oneshot::Receiver<Reply>, QueueFull> {
+    /// queued, if its lane is over its share once callers that are gone or
+    /// past their deadline have been swept out of it.
+    pub fn submit(&self, texts: Vec<String>) -> Result<oneshot::Receiver<Reply>, Refused> {
         debug_assert!((1..=INFERENCE_BATCH).contains(&texts.len()));
         let lane = Lane::of(texts.len());
         let n = texts.len();
         let (tx, rx) = oneshot::channel();
         {
             let mut q = self.shared.lock();
+            if q.dead || q.shutdown {
+                return Err(Refused::Stopped);
+            }
             let i = lane.index();
             if q.waiting[i] + n > lane.share() {
-                return Err(QueueFull(lane));
+                sweep(&self.shared, &mut q, lane, &self.metrics);
+            }
+            if q.waiting[i] + n > lane.share() {
+                return Err(Refused::QueueFull(lane));
             }
             q.waiting[i] += n;
             q.lanes[i].push_back(Job {
@@ -264,141 +369,121 @@ impl Coalescer {
     pub fn depth(&self) -> [usize; 2] {
         self.shared.lock().waiting
     }
-}
 
-fn worker(shared: &Shared, mut session: Box<dyn Session>, metrics: &Metrics, log: &Log) {
-    while let Some(batch) = next_batch(shared, metrics) {
-        run_batch(session.as_mut(), batch, metrics, log);
+    #[cfg(test)]
+    pub(crate) fn kill_worker(&self) {
+        self.shared
+            .kill
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-/// Block until a batch is due, then take it. `None` on shutdown.
-fn next_batch(shared: &Shared, metrics: &Metrics) -> Option<Vec<Job>> {
+/// Drop from `lane` every request whose caller is gone or whose deadline has
+/// passed: they would be skipped at the front anyway, and until then they
+/// hold share a live caller could use.
+fn sweep(shared: &Shared, q: &mut Queues, lane: Lane, metrics: &Metrics) {
+    let now = Instant::now();
+    let i = lane.index();
+    let jobs = std::mem::take(&mut q.lanes[i]);
+    for job in jobs {
+        if job.reply.is_closed() || shared.expired(&job, now) {
+            q.waiting[i] -= job.texts.len();
+            let _ = job.reply.send(Err(Failure::Expired));
+            metrics.record(lane, Outcome::Abandoned);
+        } else {
+            q.lanes[i].push_back(job);
+        }
+    }
+}
+
+fn worker(shared: &Shared, mut session: Box<dyn Session>, metrics: &Metrics, log: &Log) {
+    while let Some(job) = next_job(shared, metrics) {
+        #[cfg(test)]
+        if shared.kill.load(std::sync::atomic::Ordering::SeqCst) {
+            // Unguarded, on purpose: this is the death `WorkerExit` covers.
+            drop(job);
+            panic!("the test killed the inference thread");
+        }
+        run(session.as_mut(), job, metrics, log);
+    }
+}
+
+/// Block until a request is due, then take it: the interactive lane's front
+/// whenever it has one, else the backfill lane's. Requests met at a front
+/// whose caller is gone or whose deadline has passed are dropped unrun.
+/// `None` on shutdown.
+fn next_job(shared: &Shared, metrics: &Metrics) -> Option<Job> {
     let mut q = shared.lock();
     loop {
         if q.shutdown {
             return None;
         }
-        let waiting: usize = q.waiting.iter().sum();
-        if waiting == 0 {
-            q = shared.wake.wait(q).unwrap_or_else(PoisonError::into_inner);
-            continue;
-        }
-        let oldest = q
-            .lanes
-            .iter()
-            .filter_map(|l| l.front().map(|j| j.enqueued))
-            .min()
-            .expect("waiting > 0 means a job is queued");
-        let due = oldest + COALESCE_WINDOW;
         let now = Instant::now();
-        if waiting >= INFERENCE_BATCH || now >= due {
-            let batch = take_batch(&mut q, metrics);
-            if batch.is_empty() {
-                // Everything that was due had been abandoned; look again.
-                continue;
-            }
-            return Some(batch);
-        }
-        q = shared
-            .wake
-            .wait_timeout(q, due - now)
-            .unwrap_or_else(PoisonError::into_inner)
-            .0;
-    }
-}
-
-/// Whole requests, interactive lane first, arrival order within a lane, while
-/// they fit in [`INFERENCE_BATCH`]. Abandoned requests met at a lane's front
-/// are dropped without running.
-fn take_batch(q: &mut Queues, metrics: &Metrics) -> Vec<Job> {
-    let mut batch = Vec::new();
-    let mut texts = 0;
-    for lane in Lane::ALL {
-        let i = lane.index();
-        while let Some(front) = q.lanes[i].front() {
-            if front.reply.is_closed() {
-                let job = q.lanes[i].pop_front().expect("front exists");
+        for lane in Lane::ALL {
+            let i = lane.index();
+            while let Some(job) = q.lanes[i].pop_front() {
                 q.waiting[i] -= job.texts.len();
-                metrics.record(lane, Outcome::Abandoned);
-                continue;
+                if job.reply.is_closed() {
+                    metrics.record(lane, Outcome::Abandoned);
+                    continue;
+                }
+                if shared.expired(&job, now) {
+                    let _ = job.reply.send(Err(Failure::Expired));
+                    metrics.record(lane, Outcome::Abandoned);
+                    continue;
+                }
+                metrics.observe_queue_wait(lane, now.saturating_duration_since(job.enqueued));
+                return Some(job);
             }
-            if texts + front.texts.len() > INFERENCE_BATCH {
-                break;
-            }
-            let job = q.lanes[i].pop_front().expect("front exists");
-            q.waiting[i] -= job.texts.len();
-            texts += job.texts.len();
-            metrics.observe_queue_wait(lane, job.enqueued.elapsed());
-            batch.push(job);
         }
+        q = shared.wake.wait(q).unwrap_or_else(PoisonError::into_inner);
     }
-    batch
 }
 
-fn run_batch(session: &mut dyn Session, mut batch: Vec<Job>, metrics: &Metrics, log: &Log) {
-    // Move the texts out rather than copy them: one copy of each, alive for
-    // exactly this pass.
-    let mut texts = Vec::with_capacity(INFERENCE_BATCH);
-    let mut spans = Vec::with_capacity(batch.len());
-    for job in &mut batch {
-        spans.push(job.texts.len());
-        texts.append(&mut job.texts);
-    }
+fn run(session: &mut dyn Session, job: Job, metrics: &Metrics, log: &Log) {
+    let Job {
+        texts, lane, reply, ..
+    } = job;
     let n = texts.len();
     let started = Instant::now();
     let result = catch_unwind(AssertUnwindSafe(|| session.embed(&texts)));
     metrics.observe_inference(started.elapsed(), n);
+    // One copy of each text, alive for exactly this pass.
     drop(texts);
 
     let vectors = match result {
         Ok(Ok(v)) if v.len() == n && v.iter().all(|x| x.len() == protocol::DIMS) => Some(v),
         Ok(Ok(_)) => {
             log.line(&format!(
-                "inference returned the wrong shape for a batch of {n} texts from {} requests",
-                batch.len()
+                "inference returned the wrong shape for a request of {n} texts"
             ));
             None
         }
         // The error itself is not logged: it was formatted by code holding
         // the texts (see `session::SessionError`).
         Ok(Err(_)) => {
-            log.line(&format!(
-                "inference failed for a batch of {n} texts from {} requests",
-                batch.len()
-            ));
+            log.line(&format!("inference failed for a request of {n} texts"));
             None
         }
         Err(_) => {
-            log.line(&format!(
-                "inference panicked on a batch of {n} texts from {} requests",
-                batch.len()
-            ));
+            log.line(&format!("inference panicked on a request of {n} texts"));
             None
         }
     };
 
-    match vectors {
-        Some(vectors) => {
-            let mut vectors = vectors.into_iter();
-            for (job, k) in batch.into_iter().zip(spans) {
-                let own: Vec<Vec<f32>> = vectors.by_ref().take(k).collect();
-                let outcome = match job.reply.send(Ok(own)) {
-                    Ok(()) => Outcome::Ok,
-                    Err(_) => Outcome::Abandoned,
-                };
-                metrics.record(job.lane, outcome);
-            }
-        }
+    let outcome = match vectors {
+        Some(vectors) => match reply.send(Ok(vectors)) {
+            Ok(()) => Outcome::Ok,
+            Err(_) => Outcome::Abandoned,
+        },
         None => {
-            for job in batch {
-                // A caller that has gone gets nothing either way; it is still
-                // a failed request, which is what an operator is counting.
-                let _ = job.reply.send(Err(InferenceFailed));
-                metrics.record(job.lane, Outcome::Error);
-            }
+            // A caller that has gone gets nothing either way; it is still a
+            // failed request, which is what an operator is counting.
+            let _ = reply.send(Err(Failure::Inference));
+            Outcome::Error
         }
-    }
+    };
+    metrics.record(lane, outcome);
 }
 
 #[cfg(test)]
@@ -515,8 +600,8 @@ pub(crate) mod tests {
         rx.blocking_recv().expect("worker answered")
     }
 
-    /// Hold the worker in a first batch so that what is submitted next is
-    /// queued together, deterministically, rather than racing the window.
+    /// Hold the worker in a first pass so that what is submitted next is
+    /// queued together, deterministically, rather than racing the worker.
     fn held() -> (Fake, Arc<Gate>) {
         let gate = Gate::closed();
         let fake = Fake {
@@ -526,8 +611,10 @@ pub(crate) mod tests {
         (fake, gate)
     }
 
+    /// No pass ever holds two callers' texts: two requests queued together
+    /// are two passes, each answered with its own vectors in its own order.
     #[test]
-    fn two_requests_merged_into_one_batch_get_their_own_vectors_in_order() {
+    fn requests_are_never_merged_into_one_pass() {
         let (fake, gate) = held();
         let (c, _) = start(&fake);
         let hold = c.submit(vec!["hold".into()]).unwrap();
@@ -535,20 +622,22 @@ pub(crate) mod tests {
 
         let a = texts("a", 3);
         let b = texts("b", 4);
+        let one = vec!["one".to_string()];
         let ra = c.submit(a.clone()).unwrap();
         let rb = c.submit(b.clone()).unwrap();
+        let r1 = c.submit(one.clone()).unwrap();
         gate.open();
 
         wait(hold).unwrap();
         let va = wait(ra).unwrap();
         let vb = wait(rb).unwrap();
+        wait(r1).unwrap();
         assert_eq!(va, a.iter().map(|t| vector_for(t)).collect::<Vec<_>>());
         assert_eq!(vb, b.iter().map(|t| vector_for(t)).collect::<Vec<_>>());
 
-        // ONE pass for both, in arrival order.
+        // One pass each: the interactive one first, then backfill in order.
         let seen = fake.seen();
-        assert_eq!(seen.len(), 2, "{seen:?}");
-        assert_eq!(seen[1], [a, b].concat());
+        assert_eq!(seen, vec![vec!["hold".to_string()], one, a, b]);
     }
 
     #[test]
@@ -559,36 +648,27 @@ pub(crate) mod tests {
         gate.wait_for_arrivals(1);
 
         let backfill = c.submit(texts("bf", 8)).unwrap();
+        let backfill2 = c.submit(texts("bg", 2)).unwrap();
         let query = c.submit(vec!["query".into()]).unwrap();
+        let query2 = c.submit(vec!["query2".into()]).unwrap();
         gate.open();
-        for rx in [hold, backfill, query] {
+        for rx in [hold, backfill, backfill2, query, query2] {
             wait(rx).unwrap();
         }
 
         let seen = fake.seen();
-        assert_eq!(seen.len(), 3, "{seen:?}");
-        assert_eq!(seen[1], vec!["query".to_string()], "the query ran first");
-        assert_eq!(seen[2], texts("bf", 8));
+        assert_eq!(seen.len(), 5, "{seen:?}");
+        assert_eq!(seen[1], vec!["query".to_string()], "the queries ran first");
+        assert_eq!(seen[2], vec!["query2".to_string()]);
+        assert_eq!(seen[3], texts("bf", 8));
+        assert_eq!(seen[4], texts("bg", 2));
     }
 
     #[test]
-    fn a_request_never_splits_and_whole_requests_fill_around_it() {
-        let (fake, gate) = held();
-        let (c, _) = start(&fake);
-        let hold = c.submit(vec!["hold".into()]).unwrap();
-        gate.wait_for_arrivals(1);
-
-        // 5 + 5 cannot share a pass; the second 5 waits for the next one
-        // rather than being cut to 3.
-        let r1 = c.submit(texts("x", 5)).unwrap();
-        let r2 = c.submit(texts("y", 5)).unwrap();
-        gate.open();
-        for rx in [hold, r1, r2] {
-            wait(rx).unwrap();
-        }
-        let seen = fake.seen();
-        assert_eq!(seen[1], texts("x", 5));
-        assert_eq!(seen[2], texts("y", 5));
+    fn the_shares_are_sixteen_and_ninety_six_texts() {
+        assert_eq!(INTERACTIVE_SHARE, 16);
+        assert_eq!(BACKFILL_SHARE, 96);
+        assert_eq!(MAX_QUEUED_TEXTS, 112);
     }
 
     #[test]
@@ -604,14 +684,14 @@ pub(crate) mod tests {
         }
         assert_eq!(
             c.submit(texts("over", 2)).err(),
-            Some(QueueFull(Lane::Backfill))
+            Some(Refused::QueueFull(Lane::Backfill))
         );
         for i in 0..INTERACTIVE_SHARE {
             pending.push(c.submit(vec![format!("q{i}")]).unwrap());
         }
         assert_eq!(
             c.submit(vec!["over".into()]).err(),
-            Some(QueueFull(Lane::Interactive))
+            Some(Refused::QueueFull(Lane::Interactive))
         );
         assert_eq!(c.depth(), [INTERACTIVE_SHARE, BACKFILL_SHARE]);
 
@@ -647,6 +727,139 @@ pub(crate) mod tests {
         );
     }
 
+    fn start_quick(fake: &Fake, deadline: Duration) -> (Coalescer, Arc<Metrics>) {
+        let metrics = Arc::new(Metrics::new());
+        let (c, loaded) = Coalescer::start_with(
+            fake.loader(),
+            metrics.clone(),
+            Log::new(|_| {}),
+            [deadline, deadline],
+        );
+        loaded.blocking_recv().unwrap().unwrap();
+        (c, metrics)
+    }
+
+    /// A request that waited past its lane's deadline is dropped unrun, and
+    /// a caller still holding on is told so rather than given a late pass.
+    #[test]
+    fn a_request_past_its_deadline_is_dropped_unrun() {
+        let (fake, gate) = held();
+        let (c, metrics) = start_quick(&fake, Duration::from_millis(100));
+        let hold = c.submit(vec!["hold".into()]).unwrap();
+        gate.wait_for_arrivals(1);
+
+        let late = c.submit(texts("late", 2)).unwrap();
+        let late_query = c.submit(vec!["late query".into()]).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let fresh = c.submit(texts("fresh", 2)).unwrap();
+        gate.open();
+        wait(hold).unwrap();
+        assert_eq!(wait(late), Err(Failure::Expired));
+        assert_eq!(wait(late_query), Err(Failure::Expired));
+        wait(fresh).unwrap();
+
+        let seen = fake.seen();
+        assert!(
+            seen.iter().flatten().all(|t| !t.starts_with("late")),
+            "{seen:?}"
+        );
+        let out = metrics.render(c.depth());
+        assert!(
+            out.contains("squelch_embed_requests_total{lane=\"backfill\",outcome=\"abandoned\"} 1"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "squelch_embed_requests_total{lane=\"interactive\",outcome=\"abandoned\"} 1"
+            ),
+            "{out}"
+        );
+    }
+
+    /// A full lane is swept of callers that are gone, and of requests past
+    /// their deadline, before a new request is refused for want of room.
+    #[test]
+    fn a_full_lane_is_swept_before_it_refuses() {
+        let (fake, gate) = held();
+        let (c, _) = start_quick(&fake, Duration::from_millis(100));
+        let hold = c.submit(texts("hold", 2)).unwrap();
+        gate.wait_for_arrivals(1);
+
+        // Callers that hung up.
+        for i in 0..INTERACTIVE_SHARE {
+            drop(c.submit(vec![format!("gone{i}")]).unwrap());
+        }
+        assert_eq!(c.depth()[0], INTERACTIVE_SHARE);
+        let live = c.submit(vec!["live".into()]).expect("swept, not refused");
+        assert_eq!(c.depth()[0], 1);
+
+        // Callers still waiting, but past the deadline.
+        let mut stale = Vec::new();
+        for i in 0..BACKFILL_SHARE / 8 {
+            stale.push(c.submit(texts(&format!("stale{i}-"), 8)).unwrap());
+        }
+        assert_eq!(
+            c.submit(texts("refused", 2)).err(),
+            Some(Refused::QueueFull(Lane::Backfill)),
+            "nothing expired yet, so the share holds"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        let after = c.submit(texts("after", 2)).expect("expired ones swept");
+        for rx in stale {
+            assert_eq!(wait(rx), Err(Failure::Expired));
+        }
+        assert_eq!(c.depth()[1], 2);
+
+        gate.open();
+        wait(hold).unwrap();
+        // `live` and `after` are past the short deadline by now too; what
+        // matters is that they were queued, not refused.
+        let _ = wait(live);
+        let _ = wait(after);
+    }
+
+    /// The inference thread dying outside the guarded pass is not a hang:
+    /// every queued caller is answered at once, the service stops being
+    /// ready, nothing new is queued, and `died` resolves for the binary.
+    #[test]
+    fn a_dead_worker_answers_its_queue_and_stops_being_ready() {
+        let (fake, gate) = held();
+        let (c, metrics) = start(&fake);
+        let hold = c.submit(vec!["hold".into()]).unwrap();
+        gate.wait_for_arrivals(1);
+        let doomed = c.submit(texts("doomed", 2)).unwrap();
+        let queued = c.submit(texts("queued", 3)).unwrap();
+        c.kill_worker();
+        gate.open();
+        wait(hold).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let bound = Duration::from_secs(5);
+            for rx in [doomed, queued] {
+                let reply = tokio::time::timeout(bound, rx)
+                    .await
+                    .expect("a queued caller is answered, not left to time out");
+                assert!(!matches!(reply, Ok(Ok(_))), "{reply:?}");
+            }
+            tokio::time::timeout(bound, c.died())
+                .await
+                .expect("died resolves");
+        });
+        assert!(!c.is_ready());
+        assert_eq!(c.submit(vec!["after".into()]).err(), Some(Refused::Stopped));
+        assert_eq!(c.depth(), [0, 0]);
+        let out = metrics.render(c.depth());
+        assert!(out.contains("squelch_embed_session_ready 0"), "{out}");
+        assert!(
+            out.contains("squelch_embed_requests_total{lane=\"backfill\",outcome=\"error\"} 1"),
+            "{out}"
+        );
+    }
+
     /// No dedup: two byte-identical texts are two rows of the batch and two
     /// vectors, and the same text sent again is run again (no cache).
     #[test]
@@ -660,7 +873,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_failed_or_misshapen_pass_fails_every_request_in_it() {
+    fn a_failed_or_misshapen_pass_fails_its_request() {
         for fake in [
             Fake {
                 fail: true,
@@ -672,7 +885,10 @@ pub(crate) mod tests {
             },
         ] {
             let (c, metrics) = start(&fake);
-            assert_eq!(wait(c.submit(texts("t", 2)).unwrap()), Err(InferenceFailed));
+            assert_eq!(
+                wait(c.submit(texts("t", 2)).unwrap()),
+                Err(Failure::Inference)
+            );
             let out = metrics.render(c.depth());
             assert!(
                 out.contains("squelch_embed_requests_total{lane=\"backfill\",outcome=\"error\"} 1")
@@ -680,13 +896,13 @@ pub(crate) mod tests {
         }
     }
 
+    /// No window to wait out: a lone request runs as soon as it is queued.
     #[test]
-    fn a_lone_request_fires_after_the_window_not_never() {
+    fn a_lone_request_runs_at_once() {
         let fake = Fake::default();
         let (c, _) = start(&fake);
         let t = Instant::now();
         wait(c.submit(vec!["alone".into()]).unwrap()).unwrap();
-        assert!(t.elapsed() >= COALESCE_WINDOW);
         assert!(t.elapsed() < Duration::from_secs(2));
     }
 

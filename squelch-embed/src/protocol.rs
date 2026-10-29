@@ -7,6 +7,8 @@
 //! own defaults to these in a test (`embed::remote`), so moving one without the
 //! other fails CI rather than a mailbox.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 /// The one model the service runs: fastembed's model code for BGE-small-en-v1.5,
@@ -36,6 +38,27 @@ pub const MAX_CHARS_PER_TEXT: usize = 8192;
 
 /// Largest request body the server accepts, in bytes.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// The daemon's whole-request timeout for an INTERACTIVE call: exactly one
+/// text (a search query, one message at ingest) and the `/healthz` probe.
+/// The server classifies a request by the same shape (one text is
+/// interactive), so the two ends agree on which deadline applies.
+pub const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The daemon's whole-request timeout for a BACKFILL call: two or more texts.
+pub const BACKFILL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long an interactive request may wait for its forward pass to START
+/// before the server drops it unrun. Under [`INTERACTIVE_TIMEOUT`], so the
+/// server never spends a pass on a caller that has already given up.
+pub const INTERACTIVE_DEADLINE: Duration = Duration::from_millis(4500);
+
+/// The backfill lane's deadline, under [`BACKFILL_TIMEOUT`] for the same
+/// reason.
+pub const BACKFILL_DEADLINE: Duration = Duration::from_secs(28);
+
+const _: () = assert!(INTERACTIVE_DEADLINE.as_millis() < INTERACTIVE_TIMEOUT.as_millis());
+const _: () = assert!(BACKFILL_DEADLINE.as_millis() < BACKFILL_TIMEOUT.as_millis());
 
 /// The work listener: `POST /embed`. The only port the Service exposes.
 pub const PORT: u16 = 8850;
@@ -80,11 +103,13 @@ pub struct ErrorResponse {
 pub const ERR_BAD_REQUEST: &str = "bad_request";
 /// 401: missing or wrong bearer token.
 pub const ERR_UNAUTHORIZED: &str = "unauthorized";
-/// 429: this request's lane is full; `Retry-After` says when to come back.
+/// 429: this request's lane is full, the server is already reading as many
+/// bodies as it will, or the request waited past its lane's deadline without
+/// running; `Retry-After` says when to come back.
 pub const ERR_QUEUE_FULL: &str = "queue_full";
 /// 503: the session is not built yet.
 pub const ERR_NOT_READY: &str = "not_ready";
-/// 500: inference failed.
+/// 500: inference failed, or the inference thread stopped.
 pub const ERR_INTERNAL: &str = "internal";
 
 #[cfg(test)]
@@ -100,6 +125,16 @@ mod tests {
         assert_eq!(s, r#"{"texts":["a","b"]}"#);
         assert_eq!(serde_json::from_str::<EmbedRequest>(&s).unwrap(), r);
         assert!(serde_json::from_str::<EmbedRequest>(r#"{"texts":[],"tenant":"x"}"#).is_err());
+    }
+
+    /// The server gives up on a request before the daemon does, so no pass
+    /// is ever spent on a caller that has already timed out.
+    #[test]
+    fn deadlines_sit_under_the_client_timeouts() {
+        assert_eq!(INTERACTIVE_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(BACKFILL_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(INTERACTIVE_DEADLINE, Duration::from_millis(4500));
+        assert_eq!(BACKFILL_DEADLINE, Duration::from_secs(28));
     }
 
     #[test]

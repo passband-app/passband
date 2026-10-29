@@ -150,6 +150,63 @@ fn render_list(list: &[Recipient]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
+/// `raw` with its `From:` address replaced by `addr`, keeping the display
+/// name exactly as written (encoded words and all). `None` when the address
+/// is already `addr`, when there is no single From header, or when the header
+/// block is not UTF-8: the message then goes as composed.
+pub(crate) fn rewrite_from(raw: &[u8], addr: &str) -> Option<Vec<u8>> {
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 2)
+        .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|p| p + 1))?;
+    let head = std::str::from_utf8(&raw[..end]).ok()?;
+    // Unfolded header spans: (start, end) byte offsets of each header.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut pos = 0;
+    for line in head.split_inclusive('\n') {
+        let folded = line.starts_with(' ') || line.starts_with('\t');
+        match spans.last_mut() {
+            Some(last) if folded => last.1 = pos + line.len(),
+            _ => spans.push((pos, pos + line.len())),
+        }
+        pos += line.len();
+    }
+    let froms: Vec<&(usize, usize)> = spans
+        .iter()
+        .filter(|(a, _)| {
+            head[*a..]
+                .get(..5)
+                .is_some_and(|n| n.eq_ignore_ascii_case("from:"))
+        })
+        .collect();
+    let [span] = froms.as_slice() else {
+        return None;
+    };
+    let (start, stop) = **span;
+    let header = &head[start..stop];
+    let value = header[5..].trim_end_matches(['\r', '\n']);
+    let eol = &header[5 + value.len()..];
+    let current = match (value.rfind('<'), value.rfind('>')) {
+        (Some(l), Some(r)) if l < r => value[l + 1..r].trim().to_string(),
+        _ => value.trim().to_string(),
+    };
+    if current.eq_ignore_ascii_case(addr) {
+        return None;
+    }
+    let new_value = match (value.rfind('<'), value.rfind('>')) {
+        (Some(l), Some(r)) if l < r => format!("{}<{addr}>{}", &value[..l], &value[r + 1..]),
+        _ => format!(" {addr}"),
+    };
+    let mut out = Vec::with_capacity(raw.len() + addr.len());
+    out.extend_from_slice(&raw[..start]);
+    out.extend_from_slice(b"From:");
+    out.extend_from_slice(new_value.as_bytes());
+    out.extend_from_slice(eol.as_bytes());
+    out.extend_from_slice(&raw[stop..]);
+    Some(out)
+}
+
 /// Executes Outlook write ops with a WRITE-bound credential store.
 pub struct GraphWriteClient {
     creds: std::sync::Arc<dyn CredentialStore>,
@@ -157,6 +214,10 @@ pub struct GraphWriteClient {
     http: reqwest::Client,
     /// API base. Graph's own in production; tests point it at a mock.
     base: String,
+    /// Ask Graph which address the account sends as before each send, and
+    /// put it in the From ([`rewrite_from`]). On in production; the mock
+    /// tests turn it on only where they script the `/me` answer.
+    resolve_send_as: bool,
 }
 
 impl GraphWriteClient {
@@ -166,12 +227,20 @@ impl GraphWriteClient {
         account_id: AccountId,
         base: String,
     ) -> Self {
-        Self::with_http(
+        let mut c = Self::with_http(
             creds,
             account_id,
             base,
             super::gmail::GmailWriteClient::build_http(),
-        )
+        );
+        c.resolve_send_as = false;
+        c
+    }
+
+    /// Turn the send-as lookup on (tests that script `/me`).
+    pub fn resolving_send_as(mut self) -> Self {
+        self.resolve_send_as = true;
+        self
     }
 
     /// Over the door's shared client (redirects refused; see
@@ -187,7 +256,35 @@ impl GraphWriteClient {
             account_id,
             http,
             base,
+            resolve_send_as: true,
         }
+    }
+
+    /// The address Exchange sends this account's mail as: `/me`'s `mail`,
+    /// else an address-shaped `userPrincipalName`. `None` on any failure, and
+    /// the message then goes as composed.
+    async fn send_as(&self) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct Me {
+            mail: Option<String>,
+            #[serde(rename = "userPrincipalName")]
+            upn: Option<String>,
+        }
+        let me: Me = self
+            .call(
+                self.http
+                    .get(format!("{}/me?$select=mail,userPrincipalName", self.base))
+                    .timeout(std::time::Duration::from_secs(15)),
+            )
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        me.mail
+            .filter(|m| m.contains('@'))
+            .or(me.upn.filter(|u| u.contains('@')))
+            .map(|a| a.trim().to_string())
     }
 
     fn msg_url(&self, id: &str) -> String {
@@ -375,6 +472,21 @@ impl MailWriter for GraphWriteClient {
         if raw.is_empty() {
             return Err(WriteError::Invalid("empty message".into()));
         }
+        // SEND AS WHAT EXCHANGE WILL USE. A From that is not the account's
+        // primary address (an alias, or the configured address before an
+        // alias change has propagated) is not refused: Exchange silently
+        // replaces it with the mailbox's hidden `outlook_<hex>@outlook.com`
+        // address. Seen live 2026-10-28. Writing the real one keeps the From
+        // the reader sees and the one the recipient gets the same.
+        let rewritten = if self.resolve_send_as {
+            match self.send_as().await {
+                Some(addr) => rewrite_from(raw, &addr),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let raw: &[u8] = rewritten.as_deref().unwrap_or(raw);
         let body = base64::engine::general_purpose::STANDARD.encode(raw);
         if body.len() > GRAPH_MAX_REQUEST {
             return Err(WriteError::Invalid(format!(

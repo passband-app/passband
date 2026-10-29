@@ -446,3 +446,71 @@ async fn a_label_both_added_and_removed_is_refused() {
     assert!(matches!(err, WriteError::Invalid(_)));
     assert!(seen(&m).is_empty());
 }
+
+#[test]
+fn rewrite_from_swaps_only_the_address() {
+    use super::rewrite_from;
+    let raw = b"Subject: x\r\nFrom: \"Braelyn B\" <passband-qa@outlook.com>\r\nTo: a@example.com\r\n\r\nFrom: not a header\r\n";
+    let out = rewrite_from(raw, "braelyn@passband.app").unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("From: \"Braelyn B\" <braelyn@passband.app>\r\nTo:"),
+        "{out}"
+    );
+    assert!(
+        out.ends_with("\r\n\r\nFrom: not a header\r\n"),
+        "the body is untouched"
+    );
+    // Already right: nothing to do.
+    assert!(rewrite_from(raw, "PASSBAND-QA@outlook.com").is_none());
+    // A bare address, and an encoded-word name kept as written.
+    let bare = rewrite_from(b"From: a@x.com\r\n\r\nb", "b@y.com").unwrap();
+    assert_eq!(bare, b"From: b@y.com\r\n\r\nb");
+    let enc = rewrite_from(
+        b"From: =?utf-8?b?w6lsw6g=?=\r\n <a@x.com>\r\n\r\nb",
+        "b@y.com",
+    )
+    .unwrap();
+    assert_eq!(enc, b"From: =?utf-8?b?w6lsw6g=?=\r\n <b@y.com>\r\n\r\nb");
+    // Two From headers: leave it alone.
+    assert!(rewrite_from(b"From: a@x.com\r\nFrom: c@x.com\r\n\r\nb", "b@y.com").is_none());
+}
+
+#[tokio::test]
+async fn a_send_goes_out_as_the_address_exchange_will_use() {
+    let (m, c) = mock(vec![
+        (
+            200,
+            r#"{"mail":"braelyn@passband.app","userPrincipalName":"braelyn@passband.app"}"#,
+        ),
+        (201, r#"{"id":"IMM-9","conversationId":"conv-9"}"#),
+        (202, ""),
+    ])
+    .await;
+    let c = c.resolving_send_as();
+    let raw = b"From: Me <passband-qa@outlook.com>\r\nTo: a@example.com\r\nSubject: x\r\n\r\nhi";
+    c.send(raw, None).await.unwrap();
+    let s = seen(&m);
+    assert_eq!(s[0].method, "GET");
+    assert!(s[0].target.starts_with("/me?"), "{}", s[0].target);
+    let draft = base64::engine::general_purpose::STANDARD
+        .decode(&s[1].body)
+        .unwrap();
+    assert!(
+        String::from_utf8(draft)
+            .unwrap()
+            .starts_with("From: Me <braelyn@passband.app>\r\n"),
+    );
+
+    // A failed lookup sends as composed.
+    let (m, c) = mock(vec![(500, "{}"), (201, r#"{"id":"d"}"#), (202, "")]).await;
+    let c = c.resolving_send_as();
+    c.send(raw, None).await.unwrap();
+    let s = seen(&m);
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&s[1].body)
+            .unwrap(),
+        raw
+    );
+}

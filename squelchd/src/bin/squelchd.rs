@@ -14,8 +14,9 @@ use chrono::{Duration, SecondsFormat};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use squelch_core::auth::{
     AuthFlowOptions, AuthScopes, ConsentBind, CredentialTransfer, DEFAULT_HEADLESS_PORT,
-    TransferCredential, check_token_covers_slot_for, decode_transfer, encode_transfer, printable,
-    run_auth_flow, run_broker_flow, run_export_flow, verify_transfer_credential,
+    TransferCredential, check_token_covers_slot_for, decode_transfer, encode_transfer,
+    microsoft_account_id, printable, run_auth_flow_for, run_broker_flow, run_export_flow,
+    verify_transfer_credential,
 };
 use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2CapSources};
 use squelch_core::credentials::{
@@ -764,7 +765,7 @@ fn main() -> ExitCode {
     let (config, cap_sources) = load_config(&cli);
 
     let result = match &cli.command {
-        Command::Auth(args) => cmd_auth(&config, args, flag_sources),
+        Command::Auth(args) => cmd_auth(&config, cli.config.as_deref(), args, flag_sources),
         Command::Run => run_daemon(config),
         Command::Serve(args) => cmd_serve(config, cap_sources, args),
         Command::Token(args) => cmd_token(&config, args),
@@ -890,6 +891,7 @@ fn mint_first_calendar(run: impl FnOnce() -> Result<(), squelch_core::CoreError>
 /// Run the OAuth consent flow(s) and persist tokens for the configured account.
 fn cmd_auth(
     config: &Config,
+    config_path: Option<&std::path::Path>,
     args: &AuthArgs,
     sources: AuthFlagSources,
 ) -> Result<(), squelch_core::CoreError> {
@@ -918,12 +920,35 @@ fn cmd_auth(
     };
 
     let client = config.oauth_client()?;
-    let email = config.require_account_email()?;
+    let outlook = client.issuer == squelch_core::config::OAuthIssuer::Microsoft;
+    // OUTLOOK NEEDS NO ADDRESS UP FRONT: Microsoft names the mailbox, and a
+    // personal account's sign-in, primary and alias addresses differ and
+    // change. Gmail still requires one.
+    let configured = if outlook {
+        config
+            .account_email
+            .clone()
+            .filter(|e| !e.trim().is_empty())
+    } else {
+        Some(config.require_account_email()?)
+    };
     let backend = config.credential_backend;
     // Before the browser opens: a backend this build cannot use is refused
     // here, not after the consent it would have had nowhere to put.
     ensure_backend(backend)?;
     let creds_path = config.resolve_credentials_path();
+    // The Microsoft account the stored credential already belongs to, so a
+    // re-consent after the owner changed their primary alias is still
+    // recognised as this mailbox. Best effort: None falls back to addresses.
+    let known_id = match (&configured, outlook) {
+        (Some(email), true) => {
+            load_token_backend(backend, &creds_path, email, CredentialKind::Read)
+                .ok()
+                .and_then(|t| microsoft_account_id(&client, &t))
+        }
+        _ => None,
+    };
+    let mut email = configured.clone().unwrap_or_default();
 
     let plan = auth_plan(args);
     let total = plan.len();
@@ -935,17 +960,32 @@ fn cmd_auth(
         );
         // Strictly sequential: each flow's loopback listener is dropped before
         // the next binds, so headless can reuse the one fixed port.
-        if let Err(e) = mint_credential(&client, &email, backend, &creds_path, scopes, args, broker)
-        {
-            if step > 1 {
-                eprintln!(
-                    "squelchd: the credential(s) minted earlier in this run ARE stored; \
+        let minted = mint_credential(
+            &client,
+            (!email.is_empty()).then_some(email.as_str()),
+            known_id.as_deref(),
+            backend,
+            &creds_path,
+            scopes,
+            args,
+            broker,
+        );
+        match minted {
+            Ok(stored_as) => email = stored_as,
+            Err(e) => {
+                if step > 1 {
+                    eprintln!(
+                        "squelchd: the credential(s) minted earlier in this run ARE stored; \
                      re-run `squelchd auth` to finish the {} credential.",
-                    scope_word(scopes)
-                );
+                        scope_word(scopes)
+                    );
+                }
+                return Err(e);
             }
-            return Err(e);
         }
+    }
+    if configured.is_none() {
+        remember_account_email(config_path, &email);
     }
     // Read AFTER the Gmail consents, so a keyring prompt can never stand in
     // front of the screen that matters. Missing or unreadable both read as
@@ -960,32 +1000,64 @@ fn cmd_auth(
         mint_first_calendar(|| {
             mint_credential(
                 &client,
-                &email,
+                Some(&email),
+                None,
                 backend,
                 &creds_path,
                 AuthScopes::Calendar,
                 args,
                 broker,
             )
+            .map(|_| ())
         });
     }
     Ok(())
 }
 
+/// Write the address Microsoft named into the config file, so every later
+/// run (and `serve`) finds the credential under it. Best effort, loudly.
+fn remember_account_email(config_path: Option<&std::path::Path>, email: &str) {
+    let Some(path) = config_path
+        .map(std::path::Path::to_path_buf)
+        .or_else(Config::default_path)
+    else {
+        eprintln!("squelchd: add `account_email = \"{email}\"` to your config file.");
+        return;
+    };
+    let pairs = [(
+        squelch_core::config::ENV_ACCOUNT_EMAIL.to_string(),
+        email.to_string(),
+    )];
+    match squelch_core::config::mirror_env_pairs_to_config(&pairs, &path) {
+        Ok(_) => println!(
+            "Microsoft names this mailbox {email}; saved as account_email in {}.",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "squelchd: could not save account_email to {}: {e}. Add              `account_email = \"{email}\"` yourself.",
+            path.display()
+        ),
+    }
+}
+
 /// One consent flow, persisted into that kind's own slot; scopes from different
-/// kinds never share a slot.
+/// kinds never share a slot. Returns the address the token was stored under:
+/// `email` when one is configured, else the one Microsoft named.
+#[allow(clippy::too_many_arguments)]
 fn mint_credential(
     client: &OAuthClientConfig,
-    email: &str,
+    email: Option<&str>,
+    known_id: Option<&str>,
     backend: CredentialBackend,
     creds_path: &std::path::Path,
     scopes: AuthScopes,
     args: &AuthArgs,
     broker: Option<&str>,
-) -> Result<(), squelch_core::CoreError> {
+) -> Result<String, squelch_core::CoreError> {
     println!(
-        "Authorizing {} account: {email} [{}] via {:?} backend",
+        "Authorizing {} account: {} [{}] via {:?} backend",
         client.issuer.name(),
+        email.unwrap_or("(whichever account you sign in with)"),
         scopes.label_for(client.issuer),
         backend
     );
@@ -996,16 +1068,30 @@ fn mint_credential(
         // Both arms are handed `email`: the exchange refuses to return a token
         // for any other mailbox, so a consent finished on the wrong Google
         // account fails here instead of being stored under this one.
-        Some(broker) => run_broker_flow(client, email, broker, scopes)?,
+        Some(broker) => {
+            let email = email.ok_or_else(|| {
+                squelch_core::CoreError::Credential(
+                    "--broker needs account_email in the config".into(),
+                )
+            })?;
+            (
+                email.to_string(),
+                run_broker_flow(client, email, broker, scopes)?,
+            )
+        }
         None => {
             let opts = AuthFlowOptions {
                 scopes,
                 headless: args.headless,
                 port: args.port,
+                known_account_id: known_id.map(str::to_string),
             };
-            run_auth_flow(client, email, &opts)?
+            run_auth_flow_for(client, email, &opts)?
         }
     };
+    let (mailbox, token) = token;
+    let email = email.map_or(mailbox, str::to_string);
+    let email = email.as_str();
     // Every slot checked before any is written, so a grant without
     // gmail.modify stores nothing rather than a Write slot that cannot write.
     let slots = gmail_slots(scopes);
@@ -1023,7 +1109,7 @@ fn mint_credential(
              https://myaccount.google.com/permissions and re-run `squelchd auth`."
         );
     }
-    Ok(())
+    Ok(email.to_string())
 }
 
 /// Persist one token into its kind's slot and say where it landed, reading it

@@ -65,8 +65,7 @@ const GMAIL_PROFILE_URL: &str = "https://gmail.googleapis.com/gmail/v1/users/me/
 /// fallback. `otherMails` and `proxyAddresses` carry the account's other
 /// addresses: a personal account can sign in as one address (say a work
 /// address) while its Outlook mailbox is an alias like `x@outlook.com`.
-const GRAPH_ME_URL: &str =
-    "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,otherMails,proxyAddresses";
+const GRAPH_ME_URL: &str = "https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName,otherMails,proxyAddresses";
 
 /// Budget for the token exchange, the refresh, and the profile check that
 /// follows either. All three are one small round trip to Google, and every
@@ -298,6 +297,8 @@ pub struct AuthFlowOptions {
     pub headless: bool,
     /// Fixed loopback port for headless mode; ignored (ephemeral) otherwise.
     pub port: u16,
+    /// See [`LoopbackConsent::with_known_account_id`].
+    pub known_account_id: Option<String>,
 }
 
 impl Default for AuthFlowOptions {
@@ -306,6 +307,7 @@ impl Default for AuthFlowOptions {
             scopes: AuthScopes::Read,
             headless: false,
             port: DEFAULT_HEADLESS_PORT,
+            known_account_id: None,
         }
     }
 }
@@ -495,6 +497,7 @@ fn exchange_code(
         oauth,
         &GoogleEndpoints::for_issuer(issuer).profile_url,
         expected_account,
+        None,
         scopes,
         code,
         pkce_verifier,
@@ -531,11 +534,13 @@ impl ConsentFailure {
 /// [`exchange_code`] against an explicit profile endpoint (the token endpoint
 /// rides on `oauth`), with its refusals sorted by kind. The ONE body of the
 /// guarded exchange: every flow reaches it.
+#[allow(clippy::too_many_arguments)]
 fn exchange_code_at(
     issuer: OAuthIssuer,
     oauth: &GoogleClient,
     profile_url: &str,
     expected_account: Option<&str>,
+    known_id: Option<&str>,
     scopes: AuthScopes,
     code: String,
     pkce_verifier: PkceCodeVerifier,
@@ -563,6 +568,7 @@ fn exchange_code_at(
         profile_url,
         token.access_token().secret(),
         expected_account,
+        known_id,
     )
     .map_err(|e| ConsentFailure::Failed(calendar_identity_hint(scopes, e)))?;
     if let Some(expected) = expected_account {
@@ -718,6 +724,7 @@ pub(crate) fn verify_transfer_credential_at(
         profile_url,
         &refreshed.token.access_token,
         Some(expected_account),
+        None,
     )?;
 
     judge_transfer_credential_for(
@@ -928,6 +935,10 @@ struct GmailProfile {
 /// The fields of Graph's `/me` this module reads.
 #[derive(Deserialize)]
 struct GraphMe {
+    /// The account's permanent id. Addresses change (a user can make another
+    /// alias primary at any time); this does not.
+    #[serde(default)]
+    id: Option<String>,
     mail: Option<String>,
     #[serde(rename = "userPrincipalName")]
     user_principal_name: Option<String>,
@@ -976,7 +987,16 @@ impl GraphMe {
     /// primary [`Self::address`]. The caller still holds the result against
     /// the configuration, so a stranger's account names its own address and
     /// is refused.
-    fn address_for(&self, expected: Option<&str>) -> Option<String> {
+    fn address_for(&self, expected: Option<&str>, known_id: Option<&str>) -> Option<String> {
+        // The SAME account the stored credential belongs to, whatever address
+        // Microsoft names it by today: the configured address stands.
+        if let (Some(want), Some(known), Some(id)) = (expected, known_id, self.id.as_deref())
+            && !want.trim().is_empty()
+            && !known.is_empty()
+            && known == id
+        {
+            return Some(want.trim().to_string());
+        }
         if let Some(want) = expected.map(str::trim).filter(|w| !w.is_empty())
             && let Some(hit) = self
                 .addresses()
@@ -997,6 +1017,7 @@ fn fetch_profile_email(
     profile_url: &str,
     access_token: &str,
     expected: Option<&str>,
+    known_id: Option<&str>,
 ) -> Result<String> {
     let who = issuer.name();
     // The token rides in the header and nowhere else; reqwest's own errors carry
@@ -1046,7 +1067,7 @@ fn fetch_profile_email(
         }
         OAuthIssuer::Microsoft => {
             let me = serde_json::from_slice::<GraphMe>(&body).map_err(unreadable)?;
-            let picked = me.address_for(expected);
+            let picked = me.address_for(expected, known_id);
             if let (Some(want), Some(got)) = (expected, picked.as_deref())
                 && !want.trim().eq_ignore_ascii_case(got)
             {
@@ -1112,6 +1133,17 @@ pub fn run_auth_flow(
     account_email: &str,
     opts: &AuthFlowOptions,
 ) -> Result<StoredToken> {
+    run_auth_flow_for(client, Some(account_email), opts).map(|(_, token)| token)
+}
+
+/// [`run_auth_flow`] that also returns the mailbox the token opens, and takes
+/// no expected address when none is configured yet (Outlook only: Gmail's
+/// callers always name one).
+pub fn run_auth_flow_for(
+    client: &OAuthClientConfig,
+    account_email: Option<&str>,
+    opts: &AuthFlowOptions,
+) -> Result<(String, StoredToken)> {
     // Headless -> a FIXED port so it can be SSH-forwarded; otherwise ephemeral.
     let bind_addr = if opts.headless {
         format!("127.0.0.1:{}", opts.port)
@@ -1126,7 +1158,8 @@ pub fn run_auth_flow(
 
     // The SAME consent the daemon runs for the app's Connect button: one
     // builder for the URL, one guarded exchange behind it.
-    let consent = LoopbackConsent::begin(client, opts.scopes, port, Some(account_email))?;
+    let consent = LoopbackConsent::begin(client, opts.scopes, port, account_email)?
+        .with_known_account_id(opts.known_account_id.clone());
     let auth_url = consent.url().clone();
 
     if opts.headless {
@@ -1162,10 +1195,56 @@ pub fn run_auth_flow(
         CONSENT_WAIT_TIMEOUT,
     )?;
 
-    let (_mailbox, token) = consent
-        .finish(code, account_email)
-        .map_err(ConsentFailure::into_error)?;
-    Ok(token)
+    consent
+        .finish_for(code, account_email)
+        .map_err(ConsentFailure::into_error)
+}
+
+/// The permanent Microsoft account id behind a stored Outlook token, asked of
+/// Graph with a refreshed access token. `None` on any failure (revoked, no
+/// network): the caller then falls back to matching addresses, never to
+/// accepting anything. BLOCKING.
+pub fn microsoft_account_id(client: &OAuthClientConfig, token: &StoredToken) -> Option<String> {
+    microsoft_account_id_at(
+        client,
+        token,
+        client.issuer.token_url(),
+        "https://graph.microsoft.com/v1.0/me?$select=id",
+    )
+}
+
+fn microsoft_account_id_at(
+    client: &OAuthClientConfig,
+    token: &StoredToken,
+    token_url: &str,
+    me_url: &str,
+) -> Option<String> {
+    if client.issuer != OAuthIssuer::Microsoft {
+        return None;
+    }
+    crate::credentials::check_token_issuer(token, client.issuer).ok()?;
+    let refresh = token.refresh_token.as_deref()?;
+    let refreshed = crate::credentials::refresh_stored_token_detailed_at(
+        client,
+        refresh,
+        token_url,
+        EXCHANGE_HTTP_TIMEOUT,
+    )
+    .ok()?;
+    let http = guarded_http(EXCHANGE_HTTP_TIMEOUT).ok()?;
+    let resp = http
+        .get(me_url)
+        .bearer_auth(&refreshed.token.access_token)
+        .send()
+        .ok()?;
+    if resp.status().as_u16() != 200 {
+        return None;
+    }
+    let body = read_capped(resp, "Graph's /me response").ok()?;
+    serde_json::from_slice::<GraphMe>(&body)
+        .ok()?
+        .id
+        .filter(|i| !i.is_empty())
 }
 
 /// The path of the loopback redirect. A Desktop OAuth client accepts any port
@@ -1195,9 +1274,19 @@ pub struct LoopbackConsent {
     state: CsrfToken,
     verifier: PkceCodeVerifier,
     url: Url,
+    known_account_id: Option<String>,
 }
 
 impl LoopbackConsent {
+    /// The Microsoft account id the credential ALREADY stored for this
+    /// mailbox belongs to ([`microsoft_account_id`]). A consent whose token
+    /// names the same id is the same mailbox, even when Microsoft now calls
+    /// it by another address (the owner made a different alias primary).
+    pub fn with_known_account_id(mut self, id: Option<String>) -> Self {
+        self.known_account_id = id.filter(|i| !i.is_empty());
+        self
+    }
+
     /// Mint a fresh `state` and PKCE pair and build the consent URL for a
     /// redirect to `http://127.0.0.1:<port>`. No network: nothing is sent
     /// until [`Self::finish`].
@@ -1242,6 +1331,7 @@ impl LoopbackConsent {
             state,
             verifier,
             url,
+            known_account_id: None,
         })
     }
 
@@ -1265,11 +1355,23 @@ impl LoopbackConsent {
         code: String,
         expected_account: &str,
     ) -> std::result::Result<(String, StoredToken), ConsentFailure> {
+        self.finish_for(code, Some(expected_account))
+    }
+
+    /// [`Self::finish`] when no mailbox is configured yet: an Outlook daemon
+    /// set up without `account_email` takes the address Microsoft names.
+    /// `Some` holds the token to that address exactly as `finish` does.
+    pub fn finish_for(
+        self,
+        code: String,
+        expected_account: Option<&str>,
+    ) -> std::result::Result<(String, StoredToken), ConsentFailure> {
         exchange_code_at(
             self.issuer,
             &self.oauth,
             &self.profile_url,
-            Some(expected_account),
+            expected_account,
+            self.known_account_id.as_deref(),
             self.scopes,
             code,
             self.verifier,
@@ -3613,7 +3715,7 @@ mod microsoft_tests {
                 "proxyAddresses":["SMTP:primary@outlook.com","x500:/o=x","smtp:third@hotmail.com"]}"#,
         )
         .unwrap();
-        let pick = |w: Option<&str>| me.address_for(w);
+        let pick = |w: Option<&str>| me.address_for(w, None);
         assert_eq!(
             pick(Some("alias@outlook.com")).as_deref(),
             Some("Alias@Outlook.com")
@@ -3636,8 +3738,81 @@ mod microsoft_tests {
         // The old two-field shape still parses.
         let bare: GraphMe = serde_json::from_str(r#"{"mail":"a@outlook.com"}"#).unwrap();
         assert_eq!(
-            bare.address_for(Some("b@outlook.com")).as_deref(),
+            bare.address_for(Some("b@outlook.com"), None).as_deref(),
             Some("a@outlook.com")
+        );
+    }
+
+    /// An owner who made another alias primary is still the same account: the
+    /// stored credential's id vouches for the configured address. A stranger's
+    /// account (another id) is not.
+    #[test]
+    fn the_stored_accounts_id_keeps_the_configured_address() {
+        let me: GraphMe = serde_json::from_str(
+            r#"{"id":"313658d2f27bcf04","mail":"braelyn@passband.app","userPrincipalName":"braelyn@passband.app"}"#,
+        )
+        .unwrap();
+        let want = Some("passband-qa@outlook.com");
+        assert_eq!(
+            me.address_for(want, Some("313658d2f27bcf04")).as_deref(),
+            Some("passband-qa@outlook.com")
+        );
+        assert_eq!(
+            me.address_for(want, Some("someone-else")).as_deref(),
+            Some("braelyn@passband.app")
+        );
+        assert_eq!(
+            me.address_for(want, None).as_deref(),
+            Some("braelyn@passband.app")
+        );
+        // No id from Graph proves nothing.
+        let anon: GraphMe = serde_json::from_str(r#"{"mail":"x@outlook.com"}"#).unwrap();
+        assert_eq!(
+            anon.address_for(want, Some("")).as_deref(),
+            Some("x@outlook.com")
+        );
+    }
+
+    /// The id lookup refreshes the stored token and reads `/me`; any failure is
+    /// `None`, never a guess.
+    #[test]
+    fn the_account_id_comes_from_graph_with_a_refreshed_token() {
+        let stored = StoredToken {
+            access_token: "stale".into(),
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: Some(vec!["Mail.ReadWrite".into(), "Mail.Send".into()]),
+        };
+        let token_ok = (
+            "200 OK",
+            r#"{"access_token":"fresh","token_type":"Bearer","expires_in":3600}"#.to_string(),
+        );
+        let (base, rx) = capturing(vec![
+            token_ok.clone(),
+            ("200 OK", r#"{"id":"abc123"}"#.to_string()),
+        ]);
+        let id = microsoft_account_id_at(
+            &ms_client(),
+            &stored,
+            &format!("{base}/token"),
+            &format!("{base}/me"),
+        );
+        assert_eq!(id.as_deref(), Some("abc123"));
+        let requests: Vec<String> = rx.try_iter().collect();
+        assert!(
+            requests.last().is_some_and(|r| r.contains("Bearer fresh")),
+            "{requests:?}"
+        );
+
+        let (base, _rx) = capturing(vec![token_ok, ("401 Unauthorized", "{}".to_string())]);
+        assert_eq!(
+            microsoft_account_id_at(
+                &ms_client(),
+                &stored,
+                &format!("{base}/token"),
+                &format!("{base}/me")
+            ),
+            None
         );
     }
 

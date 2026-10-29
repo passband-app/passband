@@ -204,6 +204,12 @@ async fn serve(m: Mock) -> String {
         .route("/me/messages", get(all_messages))
         .route("/me/messages/{id}", get(message))
         .route("/me/messages/{id}/$value", get(message_value))
+        .route(
+            "/me",
+            get(|| async {
+                axum::Json(json!({"mail": "primary@passband.example", "userPrincipalName": "signin@passband.example"}))
+            }),
+        )
         .with_state(m.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -601,6 +607,31 @@ async fn the_users_own_mail_is_sent_wherever_it_is_filed() {
             in_sent: true
         }
     );
+}
+
+/// A personal account configured by its alias sends as its primary address;
+/// that mail is still the owner's, and a stranger's is not.
+#[tokio::test]
+async fn mail_from_the_accounts_primary_address_is_its_own() {
+    let (m, src) = setup().await;
+    {
+        let mut st = m.0.lock().unwrap();
+        for (id, from) in [
+            ("prim", "Primary@passband.example"),
+            ("other", "x@elsewhere.example"),
+        ] {
+            st.raw.insert(id.into(), b"Subject: s\r\n\r\nx".to_vec());
+            st.meta.insert(
+                id.into(),
+                json!({"id": id, "parentFolderId": "F-archive",
+                       "from": {"emailAddress": {"address": from}}}),
+            );
+        }
+    }
+    let prim = src.fetch_raw("prim", Urgency::Background).await.unwrap();
+    assert!(prim.placement.in_sent, "{:?}", prim.placement);
+    let other = src.fetch_raw("other", Urgency::Background).await.unwrap();
+    assert!(!other.placement.in_sent, "{:?}", other.placement);
 }
 
 #[tokio::test]

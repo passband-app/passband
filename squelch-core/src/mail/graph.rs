@@ -355,6 +355,8 @@ pub struct GraphSource<C: CredentialStore + ?Sized> {
     api_base: String,
     quota_retry_cap: Duration,
     folders: tokio::sync::OnceCell<FolderIds>,
+    /// Every address this account is (see [`Self::own_addresses`]).
+    own: tokio::sync::OnceCell<Vec<String>>,
 }
 
 impl<C: CredentialStore + ?Sized> GraphSource<C> {
@@ -369,6 +371,43 @@ impl<C: CredentialStore + ?Sized> GraphSource<C> {
             api_base: parts.api_base,
             quota_retry_cap: parts.quota_retry_cap,
             folders: tokio::sync::OnceCell::new(),
+            own: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// The addresses mail FROM this account can carry: the configured one,
+    /// plus what Graph's `/me` names (`mail`, the sign-in name). A personal
+    /// account's configured alias, its primary and its sign-in can all
+    /// differ, and Exchange sends as the primary, so matching only the
+    /// configured address would read the owner's own mail as a stranger's.
+    /// Asked once per source; a failed lookup is retried next time and falls
+    /// back to the configured address alone.
+    async fn own_addresses(&self) -> Vec<String> {
+        #[derive(Deserialize)]
+        struct Me {
+            mail: Option<String>,
+            #[serde(rename = "userPrincipalName")]
+            upn: Option<String>,
+        }
+        let configured = self.account_email.trim().to_ascii_lowercase();
+        let looked_up = self
+            .own
+            .get_or_try_init(|| async {
+                let url = format!("{}/me?$select=mail,userPrincipalName", self.api_base);
+                let me = self.get_json::<Me>(&url, Urgency::Window).await?;
+                let mut all = vec![configured.clone()];
+                for a in [me.mail, me.upn].into_iter().flatten() {
+                    let a = a.trim().to_ascii_lowercase();
+                    if a.contains('@') && !all.contains(&a) {
+                        all.push(a);
+                    }
+                }
+                Ok::<_, CoreError>(all)
+            })
+            .await;
+        match looked_up {
+            Ok(all) => all.clone(),
+            Err(_) => vec![configured],
         }
     }
 
@@ -805,11 +844,16 @@ impl<C: CredentialStore + ?Sized + 'static> MailSource for GraphSource<C> {
         // follows a message into any folder; Exchange's Sent Items does not,
         // so the user's own mail filed in Archive or a folder of theirs is
         // recognised by its From.
-        let from_me = meta
+        let from_addr = meta
             .from
             .as_ref()
             .and_then(|r| r.email_address.address.as_deref())
-            .is_some_and(|a| a.trim().eq_ignore_ascii_case(self.account_email.trim()));
+            .map(|a| a.trim().to_ascii_lowercase());
+        let from_me = match from_addr {
+            Some(a) if a == self.account_email.trim().to_ascii_lowercase() => true,
+            Some(a) => self.own_addresses().await.contains(&a),
+            None => false,
+        };
         let placement = match (&meta.parent_folder_id, self.folder_ids().await) {
             (Some(parent), Ok(f)) => Placement {
                 in_inbox: *parent == f.inbox,

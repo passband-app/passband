@@ -262,11 +262,15 @@ Skip step 1 (no Google client) and put two lines in the daemon's config file,
 machine that runs `squelchd auth` (the export laptop too):
 
 ```toml
-account_email = "you@outlook.com"
 provider = "outlook"
 ```
 
-There is no environment variable for `provider`; it is a config-file key.
+`account_email` is optional for Outlook: `squelchd auth` saves whatever
+address Microsoft names for the account you sign in with. Mail goes out as
+that account's primary address; to send as an `@outlook.com` alias, make it
+primary at account.live.com/names/manage (it can take hours to reach
+Outlook). There is no environment variable for `provider`; it is a
+config-file key.
 Then run step 3 as written, without the two `SQUELCH_CLIENT_*` variables. The
 consent screen is Microsoft's and asks for mail read/write, send, calendar,
 your profile, and offline access, once for both reading and writing. `--broker`

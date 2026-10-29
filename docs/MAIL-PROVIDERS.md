@@ -142,7 +142,7 @@ in `auth/mod.rs` and `credentials.rs`. Self-host only. A daemon serves one
 account, so the provider is daemon config:
 
 ```toml
-account_email = "you@outlook.com"
+# account_email is optional for Outlook: auth saves the one Microsoft names
 provider = "outlook"
 # Only when not using Passband's built-in Entra app:
 # microsoft_client_id = "00000000-0000-0000-0000-000000000000"
@@ -266,15 +266,22 @@ decides every endpoint, scope set and identity check:
 
 ### Still open
 
-0. **A personal account's Outlook alias is invisible to `/me`.** Seen live
-   2026-10-28: a Microsoft account that signs in as `x@company.com` and owns
-   the mailbox alias `y@outlook.com` answers `/me` with only `x@company.com`
-   (no `mail`, no `otherMails`, no `proxyAddresses` naming the alias), so
-   `account_email = "y@outlook.com"` is refused as the wrong account. The
-   workaround is to configure the sign-in address. The fix is either to match
-   the alias against the From of real Sent Items, or to stop requiring an
-   address for Outlook and take the one Microsoft names. Own-mail detection by
-   From (`in_sent`) has the same blind spot for such accounts.
+0. **Addresses: handled, with one gap.** Seen live 2026-10-28: a personal
+   account can sign in as `x@company.com`, own the alias `y@outlook.com`, and
+   send as whichever is primary; `/me` names only the primary (and lags an
+   alias change by hours), and Exchange REWRITES a From that is not the
+   primary to the hidden `outlook_<hex>@outlook.com`. So:
+   - `account_email` is optional for Outlook. `squelchd auth` without it
+     takes the address Microsoft names and saves it to the config.
+   - A re-consent is the same mailbox when its Microsoft account id matches
+     the stored credential's, whatever address Microsoft uses today.
+   - Every send asks `/me` and writes that address into the From before the
+     draft is made, so the From the recipient sees is never the hidden one.
+   - Mail from the configured address, `/me`'s `mail`, or the sign-in name
+     counts as the owner's own.
+   The gap: a configured alias that is NOT primary is still the address the
+   daemon is filed under, while mail goes out as the primary. The client does
+   not yet show "Sends as ...".
 1. **Live end to end: mostly verified 2026-10-28** on a personal Microsoft
    account (a scratch daemon, Passband's built-in Entra app). Seen working:
    the `http://127.0.0.1` loopback redirect (registered under "Mobile and

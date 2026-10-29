@@ -140,9 +140,12 @@ COPY --from=weights /models /models
 ENV SQUELCH_EMBED_MODEL_DIR=/models \
     HOME=/tmp
 
-# The uid tenant pods run as (squelch-warden's DEFAULT_RUN_AS). Numeric so
-# runAsNonRoot can verify it without an /etc/passwd entry.
-USER 10001:10001
+# A uid of its own, NOT the tenants' (squelch-warden's DEFAULT_RUN_AS is
+# 10001): every tenant's text passes through this process, so it shares no uid
+# with any tenant pod. 65-embed.yaml runs it as the same uid, and a warden test
+# keeps the two equal. Numeric so runAsNonRoot can verify it without an
+# /etc/passwd entry.
+USER 10002:10002
 
 # 8850 is the work (POST /embed), 9464 is /healthz and /metrics.
 EXPOSE 8850 9464

@@ -4080,6 +4080,28 @@ mod tests {
         deployment.spec.unwrap().template.spec.unwrap()
     }
 
+    /// The shared embedder runs as a uid of its own, not the tenants'
+    /// (`DEFAULT_RUN_AS`): every tenant's text passes through it, and a uid it
+    /// shared with a tenant pod is one a tenant escape would not have to
+    /// change. The manifest and the image's `USER` agree, so the pod runs as
+    /// what the image was built to run as.
+    #[test]
+    fn the_embedder_runs_as_its_own_uid_and_the_image_agrees() {
+        const DOCKERFILE: &str = include_str!("../../Dockerfile.embed");
+        let ctx = embed_pod()
+            .security_context
+            .expect("a pod security context");
+        assert_eq!(ctx.run_as_user, Some(10002));
+        assert_eq!(ctx.run_as_group, Some(10002));
+        assert_eq!(ctx.fs_group, Some(10002));
+        assert_ne!(ctx.run_as_user, Some(crate::config::DEFAULT_RUN_AS));
+        let user = DOCKERFILE
+            .lines()
+            .find_map(|l| l.strip_prefix("USER "))
+            .expect("Dockerfile.embed sets USER");
+        assert_eq!(user.trim(), "10002:10002");
+    }
+
     /// The tenant side and `65-embed.yaml` are one contract, read from both
     /// ends: the label the egress rule selects is the pod's, the port it opens
     /// is the one the container and the Service serve, the Secret the tenant

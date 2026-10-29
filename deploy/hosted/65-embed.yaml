@@ -98,9 +98,9 @@ spec:
       terminationGracePeriodSeconds: 10
       securityContext:
         runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
-        fsGroup: 10001
+        runAsUser: 10002
+        runAsGroup: 10002
+        fsGroup: 10002
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault

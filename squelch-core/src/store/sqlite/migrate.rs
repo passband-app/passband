@@ -848,6 +848,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // must not turn this into a failed open.
     rebuild_fts_if_stale(conn)?;
 
+    // ---- CALENDAR SEARCH'S INDEX OUT OF STEP ------------------------------
+    //
+    // Events written before the index existed, or by an older daemon since.
+    reindex_calendar_search_if_stale(conn)?;
+
     // Re-launder every stored institution through the extractor's OWN sanitizer,
     // which grew a shape check after a model returned a valid-looking JSON object
     // whose institution ran from a correct bank name straight into this crate's
@@ -1970,6 +1975,67 @@ pub(super) fn retire_records_destination(conn: &Connection) -> Result<()> {
             false,
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Rebuild calendar search's index (schema.sql, CALENDAR SEARCH) when it does
+/// not hold exactly one row per stored event: events stored before it
+/// existed, or written by an older daemon that does not keep it. Three counts
+/// on an index-backed table each; a rebuild is one INSERT ... SELECT per
+/// table, and the store holds at most a few thousand events per calendar.
+/// `calendar_search_fts`'s CREATE statement as schema.sql has it.
+fn canonical_calendar_search_create() -> Option<&'static str> {
+    static PARSED: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *PARSED.get_or_init(|| {
+        let start = SCHEMA.find("CREATE VIRTUAL TABLE IF NOT EXISTS calendar_search_fts")?;
+        let end = start + SCHEMA[start..].find(");")? + 1;
+        Some(SCHEMA[start..end].trim())
+    })
+}
+
+pub(super) fn reindex_calendar_search_if_stale(conn: &Connection) -> Result<()> {
+    // A partial store (an old schema mid-upgrade, a test fixture) has nothing
+    // to index, or nowhere to put it.
+    if !tables_exist(
+        conn,
+        &[
+            "calendar_events",
+            "calendar_event_guests",
+            "calendar_search_keys",
+            "calendar_search_fts",
+        ],
+    )? {
+        return Ok(());
+    }
+    let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    // A definition that differs from schema.sql's (the tokenizer changed) is
+    // a different index: recreate it, and the counts below then force the
+    // rebuild.
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='calendar_search_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let (Some(stored), Some(canonical)) = (stored, canonical_calendar_search_create())
+        && normalize_fts_sql(&stored) != normalize_fts_sql(canonical)
+    {
+        conn.execute_batch(&format!("DROP TABLE calendar_search_fts; {canonical};"))?;
+    }
+    let events = count("SELECT COUNT(*) FROM calendar_events")?;
+    let keys = count(
+        "SELECT COUNT(*) FROM calendar_search_keys k JOIN calendar_events e
+           ON e.account_id=k.account_id AND e.calendar_id=k.calendar_id AND e.event_id=k.event_id",
+    )?;
+    let all_keys = count("SELECT COUNT(*) FROM calendar_search_keys")?;
+    let indexed = count("SELECT COUNT(*) FROM calendar_search_fts")?;
+    if events == keys && keys == all_keys && all_keys == indexed {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    super::calendar::reindex_calendar_search(&tx)?;
     tx.commit()?;
     Ok(())
 }

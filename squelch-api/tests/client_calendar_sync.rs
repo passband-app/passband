@@ -697,6 +697,25 @@ async fn refresh(app: &axum::Router) -> (StatusCode, Value) {
 /// A committed triage decision carrying one `event` record, the way
 /// production makes a ghost. Returns the message's id.
 fn seed_ghost(store: &SqliteStore, account: i64, gmail: &str, title: &str, start: String) -> i64 {
+    seed_ghost_as(
+        store,
+        account,
+        gmail,
+        title,
+        start,
+        EventCommitment::Committed,
+    )
+}
+
+/// [`seed_ghost`] with the record's commitment.
+fn seed_ghost_as(
+    store: &SqliteStore,
+    account: i64,
+    gmail: &str,
+    title: &str,
+    start: String,
+    commitment: EventCommitment,
+) -> i64 {
     let id = store
         .upsert_message(&NewMessage {
             received_at: Utc::now() - Duration::minutes(5),
@@ -734,7 +753,7 @@ fn seed_ghost(store: &SqliteStore, account: i64, gmail: &str, title: &str, start
         end: None,
         duration_estimate: None,
         event_kind: EventRecordKind::Reservation,
-        commitment: EventCommitment::Committed,
+        commitment,
         change: EventChange::Created,
         identity_refs: vec![format!("REF{gmail}12345")],
         likelihood: None,
@@ -5594,4 +5613,401 @@ async fn every_refusal_before_google_names_its_code() {
         assert!(answer["error"].is_string(), "the human message stays");
     }
     assert!(writes(&w).is_empty(), "nothing reached Google");
+}
+
+// ---------------------------------------------------------------------------
+// Calendar search (docs/CALENDAR.md §10.1): `GET /client/calendar/search` and
+// the assistant's `GET /client/agent/calendar/search`, over events the real
+// sync stored and ghosts the real projection made.
+
+async fn search(app: &axum::Router, route: &str, q: &str) -> Value {
+    let q: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
+    get(app, &format!("{route}?q={q}")).await
+}
+
+fn hit_titles(body: &Value) -> Vec<String> {
+    body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            let (kind, v) = match (&item["event"], &item["ghost"]) {
+                (Value::Null, ghost) => ("ghost", ghost),
+                (event, _) => ("event", event),
+            };
+            format!("{kind}:{}", v["title"].as_str().unwrap_or(""))
+        })
+        .collect()
+}
+
+/// `event` with the owner's own RSVP a no.
+fn declined(mut event: Value) -> Value {
+    event["attendees"] = json!([
+        {"email": "me@example.com", "self": true, "responseStatus": "declined"}
+    ]);
+    event
+}
+
+/// The fixture every search test reads: two Sam dinners (one ahead, one past,
+/// the one ahead with Sam as a guest at a private address), a third the owner
+/// declined (never served), a standup, and a ghost from mail. Synced and projected.
+async fn search_world(tag: &str) -> World {
+    let w = world(tag, GRANTED).await;
+    let ahead = minute(Utc::now() + Duration::days(3));
+    let past = minute(Utc::now() - Duration::days(10));
+    let mut dinner = timed("evt-dinner", "Dinner w/ Sam", ahead, 90);
+    dinner["location"] = json!("Nopa");
+    dinner["attendees"] = json!([
+        {"email": "sam@hidden-domain.test", "displayName": "Sam Patel",
+         "responseStatus": "accepted", "organizer": true},
+        {"email": "me@example.com", "self": true, "responseStatus": "accepted"},
+        {"email": "nameless@hidden-domain.test", "responseStatus": "needsAction"}
+    ]);
+    dinner["organizer"] = json!({"email": "sam@hidden-domain.test"});
+    dinner["description"] = json!("Bring the wine");
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![
+            dinner,
+            timed("evt-old", "Dinner w/ Sam", past, 90),
+            timed("evt-standup", "Team standup", ahead, 15),
+            declined(timed("evt-no", "Dinner w/ Sam's cousin", ahead, 60)),
+        ]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    seed_ghost(
+        &w.store,
+        w.acct,
+        "g-bday",
+        "Sam's birthday dinner",
+        rfc(minute(Utc::now() + Duration::days(12))),
+    );
+    w
+}
+
+#[tokio::test]
+async fn calendar_search_lists_upcoming_soonest_then_past_newest_with_ghosts() {
+    let w = search_world("search-order").await;
+    let body = search(&w.app, "/client/calendar/search", "dinner sam").await;
+    eprintln!("dinner sam: {body}");
+    assert_eq!(
+        hit_titles(&body),
+        [
+            "event:Dinner w/ Sam",
+            "ghost:Sam's birthday dinner",
+            "event:Dinner w/ Sam"
+        ]
+    );
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["granted"], true);
+    // Each item is the timeline's own view: the first is the one ahead,
+    // served whole, guests and all.
+    let first = &body["items"][0]["event"];
+    assert_eq!(first["id"], "evt-dinner");
+    assert_eq!(first["location"], "Nopa");
+    assert_eq!(first["guests"].as_array().unwrap().len(), 3);
+    assert!(body["items"][1]["ghost"]["sources"][0]["thread_id"].is_string());
+
+    // Plurals, prefixes, the place, a guest's name and (for the owner) a
+    // guest's address all find it; inside a word does not.
+    for q in ["dinners", "din", "nopa", "patel", "hidden-domain", "wine"] {
+        let body = search(&w.app, "/client/calendar/search", q).await;
+        assert!(
+            hit_titles(&body).contains(&"event:Dinner w/ Sam".to_string()),
+            "{q}: {body}"
+        );
+    }
+    let none = search(&w.app, "/client/calendar/search", "inner").await;
+    assert_eq!(none["total"], 0, "{none}");
+
+    // The limit cuts the list, not the count.
+    let one = get(&w.app, "/client/calendar/search?q=dinner&limit=1").await;
+    assert_eq!(one["items"].as_array().unwrap().len(), 1);
+    assert_eq!(one["total"], 3);
+
+    // Mail operators ask nothing of the calendar; dates bound the start.
+    for q in [
+        "from:sam dinner",
+        "to:sam dinner",
+        "in:sent dinner",
+        "",
+        "a",
+    ] {
+        let body = search(&w.app, "/client/calendar/search", q).await;
+        assert_eq!(body["total"], 0, "{q}: {body}");
+        assert_eq!(body["items"], json!([]));
+    }
+    let after = (Utc::now() + Duration::days(1)).format("%Y-%m-%d");
+    let body = search(
+        &w.app,
+        "/client/calendar/search",
+        &format!("dinner after:{after}"),
+    )
+    .await;
+    assert_eq!(
+        hit_titles(&body),
+        ["event:Dinner w/ Sam", "ghost:Sam's birthday dinner"]
+    );
+
+    // No word has all three, so the ones missing exactly one are served.
+    let body = search(&w.app, "/client/calendar/search", "dinner sam zebra").await;
+    assert_eq!(body["total"], 3, "{body}");
+}
+
+#[tokio::test]
+async fn the_agent_view_names_people_and_never_addresses_them() {
+    let w = search_world("search-agent").await;
+    let body = search(&w.app, "/client/agent/calendar/search", "dinner sam").await;
+    eprintln!("agent: {body}");
+    let text = body.to_string();
+    assert!(!text.contains('@'), "an address reached the agent: {text}");
+    assert!(!text.contains("hidden-domain"), "{text}");
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(body["total"], 3);
+    let first = &results[0];
+    assert_eq!(first["kind"], "event");
+    assert_eq!(first["title"], "Dinner w/ Sam");
+    assert_eq!(first["guests"], json!(["Sam Patel"]));
+    // Sam and the nameless guest; never the owner.
+    assert_eq!(first["guest_count"], 2);
+    assert_eq!(first["organizer"], "Sam Patel");
+    assert_eq!(first["organizer_is_you"], false);
+    assert_eq!(first["description"], "Bring the wine");
+    assert_eq!(first["thread_id"], Value::Null);
+    let ghost = &results[1];
+    assert_eq!(ghost["kind"], "ghost");
+    assert_eq!(ghost["thread_id"], "t-g-bday");
+
+    // An address is not searchable here: a word only an address holds finds
+    // nothing, where the owner's own search finds the event.
+    let agent = search(&w.app, "/client/agent/calendar/search", "hidden-domain").await;
+    assert_eq!(agent["total"], 0, "{agent}");
+    let owner = search(&w.app, "/client/calendar/search", "hidden-domain").await;
+    assert_eq!(owner["total"], 1, "{owner}");
+}
+
+#[tokio::test]
+async fn a_ghost_that_is_a_real_event_is_served_once_as_the_event() {
+    let w = world("search-twin", GRANTED).await;
+    let at = minute(Utc::now() + Duration::days(4));
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![timed("evt-show", "Big Thief", at, 120)]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    seed_ghost(&w.store, w.acct, "g-show", "Big Thief", rfc(at));
+    // The timeline draws the ghost as the event...
+    let timeline = w.timeline().await;
+    assert!(
+        timeline["ghosts"][0]["matched_event"].is_object(),
+        "{timeline}"
+    );
+    // ...and search serves the event alone.
+    let body = search(&w.app, "/client/calendar/search", "big thief").await;
+    assert_eq!(hit_titles(&body), ["event:Big Thief"], "{body}");
+}
+
+#[tokio::test]
+async fn calendar_search_follows_the_flag_and_the_grant() {
+    let w = search_world("search-gate").await;
+    w.features.replace_granted(Vec::<String>::new());
+    for route in ["/client/calendar/search", "/client/agent/calendar/search"] {
+        let resp = w
+            .app
+            .clone()
+            .oneshot(authed("GET", &format!("{route}?q=dinner")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{route}");
+    }
+    w.features
+        .replace_granted([squelch_core::features::CALENDAR]);
+    // A grant taken back hides the synced events; the ghost stays.
+    std::fs::remove_file(&w.path).unwrap();
+    let body = search(&w.app, "/client/calendar/search", "dinner").await;
+    assert_eq!(body["granted"], false, "{body}");
+    assert_eq!(hit_titles(&body), ["ghost:Sam's birthday dinner"]);
+}
+
+#[tokio::test]
+async fn the_agent_gets_no_ghost_whose_thread_it_may_not_open() {
+    let w = search_world("search-guard").await;
+    // A later message in the ghost's thread, never assessed: the thread is
+    // closed to the agent door (get_thread would refuse it), so its ghost is
+    // not the agent's to see, though the owner still sees it.
+    w.store
+        .upsert_message(&NewMessage {
+            received_at: Utc::now() - Duration::minutes(1),
+            auth_pass: Some(true),
+            ..msg(w.acct, "g-bday-2", "t-g-bday", "Re: Your plans", "more")
+        })
+        .unwrap();
+    assert!(!w.store.external_thread_allowed(w.acct, "t-g-bday").unwrap());
+    let owner = search(&w.app, "/client/calendar/search", "birthday").await;
+    assert_eq!(
+        hit_titles(&owner),
+        ["ghost:Sam's birthday dinner"],
+        "{owner}"
+    );
+    let agent = search(&w.app, "/client/agent/calendar/search", "birthday").await;
+    assert_eq!(agent["total"], 0, "{agent}");
+}
+
+// --- Adversarial pass, 2026-10-28 -----------------------------------------
+
+#[tokio::test]
+async fn a_half_typed_word_finds_its_event_as_the_user_types() {
+    let w = world("search-typing", GRANTED).await;
+    let at = minute(Utc::now() + Duration::days(2));
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![
+            timed("evt-m", "Team Meeting", at, 30),
+            timed("evt-c", "Conference call", at, 30),
+            timed("evt-p", "Birthday party", at, 30),
+        ]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    // Every prefix of the word, not just the ones porter leaves alone.
+    for q in [
+        "me", "mee", "meet", "meeti", "meetin", "meeting", "meetings",
+    ] {
+        let body = search(&w.app, "/client/calendar/search", q).await;
+        assert_eq!(hit_titles(&body), ["event:Team Meeting"], "{q}: {body}");
+    }
+    for q in ["conferenc", "conferences", "parties", "party"] {
+        let body = search(&w.app, "/client/calendar/search", q).await;
+        assert_eq!(body["total"], 1, "{q}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn no_address_reaches_the_agent_through_names_titles_or_notes() {
+    let w = world("search-addr", GRANTED).await;
+    let at = minute(Utc::now() + Duration::days(2));
+    let mut sync = timed("evt-s", "Sync with ops@corp.example", at, 30);
+    sync["description"] = json!("host carol@corp.example, dial in");
+    sync["location"] = json!("ask frontdesk@corp.example");
+    sync["attendees"] = json!([
+        {"email": "dan@evil.com", "displayName": "dan@evil.com",
+         "responseStatus": "accepted", "organizer": true},
+        {"email": "me@example.com", "self": true, "responseStatus": "accepted"}
+    ]);
+    w.google().full.insert(PRIMARY.into(), vec![vec![sync]]);
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    // A coworker's calendar Google named after their address.
+    w.store
+        .calendar_note_meta(w.acct, PRIMARY, Some("boss.person@corp.example"), None)
+        .unwrap();
+
+    let body = search(&w.app, "/client/agent/calendar/search", "sync").await;
+    eprintln!("agent: {body}");
+    let text = body.to_string();
+    assert!(!text.contains('@'), "an address reached the agent: {text}");
+    let hit = &body["results"][0];
+    assert_eq!(hit["guests"], json!([]));
+    assert_eq!(hit["guest_count"], 1);
+    assert_eq!(hit["organizer"], Value::Null);
+    assert_eq!(hit["calendar"], Value::Null);
+    assert!(hit["description"].as_str().unwrap().contains("(address)"));
+    // Nor can a word only an address holds find it.
+    for q in ["evil", "carol", "corp", "frontdesk", "ops", "boss"] {
+        let agent = search(&w.app, "/client/agent/calendar/search", q).await;
+        assert_eq!(agent["total"], 0, "{q}: {agent}");
+    }
+    // The owner's own search box finds it by any of them.
+    for q in ["evil", "carol", "corp", "frontdesk", "ops"] {
+        let owner = search(&w.app, "/client/calendar/search", q).await;
+        assert_eq!(owner["total"], 1, "{q}: {owner}");
+    }
+}
+
+#[tokio::test]
+async fn a_huge_query_is_cut_not_an_error_and_limit_zero_serves_nothing() {
+    let w = search_world("search-huge").await;
+    let huge: String = (0..2000).map(|i| format!("al x{i} ")).collect();
+    let started = std::time::Instant::now();
+    let body = search(&w.app, "/client/agent/calendar/search", &huge).await;
+    assert!(body["results"].is_array(), "{body}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // Repeats count once: "sam standup sam" is two terms that no event has
+    // both of, so the standup (no Sam) is an all-but-one hit like the Sam
+    // dinners. Counted twice, "sam" would be demanded and the standup lost.
+    let body = search(&w.app, "/client/calendar/search", "sam standup sam").await;
+    assert!(
+        hit_titles(&body).contains(&"event:Team standup".to_string()),
+        "{body}"
+    );
+    assert_eq!(body["total"], 4, "{body}");
+    let none = get(&w.app, "/client/calendar/search?q=dinner&limit=0").await;
+    assert_eq!(none["items"], json!([]));
+    assert_eq!(none["total"], 3);
+}
+
+#[tokio::test]
+async fn only_mail_events_triage_committed_to_or_the_user_is_going_to_are_searched() {
+    let w = search_world("search-committed").await;
+    let at = |days| rfc(minute(Utc::now() + Duration::days(days)));
+    // An invitation and a proposal: possibilities, not on the calendar.
+    seed_ghost_as(
+        &w.store,
+        w.acct,
+        "g-inv",
+        "Gala dinner",
+        at(20),
+        EventCommitment::Invited,
+    );
+    seed_ghost_as(
+        &w.store,
+        w.acct,
+        "g-prop",
+        "Dinner pitch",
+        at(21),
+        EventCommitment::Proposed,
+    );
+    seed_ghost_as(
+        &w.store,
+        w.acct,
+        "g-unk",
+        "Dinner maybe",
+        at(22),
+        EventCommitment::Unknown,
+    );
+    let body = search(&w.app, "/client/calendar/search", "dinner").await;
+    assert_eq!(
+        hit_titles(&body),
+        [
+            "event:Dinner w/ Sam",
+            "ghost:Sam's birthday dinner",
+            "event:Dinner w/ Sam"
+        ],
+        "{body}"
+    );
+    let agent = search(&w.app, "/client/agent/calendar/search", "gala").await;
+    assert_eq!(agent["total"], 0, "{agent}");
+
+    // The user saying they are going makes the invitation a commitment.
+    let timeline = w.timeline().await;
+    let gala = timeline["ghosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["title"] == "Gala dinner")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let resp = w
+        .app
+        .clone()
+        .oneshot(authed_json(
+            "PATCH",
+            &format!("/client/timeline/ghosts/{gala}"),
+            json!({"state": "going"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = search(&w.app, "/client/calendar/search", "gala").await;
+    assert_eq!(hit_titles(&body), ["ghost:Gala dinner"], "{body}");
 }

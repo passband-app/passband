@@ -107,7 +107,7 @@ enum Lane: String, Sendable {
     /// what lets it run unasked: no confirm card can ever appear inside the
     /// search panel, and the lane needs no ActionGate to be safe.
     private static let searchTools: [AgentTools.Tool] = [
-        .searchMail, .getThread, .searchContacts, .getRecords, .showEmails,
+        .searchMail, .getThread, .searchContacts, .getRecords, .showEmails, .searchCalendar,
     ]
 
     /// The names this lane may call, as the run loop checks them. A SET rather
@@ -118,7 +118,9 @@ enum Lane: String, Sendable {
         // Every tool this platform has: the help tools are the Mac's alone
         // (see `AgentTools.Tool.isAvailable`).
         case .chat: Set(AgentTools.Tool.allCases.filter(\.isAvailable).map(\.rawValue))
-        case .search: Set(Self.searchTools.map(\.rawValue))
+        // Filtered by platform too: the phone has no `search_calendar`, and a
+        // lane offered a tool its dispatch refuses fails every call to it.
+        case .search: Set(Self.searchTools.filter(\.isAvailable).map(\.rawValue))
         }
     }
 

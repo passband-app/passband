@@ -2071,7 +2071,7 @@ fn timeline_bound(raw: Option<&str>) -> Result<Option<DateTime<chrono::FixedOffs
 /// is the model's own guess as stored, served even when a stronger tier wins
 /// so the client can say what it was overruled by. A date-only ghost with no
 /// stated or corrected end has no end at all (`end`, `end_source` null).
-fn ghost_view(
+pub(crate) fn ghost_view(
     ghost: &squelch_core::types::GhostEvent,
     now: DateTime<chrono::FixedOffset>,
 ) -> serde_json::Value {

@@ -69,6 +69,8 @@ struct MobileCalendarView: View {
     @State private var stepForward = true
     @State private var memo = MobileCalendarMemo()
     @State private var kicked = false
+    /// A search hit's detail, pushed once the store has turned to its day.
+    @State private var searched: String?
     #if DEBUG
         /// A screenshot's push (`--fixture-scene calendar-detail`).
         @State private var fixtureDetail: String?
@@ -179,6 +181,21 @@ struct MobileCalendarView: View {
         }
         .navigationDestination(for: MobileCalendarRoute.self) { route in
             MobileEventPage(id: route.id)
+        }
+        // A HIT FROM SEARCH (MobileSearchView's Events block): the store has
+        // turned to its day and named the item in `calendarSearchOpen`, a
+        // one-shot ask written only by `openCalendarSearchHit`: the day's
+        // hours, and the detail pushed over them. NOT `calendarMonthItem`,
+        // which every save also sets (`landEvent`), so reading it pushed a
+        // second page after each edit. Moving the place is what fetches that
+        // month, so the page finds the row once the feed lands. `initial`
+        // because the tab may mount on it.
+        .navigationDestination(item: $searched) { id in MobileEventPage(id: id) }
+        .onChange(of: store.calendarSearchOpen, initial: true) { _, id in
+            guard let id else { return }
+            store.calendarSearchOpen = nil
+            mode = .day
+            searched = id
         }
         // THE EVENT SHEET, on the store's own editor: what "+" opens, and the
         // detail's Edit from a page pushed on this stack.

@@ -883,3 +883,282 @@ async fn live_lookups_read_the_verified_copy_and_search_exactly() {
         Err(WriteError::Api { status: 404, .. })
     ));
 }
+
+// ---- amendment A3: a maybe-sent scheduled send is never sent again ------------
+
+/// An [`OutboxLedger`] in memory, which can be told to fail.
+#[derive(Default)]
+struct MemOutbox {
+    marks: Mutex<HashMap<String, OutboxMark>>,
+    broken: std::sync::atomic::AtomicBool,
+}
+
+impl MemOutbox {
+    fn mark(&self, token: &str) -> Option<OutboxMark> {
+        self.marks.lock().unwrap().get(token).cloned()
+    }
+    fn check(&self) -> Result<(), String> {
+        if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
+            Err("ledger down".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl OutboxLedger for MemOutbox {
+    fn get(&self, token: &str) -> Result<Option<OutboxMark>, String> {
+        self.check()?;
+        Ok(self.mark(token))
+    }
+    fn set(&self, token: &str, mark: &OutboxMark) -> Result<(), String> {
+        self.check()?;
+        self.marks
+            .lock()
+            .unwrap()
+            .insert(token.into(), mark.clone());
+        Ok(())
+    }
+    fn clear(&self, token: &str) -> Result<(), String> {
+        self.check()?;
+        self.marks.lock().unwrap().remove(token);
+        Ok(())
+    }
+}
+
+#[test]
+fn an_outbox_mark_round_trips_and_garbage_is_doubt() {
+    for m in [
+        OutboxMark::Submitting {
+            message_id: "a@b".into(),
+        },
+        OutboxMark::Accepted {
+            message_id: "a@b".into(),
+        },
+    ] {
+        assert_eq!(OutboxMark::decode(&m.encode()), m);
+    }
+    for garbage in ["", "accepted", "accepted ", "weird x@y"] {
+        assert!(
+            matches!(OutboxMark::decode(garbage), OutboxMark::Submitting { .. }),
+            "{garbage:?}"
+        );
+    }
+}
+
+fn is_doubt(r: &Result<Option<String>, WriteError>) -> bool {
+    matches!(r, Err(WriteError::Transport(m)) if m == MAY_HAVE_BEEN_SENT)
+}
+
+/// THE DECISION: only "no hit AND no marker" is "not sent". A hit wins
+/// (and clears the marker); `Accepted` is sent; `Submitting`, an unreadable
+/// ledger and no ledger at all are doubt.
+#[test]
+fn only_no_hit_and_no_marker_is_not_sent() {
+    let ledger = MemOutbox::default();
+    let mid = "tok@passband.app";
+    let sub = OutboxMark::Submitting {
+        message_id: mid.into(),
+    };
+    assert_eq!(
+        outbox_answer(None, mid, "tok", Some(&ledger)).unwrap(),
+        None
+    );
+
+    ledger.set("tok", &sub).unwrap();
+    assert!(is_doubt(&outbox_answer(None, mid, "tok", Some(&ledger))));
+
+    ledger
+        .set(
+            "tok",
+            &OutboxMark::Accepted {
+                message_id: mid.into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        outbox_answer(None, mid, "tok", Some(&ledger)).unwrap(),
+        Some(stable_id_for_message_id(mid))
+    );
+
+    ledger.set("tok", &sub).unwrap();
+    let mut hit = loc(3);
+    hit.message_id = Some(mid.into());
+    assert_eq!(
+        outbox_answer(Some(hit), mid, "tok", Some(&ledger)).unwrap(),
+        Some(stable_id_for_message_id(mid))
+    );
+    assert_eq!(ledger.mark("tok"), None, "a hit clears the marker");
+
+    assert!(is_doubt(&outbox_answer(None, mid, "tok", None)));
+    ledger
+        .broken
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(is_doubt(&outbox_answer(None, mid, "tok", Some(&ledger))));
+}
+
+/// A send whose marker cannot be written is refused with nothing said to
+/// SMTP (the port answers nothing) and NOT maybe-sent material: no marker
+/// was left.
+#[tokio::test]
+async fn a_scheduled_send_whose_marker_cannot_be_written_is_not_sent() {
+    let credential = dev_credential("nomark@dev.test", ImapTls::Plain, 1);
+    let ledger = Arc::new(MemOutbox::default());
+    ledger
+        .broken
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let writer =
+        dev_writer(&credential, "nomark@dev.test", Default::default()).with_outbox(ledger.clone());
+    let raw = format!(
+        "To: x@dev.test\r\nMessage-ID: <{0}@passband.app>\r\n{OUTBOX_HEADER}: {0}\r\nSubject: s\r\n\r\nb\r\n",
+        "ab".repeat(24)
+    );
+    match writer.send(raw.as_bytes(), None).await {
+        Err(WriteError::Api { status: 503, .. }) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A fired scheduled send as the worker builds it: the minted Message-ID
+/// and the outbox token beside it.
+fn scheduled_raw(to: &str, token: &str) -> String {
+    format!(
+        "To: {to}\r\nSubject: scheduled\r\nMessage-ID: <{token}@passband.app>\r\n\
+         {OUTBOX_HEADER}: {token}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nlater\r\n"
+    )
+}
+
+fn fresh_token() -> String {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{n:048x}")
+}
+
+const WINDOW: fn() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) =
+    || (chrono::Utc::now(), chrono::Utc::now());
+
+/// The ordinary path: sent, one copy in Sent, the marker gone, and the
+/// recovery question answered by the copy.
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_a_fired_scheduled_send_is_found_and_leaves_no_marker() {
+    let (writer, _, me) = live_writer("sched-ok");
+    let ledger = Arc::new(MemOutbox::default());
+    let writer = writer.with_outbox(ledger.clone());
+    let token = fresh_token();
+    let sent = writer
+        .send(scheduled_raw(&me, &token).as_bytes(), None)
+        .await
+        .unwrap();
+    let mid = format!("{token}@passband.app");
+    assert_eq!(sent.id, Some(stable_id_for_message_id(&mid)));
+    assert_eq!(ledger.mark(&token), None, "Sent has it: no marker kept");
+    assert_eq!(copies(&me, "Sent", &mid, 1).await.len(), 1);
+    let found = writer
+        .find_scheduled_send(&format!("<{mid}>"), WINDOW(), &|| false)
+        .await
+        .unwrap();
+    assert_eq!(found, sent.id);
+
+    // Never sent at all: no copy, no marker, the one "not sent".
+    let other = fresh_token();
+    assert_eq!(
+        writer
+            .find_scheduled_send(&format!("<{other}@passband.app>"), WINDOW(), &|| false)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// THE CRASH BETWEEN SMTP AND THE APPEND: the mail went (it is in the
+/// INBOX) and Sent has no copy, the case Gmail's "not in Sent = not sent"
+/// would send twice. The marker answers: `Accepted` is the id, never a
+/// resend; one that never got past `Submitting` (a crash before SMTP
+/// answered) is doubt, an `Err`, which the worker never fires on.
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_a_crash_between_smtp_and_sent_is_never_sent_again() {
+    let (writer, _, me) = live_writer("sched-crash");
+    let ledger = Arc::new(MemOutbox::default());
+    let writer = writer.with_outbox(ledger.clone()).crash_after_smtp();
+    let token = fresh_token();
+    let mid = format!("{token}@passband.app");
+    assert!(
+        writer
+            .send(scheduled_raw(&me, &token).as_bytes(), None)
+            .await
+            .is_err()
+    );
+    assert_eq!(copies(&me, "INBOX", &mid, 1).await.len(), 1, "it went");
+    assert!(
+        copies(&me, "Sent", &mid, 0).await.is_empty(),
+        "no Sent copy"
+    );
+    assert!(matches!(
+        ledger.mark(&token),
+        Some(OutboxMark::Accepted { .. })
+    ));
+    let asked = format!("<{mid}>");
+    assert_eq!(
+        writer
+            .find_scheduled_send(&asked, WINDOW(), &|| false)
+            .await
+            .unwrap(),
+        Some(stable_id_for_message_id(&mid))
+    );
+
+    // The crash a moment earlier: SMTP took it, the marker never moved on.
+    ledger
+        .set(
+            &token,
+            &OutboxMark::Submitting {
+                message_id: mid.clone(),
+            },
+        )
+        .unwrap();
+    let r = writer
+        .find_scheduled_send(&asked, WINDOW(), &|| false)
+        .await;
+    assert!(is_doubt(&r), "{r:?}");
+}
+
+/// The token alone finds it, exactly: a copy in Sent whose Message-ID a
+/// server rewrote still answers, by its own Message-ID's id; a token that
+/// merely CONTAINS the asked one does not.
+#[tokio::test]
+#[ignore = "needs scripts/imap-dev.sh start"]
+async fn live_the_outbox_token_finds_a_rewritten_copy_exactly() {
+    let (writer, _, me) = live_writer("sched-token");
+    let writer = writer.with_outbox(Arc::new(MemOutbox::default()));
+    let token = fresh_token();
+    let rewritten = format!(
+        "To: {me}\r\nSubject: s\r\nMessage-ID: <rewritten-{token}@server.example>\r\n\
+         {OUTBOX_HEADER}: {token}\r\n\r\nb\r\n"
+    );
+    let longer = format!(
+        "To: {me}\r\nSubject: s\r\nMessage-ID: <other-{token}@server.example>\r\n\
+         {OUTBOX_HEADER}: x{token}\r\n\r\nb\r\n"
+    );
+    place(&writer.source, "Sent", longer.as_bytes(), None).await;
+    let asked = format!("<{token}@passband.app>");
+    assert_eq!(
+        writer
+            .find_scheduled_send(&asked, WINDOW(), &|| false)
+            .await
+            .unwrap(),
+        None
+    );
+    place(&writer.source, "Sent", rewritten.as_bytes(), None).await;
+    assert_eq!(
+        writer
+            .find_scheduled_send(&asked, WINDOW(), &|| false)
+            .await
+            .unwrap(),
+        Some(stable_id_for_message_id(&format!(
+            "rewritten-{token}@server.example"
+        )))
+    );
+}

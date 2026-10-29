@@ -1,7 +1,22 @@
 //! THE IMAP ACCOUNT'S WRITER (issue #575 phase 3): send over SMTP, then make
 //! sure Sent holds exactly one copy; folder moves and flags ([`ops`]) on the
 //! copies the source verified as the id's own; and the lookups through the
-//! source's guarded resolve. `find_scheduled_send` is still 501 (step 3).
+//! source's guarded resolve.
+//!
+//! EVERY ERROR TEXT IS OURS. The door shows an IMAP account's write errors
+//! as they are (amendment A4), so nothing here carries a server's reply
+//! text or a credential: SMTP failures carry at most a reply code, IMAP
+//! failures a fixed line, and the detail is logged without content.
+//!
+//! A MAYBE-SENT MESSAGE IS NEVER SENT AGAIN (amendment A3). Gmail files a
+//! sent message in Sent as part of sending it, so the scheduled-send
+//! recovery reads "not in Sent" as "not sent" and fires again. SMTP has no
+//! such step: the copy in Sent is the writer's own APPEND, after the fact,
+//! and a crash or an ambiguous answer between SMTP and that APPEND leaves
+//! no copy of a message that went. So a fired scheduled send (the one kind
+//! of send anything re-fires) is written to an [`OutboxLedger`] BEFORE it is
+//! submitted, and [`ImapWriter::find_scheduled_send`] reads a marker it
+//! cannot rule out as doubt, never as "not sent".
 //!
 //! IMAP work happens on a session of the writer's own, opened by
 //! squelch-core ([`ImapSource::open_writer_session`]) under the source's TLS
@@ -35,6 +50,7 @@ use ops::{
     run_move,
 };
 
+use super::mime::{OUTBOX_HEADER, outbox_token};
 use super::smtp::{self, SmtpEndpoint, SmtpError, SmtpTimeouts};
 use super::{FetchedRaw, MailWriter, ParentHeaders, SentRef, WriteError, send_budget};
 
@@ -68,6 +84,93 @@ const LOOK_SCHEDULE: [Duration; 5] = [
 /// APPEND itself gets [`send_budget`] for its size.
 const IMAP_STEP: Duration = Duration::from_secs(60);
 
+/// Where a fired scheduled send stands with SMTP, kept durably by its outbox
+/// token so a crash cannot lose it (amendment A3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboxMark {
+    /// About to be, or being, submitted: SMTP may have taken it. Written
+    /// BEFORE the connection opens; still here after a crash or an
+    /// ambiguous answer, it is doubt.
+    Submitting { message_id: String },
+    /// SMTP accepted it: sent, whether or not Sent has a copy yet.
+    Accepted { message_id: String },
+}
+
+impl OutboxMark {
+    fn encode(&self) -> String {
+        match self {
+            OutboxMark::Submitting { message_id } => format!("submitting {message_id}"),
+            OutboxMark::Accepted { message_id } => format!("accepted {message_id}"),
+        }
+    }
+
+    /// An unreadable value is a `Submitting` with no id: still doubt.
+    fn decode(text: &str) -> Self {
+        match text.split_once(' ') {
+            Some(("accepted", mid)) if !mid.is_empty() => OutboxMark::Accepted {
+                message_id: mid.to_string(),
+            },
+            Some((_, mid)) => OutboxMark::Submitting {
+                message_id: mid.to_string(),
+            },
+            None => OutboxMark::Submitting {
+                message_id: String::new(),
+            },
+        }
+    }
+}
+
+/// THE DURABLE MAYBE-SENT MARKERS, by outbox token. Any failure is `Err`,
+/// which every caller reads as "could not rule it out".
+pub trait OutboxLedger: Send + Sync {
+    fn get(&self, token: &str) -> Result<Option<OutboxMark>, String>;
+    fn set(&self, token: &str, mark: &OutboxMark) -> Result<(), String>;
+    fn clear(&self, token: &str) -> Result<(), String>;
+}
+
+/// The app-settings key a token's marker is kept under.
+const OUTBOX_KEY_PREFIX: &str = "imap_outbox:";
+
+/// The daemon's [`OutboxLedger`]: one `app_settings` row per send in doubt,
+/// in the account's own store, removed once the copy in Sent is seen.
+pub struct StoreOutbox {
+    pub store: Arc<squelch_core::store::SqliteStore>,
+    pub account_id: squelch_core::types::AccountId,
+}
+
+impl OutboxLedger for StoreOutbox {
+    fn get(&self, token: &str) -> Result<Option<OutboxMark>, String> {
+        use squelch_core::store::Store as _;
+        self.store
+            .get_app_setting(self.account_id, &format!("{OUTBOX_KEY_PREFIX}{token}"))
+            .map(|v| v.map(|t| OutboxMark::decode(&t)))
+            .map_err(|_| "outbox ledger read failed".to_string())
+    }
+
+    fn set(&self, token: &str, mark: &OutboxMark) -> Result<(), String> {
+        use squelch_core::store::Store as _;
+        self.store
+            .set_app_setting(
+                self.account_id,
+                &format!("{OUTBOX_KEY_PREFIX}{token}"),
+                &mark.encode(),
+            )
+            .map_err(|_| "outbox ledger write failed".to_string())
+    }
+
+    fn clear(&self, token: &str) -> Result<(), String> {
+        use squelch_core::store::Store as _;
+        self.store
+            .delete_app_setting(self.account_id, &format!("{OUTBOX_KEY_PREFIX}{token}"))
+            .map_err(|_| "outbox ledger write failed".to_string())
+    }
+}
+
+/// What a scheduled send in doubt is answered with: an `Err`, so the worker
+/// defers and in the end fails the row, and never fires it again.
+pub const MAY_HAVE_BEEN_SENT: &str = "this message may already have been sent (the send was \
+     interrupted after the mail server took it), so Passband will not send it again; check Sent";
+
 /// An IMAP account's [`MailWriter`].
 pub struct ImapWriter {
     source: Arc<ImapSource>,
@@ -80,6 +183,13 @@ pub struct ImapWriter {
     /// Tests only: act as if the server had no MOVE, so the COPY + UID
     /// EXPUNGE path runs against a real one.
     without_move: bool,
+    /// The maybe-sent markers. `None` (a writer built without one) is safe,
+    /// not lax: a scheduled send it cannot find in Sent is doubt.
+    outbox: Option<Arc<dyn OutboxLedger>>,
+    /// Tests only: stop right after SMTP accepted, before Sent, as a crash
+    /// there would.
+    #[cfg(test)]
+    crash_after_smtp: bool,
 }
 
 impl ImapWriter {
@@ -101,7 +211,25 @@ impl ImapWriter {
             timeouts: SmtpTimeouts::default(),
             look_schedule: LOOK_SCHEDULE.to_vec(),
             without_move: false,
+            outbox: None,
+            #[cfg(test)]
+            crash_after_smtp: false,
         })
+    }
+
+    /// Keep scheduled sends' maybe-sent markers in `ledger` (the daemon's is
+    /// [`StoreOutbox`]).
+    pub fn with_outbox(mut self, ledger: Arc<dyn OutboxLedger>) -> Self {
+        self.outbox = Some(ledger);
+        self
+    }
+
+    /// Stop after SMTP accepted (and the marker said so), before Sent, as a
+    /// crash there would, for the tests.
+    #[cfg(test)]
+    pub(crate) fn crash_after_smtp(mut self) -> Self {
+        self.crash_after_smtp = true;
+        self
     }
 
     /// Pretend the server lacks MOVE, for the tests.
@@ -177,13 +305,6 @@ impl ImapWriter {
             Err(e) => Err(core_write_error(e)),
         }
     }
-
-    fn not_built(op: &str) -> WriteError {
-        WriteError::Api {
-            status: 501,
-            message: format!("imap {op} is not built yet"),
-        }
-    }
 }
 
 /// Map a submission failure onto the write door's error, keeping its one
@@ -225,9 +346,19 @@ fn core_write_error(e: CoreError) -> WriteError {
             message: m,
         },
         CoreError::NotFound => not_found(),
-        e => WriteError::Transport(e.to_string()),
+        e => {
+            // Core's text can quote the server; it is logged, not shown.
+            eprintln!("squelch-api: imap write: {e}");
+            WriteError::Transport(IMAP_UNREACHABLE.into())
+        }
     }
 }
+
+/// What a write that could not reach or use the IMAP server is told.
+pub const IMAP_UNREACHABLE: &str = "the mail server could not be reached; try again";
+
+/// What a lookup that could not search the server is told.
+const IMAP_SEARCH_FAILED: &str = "the mail server could not be searched; try again";
 
 /// THE ORDER (contract §4-§6): the move planned and the server's ability to
 /// move checked FIRST, so a refusal (no Junk, no Trash, no MOVE nor UIDPLUS)
@@ -329,10 +460,59 @@ pub(crate) async fn exact_message_id_hit(
     folder: &str,
     message_id: &str,
 ) -> Result<Option<MessageLocation>, String> {
+    exact_header_hit(session, folder, Exact::MessageId(message_id)).await
+}
+
+/// What [`exact_header_hit`] looks for.
+#[derive(Clone, Copy)]
+pub(crate) enum Exact<'a> {
+    /// A `Message-ID`, normalized and bare.
+    MessageId(&'a str),
+    /// An [`OUTBOX_HEADER`] value, exact after trimming.
+    Outbox(&'a str),
+}
+
+impl Exact<'_> {
+    fn header(self) -> &'static str {
+        match self {
+            Exact::MessageId(_) => "Message-ID",
+            Exact::Outbox(_) => OUTBOX_HEADER,
+        }
+    }
+
+    fn text(&self) -> &str {
+        match self {
+            Exact::MessageId(v) | Exact::Outbox(v) => v,
+        }
+    }
+
+    /// Is this one header block's field exactly the one looked for?
+    fn matches(&self, head: &[u8]) -> bool {
+        match self {
+            Exact::MessageId(want) => header_values(head, "Message-ID")
+                .into_iter()
+                .find_map(|v| normalize_message_id(&v))
+                .is_some_and(|m| m == *want),
+            Exact::Outbox(want) => header_values(head, OUTBOX_HEADER)
+                .into_iter()
+                .any(|v| v.trim() == *want),
+        }
+    }
+}
+
+/// The lowest-UID copy in `folder` carrying `want` EXACTLY (see
+/// [`exact_message_id_hit`]), with its own `Message-ID` as the location's.
+pub(crate) async fn exact_header_hit(
+    session: &mut ImapSession,
+    folder: &str,
+    want: Exact<'_>,
+) -> Result<Option<MessageLocation>, String> {
+    let text = want.text();
     // It goes inside a quoted string: refuse anything that could end it.
-    if message_id.contains(['"', '\\', '\r', '\n']) || message_id.is_empty() {
+    if text.contains(['"', '\\', '\r', '\n']) || text.is_empty() {
         return Ok(None);
     }
+    let header = want.header();
     tokio::time::timeout(IMAP_STEP, async {
         let mbox = match session.examine(folder).await {
             Ok(m) => m,
@@ -341,7 +521,7 @@ pub(crate) async fn exact_message_id_hit(
         };
         let uidvalidity = mbox.uid_validity.ok_or("no UIDVALIDITY")?;
         let hits = session
-            .uid_search(format!("HEADER Message-ID \"{message_id}\""))
+            .uid_search(format!("HEADER {header} \"{text}\""))
             .await
             .map_err(|e| e.to_string())?;
         if hits.is_empty() {
@@ -354,33 +534,40 @@ pub(crate) async fn exact_message_id_hit(
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(",");
+        let fields = match want {
+            Exact::MessageId(_) => "MESSAGE-ID".to_string(),
+            Exact::Outbox(_) => format!("MESSAGE-ID {}", OUTBOX_HEADER.to_ascii_uppercase()),
+        };
         let fetches: Vec<_> = session
-            .uid_fetch(set, "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            .uid_fetch(set, format!("(UID BODY.PEEK[HEADER.FIELDS ({fields})])"))
             .await
             .map_err(|e| e.to_string())?
             .try_collect()
             .await
             .map_err(|e| e.to_string())?;
-        let mut exact: Vec<u32> = fetches
+        let mut exact: Vec<(u32, Option<String>)> = fetches
             .iter()
-            .filter(|f| {
-                f.header().is_some_and(|h| {
-                    header_values(h, "Message-ID")
+            .filter_map(|f| {
+                let head = f.header()?;
+                let uid = f.uid.filter(|u| uids.contains(u))?;
+                want.matches(head).then(|| {
+                    let mid = header_values(head, "Message-ID")
                         .into_iter()
-                        .find_map(|v| normalize_message_id(&v))
-                        .is_some_and(|m| m == message_id)
+                        .find_map(|v| normalize_message_id(&v));
+                    (uid, mid)
                 })
             })
-            .filter_map(|f| f.uid)
-            .filter(|u| uids.contains(u))
             .collect();
         exact.sort_unstable();
-        Ok(exact.first().map(|&uid| MessageLocation {
-            folder: folder.to_string(),
-            uidvalidity,
-            uid,
-            message_id: Some(message_id.to_string()),
-        }))
+        Ok(exact
+            .into_iter()
+            .next()
+            .map(|(uid, message_id)| MessageLocation {
+                folder: folder.to_string(),
+                uidvalidity,
+                uid,
+                message_id,
+            }))
     })
     .await
     .unwrap_or_else(|_| Err(format!("imap search in {folder:?} timed out")))
@@ -500,7 +687,27 @@ impl MailWriter for ImapWriter {
             return Err(WriteError::Invalid("the message has no recipient".into()));
         }
         let wire = smtp::transmitted_copy(&saved);
-        smtp::submit(
+
+        // A FIRED SCHEDULED SEND IS MARKED BEFORE IT GOES (amendment A3): a
+        // crash from here on leaves a marker the recovery reads as doubt. No
+        // marker, no send: a mark that cannot be written is a send refused
+        // with nothing said to SMTP.
+        let token = smtp::first_header(&saved, OUTBOX_HEADER)
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        if let (Some(token), Some(ledger)) = (&token, &self.outbox) {
+            let mark = OutboxMark::Submitting {
+                message_id: message_id.clone(),
+            };
+            if let Err(e) = ledger.set(token, &mark) {
+                eprintln!("squelch-api: imap send: {e}; not sent");
+                return Err(WriteError::Api {
+                    status: 503,
+                    message: "could not record the send before it went; nothing was sent".into(),
+                });
+            }
+        }
+        let submitted = smtp::submit(
             &self.smtp,
             self.timeouts,
             &self.from,
@@ -508,8 +715,30 @@ impl MailWriter for ImapWriter {
             &wire,
             send_budget(wire.len()),
         )
-        .await
-        .map_err(smtp_write_error)?;
+        .await;
+        if let (Some(token), Some(ledger)) = (&token, &self.outbox) {
+            let after = match &submitted {
+                Ok(()) => ledger.set(
+                    token,
+                    &OutboxMark::Accepted {
+                        message_id: message_id.clone(),
+                    },
+                ),
+                // Doubt stays doubt: the marker stands.
+                Err(SmtpError::MaybeSent(_)) => Ok(()),
+                // Nothing went: a later fire may send it.
+                Err(_) => ledger.clear(token),
+            };
+            if let Err(e) = after {
+                // The marker left behind is `Submitting`: doubt, the safe side.
+                eprintln!("squelch-api: imap send: {e}");
+            }
+        }
+        submitted.map_err(smtp_write_error)?;
+        #[cfg(test)]
+        if self.crash_after_smtp {
+            return Err(WriteError::Transport("test: crashed after SMTP".into()));
+        }
 
         // SENT. Nothing below can fail the send (contract §7).
         let id = stable_id_for_message_id(&message_id);
@@ -521,6 +750,12 @@ impl MailWriter for ImapWriter {
         folder.logout().await;
         let warning = match copy {
             Ok(SentCopy::ServerSaved(loc)) | Ok(SentCopy::Appended(Some(loc))) => {
+                // Sent has it: the search answers from now on.
+                if let (Some(token), Some(ledger)) = (&token, &self.outbox)
+                    && ledger.clear(token).is_err()
+                {
+                    eprintln!("squelch-api: imap send: an outbox marker was not cleared");
+                }
                 // The location is a convenience for the echo: a miss here
                 // is the next sync's to fill in.
                 if self.source.record_own_copy(&id, &saved, loc).is_err() {
@@ -572,7 +807,8 @@ impl MailWriter for ImapWriter {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    out = Err(WriteError::Transport(e));
+                    eprintln!("squelch-api: imap lookup: {e}");
+                    out = Err(WriteError::Transport(IMAP_SEARCH_FAILED.into()));
                     break;
                 }
             }
@@ -581,13 +817,90 @@ impl MailWriter for ImapWriter {
         out
     }
 
+    /// THE RECOVERY QUESTION (contract §8, amendment A3): did this fired
+    /// scheduled send go? Sent is searched for its exact `Message-ID`, then
+    /// for its [`OUTBOX_HEADER`] token, each hit read back. A hit is the
+    /// answer, and `window` is not needed: the search is the server's, exact
+    /// and whole-folder.
+    ///
+    /// NO HIT IS NOT YET "NOT SENT". The outbox marker the send wrote before
+    /// SMTP decides: none means it never reached SMTP (or SMTP refused it),
+    /// and only then is the answer `None`. `Accepted` is sent (the APPEND
+    /// never happened): its id. `Submitting` is doubt, and so is a ledger
+    /// that cannot be read or a writer with none: [`MAY_HAVE_BEEN_SENT`],
+    /// an `Err`, which the worker defers and in the end fails, never fires.
     async fn find_scheduled_send(
         &self,
-        _: &str,
-        _: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
-        _: &(dyn Fn() -> bool + Send + Sync),
+        message_id: &str,
+        _window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+        stopping: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<Option<String>, WriteError> {
-        Err(Self::not_built("find_scheduled_send"))
+        let token = outbox_token(message_id);
+        let Some(mid) = normalize_message_id(message_id).filter(|_| !token.is_empty()) else {
+            return Err(WriteError::Invalid("no outbox token to search for".into()));
+        };
+        let (mut session, roles) = self.open_session().await?;
+        let hit = match roles.sent.as_deref() {
+            Some(sent) => {
+                let mut out = Ok(None);
+                for want in [Exact::MessageId(&mid), Exact::Outbox(&token)] {
+                    if stopping() {
+                        out = Err("cut short by shutdown".to_string());
+                        break;
+                    }
+                    out = exact_header_hit(&mut session, sent, want).await;
+                    if !matches!(out, Ok(None)) {
+                        break;
+                    }
+                }
+                out
+            }
+            // No Sent to look in: only the marker can answer.
+            None => Ok(None),
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(5), session.logout()).await;
+        let hit = hit.map_err(|e| {
+            eprintln!("squelch-api: imap scheduled-send lookup: {e}");
+            WriteError::Transport(IMAP_SEARCH_FAILED.into())
+        })?;
+        outbox_answer(hit, &mid, &token, self.outbox.as_deref())
+    }
+}
+
+/// THE DECISION after the Sent search (see
+/// [`ImapWriter::find_scheduled_send`]): a hit is the answer (and its
+/// marker is no longer needed); with none, only an absent marker is "not
+/// sent". Every doubt is `Err`.
+pub(crate) fn outbox_answer(
+    hit: Option<MessageLocation>,
+    mid: &str,
+    token: &str,
+    ledger: Option<&dyn OutboxLedger>,
+) -> Result<Option<String>, WriteError> {
+    if let Some(loc) = hit {
+        if let Some(ledger) = ledger
+            && ledger.clear(token).is_err()
+        {
+            eprintln!("squelch-api: imap: an outbox marker was not cleared");
+        }
+        let found = loc.message_id.unwrap_or_else(|| mid.to_string());
+        return Ok(Some(stable_id_for_message_id(&found)));
+    }
+    let doubt = || WriteError::Transport(MAY_HAVE_BEEN_SENT.into());
+    let Some(ledger) = ledger else {
+        return Err(doubt());
+    };
+    match ledger.get(token) {
+        Ok(None) => Ok(None),
+        Ok(Some(OutboxMark::Accepted { message_id })) => {
+            let id = normalize_message_id(&message_id).unwrap_or_else(|| mid.to_string());
+            Ok(Some(stable_id_for_message_id(&id)))
+        }
+        Ok(Some(OutboxMark::Submitting { .. })) => Err(doubt()),
+        Err(e) => {
+            eprintln!("squelch-api: imap scheduled-send lookup: {e}");
+            Err(doubt())
+        }
     }
 }
 

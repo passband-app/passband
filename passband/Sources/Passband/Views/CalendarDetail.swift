@@ -14,6 +14,7 @@
 // opens the phone's sheet (PassbandiOS/Views/MobileEventSheet.swift), and
 // delete asks on the phone's own page (MobileEventPage).
 
+import MapKit
 import SwiftUI
 
 struct CalendarDetail: View {
@@ -22,6 +23,8 @@ struct CalendarDetail: View {
     let calendar: Calendar
     /// The card's picture once it is known (Model/EventVisuals.swift).
     @State private var visual: EventVisual?
+    @State private var choosingMap = false
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s12) {
@@ -61,14 +64,14 @@ struct CalendarDetail: View {
             }
             visual = nil
             let found = await visuals.resolve(
-                key: visualKey, threadIds: item.sources.map(\.thread_id), place: item.location)
+                key: visualKey, threadIds: item.sources.map(\.thread_id), place: item.placeQuery)
             if !Task.isCancelled { visual = found }
         }
     }
 
     /// What the picture depends on: the row, its place and its mail.
     private var visualKey: String {
-        ([item.id, item.location ?? ""] + item.sources.map(\.thread_id))
+        ([item.id, item.placeQuery ?? ""] + item.sources.map(\.thread_id))
             .joined(separator: "\u{1F}")
     }
 
@@ -158,6 +161,59 @@ struct CalendarDetail: View {
         }
     }
 
+    // MARK: place
+
+    /// The venue's name, its address under it. On iOS a tap asks which maps
+    /// app to open it in; on the Mac it stays selectable text.
+    @ViewBuilder
+    private func placeValue(_ name: String) -> some View {
+        let lines = VStack(alignment: .leading, spacing: Space.s2) {
+            Text(name)
+                .font(Typo.rowSub)
+                .foregroundStyle(Palette.ink)
+            if let address = item.placeAddress {
+                Text(address)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+            }
+        }
+        #if os(iOS)
+            Button { choosingMap = true } label: { lines.contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .confirmationDialog(name, isPresented: $choosingMap, titleVisibility: .visible) {
+                    Button("Open in Apple Maps") { openInAppleMaps() }
+                    Button("Open in Google Maps") { open(Self.googleMaps, item.placeQuery) }
+                    Button("Cancel", role: .cancel) {}
+                }
+        #else
+            lines.textSelection(.enabled)
+        #endif
+    }
+
+    private static let appleMaps = "https://maps.apple.com/?q="
+    /// Opens the Google Maps app when it is installed (a universal link),
+    /// else Google Maps in Safari.
+    private static let googleMaps = "https://www.google.com/maps/search/?api=1&query="
+
+    /// The venue Apple Maps already matched for the picture when there is
+    /// one, so the pin is the same place; else a search for the place.
+    private func openInAppleMaps() {
+        switch visual {
+        case .lookAround(_, let found), .map(let found):
+            found.openInMaps()
+        default:
+            open(Self.appleMaps, item.placeQuery)
+        }
+    }
+
+    private func open(_ base: String, _ query: String?) {
+        guard let query,
+            let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(["&", "+", "="])),
+            let url = URL(string: base + encoded)
+        else { return }
+        openURL(url)
+    }
+
     // MARK: facts
 
     private var facts: some View {
@@ -166,12 +222,7 @@ struct CalendarDetail: View {
                 standing(ghost)
             }
             if let place = item.location {
-                FactRow(label: "Place") {
-                    Text(place)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.ink)
-                        .textSelection(.enabled)
-                }
+                FactRow(label: "Place") { placeValue(place) }
             }
             if let event = item.event {
                 let guests = event.guests ?? []

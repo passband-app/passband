@@ -435,11 +435,22 @@ struct AgendaTests {
         raw.location = "Dingles Public House, Tock is now part of the Resy network."
         let shown = { (e: TimelineEvent) in Agenda.item(e, calendar: cal)?.location }
         expect(shown(raw) == raw.location, "no place yet: the location")
+        expect(Agenda.item(raw, calendar: cal)?.placeAddress == nil, "no place yet: no address")
         var cleaned = raw
-        cleaned.place = "Dingles Public House"
-        expect(shown(cleaned) == "Dingles Public House", "the cleaned place")
+        cleaned.place = TimelinePlace(
+            name: "Dingles Public House", address: "165 Main St, Northampton", original: raw.location)
+        let item = Agenda.item(cleaned, calendar: cal)
+        expect(item?.location == "Dingles Public House", "the cleaned name")
+        expect(item?.placeAddress == "165 Main St, Northampton", "the address under it")
+        expect(
+            item?.placeQuery == "Dingles Public House, 165 Main St, Northampton",
+            "the map asks for both")
+        var onlyAddress = raw
+        onlyAddress.place = TimelinePlace(address: "165 Main St")
+        expect(shown(onlyAddress) == "165 Main St", "an address alone is the line")
+        expect(Agenda.item(onlyAddress, calendar: cal)?.placeAddress == nil, "and not repeated")
         var nothing = raw
-        nothing.place = ""
+        nothing.place = TimelinePlace(original: raw.location)
         expect(shown(nothing) == nil, "a place of nothing hides the line")
 
         // The new keys must survive the hand-written decoder, not just the
@@ -447,10 +458,13 @@ struct AgendaTests {
         let wire = """
             {"id":"p","calendar_id":"primary","start":"2026-10-06T19:00:00-07:00","all_day":false,
              "location":"Dingles Public House, Tock is now part of the Resy network.",
-             "place":"Dingles Public House","from_gmail":true,"passband_owned":true}
+             "place":{"name":"Dingles Public House","address":"165 Main St","original":"Dingles Public House, Tock is now part of the Resy network."},
+             "from_gmail":true,"passband_owned":true}
             """
         let decoded = try? JSONDecoder().decode(TimelineEvent.self, from: Data(wire.utf8))
-        expect(decoded?.place == "Dingles Public House", "place decodes")
+        expect(decoded?.place?.name == "Dingles Public House", "place name decodes")
+        expect(decoded?.place?.address == "165 Main St", "place address decodes")
+        expect(decoded?.place?.original?.hasPrefix("Dingles") == true, "place original decodes")
         expect(decoded?.from_gmail == true, "from_gmail decodes")
         expect(decoded?.passband_owned == true, "passband_owned decodes")
         let bad = """

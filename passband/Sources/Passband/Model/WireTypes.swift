@@ -1732,11 +1732,12 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     var start_timezone: String?
     /// The location as Google holds it: what the editor shows and writes.
     var location: String?
-    /// The location cleaned by the daemon's small model for display (a
-    /// booking service's marketing cut away): what the card shows. "" when
-    /// the location names no place. Nil until the daemon has cleaned it, and
-    /// from an older daemon: the card shows `location`.
-    var place: String?
+    /// The location cut down by the daemon's small model to the venue's name
+    /// and its street address (a booking service's marketing gone): what the
+    /// card shows. Both nil when the location names no place. Nil until the
+    /// daemon has cleaned it, and from an older daemon: the card shows
+    /// `location`.
+    var place: TimelinePlace?
     var status: TimelineEventStatus?
     /// Nil when the user is not an attendee (their own event).
     var self_response: TimelineSelfResponse?
@@ -1901,7 +1902,7 @@ extension TimelineEvent {
         guests = (try? c.decodeIfPresent([OneGuest].self, forKey: .guests))?.compactMap(\.value)
         guests_truncated = try? c.decodeIfPresent(Bool.self, forKey: .guests_truncated)
         guest_editable = try? c.decodeIfPresent(Bool.self, forKey: .guest_editable)
-        place = try? c.decodeIfPresent(String.self, forKey: .place)
+        place = try? c.decodeIfPresent(TimelinePlace.self, forKey: .place)
         from_gmail = try? c.decodeIfPresent(Bool.self, forKey: .from_gmail)
         passband_owned = try? c.decodeIfPresent(Bool.self, forKey: .passband_owned)
     }
@@ -1909,6 +1910,28 @@ extension TimelineEvent {
     private struct OneGuest: Decodable {
         let value: TimelineGuest?
         init(from decoder: Decoder) throws { value = try? TimelineGuest(from: decoder) }
+    }
+}
+
+/// An event's cleaned place (`place` on the wire). Every word of `name` and
+/// `address` is a word of `original`, checked by the daemon.
+struct TimelinePlace: Codable, Sendable, Hashable {
+    var name: String?
+    var address: String?
+    /// The location the model read, as Google holds it.
+    var original: String?
+
+    init(name: String? = nil, address: String? = nil, original: String? = nil) {
+        self.name = name
+        self.address = address
+        self.original = original
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
+        address = try? c.decodeIfPresent(String.self, forKey: .address)
+        original = try? c.decodeIfPresent(String.self, forKey: .original)
     }
 }
 

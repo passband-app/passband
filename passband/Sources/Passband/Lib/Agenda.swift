@@ -247,6 +247,15 @@ struct AgendaItem: Identifiable, Sendable, Hashable {
     /// oldest first. The matched ghost is not drawn, so this is how the card
     /// still reaches its mail. Empty for a ghost, which carries its own.
     var mail: [GhostSource] = []
+    /// The street address under `location` when the daemon split the place
+    /// into a name and an address. Nil for a ghost and a raw location.
+    var placeAddress: String? = nil
+
+    /// What to ask a map for: the name and the address together.
+    var placeQuery: String? {
+        let parts = [location, placeAddress].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
 
     /// The mail behind this row, ghost or event.
     var sources: [GhostSource] { ghost?.sources ?? mail }
@@ -391,12 +400,13 @@ enum Agenda {
             end = parsed.dateOnly ? dayAfter(parsed.date, calendar) : parsed.date
         }
         if allDay, end == nil || end! <= start.date { end = dayAfter(start.date, calendar) }
-        return AgendaItem(
+        var item = AgendaItem(
             id: itemId(event),
             origin: .event(event),
             title: tidy(event.title) ?? "Untitled event",
-            // The cleaned place when the daemon has one ("" hides it).
-            location: tidy(event.place ?? event.location),
+            // The cleaned place's name when the daemon has one (a place
+            // of nothing hides the line); the raw location otherwise.
+            location: event.place.map { tidy($0.name) ?? tidy($0.address) } ?? tidy(event.location),
             start: start.date,
             end: end,
             allDay: allDay,
@@ -406,6 +416,10 @@ enum Agenda {
             cancelled: false,
             unverified: false,
             folded: false)
+        if let place = event.place, tidy(place.name) != nil {
+            item.placeAddress = tidy(place.address)
+        }
+        return item
     }
 
     /// A real event's row id: its calendar and its id, since Google's ids are
